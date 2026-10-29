@@ -141,7 +141,8 @@ export async function fakeOrgo(roles?: Record<string, unknown>): Promise<Listeni
       const project = /^\/api\/projects\/([^/]+)\/bops-role$/.exec(req.url ?? "")?.[1];
       if (roles && project && userId) return void (roles[`${userId} ${project}`] ? json(res, 200, roles[`${userId} ${project}`]) : json(res, 404, { error: "Not found" }));
       if (req.url !== "/api/user/profile" || !userId) return void json(res, 401, { error: "no" });
-      json(res, 200, { id: userId, email: `${userId}@example.com` });
+      // Orgo's own team (an @orgo.ai email, cloud/apps-team.ts) for an id made with newUserId("orgo"): apps are open to them.
+      json(res, 200, { id: userId, email: userId.startsWith("edge-orgo-") ? `${userId}@orgo.ai` : `${userId}@example.com` });
     }),
   );
   process.env.BOPS_ORGO_ORIGIN = orgo.url;

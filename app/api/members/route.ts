@@ -43,7 +43,7 @@ export async function POST(request: Request) {
   return answer(await invite(await bodyOf(request)));
 }
 
-/** Change what someone can do: {memberId, role?: "viewer" | "admin", access?}, one or both. */
+/** Change what someone can do: {memberId, role?: "viewer" | "admin", access?}, one or both; or {invite, access}: the bots an invite still waiting gives. */
 export async function PATCH(request: Request) {
   const stop = notReady() ?? notFromWindow(request);
   if (stop) return stop;

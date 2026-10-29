@@ -548,6 +548,12 @@ n = cloud.requests.length;
 await Mem.memoryInfo("ws_two");
 honcho = since(n).filter((r) => r.path.startsWith("/proxy/honcho/"));
 assert.deepEqual(json(honcho[0]), { id: "u-u1-bops-ws_two" }, "another workspace's bank");
+// A bot that keeps its memory to itself (lib/chain.ts): its own bank, under the user's prefix too.
+n = cloud.requests.length;
+await Mem.memoryBlock({ ws: MAIN_WORKSPACE, bot: "juno", readsTeam: false }, "tea", 2500, { search: false });
+honcho = since(n).filter((r) => r.path.startsWith("/proxy/honcho/"));
+assert.deepEqual(json(honcho[0]), { id: "u-u1-bops-bot-juno" }, "a bot's own bank");
+assert.ok(honcho.every((r) => r.path === "/proxy/honcho/v3/workspaces" || r.path.startsWith("/proxy/honcho/v3/workspaces/u-u1-bops-bot-juno/")));
 await selfHosted({ HONCHO_API_KEY: "hc_self", HONCHO_WORKSPACE_ID: "nicks-bank" }, async () => {
   web.answer = (c) => (c.host === "api.honcho.dev" ? Response.json(c.path.endsWith("/card") ? { peer_card: [] } : { id: "x", metadata: {}, configuration: {}, created_at: "2026-01-01T00:00:00Z" }) : providers(c));
   w = web.calls.length;

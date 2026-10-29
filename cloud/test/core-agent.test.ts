@@ -11,6 +11,8 @@ import { forgetNotedVersions, refreshAppPolicy } from "../app-version.ts";
 import { creditLeft } from "../credit.ts";
 import { closeDb, query } from "../db.ts";
 import type { AgentInfo, PhoneMessage, PhoneMessagesPage, PhoneRemoved } from "../protocol.ts";
+import { agentView, instructionsFor } from "../agent-prompt.ts";
+import { bindingsOfBot, memoryBlock } from "../honcho.ts";
 import { honchoPrefix } from "../session.ts";
 import { sweepRemovedMessages } from "../state.ts";
 import { LEDGER_IN_USE, TEST_DATABASE_URL, call, dropUsers, fakeProvider, gate, keyOf, prepareDb, startCloud, until, type Got, type Listening, type Reply } from "./core-fakes.ts";
@@ -718,6 +720,47 @@ test("memory, only when the user allowed it from the phone: what's known goes in
     assert.doesNotMatch(String((responses().at(-1)!.json.input as { content: string }[]).at(-1)!.content), /long-term memory/);
   } finally {
     delete process.env.HONCHO_API_KEY;
+  }
+});
+
+test("the team chart: a bot that keeps its memory to itself is answered from its own bank (and the team's while it reads it), and its teammates line leaves out bots it can't ask", async () => {
+  const v = agentView({
+    owner: { name: "Alex" },
+    bots: [
+      { id: "sam", name: "Sam", role: "Chief of Staff", isMain: true },
+      { id: "juno", name: "Juno", role: "Assistant" },
+      { id: "rex", name: "Rex", role: "Assistant" },
+      { id: "nova", name: "Nova", role: "Sales" },
+    ],
+    workspaces: [{ id: "ws_main", chain: { bots: { juno: { memory: "own", sideways: "closed" }, rex: { memory: "own", readsTeam: false, sideways: "closed" } }, pairs: { "juno>nova": true } } }],
+  });
+  assert.deepEqual(bindingsOfBot(v, "juno"), [
+    { bank: "bops-bot-juno", peer: "user" },
+    { bank: "bops", peer: "user" },
+  ]);
+  assert.deepEqual(bindingsOfBot(v, "rex"), [{ bank: "bops-bot-rex", peer: "user" }]);
+  assert.deepEqual(bindingsOfBot(v, "sam"), [{ bank: "bops", peer: "user" }], "the main bot: the team's");
+  assert.deepEqual(bindingsOfBot(agentView({ bots: [{ id: "sam", isMain: true }, { id: "juno" }], workspaces: [{ id: "ws_main" }] }), "juno"), [{ bank: "bops", peer: "user" }], "without a chart, as before");
+  // The teammates line: only the bots it may ask.
+  const juno = instructionsFor(v, v.bots.find((b) => b.id === "juno")!);
+  assert.match(juno, /Your teammates: Sam \(Chief of Staff\), Nova \(Sales\)\./);
+  assert.ok(!juno.includes("Rex"));
+  assert.match(instructionsFor(v, v.bots.find((b) => b.id === "sam")!), /Your teammates: Juno \(Assistant\), Rex \(Assistant\), Nova \(Sales\)\./, "the main bot knows every bot");
+  // Read from both banks at once, under the user's own prefix.
+  process.env.HONCHO_API_KEY = "honcho-test-key";
+  try {
+    honchoContext = { json: { peer_id: "user", target_id: "user", peer_card: ["Alex runs a bakery."], representation: "Alex prefers mornings." } };
+    const id = `core-chart-${randomUUID().slice(0, 8)}`;
+    const h = honcho.got.length;
+    const block = await memoryBlock(id, bindingsOfBot(v, "juno"), "When should we meet?", "Alex");
+    assert.match(block, /About Alex:\n- Alex runs a bakery\.\nLearned before, relevant now:\n- Alex prefers mornings\.$/, "each line once");
+    assert.deepEqual(
+      honcho.got.slice(h).map((g) => g.path).sort(),
+      [`/v3/workspaces/${honchoPrefix(id)}-bops-bot-juno/peers/user/context`, `/v3/workspaces/${honchoPrefix(id)}-bops/peers/user/context`].sort(),
+    );
+  } finally {
+    delete process.env.HONCHO_API_KEY;
+    honchoContext = { status: 404, json: { detail: "not found" } };
   }
 });
 

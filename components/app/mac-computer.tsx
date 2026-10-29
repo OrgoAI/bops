@@ -607,16 +607,32 @@ function SettingsButton({ onClick, label }: { onClick: () => void; label?: boole
   );
 }
 
-/** The settings, out of the way of the screen: a sheet over the tab. Click outside to close. */
+/**
+ * The settings, as a page of the tab in place of the screen (the screen keeps going under it): Back, or Esc in it,
+ * goes back to the screen. Never a sheet over the tab.
+ */
 function MacSettingsSheet({ state, onClose }: { state: AppState; onClose: () => void }) {
   return (
-    <div onClick={onClose} className="absolute inset-0 z-50 flex items-start justify-center bg-black/10 p-4 backdrop-blur-[2px]">
-      <div onClick={(e) => e.stopPropagation()} className="relative flex max-h-full w-full max-w-[520px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]">
-        <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0]">
-          <svg width="11" height="11" viewBox="0 0 12 12">
-            <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    <div
+      role="region"
+      aria-label="Your Mac settings"
+      data-mac-settings
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return;
+        e.preventDefault();
+        onClose();
+      }}
+      className="motion-fade-in absolute inset-0 z-50 flex flex-col bg-white"
+    >
+      <div className="flex shrink-0 items-center px-4 pt-3">
+        <button onClick={onClose} className="flex items-center gap-2 rounded-lg px-2 py-1 text-[13px] font-semibold hover:bg-[#F2F2F0]">
+          <svg width="8" height="12" viewBox="0 0 8 12" aria-hidden>
+            <path d="M6 1.5L1.5 6 6 10.5" fill="none" stroke="#8A8A88" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
+          Back to your Mac
         </button>
+      </div>
+      <div className="mx-auto flex min-h-0 w-full max-w-[620px] flex-1 flex-col">
         <MacSettings state={state} />
       </div>
     </div>
@@ -672,11 +688,25 @@ function MacWatchSheet({ target, onClose }: { target: { app?: string; title?: st
   };
 
   return (
-    <div onClick={onClose} className="absolute inset-0 z-50 flex items-start justify-center bg-black/10 p-4 backdrop-blur-[2px]">
-      <div onClick={(e) => e.stopPropagation()} className="flex max-h-full w-full max-w-[440px] flex-col gap-3 overflow-y-auto rounded-[20px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]">
+    // Over the bottom of the tab, as a bot's screen's watch card is (watch-sheet.tsx), so the screen stays in view; Esc in it, or Cancel, puts it away.
+    <div className="pointer-events-none absolute inset-x-4 bottom-4 z-50 flex justify-center">
+      <div
+        role="region"
+        aria-label={picked ? `Watch ${picked.title}` : "Watch a window on your Mac"}
+        data-mac-watch
+        onKeyDown={(e) => {
+          if (e.key !== "Escape") return;
+          e.preventDefault();
+          onClose();
+        }}
+        className="motion-rise-in pointer-events-auto flex max-h-[min(460px,70vh)] w-full max-w-[440px] flex-col gap-3 overflow-y-auto rounded-[20px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
+      >
         <div className="flex items-center gap-2">
           <WatchEye size={13} />
-          <span className="text-[15px] font-semibold leading-5">{picked ? `Watch ${picked.title}` : "Watch a window on your Mac"}</span>
+          <span className="flex-1 text-[15px] font-semibold leading-5">{picked ? `Watch ${picked.title}` : "Watch a window on your Mac"}</span>
+          <button onClick={onClose} className="shrink-0 rounded-full px-2.5 py-1 text-[12.5px] font-medium text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink">
+            Cancel
+          </button>
         </div>
         {!picked ? (
           <>

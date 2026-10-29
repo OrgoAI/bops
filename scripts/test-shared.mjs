@@ -324,6 +324,38 @@ await check("a chat with an older page loaded keeps every message as new ones ar
   assert.deepEqual(copy.data().more, []);
 });
 
+await check("what the owner deletes goes from a member's copy, the older pages it read too (SharedWsState.gone), and comes back with their Undo", async () => {
+  const chat = "bot:boppy";
+  let all = Array.from({ length: 450 }, (_, i) => ({ id: `m${i}`, chatId: chat, role: "user", text: `Message ${i}`, at: i + 1 }));
+  let seq = 1;
+  let gone = [];
+  const read = async (_projectId, have, older) => {
+    const live = older ? all.filter((m) => m.at < older.before) : all;
+    if (!older && have === `h.${seq}`) return { status: 200, body: { hash: "h", seq, unchanged: true } };
+    return { status: 200, body: { ...cloudState(), hash: "h", seq, messages: live.slice(-200), more: live.length > 200 ? [chat] : [], ...(!older && have && gone.length ? { gone } : {}) } };
+  };
+  const ids = (copy) => copy.data().messages.filter((m) => m.chatId === chat).map((m) => m.id);
+  const copy = new SharedCopy(read);
+  await copy.open(listed);
+  assert.equal(await copy.older(chat), true);
+  assert.equal(ids(copy).length, 400, "the newest page and one older");
+  // The owner deletes two in the older page the member read, and one in the newest, at once.
+  const going = ["m60", "m61", "m440"];
+  const kept = all;
+  all = all.filter((m) => !going.includes(m.id));
+  seq = 2;
+  gone = going;
+  await copy.refresh();
+  assert.ok(!ids(copy).some((x) => going.includes(x)), "none of them is left in the copy");
+  assert.equal(ids(copy).length, 397);
+  // Restored (Undo): written again, so a new seq; the one in the newest page is back at once, the older ones once read again.
+  all = kept;
+  seq = 3;
+  gone = [];
+  await copy.refresh();
+  assert.ok(ids(copy).includes("m440"));
+});
+
 /**
  * A fake Bops Cloud as members.ts answers a chat, with cloud/state.ts' order: by time, then by when each was
  * written (its place in `all`), so messages sharing a millisecond stay in order. Each chat's newest 200 (`more`
@@ -740,7 +772,7 @@ await check("nothing else that would change a shared workspace is offered: a thr
   assert.ok(!/>Stop</.test(where));
   assert.match(where, /class="flex gap-1\.5 pt-0\.5" inert=""/, "Your Mac or its computer: shown, never picked");
   // The sidebar's thread row (a search lists it, flat): no ×. The same row in the user's own has one.
-  const sideProps = { chatId: "bot:boppy", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onMembers: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {}, search: "find" };
+  const sideProps = { chatId: "bot:boppy", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {}, search: "find" };
   const side = renderToStaticMarkup(h(Sidebar, { ...sideProps, state }));
   assert.ok(side.includes("Find leads"), "the row is there");
   assert.ok(!side.includes("Delete Find leads"));
@@ -764,7 +796,7 @@ await check("the window never cuts to what waits on a shared workspace's owner: 
 });
 
 await check("the sidebar of a shared workspace makes nothing new", () => {
-  const props = { chatId: "bot:boppy", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onMembers: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
+  const props = { chatId: "bot:boppy", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
   const shared = renderToStaticMarkup(h(Sidebar, { ...props, state: shownState() }));
   assert.ok(!shared.includes('aria-label="New chat or bot"'));
   assert.match(shared, /Dana&#x27;s Boppy|Dana's Boppy/);
@@ -792,7 +824,7 @@ await check("the owner's words are never said as the viewer's: the sidebar, a re
     ],
     sessions: [{ ...base.sessions[0], replies: [{ id: "r1", role: "user", text: "The first one", at: 5 }] }],
   };
-  const props = { onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onMembers: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
+  const props = { onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
   const side = text(renderToStaticMarkup(h(Sidebar, { ...props, chatId: null, state: { ...state, messages: state.messages.slice(0, 1) } })));
   assert.match(side, /Owner: Dana asked for leads/);
   assert.ok(!side.includes("You: "), side);
@@ -1225,7 +1257,7 @@ await check("a shared workspace's Favorites and bots' chips are never fed by wha
   assert.equal(needs.size, 0, "no alert cards under its bots");
   assert.deepEqual(S.attentionOf(state, needs), { count: 0, bots: new Set() });
   assert.equal(S.chipMark(state.sessions, true), null);
-  const props = { chatId: null, onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onMembers: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
+  const props = { chatId: null, onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
   const shared = renderToStaticMarkup(h(Sidebar, { ...props, state }));
   assert.ok(!shared.includes('data-favorite="attention"') && !text(shared).includes("Needs your attention"), "no Needs your attention");
   assert.ok(!shared.includes('data-chip-mark="you"'), "the chip marks nothing as the viewer's");
@@ -1249,7 +1281,7 @@ await check("a shared workspace's chats are never unread: their read marks are t
   two.state.chats.push({ id: "bot:nova", kind: "bot", botIds: ["nova"], createdAt: 1 });
   two.messages.push({ id: "m2", chatId: "bot:boppy", role: "bot", botId: "boppy", text: "On it", at: 4 }, { id: "m3", chatId: "bot:nova", role: "bot", botId: "nova", text: "Done", at: 5 });
   const state = viewState(own(), { ...listed, role: "member", wsId: WS }, two, {});
-  const props = { onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onMembers: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
+  const props = { onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
   for (const chatId of ["bot:boppy", "bot:nova"]) assert.ok(!renderToStaticMarkup(h(Sidebar, { ...props, chatId, state })).includes('data-tip="Unread"'), chatId);
   // The user's own: a bot's reply they haven't read is.
   const mine = own();
@@ -1268,7 +1300,7 @@ await check("while one is open, every write to the app's server is answered View
   for (const ok of ["/api/vault", "/api/account/checkout", "/api/owner", "/api/owner-email"]) assert.equal(callAllowed("POST", ok), true, ok);
   assert.equal(callAllowed("POST", "/api/keys"), false, "keys are a workspace's too");
   // Reads the server answers from the user's own bot or workspace of that id: never the shared one's.
-  for (const no of ["/api/memory?bot=boppy", "/api/memory/categories?ws=x", "/api/orbit/issues?ws=shared_p1", "/api/skills?ws=x", "/api/routines/suggestions?botId=boppy", "/api/vnc?bot=boppy&display=1", "/api/computer?bot=boppy", "/api/reader?bot=boppy", "/api/crm?ws=x", "/api/made-apps/app_x", "/api/hosted-apps?ws=x"])
+  for (const no of ["/api/memory?bot=boppy", "/api/memory/categories?ws=x", "/api/orbit/issues?ws=shared_p1", "/api/skills?ws=x", "/api/routines/suggestions?botId=boppy", "/api/vnc?bot=boppy&display=1", "/api/computer?bot=boppy", "/api/reader?bot=boppy", "/api/crm?ws=x", "/api/made-apps/app_x", "/api/hosted-apps?ws=x", "/api/domains?ws=x", "/api/domains/search?ws=x&q=acme", "/api/domains/6a6a6a6a-1111-4222-8333-444455556666?ws=x"])
     assert.equal(callAllowed("GET", no), false, no);
   assert.equal(callAllowed("GET", "/api/vault"), true);
   wire.length = 0;
@@ -1561,7 +1593,7 @@ await check("an @orgo.ai owner's app work never reaches the window of anyone the
   assert.match(readFileSync(`${root}/app/api/state/route.ts`, "utf8"), /const state = appsForWindow\(all\);/, "the state route gives the window that");
 });
 
-await check("the People sheet says what members see: the bots the owner picks, never the saved logins or keys", () => {
+await check("Team says what members see: the bots the owner picks, never the saved logins or keys", () => {
   const src = readFileSync(`${root}/components/app/members.tsx`, "utf8");
   assert.match(src, /In Bops they see everything of the bots you pick, your chats with them too\./);
   assert.ok(!/They see everything in the workspace/.test(src));
@@ -1743,7 +1775,7 @@ await check("Write: who said it, wherever it's said: an answer under a question,
   assert.match(text(renderToStaticMarkup(h(ChatView, chatProps(ownerSees, "bot:boppy")))), /Sam answered: “The second one”/, "the owner reads it as Sam's");
   // The sidebar's last line of a chat: Sam's words, as Sam's.
   d.messages.push({ id: "k1", chatId: "bot:boppy", role: "user", text: "Thanks", at: 20, member: { userId: "u-kim", name: "Kim", ref: "k2" } });
-  const props = { chatId: "bot:ava", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onMembers: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
+  const props = { chatId: "bot:ava", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
   const side = text(renderToStaticMarkup(h(Sidebar, { ...props, state: writeView(d) })));
   assert.match(side, /Kim: Thanks/);
   assert.ok(!/Owner: Thanks|You: Thanks/.test(side));
@@ -1792,6 +1824,48 @@ await check("Write: what Bops Cloud said: a Read bot reads again, no access drop
   assert.equal(net.error, "Couldn't reach Bops Cloud. Try again.");
   await actWith(copy, { act: "chat", chatId: "bot:boppy", text: "hi" }, "key_gone_001", sam, async () => ({ status: 404, body: { error: "No such workspace" } }));
   assert.deepEqual([copy.openNow(), left], [null, [PROJECT]], "no access: the copy goes and they leave it");
+});
+
+await check("Your Apps in a shared workspace: shown with the apps the owner gave, an act on one lands by its key or fails when Write goes", async () => {
+  const A = await import(`${root}/lib/apps-access.ts`);
+  const shop = { name: "shop", url: "https://shop.orgo.dev", sites: [{ name: "shop", url: "https://shop.orgo.dev", serving: "cs-2", live: { id: "d2", state: "succeeded", when: 9 } }], commits: [], deploys: [] };
+  const withApps = (level, acts) => ({ ...cloudState(), hash: `h-apps-${level}-${acts?.length ?? 0}`, state: { ...cloudState().state, apps: { level, at: 10, list: [{ ...shop, ...(acts ? { acts } : {}) }] } } });
+  let answer = { status: 200, body: withApps("write") };
+  const copy = new SharedCopy(async () => answer);
+  await copy.open(listed);
+  const team = () => ({ ...own(), account: { user: { id: "u-sam", name: "Sam", email: "sam@orgo.ai" } } });
+  const v = viewState(team(), copy.openNow(), copy.data(), {}, copy.acts());
+  assert.deepEqual(v.shared.apps.list.map((a) => a.name), ["shop"]);
+  assert.equal(A.appsShown(v), true, "the footer's apps button and its page");
+  // Named for what they are there: the owner's apps on the web, which neither the viewer nor their bots made.
+  assert.equal(A.appsName(v), "Apps", "the footer's button, its tab and its New Tab tile, as the page's title");
+  assert.equal(A.appsLine(v), `Apps on the web in ${v.shared.name}`);
+  assert.equal(A.appsName(team()), "Your Apps", "in their own workspace, as before");
+  assert.equal(A.appsLine(team()), "Apps your bots made for you");
+  assert.equal(A.appsOwnShown(v), false, "Settings, Domains, Bops' app skills and the made apps stay the owner's");
+  const none = viewState(team(), copy.openNow(), cloudState(), {});
+  assert.equal(A.appsShown(none), false, "no apps given: nothing");
+  assert.equal(A.appsShown({ ...v, account: { user: { email: "sam@example.com" } } }), false, "apps not open to the viewer");
+  // An act on an app: sent, pending until the owner's Bops keeps it on the app, then gone (its ok and said show there).
+  const sent = [];
+  const r = await actWith(copy, { act: "deploy", app: "shop" }, "key_deploy_01", sam, async (body) => (sent.push(JSON.parse(body)), { status: 202, body: { ok: true, macOn: true } }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(sent, [{ key: "key_deploy_01", act: { act: "deploy", app: "shop" } }]);
+  assert.deepEqual(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appActs.map((a) => [a.key, a.state]), [["key_deploy_01", "sending"]]);
+  answer = { status: 200, body: withApps("write", [{ key: "key_deploy_01", userId: "u-sam", name: "Sam", act: "deploy", ok: true, at: 11 }]) };
+  await copy.refresh();
+  assert.equal(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appActs, undefined, "landed: kept on the app now");
+  // Write taken away before it lands: it didn't go, and says so.
+  await actWith(copy, { act: "deploy", app: "shop" }, "key_deploy_02", sam, async () => ({ status: 202, body: { ok: true, macOn: true } }));
+  answer = { status: 200, body: withApps("read") };
+  await copy.refresh();
+  const failed = viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appActs;
+  assert.deepEqual(failed.map((a) => [a.key, a.state, a.error]), [["key_deploy_02", "failed", ACT_ACCESS_CHANGED]]);
+  // At Read, or an app it isn't shown: refused from the copy, nothing sent.
+  const no = await actWith(copy, { act: "deploy", app: "shop" }, "key_deploy_03", sam, async () => assert.fail("not sent"));
+  assert.deepEqual([no.status, no.code], [403, "member_apps_read_only"]);
+  const gone = await actWith(copy, { act: "deploy", app: "blog" }, "key_deploy_04", sam, async () => assert.fail("not sent"));
+  assert.equal(gone.status, 404);
 });
 
 console.log(`${passed} passed, ${failures} failed`);

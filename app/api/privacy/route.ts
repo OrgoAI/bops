@@ -1,8 +1,9 @@
-import { isDeletedDays, isKeepDays } from "@/lib/privacy";
+import { isDeletedDays, isKeepDays, type ClearChoice } from "@/lib/privacy";
 import type { DeletedDays, KeepDays } from "@/lib/types";
 import { purgeDeleted, restoreDeleted } from "@/lib/server/deleted";
 import { onPostgres, onRunner } from "@/lib/server/persist";
-import { choicesFresh, forgetHere, privacyInfo, privacyPreview, setPrivacy } from "@/lib/server/privacy";
+import { choicesFresh, clearNow, forgetHere, privacyInfo, privacyPreview, setPrivacy } from "@/lib/server/privacy";
+import { bot } from "@/lib/server/store";
 import { notReady } from "@/lib/server/ready";
 import { sharedOpen } from "@/lib/server/shared";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -24,13 +25,25 @@ function refused(request: Request): Response | null {
   return notReady();
 }
 
+/** Delete now's choice as asked for ({ olderThan: null | 365 | 90 | 30, bot? }): a bot only one that's here. Null when it isn't one. */
+function clearChoiceOf(olderThan: unknown, botId: unknown): ClearChoice | null {
+  if (!isKeepDays(olderThan)) return null;
+  if (botId === undefined || botId === null || botId === "") return { olderThan };
+  return typeof botId === "string" && bot(botId) ? { olderThan, bot: botId } : null;
+}
+
 /**
  * `?keepDays=30|90|365|null` or `?deletedDays=0|7|30`: also what choosing it would delete now (PrivacyInfo.goes,
- * goesDeleted), for the window to ask first.
+ * goesDeleted); `?clear=null|365|90|30` (and `&bot=`): what Delete now takes (goesNow); for the window to ask first.
  */
-function proposedIn(request: Request): { keepDays?: KeepDays; deletedDays?: DeletedDays } | null {
+function proposedIn(request: Request): { keepDays?: KeepDays; deletedDays?: DeletedDays; clear?: ClearChoice } | null {
   const q = new URL(request.url).searchParams;
-  const out: { keepDays?: KeepDays; deletedDays?: DeletedDays } = {};
+  const out: { keepDays?: KeepDays; deletedDays?: DeletedDays; clear?: ClearChoice } = {};
+  const c = q.get("clear");
+  if (c !== null) {
+    const choice = clearChoiceOf(c === "null" || c === "" ? null : Number(c), q.get("bot"));
+    if (choice) out.clear = choice;
+  }
   const k = q.get("keepDays");
   if (k !== null) {
     const n = k === "null" || k === "" ? null : Number(k);
@@ -38,7 +51,7 @@ function proposedIn(request: Request): { keepDays?: KeepDays; deletedDays?: Dele
   }
   const d = q.get("deletedDays");
   if (d !== null && isDeletedDays(Number(d))) out.deletedDays = Number(d) as DeletedDays;
-  return "keepDays" in out || "deletedDays" in out ? out : null;
+  return "keepDays" in out || "deletedDays" in out || "clear" in out ? out : null;
 }
 
 /** How long a save of a shorter keep waits on the sweep it starts before it answers: after that, the window reads again while it goes (PrivacyInfo.sweeping). */
@@ -54,13 +67,16 @@ export async function GET(request: Request) {
 
 /**
  * One change: { keepDays: 30 | 90 | 365 | null } or { deletedDays: 0 | 7 | 30 } (the window asked the user first
- * when fewer days delete something), { restore: <id> } or { deleteNow: <id> } for one in Recently deleted.
- * Answers what GET does, after it: a shorter keep once the sweep it starts is done, or a few seconds in.
+ * when fewer days delete something), { restore: <id> } or { deleteNow: <id> } for one in Recently deleted, or
+ * { clear: { olderThan: null | 365 | 90 | 30, bot? } }, Delete now (asked first too, with what it takes). Answers
+ * what GET does, after it: a shorter keep once the sweep it starts is done, or a few seconds in; a restore with
+ * `left`, how many of Delete now's couldn't go back; Delete now with `cleared`, what it deleted, and the copy
+ * to restore it from.
  */
 export async function POST(request: Request) {
   const no = refused(request);
   if (no) return no;
-  const body = (await request.json().catch(() => ({}))) as { keepDays?: unknown; deletedDays?: unknown; restore?: unknown; deleteNow?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { keepDays?: unknown; deletedDays?: unknown; restore?: unknown; deleteNow?: unknown; clear?: { olderThan?: unknown; bot?: unknown } };
   const bad = (error: string, status = 400) => Response.json({ error }, { status });
   if ("keepDays" in body) {
     if (!isKeepDays(body.keepDays)) return bad("Keep them 30, 90 or 365 days, or until you delete them.");
@@ -74,9 +90,15 @@ export async function POST(request: Request) {
     const r = restoreDeleted(body.restore, { current: choicesFresh() });
     if (!r.ok) return bad(r.error, r.status);
     forgetHere();
+    if (r.left) return Response.json({ ...privacyInfo(), left: r.left });
   } else if (typeof body.deleteNow === "string") {
     if (!purgeDeleted(body.deleteNow)) return bad("That isn't in Recently deleted anymore.", 404);
     forgetHere();
+  } else if (body.clear && typeof body.clear === "object") {
+    const choice = clearChoiceOf(body.clear.olderThan, body.clear.bot);
+    if (!choice) return bad("Delete everything, or what's older than a year, 90 or 30 days, for every bot or one that's here.");
+    const cleared = await clearNow(choice);
+    return Response.json({ ...privacyInfo(), cleared });
   } else return bad("What should change?");
   return Response.json(privacyInfo());
 }

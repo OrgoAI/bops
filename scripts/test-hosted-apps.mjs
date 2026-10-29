@@ -50,6 +50,13 @@
 // at a time on an app (no removal while a deploy is being sent, nor a deploy while it's removed); a deploy that
 // stops partway said as such, whatever stopped it; and an app moved off a computer that's still up, its projects
 // there taken down by Remove app.
+//
+// Then Settings' Domains (lib/server/workspace-domains.ts, app/api/domains): every domain the workspace bought, each
+// with its renewal and what its names serve (the app, its site, or the computer), read from Orgo alone; a search with
+// no app; a buy sent only with the price seen, once (a double tap, here or on an app's tab, reaches Orgo once), never
+// pointed anywhere, each refusal in words, one that hangs said as unknown and never sent again; auto-renew and DNS of
+// only the workspace's own domains, read again from Orgo first; a name under a bought domain used on an app; the window
+// only, an @orgo.ai account only, and nothing asked of Orgo on a bot's computer.
 // Usage: node --conditions=react-server scripts/test-hosted-apps.mjs
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -92,6 +99,8 @@ process.chdir(work);
 const vendor = join(scratch, "vendor-ingot");
 mkdirSync(vendor);
 process.env.BOPS_INGOT_DIR = vendor;
+// This Bops' bops-local, put on a computer as Local starts (vm/bin/bops-local).
+process.env.BOPS_LOCAL_SCRIPT = join(root, "vm/bin/bops-local");
 let BINARY = randomBytes(400 * 1024);
 writeFileSync(join(vendor, "ingot-linux-amd64"), BINARY);
 
@@ -245,11 +254,84 @@ const ran = [];
 const badSyntax = [];
 const kinds = (id, from = 0) => ran.slice(from).filter((r) => r.computerId === id).map((r) => /^# bops-ingot (\S+(?: \S+)?)/.exec(r.command)?.[1] ?? r.command.slice(0, 40));
 
+/**
+ * bops-local on a fake computer (vm/bin/bops-local, as far as Bops sends it): installed with its own command,
+ * then each line one call of it, run in turn as bash would (one failing doesn't stop the next). Each computer
+ * keeps its Locals (c.locals, by <app>--<site>: port, command, its own variables, stopped) and what was asked.
+ */
+function localFake(c, command) {
+  const lines = command.split("\n");
+  if (lines[0] === "# bops-local install") {
+    assert.match(command, /\| base64 -d > \/usr\/local\/bin\/bops-local\.new && chmod 755 /);
+    c.localInstalls = (c.localInstalls ?? 0) + 1;
+    c.localBin = true;
+    return { output: "BOPS_LOCAL_TOOL=ok\n", exit_code: 0 };
+  }
+  if (!lines.every((l) => /^(printf %s [A-Za-z0-9+/=]+ \| )?\/usr\/local\/bin\/bops-local /.test(l))) return null;
+  if (!c.localBin) return { output: "bash: /usr/local/bin/bops-local: No such file or directory\n", exit_code: 127 };
+  c.locals ??= new Map();
+  const say = (k) => {
+    const x = c.locals.get(k);
+    if (!x) return "";
+    const state = x.stopped ? "stopped" : c.localFails ? "failed" : "running";
+    const env = [...x.env.keys()].sort().join(",") || "-";
+    return `BOPS_LOCAL ${k} ${state} ${x.port} ${x.since} ${Buffer.from(x.cmd).toString("base64")} ${state === "failed" ? Buffer.from(c.localFails).toString("base64") : "-"} ${env}\n`;
+  };
+  let out = "";
+  let code = 0;
+  for (const line of lines) {
+    const stdin = /^printf %s ([A-Za-z0-9+/=]+) \| /.exec(line)?.[1];
+    const [cmd, app, site, ...rest] = line.replace(/^.*\/usr\/local\/bin\/bops-local /, "").split(" ");
+    const k = `${app}--${site}`;
+    (c.localAsked ??= []).push([cmd, app, site, ...rest]);
+    if (cmd === "status") {
+      for (const key of c.locals.keys()) if (key.startsWith(`${app}--`)) out += say(key);
+      out += "BOPS_LOCAL_DONE=1\n";
+    } else if (cmd === "start") {
+      if (!c.folders.has(`/workspace/apps/${app}`)) {
+        out += "BOPS_LOCAL_FAIL=no-folder\n";
+        code = 1;
+        continue;
+      }
+      const [given, fallback, from] = rest.map((v) => (v === "-" ? null : v));
+      const was = c.locals.get(k);
+      const port = was?.port ?? 4100 + c.locals.size;
+      const cmdText = given ? Buffer.from(given, "base64").toString() : was?.cmd ?? (fallback ? Buffer.from(fallback, "base64").toString() : "npm run dev");
+      c.locals.set(k, { port, cmd: cmdText, since: 1761134400, stopped: false, env: was?.env ?? new Map(), from });
+      out += say(k);
+    } else if (cmd === "stop") {
+      if (c.locals.has(k)) c.locals.get(k).stopped = true;
+      out += say(k);
+    } else if (cmd === "open") {
+      if (!c.locals.get(k)?.port) {
+        out += "BOPS_LOCAL_FAIL=not-started\n";
+        code = 1;
+        continue;
+      }
+      (c.opened ??= []).push(`http://localhost:${c.locals.get(k).port}/`);
+      out += `BOPS_LOCAL_OPENED=1\n${say(k)}`;
+    } else if (cmd === "env") {
+      assert.ok(stdin, "its variables come on stdin, never as an argument");
+      const x = c.locals.get(k) ?? { port: null, cmd: "", since: 0, stopped: true, env: new Map() };
+      for (const [n, v] of Object.entries(JSON.parse(Buffer.from(stdin, "base64").toString()))) {
+        if (v === null) x.env.delete(n);
+        else x.env.set(n, v);
+      }
+      if (!c.locals.has(k)) c.localEnvOnly = (c.localEnvOnly ?? new Map()).set(k, x.env);
+      else c.locals.set(k, x);
+      out += `BOPS_LOCAL_ENV=${[...x.env.keys()].sort().join(",") || "-"}\n`;
+    }
+  }
+  return { output: out, exit_code: code };
+}
+
 function bash(id, command) {
   ran.push({ computerId: id, command });
   const check = spawnSync("bash", ["-n"], { input: command, encoding: "utf8" });
   if (check.status !== 0) badSyntax.push(`${command.split("\n")[0]}: ${check.stderr.trim()}`);
   const c = fleet.get(id);
+  const local = c && localFake(c, command);
+  if (local) return local;
   const first = command.split("\n")[0];
   const m = /^# bops-ingot (\S+)(?: (.*))?$/.exec(first);
   if (!c || !m) return { output: `fake bash: can't run ${first.slice(0, 80)}`, exit_code: 127 };
@@ -390,6 +472,8 @@ async function orgoWeb(req) {
   // A call a test holds (one that waits until it's let go, or throws as a dropped connection would).
   if (web.hold) await web.hold(req.method, url.pathname);
   if (![ORGO_KEY, NEW_KEY].some((k) => req.headers.get("authorization") === `Bearer ${k}`)) return json({ error: "Not authenticated" }, 401);
+  const vaulted = vaultAndBroker(req, url, body);
+  if (vaulted) return vaulted;
   const more = settingsAndAdding(req, url, body);
   if (more) return more;
   let m = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/members$/);
@@ -478,6 +562,8 @@ async function orgoWeb(req) {
   if (m) {
     const [, project, domainId, dns, recordId] = m;
     if (web.dnsClosed && (domainId || req.method !== "GET")) return json({ error: "Domains are not enabled.", code: "DOMAINS_NOT_ENABLED" }, 404);
+    // Domains closed to the account: orgo-web answers an empty list, enabled false.
+    if (!domainId && req.method === "GET" && web.sell.gate === false) return json({ enabled: false, free_names: null, registrar: false, can_buy: false, renewals_enabled: false, domains: [], last_contact: null });
     if (!domainId && req.method === "GET")
       return json({
         enabled: !web.dnsClosed,
@@ -605,6 +691,7 @@ function settingsAndAdding(req, url, body) {
   }
   if (url.pathname === "/api/domains/search" && req.method === "GET") {
     if (web.sell.searchRefuse) return json(web.sell.searchRefuse.body, web.sell.searchRefuse.status);
+    if (web.sell.searchRaw) return new Response(web.sell.searchRaw, { status: 200, headers: { "content-type": "text/html" } });
     const q = url.searchParams.get("q") ?? "";
     const page = Number(url.searchParams.get("page") ?? 0);
     const label = q.split(".")[0].toLowerCase();
@@ -617,21 +704,13 @@ function settingsAndAdding(req, url, body) {
     const project = m[1];
     const sell = web.sell;
     sell.buys.push({ project, body });
-    if (sell.refuse) return json(sell.refuse.body, sell.refuse.status);
-    if (!sell.registrar) return json({ error: "Domains are not enabled.", code: "DOMAINS_NOT_ENABLED" }, 404);
-    const domain = String(body?.domain ?? "").toLowerCase();
-    if (!/^[a-z0-9-]+\.[a-z]+$/.test(domain)) return json({ error: "Pick a domain from the search.", code: "INVALID_DOMAIN" }, 400);
-    if (!body.registrant?.first_name) return json({ error: "Enter first name.", code: "INVALID_REGISTRANT", field: "first_name" }, 400);
-    const there = web.bought.find((b) => b.domain === domain);
-    if (there && there.project === project) return json(boughtView(there), 200);
-    if (there) return json({ error: `${domain} was already bought through Orgo.`, code: "DOMAIN_TAKEN" }, 409);
-    if (typeof body.expected_price_cents === "number" && body.expected_price_cents !== sell.price)
-      return json({ error: `The price is now $${(sell.price / 100).toFixed(2)}. Check it, then buy again.`, code: "PRICE_CHANGED", price_cents: sell.price, renewal_cents_per_year: sell.renewal, min_years: sell.years }, 409);
-    if (sell.credits < sell.price) return json({ error: "Not enough credits.", code: "INSUFFICIENT_CREDITS", price_cents: sell.price, available_cents: sell.credits }, 402);
-    sell.credits -= sell.price;
-    const b = { id: randomUUID(), project, domain, status: "active", serving: true, records: [], auto_renew: true, renewal_cents: sell.renewal, renewal_years: 1 };
-    web.bought.push(b);
-    return json(boughtView(b), 201);
+    // One whose answer never comes (Orgo hung): it ends only as Bops gives up on it.
+    if (sell.hang) return new Promise((_, no) => req.signal.addEventListener("abort", () => no(req.signal.reason ?? new Error("aborted"))));
+    // An answer that isn't orgo-web's own: a page from a proxy or a restart in front of it ({ status, text }).
+    if (sell.raw) return new Response(sell.raw.text, { status: sell.raw.status, headers: { "content-type": "text/html" } });
+    const answer = sellOne(project, body);
+    // One a test holds, so two can overlap: answered once `hold` lets it go.
+    return sell.hold ? sell.hold.then(() => answer) : answer;
   }
   m = url.pathname.match(/^\/api\/projects\/([^/]+)\/domains\/([^/]+)$/);
   if (m && req.method === "PATCH") {
@@ -653,6 +732,7 @@ function settingsAndAdding(req, url, body) {
     if (body?.registered_domain_id !== undefined) {
       const b = web.bought.find((x) => x.id === body.registered_domain_id && theirs(x));
       if (!b) return json({ error: "Pick one of this workspace’s domains.", code: "REGISTERED_DOMAIN_NOT_FOUND" }, 404);
+      if (body.subdomain && !/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(body.subdomain)) return json({ error: "Use letters, numbers and hyphens for the name, like www.", code: "INVALID_SUBDOMAIN" }, 400);
       domain = body.subdomain ? `${body.subdomain}.${b.domain}` : b.domain;
       zone = b.id;
     } else {
@@ -661,7 +741,7 @@ function settingsAndAdding(req, url, body) {
       zone = web.bought.find((x) => theirs(x) && (domain === x.domain || domain.endsWith(`.${x.domain}`)))?.id ?? null;
     }
     if (web.domains.some((d) => d.domain === domain)) return json({ error: "That domain is already in use" }, 409);
-    const d = { id: randomUUID(), computerId: m[1], domain, status: "pending", target_port: body.target_port ?? 8642, zone, token: `tok-${randomBytes(4).toString("hex")}` };
+    const d = { id: randomUUID(), computerId: m[1], domain, status: "pending", target_port: body.target_port ?? 8642, zone, token: `tok-${randomBytes(4).toString("hex")}`, ...(!zone && domain.split(".").length === 2 ? { apex: true } : {}) };
     web.domains.push(d);
     if (zone) {
       const b = web.bought.find((x) => x.id === zone);
@@ -697,6 +777,34 @@ function settingsAndAdding(req, url, body) {
     return json({ status: "active" });
   }
   return null;
+}
+
+/**
+ * orgo-web's answer to one buy: a refusal a test set, the gate, the name and registrant checked, one the
+ * workspace owns already answered as it is (nothing charged), one bought by another workspace, a new price,
+ * too few credits; one whose registration's answer was lost (`unknown`) stays pending; else it's bought.
+ */
+function sellOne(project, body) {
+  const sell = web.sell;
+  if (sell.refuse) return json(sell.refuse.body, sell.refuse.status);
+  if (!sell.registrar) return json({ error: "Domains are not enabled.", code: "DOMAINS_NOT_ENABLED" }, 404);
+  const domain = String(body?.domain ?? "").toLowerCase();
+  if (!/^[a-z0-9-]+\.[a-z]+$/.test(domain)) return json({ error: "Pick a domain from the search.", code: "INVALID_DOMAIN" }, 400);
+  if (!body.registrant?.first_name) return json({ error: "Enter first name.", code: "INVALID_REGISTRANT", field: "first_name" }, 400);
+  const there = web.bought.find((b) => b.domain === domain);
+  if (there && there.project === project) return json(boughtView(there), 200);
+  if (there) return json({ error: `${domain} was already bought through Orgo.`, code: "DOMAIN_TAKEN" }, 409);
+  if (typeof body.expected_price_cents === "number" && body.expected_price_cents !== sell.price)
+    return json({ error: `The price is now $${(sell.price / 100).toFixed(2)}. Check it, then buy again.`, code: "PRICE_CHANGED", price_cents: sell.price, renewal_cents_per_year: sell.renewal, min_years: sell.years }, 409);
+  if (sell.credits < sell.price) return json({ error: "Not enough credits.", code: "INSUFFICIENT_CREDITS", price_cents: sell.price, available_cents: sell.credits }, 402);
+  if (sell.unknown) {
+    web.bought.push({ id: randomUUID(), project, domain, status: "pending", serving: true, records: [] });
+    return json({ error: "The registry hasn’t confirmed it yet. It shows under Your domains once it does.", code: "REGISTRATION_UNKNOWN" }, 502);
+  }
+  sell.credits -= sell.price;
+  const b = { id: randomUUID(), project, domain, status: "active", serving: true, records: [], auto_renew: true, renewal_cents: sell.renewal, renewal_years: 1 };
+  web.bought.push(b);
+  return json(boughtView(b), 201);
 }
 
 /* ---------------- orgo-web's domains: a computer's custom domains, and the zone of a domain bought through Orgo ---------------- */
@@ -765,9 +873,107 @@ const customDomainView = (d) => ({
     ? [{ type: "TXT", name: `_orgo-verify.${d.domain}`, host: `_orgo-verify.${d.domain}`, zone: d.domain.split(".").slice(-2).join("."), value: d.token }]
     : [
         { type: "TXT", name: `_orgo-verify.${d.domain}`, host: `_orgo-verify.${d.domain}`, zone: null, value: d.token },
-        { type: "CNAME", name: d.domain, host: d.domain, zone: null, value: "edge.orgo.dev" },
+        // A name that's its zone's root gets an A to Orgo's edge (lib/public-urls/dns-records.ts), any other a CNAME.
+        d.apex ? { type: "A", name: d.domain, host: d.domain, zone: null, value: EDGE_IP } : { type: "CNAME", name: d.domain, host: d.domain, zone: null, value: "edge.orgo.dev" },
       ],
 });
+
+/* ---------------- orgo-web's vault and its broker, and the user's Cloudflare behind it ---------------- */
+
+/** The Cloudflare key's value: only ever inside the fake broker, as Orgo keeps it (Bops never sees it). */
+const CF_TOKEN = "cf-test-token-do-not-leak";
+/** The vault's names ({ name, workspace_id }: null for all workspaces), and whether orgo-web's broker knows Cloudflare yet. */
+web.secrets = [];
+web.cfBroker = true;
+/** The Orgo workspaces the user may name to the broker (orgo-web userCanAccessProject). */
+const CF_OTHER = "6e5d4c3b-2a19-4f8e-9d7c-6b5a49382716";
+const freshCloudflare = () => ({ zones: [], records: [], canRead: true, canEdit: true, valid: true, down: false, downOnBatch: false, lostOnBatch: false, limited: false, calls: [], batches: [], beforeBatch: null });
+let cloudflare = freshCloudflare();
+const cfId = () => randomBytes(16).toString("hex");
+const cfView = (r) => ({ id: r.id, zone_id: r.zone, name: r.name, type: r.type, content: r.content, proxiable: r.type !== "TXT", ...(r.type === "TXT" ? {} : { proxied: !!r.proxied }), ttl: r.ttl ?? 1, comment: r.comment ?? null, tags: [], created_on: "2026-10-20T00:00:00Z", modified_on: "2026-10-20T00:00:00Z" });
+
+function vaultAndBroker(req, url, body) {
+  if (url.pathname === "/api/secrets" && req.method === "GET")
+    return json({ secrets: web.secrets.map((s) => ({ name: s.name, workspace_id: s.workspace_id ?? null, created_at: "2026-10-20T00:00:00Z", updated_at: "2026-10-21T00:00:00Z" })) });
+  if (url.pathname === "/api/secrets/reveal") return json({ error: "No reveal in these tests." }, 403);
+  if (url.pathname !== "/api/secrets/call" || req.method !== "POST") return null;
+  // orgo-web's broker (app/api/secrets/call): a name with no provider, a workspace the user isn't in, a name not set.
+  if (body?.name !== "CLOUDFLARE_API_TOKEN" || !web.cfBroker) return json({ error: `${body?.name} has no provider Orgo can call. GET /api/secrets/providers lists them.` }, 400);
+  const ws = body.workspace_id ?? null;
+  if (ws && ![PROJECT, CF_OTHER].includes(ws)) return json({ error: "Workspace not found" }, 404);
+  const copy = web.secrets.find((s) => s.name === body.name && (s.workspace_id ?? null) === ws) ?? web.secrets.find((s) => s.name === body.name && !s.workspace_id);
+  if (!copy) return json({ error: `${body.name} is not set in your vault${ws ? " for this workspace" : ""}. Add it in Settings, Secrets.` }, 404);
+  if (cloudflare.limited === "orgo") return json({ error: "Too many vault calls. Wait, then try again." }, 429);
+  const batch = /\/batch$/.test(body.path);
+  cloudflare.calls.push({ method: body.method, path: body.path, query: body.query, body: body.body, workspace: ws });
+  if (cloudflare.down || (batch && cloudflare.downOnBatch)) return json({ error: "Could not reach Cloudflare." }, 502);
+  const { status, answer } = cloudflareApi(body.method, body.path, body.query ?? {}, body.body);
+  // A batch that went in, its answer lost on the way back.
+  if (batch && cloudflare.lostOnBatch) return json({ error: "Could not reach Cloudflare." }, 502);
+  return json({ status, contentType: "application/json", body: answer, truncated: false, headers: {} });
+}
+
+/** Cloudflare's API as far as Bops calls it: zones, a zone's records by name or comment, and a batch (deletes, patches, posts: all or nothing). */
+function cloudflareApi(method, path, q, b) {
+  const ok = (result, info) => ({ status: 200, answer: { success: true, errors: [], messages: [], result, ...(info ? { result_info: info } : {}) } });
+  const no = (status, code, message) => ({ status, answer: { success: false, errors: [{ code, message }], messages: [], result: null } });
+  if (!cloudflare.valid) return no(403, 9109, "Invalid access token");
+  if (cloudflare.limited === "cloudflare") return no(429, 971, "Please wait and consider throttling your request speed");
+  if (path === "/zones" && method === "GET") {
+    const all = cloudflare.zones.filter((z) => !q.status || z.status === q.status);
+    const per = Number(q.per_page ?? 20);
+    const page = Number(q.page ?? 1);
+    const part = all.slice((page - 1) * per, page * per);
+    return ok(part.map(({ id, name, status, account }) => ({ id, name, status, account, name_servers: [] })), { page, per_page: per, count: part.length, total_count: all.length, total_pages: Math.max(1, Math.ceil(all.length / per)) });
+  }
+  let m = path.match(/^\/zones\/([^/]+)\/dns_records(\/batch)?$/);
+  const zone = m && cloudflare.zones.find((z) => z.id === m[1]);
+  if (m && !zone) return no(404, 7003, "Could not route to the zone, perhaps your object identifier is invalid?");
+  if (m && !m[2] && method === "GET") {
+    if (!cloudflare.canRead) return no(403, 10000, "Authentication error");
+    let rs = cloudflare.records.filter((r) => r.zone === zone.id);
+    if (q["name.exact"]) rs = rs.filter((r) => r.name === q["name.exact"]);
+    if (q["comment.contains"]) rs = rs.filter((r) => (r.comment ?? "").includes(q["comment.contains"]));
+    return ok(rs.map(cfView), { page: 1, per_page: 100, count: rs.length, total_count: rs.length, total_pages: 1 });
+  }
+  if (m && m[2] && method === "POST") {
+    if (!cloudflare.canEdit) return no(403, 10000, "Authentication error");
+    cloudflare.beforeBatch?.();
+    cloudflare.batches.push(structuredClone(b));
+    // On a copy, then kept only if all of it goes (one transaction).
+    let rs = cloudflare.records.map((r) => ({ ...r }));
+    const done = { deletes: [], patches: [], puts: [], posts: [] };
+    for (const d of b.deletes ?? []) {
+      if (!rs.some((r) => r.id === d.id && r.zone === zone.id)) return no(400, 81044, "Record does not exist.");
+      rs = rs.filter((r) => r.id !== d.id);
+      done.deletes.push({ id: d.id });
+    }
+    const valid = (r) => (r.comment ?? "").length <= 100 && (r.type !== "TXT" || r.proxied === undefined);
+    for (const p of b.patches ?? []) {
+      const at = rs.find((r) => r.id === p.id && r.zone === zone.id);
+      if (!at) return no(400, 81044, "Record does not exist.");
+      Object.assign(at, Object.fromEntries(Object.entries(p).filter(([k]) => k !== "id")));
+      if (!valid(at)) return no(400, 9004, "DNS Validation Error");
+      done.patches.push(cfView(at));
+    }
+    for (const p of b.posts ?? []) {
+      const r = { id: cfId(), zone: zone.id, ...p };
+      if (!valid(r)) return no(400, 9004, "DNS Validation Error");
+      rs.push(r);
+      done.posts.push(cfView(r));
+    }
+    // A CNAME needs its name to itself (but at the zone itself, where Cloudflare flattens it), and no record twice.
+    for (const r of rs.filter((x) => x.zone === zone.id)) {
+      const at = rs.filter((x) => x.zone === zone.id && x.name === r.name && x !== r);
+      if (r.type === "CNAME" && r.name !== zone.name && at.length) return no(400, 81053, "An A, AAAA, or CNAME record with that host already exists.");
+      if (r.type === "CNAME" && at.some((x) => ["A", "AAAA", "CNAME"].includes(x.type))) return no(400, 81053, "An A, AAAA, or CNAME record with that host already exists.");
+      if (at.some((x) => x.type === r.type && x.content === r.content)) return no(400, 81058, "A record with the same settings already exists.");
+    }
+    cloudflare.records = rs;
+    return ok(done);
+  }
+  return no(404, 7000, "No route for that URI");
+}
 
 /* ---------------- A fake OpenAI, and the tasks started ---------------- */
 
@@ -796,6 +1002,8 @@ globalThis.fetch = async (input, init) => {
     const next = answers.shift();
     return json(next ? await next(b) : response(`resp_${asked.length}`, [said("Done.")]));
   }
+  // Cloudflare is called only through Orgo's broker, which adds the key there.
+  if (url.host === "api.cloudflare.com") throw new Error("Bops must never call Cloudflare itself");
   throw new TypeError(`fetch failed (the test is offline: ${url.host})`);
 };
 
@@ -1137,7 +1345,7 @@ await check("work_on_app on Alex's own turn: the app kept on the workspace with 
     for (const p of Object.values(t.parameters.properties)) hear(p.description ?? "");
     assert.deepEqual(Object.keys(t.parameters.properties), t.parameters.required, "strict: every field required");
   }
-  assert.deepEqual(Object.keys(body.tools.find((x) => x.name === "deploy_app").parameters.properties), ["app", "at"]);
+  assert.deepEqual(Object.keys(body.tools.find((x) => x.name === "deploy_app").parameters.properties), ["app", "at", "where"]);
   assert.equal(started.length, k + 1);
   const t = started.at(-1);
   assert.deepEqual([t.botId, t.where, t.procedure, t.app, t.title, t.sentVia, t.chatId], ["boppy", "cloud", undefined, { wsId: WS, name: "recipe-box" }, "Work on recipe-box", "you", chatId]);
@@ -1405,7 +1613,7 @@ await check("No work_on_app or deploy_app on a routine's run or a turn someone e
     toolCall("deploy_app", { app: "recipe-box", at: null }),
     toolCall("work_on_app", { app: "recipe-box", name: null, change: "Add the menu.", say: "On it." }),
   ]);
-  assert.match(asks.out(1), /^Deploying the newest commit of recipe-box on Boppy's computer\./);
+  assert.match(asks.out(1), /^Deploying a preview of the newest commit of recipe-box on Boppy's computer\./);
   assert.equal(started.length, k + 1, "the task starts");
 });
 
@@ -1456,10 +1664,17 @@ await check("A redeploy of an older changeset goes to the same project; a change
   assert.equal(what.status, 400);
 });
 
-await check("deploy_app in the chat answers the model with how it went and the address; live, the list and the bots' prompt say the URL", async () => {
+await check("deploy_app in the chat answers the model with how it went and the address: to Staging, unless Alex's own words ask for Prod, which gets what Staging serves (Promote); live, the list and the bots' prompt say the URL", async () => {
   web.liveAtOnce = true;
-  const t = await turnWith("Put the recipe app live", [toolCall("deploy_app", { app: "recipe-box", at: null })], "It's deploying.");
-  assert.equal(t.out(), "Deploying the newest commit of recipe-box on Boppy's computer. It gets its public address once this first deploy is live, and the Apps page shows it then.");
+  const t = await turnWith("Put the recipe app live", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "staging" })], "It's deploying.");
+  const AFTER = "Say publish, or press Publish on the Apps page, to put it at its real address once it looks right.";
+  assert.equal(t.out(), `Deploying a preview of the newest commit of recipe-box on Boppy's computer. It's at https://recipe-box-staging.orgo.dev in a minute or two, a link to share. ${AFTER}`);
+  // The bot asking for Prod on words that don't: Staging, and it's told so.
+  const not = await turnWith("Put the recipe app up", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
+  assert.equal(not.out(), `Deploying a preview of the newest commit of recipe-box on Boppy's computer. It's at https://recipe-box-staging.orgo.dev in a minute or two, a link to share. ${AFTER} (It went to its preview: Alex didn't ask to publish it. Ask them, or they press Publish on the Apps page.)`);
+  const head = repoOf("recipe-box").changesets[0].id;
+  const prod = await turnWith("Ship the recipe app to production", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
+  assert.equal(prod.out(), `Publishing recipe-box at ${head.slice(0, 7)}, what its preview serves. It gets its public address once this first deploy is live.`);
   web.liveAtOnce = false;
   forgetListed();
   const a = await H.listApps(WS);
@@ -1470,8 +1685,8 @@ await check("deploy_app in the chat answers the model with how it went and the a
   assert.equal(app.live.url, "https://recipe-box.orgo.dev");
   assert.equal(app.serving, repoOf("recipe-box").changesets[0].id);
   assert.equal(hostedApps()["recipe-box"].url, "https://recipe-box.orgo.dev", "the URL is kept");
-  const again = await turnWith("Deploy the recipe app", [toolCall("deploy_app", { app: "recipe-box", at: null })], "Deploying.");
-  assert.equal(again.out(), "Deploying the newest commit of recipe-box on Boppy's computer. It's live at https://recipe-box.orgo.dev in a minute or two.");
+  const again = await turnWith("Promote the recipe app", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Deploying.");
+  assert.equal(again.out(), `Publishing recipe-box at ${head.slice(0, 7)}, what its preview serves. It's live at https://recipe-box.orgo.dev in a minute or two.`);
   const now = again.first.input.find((x) => x.role === "developer").content;
   assert.match(now, /\nYour workspace's apps on the web, each an Ingot repo \(work_on_app to build or change one, deploy_app to put it live\): [^\n]*recipe-box \(live at https:\/\/recipe-box\.orgo\.dev\)/);
   assert.match(now, /notes \(not on the web yet\)/);
@@ -1480,8 +1695,8 @@ await check("deploy_app in the chat answers the model with how it went and the a
 
 await check("deploy_app with the short id Ingot prints: the whole one looked up on main in Ingot and deployed, the computer asleep or not; the start of two, an unknown one, and one while Ingot is down are refused in words", async () => {
   const n = web.calls.length;
-  const t = await turnWith("Put the first version back live", [toolCall("deploy_app", { app: "recipe-box", at: first.id.slice(0, 12) })], "Done.");
-  assert.match(t.out(), new RegExp(`^Deploying recipe-box at ${first.id.slice(0, 7)} on Boppy's computer\\.`));
+  const t = await turnWith("Put the first version back live on prod", [toolCall("deploy_app", { app: "recipe-box", at: first.id.slice(0, 12), where: "prod" })], "Done.");
+  assert.match(t.out(), new RegExp(`^Publishing recipe-box at ${first.id.slice(0, 7)} on Boppy's computer\\.`));
   assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.body), [{ at: first.id }]);
   // Two changesets whose ids start alike.
   const a = commit("recipe-box", "Pink", { id: "boppy", name: "Boppy" });
@@ -1496,8 +1711,8 @@ await check("deploy_app with the short id Ingot prints: the whole one looked up 
   boppy.status = "suspended";
   const k = ran.length;
   let m = web.calls.length;
-  const asleep = await turnWith("Deploy the blue one", [toolCall("deploy_app", { app: "recipe-box", at: b.id.slice(0, 8) })]);
-  assert.match(asleep.out(), new RegExp(`^Deploying recipe-box at ${b.id.slice(0, 7)} on Boppy's computer\\.`));
+  const asleep = await turnWith("Deploy the blue one", [toolCall("deploy_app", { app: "recipe-box", at: b.id.slice(0, 8), where: "staging" })]);
+  assert.match(asleep.out(), new RegExp(`^Deploying a preview of recipe-box at ${b.id.slice(0, 7)} on Boppy's computer\\.`));
   assert.deepEqual(callsSince(m, "POST", /\/deployments$/).map((c) => c.body), [{ at: b.id }]);
   assert.equal(ran.length, k, "no command on the computer");
   assert.equal(web.woke, undefined, "never woken");
@@ -1583,6 +1798,8 @@ await check("A deploy on a computer that has no token of the workspace's yet (th
 
 const recipeHead = () => repoOf("recipe-box").changesets[0].id;
 const recipeDeploys = () => newestFirst(web.projects.find((p) => p.id === hostedApps()["recipe-box"].projectId));
+/** Its Staging project's deploys (where a task's deploy goes), newest first. */
+const stagingDeploys = () => newestFirst(web.projects.find((p) => p.name === "recipe-box-staging"));
 const sessionOf = (id) => S.getState().sessions.find((x) => x.id === id);
 const deploysSince = (n) => callsSince(n, "POST", /\/deploy-projects\/[^/]+\/deployments$/);
 const RECIPE = { wsId: WS, name: "recipe-box" };
@@ -1613,7 +1830,7 @@ await check("work_on_app with deploy, on Alex's own turn: the task carries the a
   const t = started.at(-1);
   assert.deepEqual(t.app, { ...RECIPE, deployAfter: true });
   hear(t.goal);
-  assert.match(t.goal, /\n4\. Say what you changed\. Alex asked for it to go live too: once you've committed and this task ends, Bops deploys its newest commit itself and tells them where it's live, so don't tell them to deploy it\. If you couldn't commit it, say why\.$/);
+  assert.match(t.goal, /\n4\. Say what you changed\. Alex asked for it to go live too: once you've committed and this task ends, Bops deploys its newest commit to its preview itself and tells them where, so don't tell them to deploy it\. If you couldn't commit it, say why\.$/);
   assert.doesNotMatch(t.goal, /Apps page/);
   assert.equal(messages().at(-1).text, "Making it green, then putting it live.");
   answers.push(calling(toolCall("work_on_app", { app: "recipe-box", name: null, change: "Make the title blue.", deploy: false, say: "Making it blue." })));
@@ -1637,7 +1854,7 @@ await check("On a turn that read something from outside Bops, the deploy goes wi
   await turnWith("Put the menu from that page in the recipe app and deploy it", [toolCall("web_fetch", { url: "https://example.com/menu" }), toolCall("work_on_app", { app: "recipe-box", name: null, change: "Add the menu.", deploy: true, say: "Adding the menu." })]);
   assert.equal(started.length, k + 2);
   assert.deepEqual(started.at(-1).app, { ...RECIPE, deployAfter: true }, "Alex's own words asked");
-  assert.match(started.at(-1).goal, /Bops deploys its newest commit itself/);
+  assert.match(started.at(-1).goal, /Bops deploys its newest commit to its preview itself/);
   assert.ok(!messages().slice(m).some((x) => x.text.startsWith("Won't put")));
 });
 
@@ -1681,10 +1898,10 @@ await check("Done with a new commit: Bops deploys the newest itself, once, and s
   await Promise.all([H.deployAfterTask("ses_dep"), H.deployAfterTask("ses_dep")]);
   web.onDeploy = undefined;
   assert.deepEqual(deploysSince(n).map((x) => x.body), [{}], "one deploy, of the newest on main");
-  assert.equal(recipeDeploys()[0].source_version, c1.id);
+  assert.equal(stagingDeploys()[0].source_version, c1.id, "on Staging");
   const said = messages().slice(m);
   assert.equal(said.length, 1);
-  assert.match(hear(said[0].text), /^Deploying the newest commit of recipe-box on Boppy's computer\. /);
+  assert.match(hear(said[0].text), /^Deploying a preview of the newest commit of recipe-box on Boppy's computer\. /);
   assert.deepEqual([said[0].role, said[0].botId, said[0].sessionIds, said[0].appNote, said[0].bops, said[0].resultOf], ["bot", "boppy", ["ses_dep"], true, true, undefined]);
   assert.deepEqual(sessionOf("ses_dep").app, { ...RECIPE, from: c1.id }, "the ask is off, from is what went live");
   assert.ok(saved, "the state was saved as the deploy went");
@@ -1699,7 +1916,7 @@ await check("Done with a new commit: Bops deploys the newest itself, once, and s
   answers.push(reply("It's going live."));
   const k = asked.length;
   await Chat.handleMessage(chatId, "Is it live yet?");
-  const mine = asked[k].input.find((x) => x.role === "assistant" && typeof x.content === "string" && x.content.startsWith("Deploying the newest commit of recipe-box"));
+  const mine = asked[k].input.find((x) => x.role === "assistant" && typeof x.content === "string" && x.content.startsWith("Deploying a preview of the newest commit of recipe-box"));
   assert.match(mine?.content ?? "", /\n\[What was done: said this as the task "Work on recipe-box" ended\]$/);
 });
 
@@ -1715,7 +1932,7 @@ await check("Asked again of that task with nothing new committed since it went l
   const c2 = commit("recipe-box", "A footer", { id: "boppy", name: "Boppy" });
   await H.deployAfterTask("ses_dep");
   assert.equal(deploysSince(n).length, 1);
-  assert.equal(recipeDeploys()[0].source_version, c2.id);
+  assert.equal(stagingDeploys()[0].source_version, c2.id);
   assert.equal(sessionOf("ses_dep").app.deployAfter, undefined);
 });
 
@@ -1735,7 +1952,7 @@ await check("A task that failed (after committing, even): not deployed, said und
   S.patchSession("ses_fail", { status: "done", error: undefined });
   await H.deployAfterTask("ses_fail");
   assert.equal(deploysSince(n).length, 1, "deployed once it ended done");
-  assert.equal(recipeDeploys()[0].source_version, c3.id);
+  assert.equal(stagingDeploys()[0].source_version, c3.id);
 });
 
 await check("Done with nothing committed: not deployed, said so, the ask stays; Ingot not answering as it ends: the task's done goes, and it's deployed", async () => {
@@ -1755,7 +1972,7 @@ await check("Done with nothing committed: not deployed, said so, the ask stays; 
     central.down = false;
   }
   assert.equal(deploysSince(n).length, 1);
-  assert.match(hear(messages().at(-1).text), /^Deploying the newest commit of recipe-box/);
+  assert.match(hear(messages().at(-1).text), /^Deploying a preview of the newest commit of recipe-box/);
   assert.equal(sessionOf("ses_none").app.from, recipeHead(), "from as it was (Ingot couldn't say)");
   assert.equal(sessionOf("ses_none").app.deployAfter, undefined);
 });
@@ -1771,7 +1988,9 @@ await check("Orgo turns the deploy down: said in Orgo's words as the bot, and no
   } finally {
     web.closed = false;
   }
-  assert.equal(deploysSince(n).length, 1, "asked once");
+  const asked = web.calls.length - n;
+  assert.ok(asked > 0, "Orgo asked");
+  assert.equal(deploysSince(n).length, 0, "nothing queued: Orgo turned its Staging down");
   assert.equal(recipeDeploys().length, queued, "nothing queued");
   const said = messages().slice(m);
   assert.equal(said.length, 1);
@@ -1780,7 +1999,7 @@ await check("Orgo turns the deploy down: said in Orgo's words as the bot, and no
   assert.equal(sessionOf("ses_closed").app.deployAfter, undefined);
   await H.deployAfterTask("ses_closed");
   assert.equal(messages().length, m + 1);
-  assert.equal(deploysSince(n).length, 1, "not asked again");
+  assert.equal(web.calls.length - n, asked, "not asked again");
 });
 
 await check("Nothing for a task with no deploy ask, one that moved on to another thread, one whose brain waits on Alex, a routine's run, someone else's task, or an account apps aren't open to", async () => {
@@ -2179,6 +2398,7 @@ await check("Hosting not open to the account: enabled false with a plain why, th
 
 const SettingsRoute = await import(`${root}/app/api/hosted-apps/[name]/settings/route.ts`);
 const EnvRoute = await import(`${root}/app/api/hosted-apps/[name]/env/route.ts`);
+const LocalRoute = await import(`${root}/app/api/hosted-apps/[name]/local/route.ts`);
 const DomainsRoute = await import(`${root}/app/api/hosted-apps/[name]/domains/route.ts`);
 const SearchRoute = await import(`${root}/app/api/hosted-apps/[name]/domains/search/route.ts`);
 const DomainRoute = await import(`${root}/app/api/hosted-apps/[name]/domains/[domainId]/route.ts`);
@@ -2192,6 +2412,8 @@ const RB = { name: "recipe-box" };
 const addAsk = (body, opts) => ask(AppsRoute, "POST", "/api/hosted-apps", null, body, opts);
 /** Every write that reached orgo-web since `n`. */
 const writesSince = (n) => web.calls.slice(n).filter((c) => c.method !== "GET");
+/** Only these keys of `o`. */
+const pick = (o, keys) => Object.fromEntries(keys.filter((k) => k in o).map((k) => [k, o[k]]));
 /** A made-up person to register a domain to (the gate needs an @orgo.ai address). */
 const AVA = { first_name: "Ava", last_name: "Lin", email: "ava@orgo.ai", phone: "+1.4155550100", address1: "1 Example Way", city: "Springfield", state: "CA", postal_code: "94000", country: "US" };
 /** The app's domains and the workspace's bought ones as domainsAgain makes them, and the fake selling domains afresh. */
@@ -2426,7 +2648,24 @@ await check("What a domain can be added from (the window only): buying open, the
   const r = await ask(DomainsRoute, "GET", `/api/hosted-apps/recipe-box/domains?ws=${WS}`, RB);
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.buy, { open: true });
-  assert.deepEqual(r.body.owned, [{ id: "6a6a6a6a-1111-4222-8333-444455556666", domain: "spare.example" }], "not acme.example nor shop.store: names point at them");
+  assert.deepEqual(
+    r.body.owned,
+    [
+      {
+        id: ZONE,
+        domain: "acme.example",
+        inUse: [
+          { name: "acme.example", app: "recipe-box" },
+          { name: "www.acme.example", app: "recipe-box" },
+          { name: "blog.acme.example", where: "bops-boppy" },
+          { name: "ivy.acme.example", where: "another computer" },
+        ],
+      },
+      { id: SHOP_ZONE, domain: "shop.store", inUse: [{ name: "shop.store", where: "bops-boppy" }] },
+      { id: "6a6a6a6a-1111-4222-8333-444455556666", domain: "spare.example", inUse: [] },
+    ],
+    "every one the workspace bought, each with what points at it or under it: the app on this app's computer that serves it, else that computer",
+  );
   assert.deepEqual(r.body.contact, AVA, "the registry's fields alone");
   web.sell.canBuy = false;
   const view = await ask(DomainsRoute, "GET", `/api/hosted-apps/recipe-box/domains?ws=${WS}`, RB);
@@ -2445,14 +2684,20 @@ await check("Searching for a domain (the window only): orgo-web's names, each pr
   addingAgain();
   const r = await ask(SearchRoute, "GET", `/api/hosted-apps/recipe-box/domains/search?ws=${WS}&q=guest&page=0`, RB);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.results, [
-    { domain: "guest.example", status: "available", price: 1200, renewal: 1400, years: 1 },
-    { domain: "guest.invalid", status: "taken", price: null, renewal: null, years: null },
-    { domain: "guest.test", status: "available", price: 14000, renewal: 7000, years: 2 },
-    { domain: "guest.localhost", status: "premium", price: null, renewal: null, years: null },
-  ]);
+  assert.deepEqual(
+    r.body.results,
+    [
+      { domain: "guest.example", status: "available", price: 1200, renewal: 1400, years: 1 },
+      { domain: "guest.test", status: "available", price: 14000, renewal: 7000, years: 2 },
+      { domain: "guest.invalid", status: "taken", price: null, renewal: null, years: null },
+      { domain: "guest.localhost", status: "premium", price: null, renewal: null, years: null },
+    ],
+    "the ones that can be bought first, then the rest, each in Orgo's order",
+  );
   assert.equal(r.body.next, 1);
   assert.deepEqual(web.calls.at(-1).query, "?q=guest&page=0");
+  const exact = await ask(SearchRoute, "GET", `/api/hosted-apps/recipe-box/domains/search?ws=${WS}&q=guest.invalid&page=0`, RB);
+  assert.deepEqual(exact.body.results.map((o) => o.domain), ["guest.invalid", "guest.example", "guest.test", "guest.localhost"], "the exact name typed first, taken or not");
   const two = await ask(SearchRoute, "GET", `/api/hosted-apps/recipe-box/domains/search?ws=${WS}&q=guest&page=1`, RB);
   assert.deepEqual([two.body.results.map((o) => o.status), two.body.next], [["unknown"], null]);
   let n = web.calls.length;
@@ -2563,7 +2808,7 @@ await check("Bought, but Orgo couldn't point it at the app: it says so with the 
   const r = await ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "buy", domain: "guest.example", registrant: AVA, price: 1200 });
   assert.equal(r.status, 200);
   assert.deepEqual([r.body.bought, r.body.domain], ["guest.example", null]);
-  assert.equal(r.body.error, "Bought guest.example, but it isn't pointed at this app yet: Orgo couldn't save the records just now. It's under your domains not in use: press Use there to try again.");
+  assert.equal(r.body.error, "Bought guest.example, but it isn't pointed at this app yet: Orgo couldn't save the records just now. It's under Your domains: press Use there to try again.");
   web.connectRefuse = null;
   const options = await H.domainOptions(WS, "recipe-box");
   const it = options.owned.find((o) => o.domain === "guest.example");
@@ -2676,6 +2921,1041 @@ await check("Auto-renew: a bought domain that points at the app turned off and o
   assert.equal(away.status, 403);
 });
 
+await check("Use with a name under a bought domain (www, shop): sent as registered_domain_id and subdomain with the app's port, Orgo writing its A and TXT; one that can't be a name refused before Orgo is asked; one that points somewhere already (this app, another app here, another computer) refused with where, nothing sent; the domain itself, free, in one tap", async () => {
+  addingAgain();
+  const port = recipeProject().port;
+  const pointAt = (zone, subdomain) => ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "connect", zone, ...(subdomain === undefined ? {} : { subdomain }) });
+  let n = web.calls.length;
+  const shop = await pointAt(ZONE, " Shop ");
+  assert.equal(shop.status, 200);
+  assert.deepEqual(writesSince(n).map((c) => [c.path, c.body]), [["/api/computers/c_boppy/domains", { registered_domain_id: ZONE, subdomain: "shop", target_port: port }]]);
+  assert.deepEqual([shop.body.domain.domain, shop.body.domain.managed, shop.body.domain.zone], ["shop.acme.example", true, ZONE]);
+  const zone = web.bought.find((b) => b.id === ZONE);
+  assert.ok(zone.records.some((r) => r.type === "A" && r.name === "shop") && zone.records.some((r) => r.type === "TXT" && r.name === "_orgo-verify.shop"), "Orgo wrote its A and TXT");
+  n = web.calls.length;
+  for (const bad of ["bad_name", "-www", "a b", "www..x"]) {
+    const x = await pointAt(ZONE, bad);
+    assert.deepEqual([x.status, x.body.error, x.body.field], [400, "Type a name like www or shop.", "subdomain"], bad);
+  }
+  assert.equal(web.calls.length, n, "nothing asked of Orgo");
+  fleet.get("c_ivy").name = "Studio computer";
+  try {
+    for (const [sub, error] of [
+      ["www", "www.acme.example is on recipe-box already."],
+      ["blog", "blog.acme.example is on another app on this computer already."],
+      ["ivy", "ivy.acme.example is on Studio computer already."],
+      ["", "acme.example is on recipe-box already."],
+    ]) {
+      const x = await pointAt(ZONE, sub);
+      assert.deepEqual([x.status, x.body.error, x.body.field], [409, error, sub ? "subdomain" : undefined], sub);
+    }
+  } finally {
+    delete fleet.get("c_ivy").name;
+  }
+  assert.deepEqual(writesSince(n), [], "nothing pointed");
+  // Orgo's own refusal of a name under it, in the same words.
+  web.connectRefuse = { status: 400, body: { error: "Use letters, numbers and hyphens.", code: "INVALID_SUBDOMAIN" } };
+  const refused = await pointAt(ZONE, "api");
+  assert.deepEqual([refused.status, refused.body.error, refused.body.field], [400, "Type a name like www or shop.", "subdomain"]);
+  web.connectRefuse = null;
+  // A domain nothing points at: the domain itself, one tap.
+  web.bought.push({ id: "6a6a6a6a-1111-4222-8333-444455556666", project: PROJECT, domain: "spare.example", status: "active", serving: true, records: [] });
+  n = web.calls.length;
+  const spare = await pointAt("6a6a6a6a-1111-4222-8333-444455556666");
+  assert.deepEqual([spare.status, spare.body.domain.domain], [200, "spare.example"]);
+  assert.deepEqual(writesSince(n).map((c) => c.body), [{ registered_domain_id: "6a6a6a6a-1111-4222-8333-444455556666", subdomain: "", target_port: port }]);
+  const listed = await ask(DomainsRoute, "GET", `/api/hosted-apps/recipe-box/domains?ws=${WS}`, RB);
+  assert.deepEqual(
+    listed.body.owned.map((o) => [o.domain, o.inUse.filter((u) => u.app === "recipe-box").map((u) => u.name)]),
+    [
+      ["acme.example", ["acme.example", "www.acme.example", "shop.acme.example"]],
+      ["shop.store", []],
+      ["spare.example", ["spare.example"]],
+    ],
+    "every bought domain, with what this app serves of it now",
+  );
+});
+
+await check("A double tap on Buy from the app's tab buys once: the second, while the first is out, is refused at once (409 BUYING) and never reaches Orgo", async () => {
+  addingAgain();
+  let release;
+  web.sell.hold = new Promise((r) => (release = r));
+  const settled = [];
+  const buy = () => ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "buy", domain: "guest.example", registrant: AVA, price: 1200 }).then((r) => (settled.push(r), r));
+  const both = Promise.all([buy(), buy()]);
+  try {
+    await until(() => settled.length === 1 && web.sell.buys.length === 1);
+    assert.deepEqual([settled[0].status, settled[0].body.code, settled[0].body.error], [409, "BUYING", "guest.example is being bought already. Wait for it."]);
+  } finally {
+    release();
+    web.sell.hold = null;
+  }
+  const [a, b] = await both;
+  assert.deepEqual([a.status, b.status].sort(), [200, 409]);
+  assert.equal(web.sell.buys.length, 1, "one buy reached Orgo");
+  assert.equal(web.sell.credits, 10_000 - 1200, "charged once");
+});
+
+/* ---------------- Add a domain from the user's Cloudflare, through Orgo's broker ---------------- */
+
+const CF = await import(`${root}/lib/server/cloudflare.ts`);
+const CfRoute = await import(`${root}/app/api/hosted-apps/[name]/domains/[domainId]/cloudflare/route.ts`);
+/** The user's Cloudflare zones: two in their own account, one the workspace bought through Orgo, one not active yet. */
+const Z_TEST = "7e".repeat(16);
+const Z_COM = "c0".repeat(16);
+const Z_ACME = "ac".repeat(16);
+const ACCT = { id: "a1".repeat(16), name: "Acme" };
+const cfZone = (id, name, extra = {}) => ({ id, name, status: "active", account: ACCT, ...extra });
+const CF_KEY_ROW = { name: "CLOUDFLARE_API_TOKEN", workspace_id: null };
+/** A record in the fake Cloudflare (`zone` its id), as a test puts it there. */
+const cfRecord = (zone, type, name, content, extra = {}) => ({ id: cfId(), zone, type, name, content, ...(type === "TXT" ? {} : { proxied: false }), ttl: 1, comment: null, ...extra });
+const cfAt = (name) => cloudflare.records.filter((r) => r.name === name).map((r) => [r.type, r.content, r.proxied ?? null, r.comment]).sort();
+/** The app's domains and Cloudflare afresh: the key for all workspaces, its zones, no records; the vault's names and the zones read again. */
+function cloudflareAgain(extra = {}) {
+  addingAgain();
+  web.secrets = [{ ...CF_KEY_ROW }, { name: "CLOUDFLARE_ZONE_ID", workspace_id: null }];
+  web.cfBroker = true;
+  cloudflare = { ...freshCloudflare(), zones: [cfZone(Z_TEST, "acme.test"), cfZone(Z_COM, "example.com"), cfZone(Z_ACME, "acme.example"), cfZone("9a".repeat(16), "pending.example", { status: "pending" })], ...extra };
+  globalThis.bopsVaultNames = undefined;
+  globalThis.bopsKeys = undefined;
+  globalThis.bopsCfZones?.clear();
+  globalThis.bopsCfZonesFailed?.clear();
+}
+const cfOptions = async () => (await ask(DomainsRoute, "GET", `/api/hosted-apps/recipe-box/domains?ws=${WS}`, RB)).body;
+const cfUse = (zone, subdomain, opts) => ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "cloudflare", zone, ...(subdomain !== undefined ? { subdomain } : {}) }, opts);
+const cfPlan = (id, opts) => ask(CfRoute, "GET", `/api/hosted-apps/recipe-box/domains/${id}/cloudflare?ws=${WS}`, { name: "recipe-box", domainId: id }, undefined, opts);
+const cfApply = (id, plan, extra = {}, opts) => ask(CfRoute, "POST", `/api/hosted-apps/recipe-box/domains/${id}/cloudflare`, { name: "recipe-box", domainId: id }, { ws: WS, plan, ...extra }, opts);
+const brokerCalls = (n = 0) => web.calls.slice(n).filter((c) => c.path === "/api/secrets/call");
+const lines = (plan) => plan.changes.map((c) => [c.op, c.type, c.host, c.value, ...(c.was ? [c.was] : []), ...(c.theirs ? ["theirs"] : []), ...(c.stale ? ["stale"] : [])]);
+
+await check("Without a Cloudflare key, Add a domain and the app's domains are as they were: nothing called through the broker, no Cloudflare field anywhere", async () => {
+  cloudflareAgain();
+  web.secrets = [{ name: "STRIPE_SECRET_KEY", workspace_id: null }, { name: "CLOUDFLARE_ZONE_ID", workspace_id: null }];
+  const n = web.calls.length;
+  const options = await cfOptions();
+  assert.deepEqual(Object.keys(options).sort(), ["buy", "contact", "owned"], "no cloudflare");
+  const list = await ask(DnsRoute, "GET", `/api/hosted-apps/recipe-box/dns?ws=${WS}`, RB);
+  assert.ok(list.body.domains.every((d) => !("cloudflare" in d)));
+  assert.deepEqual(brokerCalls(n), [], "no call through Orgo's broker");
+  assert.equal(cloudflare.calls.length, 0);
+  // Signed out of the vault, or the vault not answering: the same.
+  web.secrets = [{ ...CF_KEY_ROW }];
+  globalThis.bopsVaultNames = undefined;
+  const wasSecrets = web.secrets;
+  web.secrets = null;
+  try {
+    const down = await cfOptions();
+    assert.ok(!("cloudflare" in down), "a vault that can't be read is no Cloudflare");
+  } finally {
+    web.secrets = wasSecrets;
+  }
+});
+
+await check("A Cloudflare key Orgo's broker can't call yet: Add a domain says so in one quiet line, Your domains and buying as they were", async () => {
+  cloudflareAgain();
+  const before = await (async () => {
+    web.secrets = [];
+    globalThis.bopsVaultNames = undefined;
+    return cfOptions();
+  })();
+  cloudflareAgain();
+  web.cfBroker = false;
+  const options = await cfOptions();
+  assert.deepEqual(options.cloudflare, { why: "Your Cloudflare key is in your vault, but Orgo can't use it for domains yet." });
+  assert.deepEqual([options.buy, options.owned, options.contact], [before.buy, before.owned, before.contact], "the rest unchanged");
+});
+
+await check("Add a domain from Cloudflare lists the key's active zones (every page read, the ones the workspace bought through Orgo left out), each with what on this computer is it or under it, and the account only when there are two", async () => {
+  cloudflareAgain();
+  const many = Array.from({ length: 52 }, (_, i) => cfZone((i + 16).toString(16).padStart(2, "0").repeat(16), `z${i}.example`));
+  cloudflare.zones = [...cloudflare.zones, ...many];
+  const n = cloudflare.calls.length;
+  const options = await cfOptions();
+  const zones = options.cloudflare.zones;
+  assert.deepEqual(cloudflare.calls.slice(n).map((c) => [c.method, c.path, c.query.page]), [["GET", "/zones", 1], ["GET", "/zones", 2]], "two pages of 50");
+  assert.deepEqual(cloudflare.calls.slice(n).map((c) => c.query.status), ["active", "active"]);
+  assert.ok(!zones.some((z) => z.domain === "acme.example"), "one bought through Orgo is under Your domains");
+  assert.ok(!zones.some((z) => z.domain === "pending.example"), "only active ones");
+  assert.equal(zones.length, 2 + 52);
+  assert.equal(options.cloudflare.more, undefined, "all of them");
+  const com = zones.find((z) => z.domain === "example.com");
+  assert.deepEqual(com, { id: Z_COM, domain: "example.com", inUse: [{ name: "recipes.example.com", app: "recipe-box" }] }, "what's on this computer under it, and no account name with one account");
+  assert.deepEqual(zones.find((z) => z.domain === "acme.test").inUse, []);
+  // Read for a minute: a second look asks Cloudflare nothing.
+  const m = cloudflare.calls.length;
+  await cfOptions();
+  assert.equal(cloudflare.calls.length, m, "the zones kept a minute");
+  // Two accounts: each line says which.
+  cloudflareAgain();
+  cloudflare.zones.push(cfZone("b2".repeat(16), "other.example", { account: { id: "b1".repeat(16), name: "Side" } }));
+  const two = (await cfOptions()).cloudflare.zones;
+  assert.deepEqual(two.map((z) => [z.domain, z.account]), [["acme.test", "Acme"], ["example.com", "Acme"], ["other.example", "Side"]]);
+  // More than 200: the first 200, and says so.
+  cloudflareAgain();
+  cloudflare.zones = Array.from({ length: 205 }, (_, i) => cfZone(i.toString(16).padStart(4, "0").repeat(8), `n${i}.example`));
+  const lots = (await cfOptions()).cloudflare;
+  assert.deepEqual([lots.zones.length, lots.more], [200, true]);
+  // None active, and each refusal in words.
+  for (const [set, why] of [
+    [() => (cloudflare.zones = []), "Your Cloudflare key doesn't see any active domains. In Cloudflare, let it read your zones and edit their DNS."],
+    [() => (cloudflare.valid = false), "Cloudflare turned your key down. It may have expired. Save a new one in your vault as CLOUDFLARE_API_TOKEN."],
+    [() => (cloudflare.down = true), "Cloudflare didn't answer just now. Try again in a minute."],
+    [() => (cloudflare.limited = "orgo"), "Orgo is limiting calls to Cloudflare right now. Wait a minute, then try again."],
+    [() => (cloudflare.limited = "cloudflare"), "Cloudflare is limiting calls right now. Wait a minute, then try again."],
+  ]) {
+    cloudflareAgain();
+    set();
+    assert.deepEqual((await cfOptions()).cloudflare, { why });
+  }
+});
+
+await check("Which Cloudflare key: the Bops workspace's own project's, else the one for the Orgo workspace the app's computer is in, else the account's, each sent to the broker as its workspace; one for an Orgo workspace that's neither is none", async () => {
+  const sent = async () => {
+    globalThis.bopsVaultNames = undefined;
+    globalThis.bopsCfZones?.clear();
+    const n = cloudflare.calls.length;
+    const o = await cfOptions();
+    return { o, ws: [...new Set(cloudflare.calls.slice(n).map((c) => c.workspace))] };
+  };
+  cloudflareAgain();
+  web.secrets = [{ ...CF_KEY_ROW }, { ...CF_KEY_ROW, workspace_id: PROJECT }, { ...CF_KEY_ROW, workspace_id: CF_OTHER }];
+  assert.deepEqual((await sent()).ws, [PROJECT], "the Bops workspace's own first");
+  const was = boppy.project;
+  boppy.project = CF_OTHER;
+  try {
+    web.secrets = [{ ...CF_KEY_ROW }, { ...CF_KEY_ROW, workspace_id: CF_OTHER }];
+    assert.deepEqual((await sent()).ws, [CF_OTHER], "then the computer's Orgo workspace's");
+  } finally {
+    boppy.project = was;
+  }
+  web.secrets = [{ ...CF_KEY_ROW }];
+  assert.deepEqual((await sent()).ws, [null], "then the account's, sent with no workspace");
+  web.secrets = [{ ...CF_KEY_ROW, workspace_id: "11111111-2222-4333-8444-555566667777" }];
+  const none = await sent();
+  assert.deepEqual([none.ws, "cloudflare" in none.o], [[], false], "one for an unrelated Orgo workspace: no Cloudflare");
+});
+
+await check("Use on a Cloudflare domain: the zone read again from the key's (a made up one refused before Orgo is asked), a name on this computer refused first, Orgo's 409 in words; else pointed at the app's port as a domain the user owns, answered with what Bops would set in Cloudflare (nothing written yet)", async () => {
+  cloudflareAgain();
+  const n = web.calls.length;
+  for (const [zone, sub, status, error, field] of [
+    ["ff".repeat(16), "shop", 404, "That isn't one of your Cloudflare domains."],
+    ["../../zones", "shop", 404, "That isn't one of your Cloudflare domains."],
+    [Z_TEST, "bad_name", 400, "Type a name like www or shop.", "subdomain"],
+    [Z_COM, "recipes", 409, "recipes.example.com is on recipe-box already.", "subdomain"],
+  ]) {
+    const x = await cfUse(zone, sub);
+    assert.deepEqual([x.status, x.body.error, x.body.field], [status, error, field], `${zone} ${sub}`);
+  }
+  assert.deepEqual(writesSince(n).filter((c) => c.path.startsWith("/api/computers/")), [], "Orgo not asked to point anything");
+  web.domains.push({ id: "cd_far2", computerId: "c_ivy", domain: "far.acme.test", status: "active", target_port: 3000, zone: null, token: "tok-far2" });
+  const far = await cfUse(Z_TEST, "far");
+  assert.deepEqual([far.status, far.body.error, far.body.field], [409, "far.acme.test is on another Orgo computer already.", "subdomain"]);
+  const m = web.calls.length;
+  const b = cloudflare.batches.length;
+  const r = await cfUse(Z_TEST, " Shop ");
+  assert.equal(r.status, 200);
+  assert.deepEqual(writesSince(m).filter((c) => c.path === "/api/computers/c_boppy/domains").map((c) => c.body), [{ domain: "shop.acme.test", target_port: recipeProject().port }], "as a domain the user owns, on the app's port");
+  const d = r.body.domain;
+  assert.deepEqual([d.domain, d.managed, d.status, d.cloudflare], ["shop.acme.test", false, "pending", { zone: "acme.test", zoneId: Z_TEST }]);
+  assert.equal(r.body.fresh, true, "just pointed here: Cancel takes it off");
+  const plan = r.body.cloudflare;
+  const token = web.domains.find((x) => x.id === d.id).token;
+  assert.deepEqual([plan.zone, plan.zoneId, plan.domain, plan.domainId, plan.ask, plan.blocked], ["acme.test", Z_TEST, "shop.acme.test", d.id, false, null]);
+  assert.deepEqual(lines(plan), [["add", "TXT", "_orgo-verify.shop", token], ["add", "CNAME", "shop", "edge.orgo.dev"]], "the TXT that proves it and the CNAME that routes it");
+  assert.match(plan.fingerprint, /^[0-9a-f]{16}$/);
+  assert.equal(cloudflare.batches.length, b, "nothing written in Cloudflare");
+  assert.deepEqual(
+    cloudflare.calls.slice(-2).map((c) => [c.method, c.path, c.query["name.exact"]]).sort(),
+    [["GET", `/zones/${Z_TEST}/dns_records`, "_orgo-verify.shop.acme.test"], ["GET", `/zones/${Z_TEST}/dns_records`, "shop.acme.test"]].sort(),
+    "the two names read",
+  );
+});
+
+await check("Its plan written: only the plan the user saw (a stale one refused with the plan as it is now), in one Cloudflare batch, every record DNS only, automatic TTL and Bops' comment; then Orgo checks it, a miss said as Cloudflare taking a minute; sent again, nothing written twice", async () => {
+  cloudflareAgain();
+  const r = await cfUse(Z_TEST, "shop");
+  const d = r.body.domain;
+  const b = cloudflare.batches.length;
+  const stale = await cfApply(d.id, "0123456789abcdef");
+  assert.deepEqual([stale.status, stale.body.code, stale.body.error], [409, "STALE", "Something changed in Cloudflare since you looked. Check the changes again."]);
+  assert.deepEqual(stale.body.cloudflare.fingerprint, r.body.cloudflare.fingerprint, "with the plan as it is now");
+  assert.equal(cloudflare.batches.length, b, "nothing written");
+  for (const plan of [undefined, "", "not-a-plan", 12]) assert.equal((await cfApply(d.id, plan)).status, 400, String(plan));
+  const v = web.calls.length;
+  const done = await cfApply(d.id, r.body.cloudflare.fingerprint);
+  assert.equal(done.status, 200);
+  assert.equal(cloudflare.batches.length, b + 1, "one batch");
+  const sent = cloudflare.batches.at(-1);
+  assert.deepEqual(Object.keys(sent), ["posts"]);
+  const token = web.domains.find((x) => x.id === d.id).token;
+  const comment = `Set by Bops for recipe-box [bops:${d.id}]`;
+  assert.deepEqual(sent.posts, [
+    { type: "TXT", name: "_orgo-verify.shop.acme.test", content: `"${token}"`, ttl: 1, comment },
+    { type: "CNAME", name: "shop.acme.test", content: "edge.orgo.dev", ttl: 1, proxied: false, comment },
+  ]);
+  assert.ok(sent.posts.every((p) => p.comment.length <= 100));
+  assert.deepEqual(callsSince(v, "POST", new RegExp(`/domains/${d.id}/verify$`)).length, 1, "then Orgo checks it");
+  assert.deepEqual([done.body.written, done.body.domain.status, done.body.said], [2, "verifying", "Set in Cloudflare. It can take a minute or two to answer."]);
+  assert.deepEqual(done.body.domain.cloudflare, { zone: "acme.test", zoneId: Z_TEST });
+  // Looked at again: all set already, and pressing it writes nothing.
+  const again = await cfPlan(d.id);
+  assert.deepEqual(lines(again.body).map((l) => l[0]), ["same", "same"]);
+  const twice = await cfApply(d.id, again.body.fingerprint);
+  assert.deepEqual([twice.status, twice.body.written, cloudflare.batches.length], [200, 0, b + 1], "no second copy");
+  assert.equal(cloudflare.records.filter((x) => x.name === "shop.acme.test").length, 1);
+  // A long app name is cut so the comment fits Cloudflare's 100; the tag never is.
+  const long = CF.marker("a".repeat(64), "5d0c3a9e-4a2b-4c3d-8e5f-6a7b8c9d0e1f");
+  assert.ok(long.length <= 100 && long.endsWith("[bops:5d0c3a9e-4a2b-4c3d-8e5f-6a7b8c9d0e1f]"), long);
+  assert.equal(CF.ourId(long), "5d0c3a9e-4a2b-4c3d-8e5f-6a7b8c9d0e1f");
+});
+
+await check("Records Bops didn't set: shown first (Replace, Remove, Not set by Bops), refused without the user's OK, and only Replace and add writes them, the user's A deleted and written fresh; the zone's MX left alone", async () => {
+  cloudflareAgain();
+  const mine = [cfRecord(Z_TEST, "A", "acme.test", "192.0.2.4", { comment: "the old host" }), cfRecord(Z_TEST, "AAAA", "acme.test", "2001:db8::1"), cfRecord(Z_TEST, "MX", "acme.test", "mx.acme.test", { priority: 10 })];
+  cloudflare.records.push(...mine);
+  const r = await cfUse(Z_TEST);
+  const plan = r.body.cloudflare;
+  const token = web.domains.find((x) => x.id === r.body.domain.id).token;
+  assert.deepEqual(lines(plan), [
+    ["add", "TXT", "_orgo-verify", token],
+    ["change", "A", "@", EDGE_IP, "192.0.2.4", "theirs"],
+    ["remove", "AAAA", "@", "2001:db8::1", "theirs"],
+  ]);
+  assert.deepEqual([plan.ask, plan.blocked], [true, null]);
+  const b = cloudflare.batches.length;
+  const no = await cfApply(r.body.domain.id, plan.fingerprint);
+  assert.deepEqual([no.status, no.body.code, no.body.error], [409, "NEEDS_OK", "Bops won't replace records it didn't set without your OK."]);
+  assert.equal(cloudflare.batches.length, b);
+  const yes = await cfApply(r.body.domain.id, plan.fingerprint, { replace: true });
+  assert.equal(yes.status, 200);
+  const sent = cloudflare.batches.at(-1);
+  assert.deepEqual(sent.deletes.map((x) => x.id).sort(), [mine[0].id, mine[1].id].sort(), "the user's A deleted, not patched, and the AAAA");
+  assert.deepEqual(sent.posts.map((p) => [p.type, p.name, p.content]), [["TXT", "_orgo-verify.acme.test", `"${token}"`], ["A", "acme.test", EDGE_IP]]);
+  assert.ok(!sent.patches, "never a patch of theirs");
+  assert.deepEqual(cfAt("acme.test").map((x) => x[0]), ["A", "MX"], "their MX stays");
+});
+
+await check("The plan, case by case (planRecords): Bops' own records changed without asking (proxied turned DNS only, an old value, a gone domain's), another app's or a record beside a CNAME blocked, a TXT of theirs left beside Orgo's, and once live only what routes it; any change in Cloudflare a new fingerprint", () => {
+  const zone = { id: Z_TEST, name: "acme.test" };
+  const domain = { id: "cd_new", name: "shop.acme.test" };
+  const want = [{ type: "TXT", name: "_orgo-verify.shop.acme.test", value: "tok-new" }, { type: "CNAME", name: "shop.acme.test", value: "edge.orgo.dev" }];
+  const here = new Map([["cd_www", "recipe-box"], ["cd_blog", null]]);
+  const at = (type, name, content, extra = {}) => ({ id: cfId(), type, name, content, ...(type === "TXT" ? {} : { proxied: false }), comment: null, ...extra });
+  const ours = (id = "cd_new") => ({ comment: `Set by Bops for recipe-box [bops:${id}]` });
+  const plan = (found, w = want) => CF.planRecords({ zone, domain, app: "recipe-box", want: w, found, here });
+  assert.deepEqual(lines(plan([]).plan), [["add", "TXT", "_orgo-verify.shop", "tok-new"], ["add", "CNAME", "shop", "edge.orgo.dev"]], "an empty zone: two adds");
+  const byHand = [at("TXT", "_orgo-verify.shop.acme.test", '"tok-new"'), at("CNAME", "shop.acme.test", "EDGE.orgo.dev.")];
+  assert.deepEqual(lines(plan(byHand).plan).map((l) => l[0]), ["same", "same"], "set by hand already: left as it is, whoever set it");
+  assert.equal(CF.batchSize(plan(byHand).batch), 0);
+  const proxied = plan([at("CNAME", "shop.acme.test", "edge.orgo.dev", { proxied: true, ...ours() })]);
+  assert.deepEqual(proxied.plan.changes[1], { op: "change", type: "CNAME", name: "shop.acme.test", host: "shop", value: "edge.orgo.dev", was: "proxied", note: "Turns off Cloudflare's proxy. Orgo needs DNS only." });
+  assert.equal(proxied.plan.ask, false, "Bops' own: no OK needed");
+  assert.equal(proxied.batch.patches[0].proxied, false);
+  const theirsProxied = plan([at("CNAME", "shop.acme.test", "edge.orgo.dev", { proxied: true })]);
+  assert.deepEqual([theirsProxied.plan.changes[1].theirs, theirsProxied.plan.ask, theirsProxied.batch.deletes.length, theirsProxied.batch.posts.length], [true, true, 1, 2], "theirs, proxied: their OK, then written fresh");
+  const old = plan([at("CNAME", "shop.acme.test", "old.edge.example", ours())]);
+  assert.deepEqual([lines(old.plan)[1], old.batch.patches.length, old.plan.ask], [["change", "CNAME", "shop", "edge.orgo.dev", "old.edge.example"], 1, false], "Bops' own with an old value: patched");
+  const gone = plan([at("A", "shop.acme.test", "198.51.100.7", ours("cd_gone")), at("TXT", "_orgo-verify.shop.acme.test", '"tok-old"', ours("cd_gone"))]);
+  assert.deepEqual(lines(gone.plan), [["add", "TXT", "_orgo-verify.shop", "tok-new"], ["remove", "TXT", "_orgo-verify.shop", "tok-old", "stale"], ["change", "CNAME", "shop", "edge.orgo.dev", "A 198.51.100.7", "stale"]]);
+  assert.deepEqual([gone.plan.ask, gone.batch.deletes.length], [false, 2], "a gone domain's: Bops' own, no OK; another type deleted and written");
+  const other = plan([at("CNAME", "shop.acme.test", "edge.orgo.dev", ours("cd_www"))]);
+  assert.deepEqual([other.plan.blocked, other.plan.ask, CF.batchSize(other.batch)], ["Bops set the CNAME at shop for recipe-box. Remove that domain from recipe-box first.", false, 0], "another domain of this computer's: blocked, nothing written");
+  assert.equal(plan([at("A", "shop.acme.test", EDGE, ours("cd_blog"))]).plan.blocked, "Bops set the A at shop for another domain on this computer. Remove that one first.");
+  const mx = plan([at("MX", "shop.acme.test", "mx.acme.test")]);
+  assert.deepEqual([mx.plan.blocked, mx.plan.changes.map((c) => c.op)], ["shop.acme.test has a MX record in Cloudflare, so it can't also have the CNAME Orgo needs. Pick another name.", ["blocked"]]);
+  const apexMx = CF.planRecords({ zone, domain: { id: "cd_new", name: "acme.test" }, app: "recipe-box", want: [{ type: "CNAME", name: "acme.test", value: "edge.orgo.dev" }], found: [at("MX", "acme.test", "mx.acme.test")], here });
+  assert.equal(apexMx.plan.blocked, null, "at the zone itself Cloudflare flattens a CNAME beside its MX");
+  const txt = plan([at("TXT", "_orgo-verify.shop.acme.test", '"someone else"')]);
+  assert.deepEqual([lines(txt.plan)[0], txt.batch.deletes.length, txt.plan.ask], [["add", "TXT", "_orgo-verify.shop", "tok-new"], 0, false], "their TXT there stays beside it");
+  const live = plan([], [want[1]]);
+  assert.deepEqual(lines(live.plan), [["add", "CNAME", "shop", "edge.orgo.dev"]], "live: only what routes it");
+  assert.equal(plan([], []).plan.blocked, "Orgo didn't say where shop.acme.test should point. Try again in a minute.");
+  const a = plan([at("CNAME", "shop.acme.test", "old.edge.example", { ...ours(), id: "1".repeat(32) })]).plan.fingerprint;
+  const b = plan([at("CNAME", "shop.acme.test", "older.edge.example", { ...ours(), id: "1".repeat(32) })]).plan.fingerprint;
+  const c = plan([at("CNAME", "shop.acme.test", "old.edge.example", { ...ours(), id: "2".repeat(32) })]).plan.fingerprint;
+  assert.ok(a !== b && a !== c && b !== c, "any change, a new fingerprint");
+  // The same records answered in another order: the same plan, the same one replaced, the same fingerprint.
+  const apexWant = [{ type: "TXT", name: "_orgo-verify.acme.test", value: "tok-new" }, { type: "A", name: "acme.test", value: EDGE_IP }];
+  const twoA = [at("A", "acme.test", "192.0.2.4", { id: "3".repeat(32) }), at("A", "acme.test", "192.0.2.5", { id: "4".repeat(32) })];
+  const apexOf = (found) => CF.planRecords({ zone, domain: { id: "cd_new", name: "acme.test" }, app: "recipe-box", want: apexWant, found, here });
+  const [fwd, back] = [apexOf(twoA), apexOf([...twoA].reverse())];
+  assert.deepEqual(lines(back.plan), lines(fwd.plan), "the same lines");
+  assert.deepEqual([back.plan.fingerprint, back.batch], [fwd.plan.fingerprint, fwd.batch], "the same fingerprint and batch, whatever order Cloudflare answers in");
+  assert.equal(CF.valueOf("TXT", '"tok" "-new"'), "tok-new", "a TXT's strings joined");
+});
+
+await check("Writing when Cloudflare can't: a key that can't edit DNS changes nothing, said so; no answer says it isn't known whether it went in, and the next look works; a record made meanwhile is STALE with the plan as it is now (before the write, or clashing in it)", async () => {
+  cloudflareAgain();
+  const r = await cfUse(Z_TEST, "shop");
+  const id = r.body.domain.id;
+  cloudflare.canEdit = false;
+  const ro = await cfApply(id, r.body.cloudflare.fingerprint);
+  assert.deepEqual([ro.status, ro.body.code, ro.body.error], [403, "NO_EDIT", "Your Cloudflare key can read acme.test but can't change its DNS. In Cloudflare, let the key edit DNS for acme.test, then try again. Nothing was changed."]);
+  assert.equal(cloudflare.records.length, 0, "nothing changed");
+  cloudflare.canEdit = true;
+  cloudflare.downOnBatch = true;
+  const down = await cfApply(id, r.body.cloudflare.fingerprint);
+  assert.deepEqual([down.status, down.body.code, down.body.error], [504, "UNKNOWN", "Cloudflare didn't answer, so it isn't known whether the records went in. Try again in a minute. Bops looks first, so nothing is set twice."]);
+  cloudflare.downOnBatch = false;
+  const look = await cfPlan(id);
+  assert.deepEqual([look.status, look.body.fingerprint], [200, r.body.cloudflare.fingerprint], "the next look works");
+  // A record added by hand between the look and the press: the plan isn't the one seen.
+  cloudflare.records.push(cfRecord(Z_TEST, "A", "shop.acme.test", "192.0.2.9"));
+  const moved = await cfApply(id, look.body.fingerprint);
+  assert.deepEqual([moved.status, moved.body.code], [409, "STALE"]);
+  assert.deepEqual(lines(moved.body.cloudflare).slice(1), [["add", "CNAME", "shop", "edge.orgo.dev"], ["remove", "A", "shop", "192.0.2.9", "theirs"]], "the plan as it is now, the new record in it");
+  assert.equal(moved.body.cloudflare.ask, true);
+  cloudflare.records = [];
+  // Between Bops' last read and its write: Cloudflare's clash, nothing in, and the plan as it is then.
+  const fresh = await cfPlan(id);
+  cloudflare.beforeBatch = () => {
+    cloudflare.beforeBatch = null;
+    cloudflare.records.push(cfRecord(Z_TEST, "CNAME", "shop.acme.test", "elsewhere.example"));
+  };
+  const raced = await cfApply(id, fresh.body.fingerprint);
+  assert.deepEqual([raced.status, raced.body.code], [409, "STALE"]);
+  assert.ok(raced.body.cloudflare?.changes.some((c) => c.theirs), "the plan as it is now");
+  assert.deepEqual(cfAt("shop.acme.test"), [["CNAME", "elsewhere.example", false, null]], "nothing of Bops' went in");
+  cloudflare.canRead = false;
+  cloudflare.records = [];
+  const blind = await cfPlan(id);
+  assert.deepEqual([blind.status, blind.body.code, blind.body.error], [403, "NO_READ", "Your Cloudflare key can't read the DNS of acme.test. In Cloudflare, let it edit DNS for acme.test."]);
+  cloudflare.canRead = true;
+  // It went in, but its answer was lost: pressed again, Bops looks first, finds them set, and sets nothing twice.
+  const seen = await cfPlan(id);
+  cloudflare.lostOnBatch = true;
+  const lost = await cfApply(id, seen.body.fingerprint);
+  cloudflare.lostOnBatch = false;
+  assert.deepEqual([lost.status, lost.body.code], [504, "UNKNOWN"]);
+  const again = await cfApply(id, seen.body.fingerprint);
+  assert.deepEqual([again.status, again.body.code, lines(again.body.cloudflare).map((l) => l[0])], [409, "STALE", ["same", "same"]], "the plan as it is now: all set");
+  assert.deepEqual(cfAt("shop.acme.test").map((x) => x[0]), ["CNAME"], "no second copy");
+});
+
+await check("Removing a domain set in Cloudflare: once Orgo took it off, only the records Bops tagged with its id go (the user's and another domain's stay); Cloudflare not answering says what to remove there; Orgo refusing, Cloudflare is never asked", async () => {
+  cloudflareAgain();
+  const r = await cfUse(Z_TEST, "shop");
+  const id = r.body.domain.id;
+  await cfApply(id, r.body.cloudflare.fingerprint);
+  const theirs = cfRecord(Z_TEST, "TXT", "shop.acme.test", '"v=spf1 -all"');
+  const another = cfRecord(Z_TEST, "A", "old.acme.test", EDGE, { comment: "Set by Bops for recipe-box [bops:cd_other]" });
+  const lookalike = cfRecord(Z_TEST, "A", "kin.acme.test", EDGE, { comment: `note [bops:${id}x]` });
+  cloudflare.records.push(theirs, another, lookalike);
+  const gone = await ask(DomainRoute, "DELETE", `/api/hosted-apps/recipe-box/domains/${id}`, { name: "recipe-box", domainId: id }, { ws: WS });
+  assert.deepEqual([gone.status, gone.body.said], [200, undefined]);
+  assert.ok(!gone.body.domains.some((d) => d.id === id));
+  assert.deepEqual(cloudflare.batches.at(-1).deletes.length, 2, "its TXT and CNAME, in one batch");
+  assert.deepEqual(cloudflare.records.map((x) => x.id).sort(), [theirs.id, another.id, lookalike.id].sort(), "only those");
+  // Cloudflare not answering: removed from the app all the same, and what may be left there said (its records
+  // not read, so only if Bops set them).
+  const r2 = await cfUse(Z_TEST, "deli");
+  const id2 = r2.body.domain.id;
+  await cfApply(id2, r2.body.cloudflare.fingerprint);
+  cloudflare.down = true;
+  const left = await ask(DomainRoute, "DELETE", `/api/hosted-apps/recipe-box/domains/${id2}`, { name: "recipe-box", domainId: id2 }, { ws: WS });
+  assert.deepEqual([left.status, left.body.said], [200, "Removed from this app. Bops couldn't reach Cloudflare. If it set TXT _orgo-verify.deli and CNAME deli there, remove them."]);
+  assert.ok(!web.domains.some((d) => d.id === id2), "gone from Orgo");
+  cloudflare.down = false;
+  // Read, but the batch not answered: they're Bops' own, so named as such.
+  const r4 = await cfUse(Z_TEST, "cafe");
+  await cfApply(r4.body.domain.id, r4.body.cloudflare.fingerprint);
+  cloudflare.downOnBatch = true;
+  const half = await ask(DomainRoute, "DELETE", `/api/hosted-apps/recipe-box/domains/${r4.body.domain.id}`, { name: "recipe-box", domainId: r4.body.domain.id }, { ws: WS });
+  assert.deepEqual([half.status, half.body.said], [200, "Removed from this app. Bops couldn't reach Cloudflare, so remove TXT _orgo-verify.cafe and CNAME cafe there."]);
+  cloudflare.downOnBatch = false;
+  // Its zones not read now nor kept from before (just started, Cloudflare down): still said, in full.
+  const r5 = await cfUse(Z_TEST, "bar");
+  globalThis.bopsCfZones?.clear();
+  cloudflare.down = true;
+  const blind = await ask(DomainRoute, "DELETE", `/api/hosted-apps/recipe-box/domains/${r5.body.domain.id}`, { name: "recipe-box", domainId: r5.body.domain.id }, { ws: WS });
+  assert.deepEqual([blind.status, blind.body.said], [200, "Removed from this app. Bops couldn't reach Cloudflare. If it set TXT _orgo-verify.bar.acme.test and CNAME bar.acme.test there, remove them."]);
+  cloudflare.down = false;
+  // One in no zone of the key's: nothing said of Cloudflare.
+  const port = recipeProject().port;
+  web.domains.push({ id: "cd_net2", computerId: "c_boppy", domain: "app2.example.net", status: "pending", target_port: port, zone: null, token: "tok-net2" });
+  const elsewhere = await ask(DomainRoute, "DELETE", "/api/hosted-apps/recipe-box/domains/cd_net2", { name: "recipe-box", domainId: "cd_net2" }, { ws: WS });
+  assert.deepEqual([elsewhere.status, elsewhere.body.said], [200, undefined]);
+  // Orgo keeps it: nothing asked of Cloudflare.
+  const r3 = await cfUse(Z_TEST, "kept");
+  web.domainKeep = new Set([r3.body.domain.id]);
+  const n = cloudflare.calls.length;
+  try {
+    const kept = await ask(DomainRoute, "DELETE", `/api/hosted-apps/recipe-box/domains/${r3.body.domain.id}`, { name: "recipe-box", domainId: r3.body.domain.id }, { ws: WS });
+    assert.equal(kept.status, 409);
+    assert.equal(cloudflare.calls.length, n, "Cloudflare never asked");
+  } finally {
+    web.domainKeep = undefined;
+  }
+});
+
+/** The app's domains, as the Bops window reads them (or, `window` false, a page that reached this server another way). */
+const cfList = (opts) => ask(DnsRoute, "GET", `/api/hosted-apps/recipe-box/dns?ws=${WS}`, RB, undefined, opts);
+
+await check("A domain bought elsewhere whose zone is in the key's account says so (its zone and id there), and its plan reads from the box; one in no zone of the key's, one bought through Orgo, or the zones not read: as it was", async () => {
+  cloudflareAgain();
+  const port = recipeProject().port;
+  web.domains.push({ id: "cd_net", computerId: "c_boppy", domain: "app.example.net", status: "pending", target_port: port, zone: null, token: "tok-net" });
+  // Not from the window: the list as it was, and the user's Cloudflare never asked.
+  const c = cloudflare.calls.length;
+  const away = await cfList({ window: false });
+  assert.equal(away.status, 200);
+  assert.ok(away.body.domains.length && away.body.domains.every((d) => !("cloudflare" in d)), "nothing of Cloudflare");
+  assert.equal(cloudflare.calls.length, c, "Cloudflare never asked");
+  const list = (await cfList()).body.domains;
+  const of = (domain) => list.find((d) => d.domain === domain);
+  assert.deepEqual(of("recipes.example.com").cloudflare, { zone: "example.com", zoneId: Z_COM });
+  assert.ok(!("cloudflare" in of("app.example.net")), "its zone isn't in the key's account");
+  assert.ok(!("cloudflare" in of("acme.example")), "bought through Orgo: Orgo keeps its DNS");
+  const plan = await cfPlan("cd_mine");
+  assert.deepEqual(lines(plan.body), [["add", "TXT", "_orgo-verify.recipes", "tok-mine"], ["add", "CNAME", "recipes", "edge.orgo.dev"]]);
+  const net = await cfPlan("cd_net");
+  assert.deepEqual([net.status, net.body.error], [404, "app.example.net isn't in your Cloudflare account."]);
+  const bought = await cfPlan("cd_apex");
+  assert.equal(bought.status, 409);
+  // A check says it too.
+  const checked = await ask(DomainRoute, "POST", "/api/hosted-apps/recipe-box/domains/cd_mine", { name: "recipe-box", domainId: "cd_mine" }, { ws: WS });
+  assert.deepEqual(checked.body.domain.cloudflare, { zone: "example.com", zoneId: Z_COM });
+  globalThis.bopsCfZones?.clear();
+  cloudflare.down = true;
+  const blind = (await cfList()).body.domains;
+  assert.ok(blind.every((d) => !("cloudflare" in d)), "the zones not read: each as it was");
+  assert.deepEqual(blind.find((d) => d.id === "cd_mine").publish.map((x) => x.type), ["TXT", "CNAME"], "its records to set still there");
+});
+
+await check("Checks while a domain is watched: Orgo's check goes out while the key's zones are still being read, never after them; a zones read that failed isn't sent again for a minute by the checks (Set it in Cloudflare still asks, and once it reads them the checks have them again)", async () => {
+  cloudflareAgain();
+  const checkMine = () => ask(DomainRoute, "POST", "/api/hosted-apps/recipe-box/domains/cd_mine", { name: "recipe-box", domainId: "cd_mine" }, { ws: WS });
+  // The zones' read held until Orgo's check arrives: it does, at once, and the answer has the zone.
+  let go;
+  const held = new Promise((r) => (go = r));
+  const order = [];
+  web.hold = async (m, path) => {
+    if (path === "/api/secrets/call") {
+      await held;
+      order.push("zones");
+    }
+    if (/\/domains\/cd_mine\/verify$/.test(path)) {
+      order.push("verify");
+      go();
+    }
+  };
+  const t0 = Date.now();
+  let r;
+  try {
+    r = await checkMine();
+  } finally {
+    web.hold = null;
+    go();
+  }
+  assert.equal(r.status, 200);
+  assert.deepEqual(order, ["verify", "zones"], "Orgo checks it before the zones are read (they wait for it here)");
+  assert.ok(Date.now() - t0 < 2000, "never waited out the zones' few seconds");
+  assert.deepEqual(r.body.domain.cloudflare, { zone: "example.com", zoneId: Z_COM });
+  // Cloudflare down: the first check asks once, the next ones in the minute don't.
+  globalThis.bopsCfZones?.clear();
+  cloudflare.down = true;
+  const n = cloudflare.calls.length;
+  assert.ok(!("cloudflare" in (await checkMine()).body.domain));
+  assert.equal(cloudflare.calls.length - n, 1, "asked once");
+  for (let i = 0; i < 3; i++) assert.ok(!("cloudflare" in (await checkMine()).body.domain));
+  assert.ok(!("cloudflare" in (await cfList()).body.domains.find((d) => d.id === "cd_mine")));
+  assert.equal(cloudflare.calls.length - n, 1, "not asked again by the checks, nor the list");
+  // What the user presses asks.
+  cloudflare.down = false;
+  const plan = await cfPlan("cd_mine");
+  assert.equal(plan.status, 200);
+  assert.deepEqual((await checkMine()).body.domain.cloudflare, { zone: "example.com", zoneId: Z_COM }, "read again, the checks have it");
+});
+
+await check("Cloudflare's routes are the window's only (403 with words, nothing asked), 404 for an account apps aren't open to; another app's domain or a made up one is refused before Cloudflare is asked", async () => {
+  cloudflareAgain();
+  const n = web.calls.length;
+  const c = cloudflare.calls.length;
+  const away = [await cfPlan("cd_mine", { window: false }), await cfApply("cd_mine", "0123456789abcdef", {}, { window: false }), await cfUse(Z_TEST, "shop", { window: false })];
+  assert.deepEqual(away.map((x) => [x.status, x.body.error]), [
+    [403, "Domains can only be changed in the Bops app."],
+    [403, "Domains can only be changed in the Bops app."],
+    [403, "Domains can only be added in the Bops app."],
+  ]);
+  for (const id of ["cd_blog", "cd_ivy", "../../zones"]) assert.deepEqual([(await cfPlan(id)).status, (await cfApply(id, "0123456789abcdef")).status], [404, 404], id);
+  assert.equal(cloudflare.calls.length, c, "Cloudflare never asked");
+  assert.deepEqual(writesSince(n).filter((x) => x.path !== "/api/secrets/call"), [], "nothing written at Orgo");
+  const was = S.getState().account;
+  S.update((s) => (s.account = { ...s.account, user: { ...s.account.user, email: "alex@example.com" } }));
+  try {
+    for (const x of [await cfPlan("cd_mine"), await cfApply("cd_mine", "0123456789abcdef"), await cfUse(Z_TEST, "shop")]) assert.equal(x.status, 404);
+  } finally {
+    S.update((s) => (s.account = was));
+  }
+});
+
+await check("Nothing of it is kept: the state the same after a whole add, write, check and removal; the Cloudflare key's value never in an answer, the state or a log; never revealed, never Cloudflare called from this Mac; no saved type gained a field", async () => {
+  cloudflareAgain();
+  const before = JSON.stringify(S.getState());
+  const r = await cfUse(Z_TEST, "shop");
+  const id = r.body.domain.id;
+  await cfApply(id, r.body.cloudflare.fingerprint);
+  await ask(DomainRoute, "POST", `/api/hosted-apps/recipe-box/domains/${id}`, { name: "recipe-box", domainId: id }, { ws: WS });
+  await ask(DomainRoute, "DELETE", `/api/hosted-apps/recipe-box/domains/${id}`, { name: "recipe-box", domainId: id }, { ws: WS });
+  assert.equal(JSON.stringify(S.getState()), before, "the state as it was");
+  const state = JSON.stringify(S.getState());
+  for (const t of [...heard, ...warned, state, ...web.calls.map((c) => JSON.stringify(c.body ?? null))]) assert.ok(!t.includes(CF_TOKEN), "never the key's value");
+  assert.ok(!web.calls.some((c) => c.path === "/api/secrets/reveal"), "never revealed");
+  assert.ok(!/cloudflare/i.test(readFileSync(`${root}/lib/types.ts`, "utf8")), "nothing of it in the saved state's types");
+  const hosting = /export type AppHosting = \{[\s\S]*?\n\};/.exec(readFileSync(`${root}/lib/hosted-apps.ts`, "utf8"))[0];
+  assert.ok(!/cloudflare/i.test(hosting), "Workspace.hostedApps as it was");
+  // Its code (not what it says of itself): no fetch of its own, no reveal, never the Keys' list.
+  const code = readFileSync(`${root}/lib/server/cloudflare.ts`, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/\bfetch\(|cloudflare\.com|reveal|KEY_PROVIDERS|keyProvider/i.test(code), "never itself, never a reveal, never one of the Keys");
+});
+
+/** No Cloudflare key again, nothing of it kept: what follows is as it was before it. */
+function cloudflareDone() {
+  web.secrets = [];
+  cloudflare = freshCloudflare();
+  globalThis.bopsVaultNames = undefined;
+  globalThis.bopsCfZones?.clear();
+  globalThis.bopsCfZonesFailed?.clear();
+}
+cloudflareDone();
+
+/* ---------------- Settings, Domains: the workspace's domains, searched for and bought without an app ---------------- */
+
+const WsDomainsRoute = await import(`${root}/app/api/domains/route.ts`);
+const WsSearchRoute = await import(`${root}/app/api/domains/search/route.ts`);
+const WsZoneRoute = await import(`${root}/app/api/domains/[zone]/route.ts`);
+const WsRecordsRoute = await import(`${root}/app/api/domains/[zone]/records/route.ts`);
+const WsRecordRoute = await import(`${root}/app/api/domains/[zone]/records/[recordId]/route.ts`);
+const SPARE = "6a6a6a6a-1111-4222-8333-444455556666";
+const BAKES = "7d7d7d7d-1111-4222-8333-444455556666";
+const BLOG_SITE = "p_recipe_blog";
+/** The workspace's domains for Settings: acme.example (its apex and www on recipe-box, blog on its second site, ivy on Studio computer, which has no app), shop.store (on a port of recipe-box's computer no app has), spare.example (nothing on it) and acmebakes.example (still registering). */
+function workspaceAgain() {
+  addingAgain();
+  const port = recipeProject().port;
+  Object.assign(web.bought[0], { auto_renew: true, renewal_cents: 1400, renewal_years: 1 });
+  web.bought.push(
+    { id: SPARE, project: PROJECT, domain: "spare.example", status: "active", serving: true, records: [{ type: "TXT", name: "", value: "v=spf1 -all" }], auto_renew: true, renewal_cents: 1400, renewal_years: 1 },
+    { id: BAKES, project: PROJECT, domain: "acmebakes.example", status: "pending", serving: true, records: [] },
+  );
+  web.domains.find((d) => d.id === "cd_shop").target_port = port + 3;
+  web.projects = web.projects.filter((p) => p.id !== BLOG_SITE);
+  web.projects.push({ id: BLOG_SITE, computerId: "c_boppy", name: "blog", port: port + 1, source: "ingot", ingot_repo: `${PROJECT}/recipe-box`, ingot_at: null, url: null, deployments: [] });
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].sites = [{ name: "blog", projectId: BLOG_SITE }]));
+  fleet.get("c_ivy").name = "Studio computer";
+}
+function workspaceDone() {
+  web.projects = web.projects.filter((p) => p.id !== BLOG_SITE);
+  S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].sites);
+  delete fleet.get("c_ivy").name;
+  web.sell = freshSell();
+}
+const wsList = (opts) => ask(WsDomainsRoute, "GET", `/api/domains?ws=${WS}`, null, undefined, opts);
+const wsBuy = (extra = {}, opts) => ask(WsDomainsRoute, "POST", "/api/domains", null, { ws: WS, domain: "acme-shop.example", registrant: AVA, price: 1200, ...extra }, opts);
+
+await check("Settings, Domains: every domain the workspace bought, newest first as Orgo lists them, the one still registering too; each with its renewal and what its names serve (the app, its site, or the computer that isn't one of its apps); who the user registered their last one to; read from Orgo alone (one list, and each app computer's domains and deploy projects once), nothing woken", async () => {
+  workspaceAgain();
+  try {
+    web.sell.contact = { ...AVA, internal_id: "x" };
+    const n = web.calls.length;
+    const was = ran.length;
+    const r = await wsList();
+    assert.equal(r.status, 200);
+    assert.deepEqual([r.body.open, r.body.buy, r.body.contact], [true, { open: true }, AVA]);
+    assert.deepEqual(r.body.domains.map((d) => [d.domain, d.status]), [["acme.example", "active"], ["shop.store", "active"], ["spare.example", "active"], ["acmebakes.example", "pending"]]);
+    const [acme, shop, spare, bakes] = r.body.domains;
+    assert.deepEqual(acme.uses, [
+      { name: "acme.example", status: "active", app: "recipe-box" },
+      { name: "www.acme.example", status: "active", app: "recipe-box" },
+      { name: "blog.acme.example", status: "active", app: "recipe-box", site: "blog" },
+      { name: "ivy.acme.example", status: "active", where: "Studio computer" },
+    ]);
+    assert.deepEqual(shop.uses, [{ name: "shop.store", status: "active", where: "bops-boppy" }], "a port of its computer no app has: the computer");
+    assert.deepEqual([spare.uses, bakes.uses, bakes.renewal], [[], [], undefined]);
+    assert.deepEqual(acme.renewal, { on: true, cents: 1400, years: 1, payer: "you", state: "scheduled", error: null, expires: Date.parse("2027-10-21T00:00:00.000Z") });
+    assert.deepEqual(
+      web.calls.slice(n).map((c) => [c.method, c.path]).sort(),
+      [
+        ["GET", "/api/computers/c_boppy"],
+        ["GET", "/api/computers/c_boppy/deploy-projects"],
+        ["GET", "/api/computers/c_boppy/domains"],
+        ["GET", `/api/projects/${PROJECT}/domains`],
+      ],
+      "reads alone: which Orgo workspace the main bot's computer is in, one list, and recipe-box's computer once (Studio computer has none of its apps)",
+    );
+    assert.deepEqual(kinds("c_boppy", was), [], "nothing reaches a computer");
+    // Closed to the account, can't buy here, not on Orgo.
+    web.sell.gate = false;
+    assert.deepEqual(pick((await wsList()).body, ["open", "why", "domains"]), { open: false, why: "Buying domains isn't open to your Orgo account yet.", domains: [] });
+    web.sell.gate = undefined;
+    web.dnsClosed = true;
+    assert.deepEqual(pick((await wsList()).body, ["open", "why"]), { open: false, why: "Buying domains isn't open to your Orgo account yet." }, "an older orgo-web's enabled false");
+    web.dnsClosed = false;
+    web.sell.canBuy = false;
+    const view = (await wsList()).body;
+    assert.deepEqual([view.open, view.buy, view.contact, view.domains.length], [true, { open: false, why: "Buying a domain needs full access to this workspace, signed in with your own Orgo account." }, null, 4], "listed, but none bought here, and no contact");
+    web.sell.canBuy = true;
+    S.update((s) => s.workspaces.push({ id: "ws_bare", name: "Bare", createdAt: Date.now() }));
+    try {
+      const m = web.calls.length;
+      const bare = await ask(WsDomainsRoute, "GET", "/api/domains?ws=ws_bare", null);
+      assert.deepEqual(pick(bare.body, ["open", "why"]), { open: false, why: "This workspace isn't on Orgo yet, so it can't have domains." });
+      assert.equal(web.calls.length, m, "nothing asked");
+      // Search needs no app, nor a project.
+      const found = await ask(WsSearchRoute, "GET", "/api/domains/search?ws=ws_bare&q=acme", null);
+      assert.deepEqual(found.body.results.map((o) => o.domain), ["acme.example", "acme.test", "acme.invalid", "acme.localhost"], "the ones that can be bought first");
+      const exact = await ask(WsSearchRoute, "GET", "/api/domains/search?ws=ws_bare&q=acme.test", null);
+      assert.equal(exact.body.results[0].domain, "acme.test", "the exact name typed first");
+      assert.deepEqual(web.calls.slice(m).map((c) => [c.method, c.path, c.query]), [["GET", "/api/domains/search", "?q=acme&page=0"], ["GET", "/api/domains/search", "?q=acme.test&page=0"]]);
+      for (const q of ["", "a b"]) {
+        const x = await ask(WsSearchRoute, "GET", `/api/domains/search?ws=${WS}&q=${encodeURIComponent(q)}`, null);
+        assert.deepEqual([x.status, x.body.field], [400, "q"], q);
+      }
+      assert.equal(web.calls.length, m + 2, "a query that can't be one asks nothing");
+    } finally {
+      S.update((s) => (s.workspaces = s.workspaces.filter((w) => w.id !== "ws_bare")));
+    }
+  } finally {
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains and an app's tab use one Orgo workspace: the one the main bot's computer is in, when the workspace's own project (made empty by the move onto Orgo workspaces) is another; listed there, bought there from Settings and usable on the app from its tab, one buy at a time across both; Orgo not saying which it is, said as such (never as not on Orgo) with nothing bought; a computer Orgo no longer has for the user, the workspace's own project", async () => {
+  workspaceAgain();
+  const MOVED = "5e5e5e5e-1111-4222-8333-444455556666";
+  const own = () => S.getState().workspaces.find((w) => w.id === WS);
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).orgoProjectId = MOVED));
+  boppy.project = PROJECT;
+  try {
+    let n = web.calls.length;
+    const list = await wsList();
+    assert.deepEqual(list.body.domains.map((d) => d.domain), ["acme.example", "shop.store", "spare.example", "acmebakes.example"], "the ones its apps use");
+    assert.ok(!web.calls.slice(n).some((c) => c.path.startsWith(`/api/projects/${MOVED}/`)), "never the empty project");
+    const bought = await wsBuy();
+    assert.equal(bought.status, 200);
+    assert.deepEqual(web.sell.buys.map((b) => b.project), [PROJECT], "bought where its computer is");
+    const options = await ask(DomainsRoute, "GET", `/api/hosted-apps/recipe-box/domains?ws=${WS}`, RB);
+    const it = options.body.owned.find((o) => o.domain === "acme-shop.example");
+    assert.ok(it, "under Your domains on the app's tab");
+    const used = await ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "connect", zone: it.id });
+    assert.deepEqual([used.status, used.body.domain?.domain], [200, "acme-shop.example"], "and used on the app");
+    // A buy from Settings and one from the app's tab at once: one reaches Orgo.
+    web.sell = freshSell();
+    let release;
+    web.sell.hold = new Promise((r) => (release = r));
+    const settled = [];
+    const both = Promise.all(
+      [wsBuy({ domain: "acme-two.example" }), ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "buy", domain: "acme-two.example", registrant: AVA, price: 1200 })].map((p) =>
+        p.then((x) => (settled.push(x), x)),
+      ),
+    );
+    try {
+      await until(() => settled.length === 1 && web.sell.buys.length === 1);
+      assert.deepEqual([settled[0].status, settled[0].body.code], [409, "BUYING"], "the other refused at once");
+    } finally {
+      release();
+      web.sell.hold = null;
+    }
+    await both;
+    assert.deepEqual([web.sell.buys.length, web.sell.credits], [1, 10_000 - 1200], "one buy reached Orgo, charged once");
+    // Orgo doesn't answer which workspace the computer is in: said, and nothing bought.
+    web.hold = (m, path) => {
+      if (m === "GET" && path === "/api/computers/c_boppy") throw new TypeError("fetch failed");
+    };
+    try {
+      const down = await wsList();
+      assert.deepEqual([down.status, down.body.error], [502, "Couldn't reach Orgo's domains just now."]);
+      const buy = await wsBuy({ domain: "acme-three.example" });
+      assert.deepEqual([buy.status, buy.body.error], [502, "Couldn't reach Orgo's domains just now."]);
+      const tab = await ask(DomainsRoute, "GET", `/api/hosted-apps/recipe-box/domains?ws=${WS}`, RB);
+      assert.deepEqual(tab.body.buy, { open: false, why: "Couldn't reach Orgo's domains just now." });
+      assert.equal(web.sell.buys.length, 1, "nothing more bought");
+    } finally {
+      web.hold = null;
+    }
+    // On an Orgo without a project for each workspace, the same: Orgo not answering is never "isn't on Orgo yet".
+    S.update((s) => delete s.workspaces.find((w) => w.id === WS).orgoProjectId);
+    web.hold = (m, path) => {
+      if (m === "GET" && path === "/api/computers/c_boppy") throw new TypeError("fetch failed");
+    };
+    try {
+      const down = await wsList();
+      assert.deepEqual([down.status, down.body.error], [502, "Couldn't reach Orgo's domains just now."]);
+    } finally {
+      web.hold = null;
+    }
+    assert.ok((await wsList()).body.domains.some((d) => d.domain === "acme-two.example"), "the computer's, once Orgo answers");
+    // The main bot's computer Orgo no longer has for the user: the workspace's own project, where a new one goes.
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).orgoProjectId = MOVED));
+    const was = fleet.get("c_boppy");
+    fleet.delete("c_boppy");
+    try {
+      n = web.calls.length;
+      const gone = await wsList();
+      assert.deepEqual([gone.status, gone.body.open, gone.body.domains], [200, true, []]);
+      assert.ok(web.calls.slice(n).some((c) => c.path === `/api/projects/${MOVED}/domains`), "the workspace's own");
+    } finally {
+      fleet.set("c_boppy", was);
+    }
+    assert.equal(own().orgoProjectId, MOVED);
+  } finally {
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).orgoProjectId = PROJECT));
+    delete boppy.project;
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains: a buy is sent only with the price the user saw, once, never pointed anywhere; no price (none, text, below 0) or no domain, nothing sent; the list answered with it in it", async () => {
+  workspaceAgain();
+  try {
+    let n = web.calls.length;
+    for (const extra of [{ price: undefined }, { price: "1200" }, { price: -1 }, { price: 12.5 }, { domain: "not a domain" }]) {
+      const x = await wsBuy(extra);
+      assert.equal(x.status, 400, JSON.stringify(extra));
+    }
+    assert.equal((await wsBuy({ price: undefined })).body.error, "Pick a domain from the search to see its price first.");
+    assert.deepEqual(writesSince(n), [], "nothing sent");
+    assert.equal(web.calls.length, n, "nor anything read");
+    n = web.calls.length;
+    const r = await wsBuy({ domain: "Acme-Shop.Example", registrant: { ...AVA, extra: "dropped" } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(writesSince(n).map((c) => [c.method, c.path, c.body]), [["POST", `/api/projects/${PROJECT}/domains`, { domain: "acme-shop.example", registrant: AVA, expected_price_cents: 1200 }]], "one buy, at the price seen; never pointed");
+    assert.equal(web.sell.credits, 10_000 - 1200, "charged once");
+    assert.equal(r.body.bought, "acme-shop.example");
+    const it = r.body.domains.domains.find((d) => d.domain === "acme-shop.example");
+    assert.deepEqual([it.status, it.uses, it.renewal.on], ["active", [], true], "in the list, pointed nowhere, auto-renew on");
+  } finally {
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains: a double tap buys once (the second, while the first is out, refused at once with 409 BUYING, nothing sent); once it's done, another buy of it reaches Orgo, which charges nothing again", async () => {
+  workspaceAgain();
+  try {
+    let release;
+    web.sell.hold = new Promise((r) => (release = r));
+    const settled = [];
+    const both = Promise.all([wsBuy(), wsBuy()].map((p) => p.then((r) => (settled.push(r), r))));
+    try {
+      await until(() => settled.length === 1 && web.sell.buys.length === 1);
+      assert.deepEqual([settled[0].status, settled[0].body.code, settled[0].body.error], [409, "BUYING", "acme-shop.example is being bought already. Wait for it."]);
+    } finally {
+      release();
+      web.sell.hold = null;
+    }
+    assert.deepEqual((await both).map((x) => x.status).sort(), [200, 409]);
+    assert.deepEqual([web.sell.buys.length, web.sell.credits], [1, 10_000 - 1200], "one buy reached Orgo, charged once");
+    const third = await wsBuy();
+    assert.deepEqual([third.status, third.body.bought, web.sell.buys.length, web.sell.credits], [200, "acme-shop.example", 2, 10_000 - 1200], "the workspace's already: nothing charged again");
+  } finally {
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains: a buy Orgo refuses says why, with what the window asks again with (the credits short and where to add them, the new price); a lost answer says it shows up once the registry says, never to point it here (the app's tab still does); one that hangs past the timeout says it isn't known whether it went, sent once", async () => {
+  workspaceAgain();
+  try {
+    web.sell.credits = 500;
+    const short = await wsBuy();
+    assert.deepEqual([short.status, short.body.code, short.body.error, short.body.price, short.body.available], [402, "INSUFFICIENT_CREDITS", "acme-shop.example costs $12.00 and your Orgo credits cover $5.00. Add $7.00 or more in credits, then buy it.", 1200, 500]);
+    assert.equal(short.body.topUp, `${ORGO}/settings/billing#credits`, "where to add them, on orgo.ai");
+    web.sell = freshSell();
+    web.sell.price = 1300;
+    const changed = await wsBuy();
+    assert.deepEqual([changed.status, changed.body.code, changed.body.price, changed.body.error], [409, "PRICE_CHANGED", 1300, "The price of acme-shop.example is $13.00 now. Check it, then buy it."]);
+    web.sell = freshSell();
+    web.bought.push({ id: "7b7b7b7b-1111-4222-8333-444455556666", project: "99999999-1111-4222-8333-444455556666", domain: "acme-shop.example", status: "active", serving: true, records: [] });
+    const taken = await wsBuy();
+    assert.deepEqual([taken.status, taken.body.code, taken.body.error], [409, "DOMAIN_TAKEN", "acme-shop.example was bought through Orgo already. Pick another."]);
+    web.bought.pop();
+    web.sell.refuse = { status: 429, body: { error: "That’s the most domains for today. Try again tomorrow.", code: "rate_limited", retry_after: 3600 } };
+    const limited = await wsBuy();
+    assert.deepEqual([limited.status, limited.body.error], [429, "That’s the most domains for today. Try again tomorrow."]);
+    web.sell.refuse = null;
+    web.sell.unknown = true;
+    const lost = await wsBuy();
+    assert.deepEqual([lost.status, lost.body.code, lost.body.error], [502, "REGISTRATION_UNKNOWN", "The registry hasn't confirmed acme-shop.example yet. It shows up under your domains once it does."]);
+    const listed = (await wsList()).body.domains.find((d) => d.domain === "acme-shop.example");
+    assert.deepEqual([listed.status, listed.uses], ["pending", []], "registering, in the list");
+    web.bought = web.bought.filter((b) => b.domain !== "acme-shop.example");
+    const tab = await ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "buy", domain: "acme-shop.example", registrant: AVA, price: 1200 });
+    assert.equal(tab.body.error, "The registry hasn't confirmed acme-shop.example yet. It shows up under your domains once it does, and you can point it here then.", "the app's tab can point it there once it's in");
+    web.sell.unknown = false;
+    web.bought = web.bought.filter((b) => b.domain !== "acme-shop.example");
+    // Orgo hangs: Bops gives up after its timeout, says it isn't known, and never sends it again.
+    process.env.BOPS_DOMAIN_BUY_MS = "80";
+    web.sell.hang = true;
+    const m = web.sell.buys.length;
+    try {
+      const hung = await wsBuy();
+      assert.deepEqual([hung.status, hung.body.code, hung.body.error], [504, "NO_ANSWER", "Orgo didn't answer in time, so it isn't known whether acme-shop.example was bought. Look again in a minute: it shows up under your domains if it was."]);
+    } finally {
+      delete process.env.BOPS_DOMAIN_BUY_MS;
+      web.sell.hang = false;
+    }
+    assert.equal(web.sell.buys.length, m + 1, "sent once, never again");
+  } finally {
+    workspaceDone();
+  }
+});
+
+await check("A buy whose answer isn't Orgo's own (a 502 or 504 page from in front of orgo-web, a 2xx that isn't JSON) says it isn't known whether it went (NO_ANSWER, never Try again), from Settings and from an app's tab, each sent once; Orgo's own coded 5xx still says why", async () => {
+  workspaceAgain();
+  try {
+    for (const raw of [
+      { status: 502, text: "<html><body>Bad gateway</body></html>" },
+      { status: 504, text: "" },
+      { status: 201, text: "<html><body>ok</body></html>" },
+    ]) {
+      web.sell.raw = raw;
+      const m = web.sell.buys.length;
+      const s = await wsBuy();
+      assert.deepEqual(
+        [s.status, s.body.code, s.body.error],
+        [504, "NO_ANSWER", "Orgo's answer didn't come through, so it isn't known whether acme-shop.example was bought. Look again in a minute: it shows up under your domains if it was."],
+        `Settings, ${raw.status}`,
+      );
+      const tab = await ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "buy", domain: "acme-shop.example", registrant: AVA, price: 1200 });
+      assert.deepEqual([tab.status, tab.body.code], [504, "NO_ANSWER"], `the app's tab, ${raw.status}`);
+      assert.equal(web.sell.buys.length, m + 2, "each sent once, never again");
+    }
+    web.sell.raw = null;
+    web.sell.refuse = { status: 502, body: { error: "Domains are unavailable right now. Try again shortly.", code: "REGISTRAR_UNAVAILABLE" } };
+    const coded = await wsBuy();
+    assert.deepEqual([coded.status, coded.body.code, coded.body.error], [502, "REGISTRAR_UNAVAILABLE", "Domains aren't answering on Orgo just now. Nothing was charged. Try again shortly."]);
+  } finally {
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains: auto-renew of any of the workspace's active domains (one no app uses too), read again from Orgo first; one that isn't the workspace's (made up, another workspace's, or not an id) refused before anything is sent, as is one that isn't on or off", async () => {
+  workspaceAgain();
+  try {
+    let n = web.calls.length;
+    const off = await ask(WsZoneRoute, "PATCH", `/api/domains/${SPARE}`, { zone: SPARE }, { ws: WS, autoRenew: false });
+    assert.equal(off.status, 200);
+    assert.deepEqual(writesSince(n).map((c) => [c.method, c.path, c.body]), [["PATCH", `/api/projects/${PROJECT}/domains/${SPARE}`, { auto_renew: false }]]);
+    assert.deepEqual([off.body.renewal.on, off.body.renewal.state], [false, "off"]);
+    web.bought.push({ id: "7b7b7b7b-1111-4222-8333-444455556666", project: "99999999-1111-4222-8333-444455556666", domain: "theirs.example", status: "active", serving: true, records: [] });
+    n = web.calls.length;
+    for (const z of ["0f0f0f0f-1111-4222-8333-444455556666", "7b7b7b7b-1111-4222-8333-444455556666", "nope"]) {
+      const x = await ask(WsZoneRoute, "PATCH", `/api/domains/${z}`, { zone: z }, { ws: WS, autoRenew: false });
+      assert.deepEqual([x.status, x.body.error], [404, "That isn't one of this workspace's domains."], z);
+    }
+    const pending = await ask(WsZoneRoute, "PATCH", `/api/domains/${BAKES}`, { zone: BAKES }, { ws: WS, autoRenew: false });
+    assert.deepEqual([pending.status, pending.body.error], [409, "This domain is still being registered. Try again in a few minutes."]);
+    assert.equal((await ask(WsZoneRoute, "PATCH", `/api/domains/${SPARE}`, { zone: SPARE }, { ws: WS, autoRenew: "no" })).status, 400);
+    assert.deepEqual(writesSince(n), [], "nothing sent");
+  } finally {
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains: a domain's zone, read when its line opens, Orgo's records locked with the app (and site) or computer each of its names reaches; a record added to one no app uses (which the app's tab can't); a zone that isn't the workspace's refused, nothing written; a record that changed since it was read refused with the records as they are now", async () => {
+  workspaceAgain();
+  try {
+    const z = await ask(WsZoneRoute, "GET", `/api/domains/${ZONE}?ws=${WS}`, { zone: ZONE });
+    assert.equal(z.status, 200);
+    const records = z.body.zone.records;
+    assert.equal(recordIn(records, "A", "").locked, "Orgo set this so acme.example reaches recipe-box.");
+    assert.equal(recordIn(records, "TXT", "_orgo-verify").locked, "Orgo set this so acme.example reaches recipe-box.");
+    assert.equal(recordIn(records, "A", "blog").locked, "Orgo set this so blog.acme.example reaches recipe-box, site blog.");
+    assert.equal(recordIn(records, "A", "ivy").locked, "Orgo set this so ivy.acme.example reaches Studio computer.");
+    assert.equal(recordIn(records, "MX", "").locked, null, "the user's own");
+    assert.equal(z.body.zone.renewal.on, true, "with its renewal");
+    assert.deepEqual(z.body.uses.map((u) => u.name), ["acme.example", "www.acme.example", "blog.acme.example", "ivy.acme.example"]);
+    let n = web.calls.length;
+    const added = await ask(WsRecordsRoute, "POST", `/api/domains/${SPARE}/records`, { zone: SPARE }, { ws: WS, type: "TXT", name: "_dmarc", value: "v=DMARC1; p=none" });
+    assert.equal(added.status, 200);
+    assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [["POST", `/api/projects/${PROJECT}/domains/${SPARE}/dns/records`]]);
+    assert.ok(recordIn(added.body.records, "TXT", "_dmarc"), "written");
+    n = web.calls.length;
+    for (const zone of ["0f0f0f0f-1111-4222-8333-444455556666", "../../x"]) {
+      const x = await ask(WsRecordsRoute, "POST", `/api/domains/${encodeURIComponent(zone)}/records`, { zone }, { ws: WS, type: "TXT", name: "x", value: "y" });
+      assert.deepEqual([x.status, x.body.error], [404, "That isn't one of this workspace's domains."], zone);
+    }
+    const bad = await ask(WsRecordsRoute, "POST", `/api/domains/${SPARE}/records`, { zone: SPARE }, { ws: WS, type: "NS", name: "x", value: "y" });
+    assert.deepEqual([bad.status, bad.body.field], [400, "type"]);
+    assert.deepEqual(writesSince(n), [], "nothing written");
+    const spf = recordIn(added.body.records, "TXT", "");
+    web.bought.find((b) => b.id === SPARE).records.find((r) => r.type === "TXT" && r.name === "").value = "v=spf1 include:mail.example.com -all";
+    const stale = await ask(WsRecordRoute, "PATCH", `/api/domains/${SPARE}/records/${spf.id}`, { zone: SPARE, recordId: spf.id }, { ws: WS, type: "TXT", name: "", value: "v=spf1 ~all" });
+    assert.deepEqual([stale.status, stale.body.stale, stale.body.zone, stale.body.error], [404, true, SPARE, "That record changed since it was read. Here are the records as they are now, so try again."]);
+    assert.equal(recordIn(stale.body.records, "TXT", "").value, "v=spf1 include:mail.example.com -all");
+    const dmarc = recordIn(added.body.records, "TXT", "_dmarc");
+    const gone = await ask(WsRecordRoute, "DELETE", `/api/domains/${SPARE}/records/${dmarc.id}`, { zone: SPARE, recordId: dmarc.id }, { ws: WS });
+    assert.deepEqual([gone.status, !!recordIn(gone.body.records, "TXT", "_dmarc")], [200, false], "removed");
+  } finally {
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains: Orgo not answering (a connection dropped, an answer that isn't JSON) said in plain words, never Node's own: the list, a domain opened, auto-renew, a record added, a search", async () => {
+  workspaceAgain();
+  const drop = (method, re) => {
+    web.hold = (m, path) => {
+      if (m === method && re.test(path)) throw new TypeError("fetch failed");
+    };
+  };
+  try {
+    drop("GET", new RegExp(`^/api/projects/${PROJECT}/domains$`));
+    const list = await wsList();
+    assert.deepEqual([list.status, list.body.error], [502, "Couldn't reach Orgo's domains just now."]);
+    const z = await ask(WsZoneRoute, "GET", `/api/domains/${SPARE}?ws=${WS}`, { zone: SPARE });
+    assert.deepEqual([z.status, z.body.error], [502, "Couldn't reach Orgo's domains just now."], "a domain opened");
+    drop("PATCH", new RegExp(`^/api/projects/${PROJECT}/domains/${SPARE}$`));
+    const renew = await ask(WsZoneRoute, "PATCH", `/api/domains/${SPARE}`, { zone: SPARE }, { ws: WS, autoRenew: false });
+    assert.deepEqual([renew.status, renew.body.error], [502, "Couldn't reach Orgo just now."]);
+    drop("POST", new RegExp(`^/api/projects/${PROJECT}/domains/${SPARE}/dns/records$`));
+    const added = await ask(WsRecordsRoute, "POST", `/api/domains/${SPARE}/records`, { zone: SPARE }, { ws: WS, type: "TXT", name: "_dmarc", value: "v=DMARC1; p=none" });
+    assert.deepEqual([added.status, added.body.error], [502, "Couldn't reach Orgo just now."]);
+    web.hold = null;
+    web.sell.searchRaw = "<html>not json</html>";
+    const found = await ask(WsSearchRoute, "GET", `/api/domains/search?ws=${WS}&q=acme`, null);
+    assert.deepEqual([found.status, found.body.error], [504, "Domain search isn't answering just now. Try again shortly."]);
+    for (const r of [list, z, renew, added, found]) assert.ok(!/fetch failed|isn't JSON|Orgo (GET|POST|PATCH) \//.test(r.body.error), r.body.error);
+  } finally {
+    web.hold = null;
+    workspaceDone();
+  }
+});
+
+await check("Settings, Domains: every new route only from the Bops window (403 with its words, nothing asked of Orgo); on a bot's computer, nothing asked of Orgo either: the list closed with why, a buy refused", async () => {
+  workspaceAgain();
+  try {
+    const n = web.calls.length;
+    const away = { window: false };
+    for (const [r, error] of [
+      [await wsList(away), "Domains can only be seen in the Bops app."],
+      [await wsBuy({}, away), "Domains can only be bought in the Bops app."],
+      [await ask(WsSearchRoute, "GET", `/api/domains/search?ws=${WS}&q=acme`, null, undefined, away), "Domains can only be searched in the Bops app."],
+      [await ask(WsZoneRoute, "GET", `/api/domains/${ZONE}?ws=${WS}`, { zone: ZONE }, undefined, away), "Domains can only be seen in the Bops app."],
+      [await ask(WsZoneRoute, "PATCH", `/api/domains/${ZONE}`, { zone: ZONE }, { ws: WS, autoRenew: false }, away), "Domains can only be changed in the Bops app."],
+      [await ask(WsRecordsRoute, "POST", `/api/domains/${ZONE}/records`, { zone: ZONE }, { ws: WS, type: "TXT", name: "x", value: "y" }, away), "DNS can only be changed in the Bops app."],
+      [await ask(WsRecordRoute, "PATCH", `/api/domains/${ZONE}/records/AAAAAAAAAAAAAAAA`, { zone: ZONE, recordId: "AAAAAAAAAAAAAAAA" }, { ws: WS, type: "TXT", name: "x", value: "y" }, away), "DNS can only be changed in the Bops app."],
+      [await ask(WsRecordRoute, "DELETE", `/api/domains/${ZONE}/records/AAAAAAAAAAAAAAAA`, { zone: ZONE, recordId: "AAAAAAAAAAAAAAAA" }, { ws: WS }, away), "DNS can only be changed in the Bops app."],
+    ])
+      assert.deepEqual([r.status, r.body.error], [403, error]);
+    assert.equal(web.calls.length, n, "nothing asked of Orgo");
+    process.env.BOPS_RUNNER = "1";
+    try {
+      const list = await wsList();
+      assert.deepEqual(pick(list.body, ["open", "why", "domains"]), { open: false, why: "Domains are changed from the Bops app on your Mac.", domains: [] });
+      const buy = await wsBuy();
+      assert.deepEqual([buy.status, buy.body.error], [403, "Domains are changed from the Bops app on your Mac."]);
+      const renew = await ask(WsZoneRoute, "PATCH", `/api/domains/${SPARE}`, { zone: SPARE }, { ws: WS, autoRenew: false });
+      assert.equal(renew.status, 403);
+    } finally {
+      delete process.env.BOPS_RUNNER;
+    }
+    assert.equal(web.calls.length, n, "nothing asked of Orgo on a bot's computer");
+    assert.equal(web.sell.buys.length, 0, "nothing bought");
+  } finally {
+    workspaceDone();
+  }
+});
+
 /* ---------------- One app, several sites; removing one; its health check; variables before its first deploy ---------------- */
 
 const SUITE = { name: "shop-suite" };
@@ -2777,8 +4057,8 @@ await check("Deploy deploys every site, one after another: each its own deploy p
   assert.equal(suite().sites[2].projectId, siteProject("shop-suite-api").id);
   web.closedFor = siteProject("shop-suite-till").id;
 
-  const said = hear(await H.deployForBot("boppy", "shop-suite", null));
-  assert.match(said, /^Deploying the newest commit of shop-suite to its 4 sites on Boppy's computer, one after another: shop-suite at https:\/\/shop-suite\.orgo\.dev; shop-suite-admin at https:\/\/shop-suite-admin\.orgo\.dev; shop-suite-till at https:\/\/shop-suite-till\.orgo\.dev; shop-suite-api /);
+  const said = hear(await H.deployForBot("boppy", "shop-suite", null, undefined, "prod"));
+  assert.match(said, /^Publishing the newest commit of shop-suite on its 4 sites on Boppy's computer, one after another: shop-suite at https:\/\/shop-suite\.orgo\.dev; shop-suite-admin at https:\/\/shop-suite-admin\.orgo\.dev; shop-suite-till at https:\/\/shop-suite-till\.orgo\.dev; shop-suite-api /);
   const line = hear(H.hostedAppsLine("boppy"));
   assert.match(line, /shop-suite \(live at https:\/\/shop-suite\.orgo\.dev, and its other sites from the same repo, deployed with it: shop-suite-admin live at https:\/\/shop-suite-admin\.orgo\.dev, shop-suite-till live at https:\/\/shop-suite-till\.orgo\.dev, shop-suite-api (deployed, no address yet|live at [^,]+)\)/);
 });
@@ -3207,7 +4487,7 @@ await check("A deploy of several sites that stops partway: the ones that went ar
   dropSecond();
   const said = hear(await H.deployForBot("boppy", "shop-suite", null));
   web.hold = null;
-  assert.equal(said, "Deploying shop-suite, but not shop-suite-admin: fetch failed.");
+  assert.equal(said, "Deploying shop-suite to its preview, but not shop-suite-admin: fetch failed.", "the bot's goes to its preview");
   web.hold = (m, path) => {
     if (m === "POST" && /\/deployments$/.test(path)) throw new TypeError("fetch failed");
   };
@@ -3264,6 +4544,333 @@ await check("An app moved off a computer that's still up (its bot on another one
   S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps["moved-site"]);
 });
 
+await check("Remove site and Remove app take what Bops set in the user's Cloudflare off too: only the records tagged for each domain Orgo took off (the user's and another domain's stay), each domain's in one batch; what Cloudflare didn't take is said with the rest", async () => {
+  suiteAgain();
+  web.domains = web.domains.filter((d) => d.computerId !== "c_boppy" || d.target_port === recipeProject().port);
+  await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" });
+  assert.equal((await post("shop-suite", { ws: WS, action: "deploy" })).status, 200);
+  const [own, admin] = [siteProject("shop-suite"), siteProject("shop-suite-admin")];
+  web.domains.push(
+    { id: "cd_cfsuite", computerId: "c_boppy", domain: "suite.acme.test", status: "active", target_port: own.port, zone: null, token: "tok-cfsuite" },
+    { id: "cd_cfadmin", computerId: "c_boppy", domain: "admin.acme.test", status: "pending", target_port: admin.port, zone: null, token: "tok-cfadmin" },
+  );
+  web.secrets = [{ ...CF_KEY_ROW }];
+  web.cfBroker = true;
+  cloudflare = { ...freshCloudflare(), zones: [cfZone(Z_TEST, "acme.test")] };
+  globalThis.bopsVaultNames = undefined;
+  globalThis.bopsCfZones?.clear();
+  globalThis.bopsCfZonesFailed?.clear();
+  const tag = (id) => ({ comment: CF.marker("shop-suite", id) });
+  const adminTxt = cfRecord(Z_TEST, "TXT", "_orgo-verify.admin.acme.test", '"tok-cfadmin"', tag("cd_cfadmin"));
+  const adminCname = cfRecord(Z_TEST, "CNAME", "admin.acme.test", "edge.orgo.dev", tag("cd_cfadmin"));
+  const suiteCname = cfRecord(Z_TEST, "CNAME", "suite.acme.test", "edge.orgo.dev", tag("cd_cfsuite"));
+  const theirs = cfRecord(Z_TEST, "A", "www.acme.test", "192.0.2.4");
+  const another = cfRecord(Z_TEST, "A", "old.acme.test", EDGE, tag("cd_other"));
+  cloudflare.records.push(adminTxt, adminCname, suiteCname, theirs, another);
+  try {
+    let n = web.calls.length;
+    const site = await post("shop-suite", { ws: WS, action: "removeSite", site: "shop-suite-admin" });
+    assert.deepEqual([site.status, site.body.said], [200, undefined]);
+    assert.deepEqual(writesSince(n).filter((c) => c.path !== "/api/secrets/call").map((c) => [c.method, c.path]), [
+      ["DELETE", "/api/computers/c_boppy/domains/cd_cfadmin"],
+      ["DELETE", `/api/computers/c_boppy/deploy-projects/${admin.id}`],
+    ]);
+    assert.deepEqual(cloudflare.batches.map((b) => b.deletes.map((x) => x.id).sort()), [[adminTxt.id, adminCname.id].sort()], "the site's domain's two, in one batch");
+    assert.deepEqual(cloudflare.records.map((x) => x.id).sort(), [suiteCname.id, theirs.id, another.id].sort(), "only those");
+    // Cloudflare doesn't answer the batch: the app is removed all the same, and what's left there said.
+    cloudflare.downOnBatch = true;
+    n = web.calls.length;
+    const app = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
+    assert.deepEqual([app.status, app.body], [200, { removed: "shop-suite", repo: false, said: "Bops couldn't reach Cloudflare, so remove CNAME suite there." }]);
+    assert.deepEqual(writesSince(n).filter((c) => c.path !== "/api/secrets/call").map((c) => [c.method, c.path]), [
+      ["DELETE", "/api/computers/c_boppy/domains/cd_cfsuite"],
+      ["DELETE", `/api/computers/c_boppy/deploy-projects/${own.id}`],
+    ]);
+    assert.ok(!suite() && !suiteProjects().length, "gone");
+    assert.deepEqual(cloudflare.records.map((x) => x.id).sort(), [suiteCname.id, theirs.id, another.id].sort(), "nothing else touched");
+  } finally {
+    cloudflareDone();
+  }
+});
+
+/* ---------------- Local, Staging and Prod, all on the app's own computer ---------------- */
+
+const NOTES = { name: "field-notes" };
+const notesProjects = () => web.projects.filter((p) => p.ingot_repo === `${PROJECT}/field-notes`);
+const notesProject = (name) => notesProjects().find((p) => p.name === name);
+const notes = () => hostedApps()["field-notes"];
+/** AppHosting's fields as a Bops from before Staging (v0.0.32) knows them: Bops keeps nothing else of an app. */
+const KNOWN = ["botId", "computerId", "projectId", "url", "queuedAt", "sites", "lost", "behind"];
+/** A made-up app with one commit, its working folder on Boppy's computer, never deployed. */
+function notesAgain() {
+  addingAgain();
+  central.repos.set(`${PROJECT}/field-notes`, { created_by: { id: "u_alex", name: "Alex" }, created_at: iso(), changesets: [] });
+  commit("field-notes", "Field notes, a first page", { id: "boppy", name: "Boppy" });
+  web.projects = web.projects.filter((p) => p.ingot_repo !== `${PROJECT}/field-notes`);
+  boppy.folders.set("/workspace/apps/field-notes", `${PROJECT}/field-notes`);
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"] = { botId: "boppy", computerId: "c_boppy" }));
+  forgetListed();
+}
+/** A project's waiting deploys gone live, with its address. */
+const goLive = (p) => {
+  for (const d of p.deployments) if (d.state === "queued" || d.state === "running") Object.assign(d, { state: "succeeded", finished_at: iso() });
+  p.url = `https://${p.name}.orgo.dev`;
+};
+const localAsk = (body, opts) => ask(LocalRoute, "POST", "/api/hosted-apps/field-notes/local", NOTES, { ws: WS, ...body }, opts);
+const localRead = () => ask(LocalRoute, "GET", `/api/hosted-apps/field-notes/local?ws=${WS}&fresh=1`, NOTES);
+
+await check("Deploy to Staging: Prod's project made first (nothing deployed on it), then the site's Staging project beside it on the same computer (<site>-staging, a port of its own), the newest queued there and Prod untouched; nothing of Staging kept in Bops' state; the list says Staging apart from Prod", async () => {
+  notesAgain();
+  const head = repoOf("field-notes").changesets[0].id;
+  const n = web.calls.length;
+  const r = await post("field-notes", { ws: WS, action: "deploy", env: "staging" });
+  assert.equal(r.status, 200);
+  const [prod, staging] = [notesProject("field-notes"), notesProject("field-notes-staging")];
+  assert.ok(prod && staging, "a project each");
+  assert.deepEqual([prod.computerId, staging.computerId], ["c_boppy", "c_boppy"], "both on the app's own computer");
+  assert.deepEqual(prod.deployments, [], "nothing deployed on Prod");
+  assert.deepEqual(staging.deployments.map((d) => [d.state, d.source_version]), [["queued", head]]);
+  assert.notEqual(staging.port, prod.port);
+  assert.deepEqual(staging.created, { source: "ingot", repo: `${PROJECT}/field-notes`, name: "field-notes-staging", port: staging.port, deploy: false });
+  assert.deepEqual(
+    writesSince(n).map((c) => `${c.method} ${c.path.replace(/[0-9a-f-]{36}/g, "id")}`),
+    ["POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects/id/deployments"],
+    "Prod's made, then Staging's, then Staging's deploy",
+  );
+  assert.equal(callsSince(n, "POST", /\/deployments$/)[0].path.split("/")[5], staging.id, "on Staging's project");
+  assert.deepEqual(Object.keys(notes()).filter((k) => !KNOWN.includes(k)), [], "only what a Bops from before Staging knows");
+  assert.equal(notes().projectId, prod.id);
+  await S.flushState(5000);
+  assert.ok(!JSON.stringify(S.getState()).includes(staging.id), "Staging's project is found on the computer, never kept");
+  assert.deepEqual([r.body.app.live, r.body.app.serving, r.body.app.staging.live.state, r.body.app.staging.projectId], [null, null, "queued", staging.id]);
+  goLive(staging);
+  forgetListed();
+  const a = (await H.listApps(WS)).apps.find((x) => x.name === "field-notes");
+  assert.deepEqual([a.staging.url, a.staging.serving, a.staging.live.state], ["https://field-notes-staging.orgo.dev", head, "succeeded"]);
+  assert.deepEqual([a.serving, a.live], [null, null], "Prod not on the web yet");
+  // A deploy from before Staging (no env) is Prod's, as it always was.
+  const k = web.calls.length;
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  assert.deepEqual(callsSince(k, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [prod.id]);
+  goLive(prod);
+});
+
+await check("Promote to Prod: Prod gets the changeset Staging serves (built again on Prod's own project), never the newest; with the one the window saw, refused once Staging moved on; nothing live on Staging, refused", async () => {
+  const st = notesProject("field-notes-staging");
+  const prod = notesProject("field-notes");
+  const served = st.deployments[0].source_version;
+  const newer = commit("field-notes", "A second page", { id: "boppy", name: "Boppy" });
+  let n = web.calls.length;
+  const moved = await post("field-notes", { ws: WS, action: "promote", site: "field-notes", at: newer.id });
+  assert.deepEqual([moved.status, moved.body.error], [409, "The preview changed since you looked. Look again."]);
+  assert.deepEqual(writesSince(n), [], "nothing sent");
+  const r = await post("field-notes", { ws: WS, action: "promote", site: "field-notes", at: served });
+  assert.equal(r.status, 200);
+  assert.deepEqual(writesSince(n).map((c) => [c.path.split("/")[5], c.body]), [[prod.id, { at: served }]], "Prod's project, Staging's changeset");
+  assert.deepEqual([r.body.app.live.state, r.body.app.live.at], ["queued", served]);
+  assert.equal(st.deployments.length, 1, "Staging as it was");
+  goLive(prod);
+  // Nothing live on Staging: nothing to promote.
+  const had = st.deployments;
+  st.deployments = [];
+  n = web.calls.length;
+  const none = await post("field-notes", { ws: WS, action: "promote" });
+  assert.deepEqual([none.status, none.body.error], [409, "The preview isn't live yet, so there's nothing to publish. Deploy a preview first."]);
+  assert.deepEqual(writesSince(n), []);
+  st.deployments = had;
+});
+
+await check("Staging keeps its own variables, settings, log and deploys (env staging), apart from Prod's; its settings answer names Prod's variables, to say which it lacks; a rollback there is only of its own deploys", async () => {
+  const [prod, st] = [notesProject("field-notes"), notesProject("field-notes-staging")];
+  const SECRET = "staging-only-secret-4f1";
+  const e1 = await ask(EnvRoute, "PATCH", "/api/hosted-apps/field-notes/env", NOTES, { ws: WS, where: "staging", env: { API_TOKEN: SECRET } });
+  assert.deepEqual([e1.status, e1.body], [200, { env: ["API_TOKEN"] }]);
+  const e2 = await ask(EnvRoute, "PATCH", "/api/hosted-apps/field-notes/env", NOTES, { ws: WS, env: { API_TOKEN: "prod-value", SENTRY_DSN: "dsn" } });
+  assert.deepEqual(e2.body, { env: ["API_TOKEN", "SENTRY_DSN"] });
+  assert.deepEqual([web.envs.get(st.id).get("API_TOKEN"), web.envs.get(prod.id).get("API_TOKEN")], [SECRET, "prod-value"], "each its own");
+  const s1 = await ask(SettingsRoute, "GET", `/api/hosted-apps/field-notes/settings?ws=${WS}&env=staging`, NOTES);
+  assert.deepEqual([s1.body.url, s1.body.env, s1.body.prodEnv, s1.body.deploys.length], ["https://field-notes-staging.orgo.dev", ["API_TOKEN"], ["API_TOKEN", "SENTRY_DSN"], 1]);
+  const s0 = await ask(SettingsRoute, "GET", `/api/hosted-apps/field-notes/settings?ws=${WS}`, NOTES);
+  assert.deepEqual([s0.body.url, s0.body.env, "prodEnv" in s0.body], ["https://field-notes.orgo.dev", ["API_TOKEN", "SENTRY_DSN"], false], "Prod's as before");
+  let n = web.calls.length;
+  const s2 = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/field-notes/settings", NOTES, { ws: WS, env: "staging", build: "npm run build:staging" });
+  assert.equal(s2.status, 200);
+  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path, c.body]), [["PATCH", `/api/computers/c_boppy/deploy-projects/${st.id}`, { build_cmd: "npm run build:staging" }]], "Staging's alone");
+  assert.equal(prod.build_cmd ?? null, null, "Prod's as it was");
+  const logs = await ask(LogsRoute, "GET", `/api/hosted-apps/field-notes/logs?ws=${WS}&env=staging`, NOTES);
+  assert.deepEqual([logs.status, logs.body.log], [200, "Exporting the changeset\nBuilding\n"]);
+  n = web.calls.length;
+  const back = await post("field-notes", { ws: WS, action: "rollback", env: "staging", deployment: prod.deployments[0].id });
+  assert.deepEqual([back.status, back.body.error], [404, "That isn't one of its recent deploys."], "Prod's deploy isn't Staging's");
+  assert.deepEqual(writesSince(n), []);
+  await S.flushState(5000);
+  assert.ok(!JSON.stringify(S.getState()).includes(SECRET) && ![...warned, ...heard].some((l) => l.includes(SECRET)), "the value went to Orgo alone");
+});
+
+await check("Prod never takes Staging's project: its record forgetting Prod's, a deploy finds Prod's own by name; Prod's gone on Orgo, a new one is made beside Staging's, which is left as it is; a site can't be named as a Staging is", async () => {
+  const [prod, st] = [notesProject("field-notes"), notesProject("field-notes-staging")];
+  const forget = () =>
+    S.update((s) => {
+      const h = s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"];
+      delete h.projectId;
+      delete h.url;
+    });
+  forget();
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  assert.equal(notes().projectId, prod.id, "Prod's own, found by name");
+  web.projects = web.projects.filter((p) => p !== prod);
+  forget();
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  const made = notesProject("field-notes");
+  assert.ok(made && made.id !== st.id && notes().projectId === made.id, "a new Prod project, never Staging's");
+  assert.equal(notesProject("field-notes-staging"), st, "Staging's as it was");
+  goLive(made);
+  const bad = await post("field-notes", { ws: WS, action: "addSite", site: "field-notes-staging" });
+  assert.deepEqual([bad.status, bad.body.error, bad.body.field], [400, "A site's name can't end in staging: its preview is named that way. Pick another name.", "site"]);
+});
+
+await check("Each site's Staging is a project of its own (<site>-staging; a long name cut, with a bit of its sha256, so two never share one): Deploy to Staging deploys every site's, or one; promote each site's own changeset; Remove site and Remove app take Staging down first", async () => {
+  assert.equal(H.stagingName("shop"), "shop-staging");
+  assert.equal(H.stagingName("shop", 3), "shop-staging-3");
+  const [a, b] = [H.stagingName("a-very-long-site-name-number-one"), H.stagingName("a-very-long-site-name-number-two")];
+  assert.ok(a !== b && a.length <= 32 && b.length <= 32 && H.stagingName("a-very-long-site-name-number-one", 9).length <= 32, `${a} ${b}`);
+  assert.ok(H.isStagingOf(a, "a-very-long-site-name-number-one") && !H.isStagingOf(a, "a-very-long-site-name-number-two"));
+  suiteAgain();
+  await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" });
+  const n = web.calls.length;
+  const r = await post("shop-suite", { ws: WS, action: "deploy", env: "staging" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(suiteProjects().map((p) => p.name).sort(), ["shop-suite", "shop-suite-admin", "shop-suite-admin-staging", "shop-suite-staging"]);
+  assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [siteProject("shop-suite-staging").id, siteProject("shop-suite-admin-staging").id], "each site's Staging, in turn");
+  assert.deepEqual(r.body.app.sites.map((x) => [x.name, x.staging.live.state, x.live]), [["shop-suite", "queued", null], ["shop-suite-admin", "queued", null]]);
+  for (const p of suiteProjects()) goLive(p);
+  // One site alone; then promote each site's own.
+  const head = repoOf("shop-suite").changesets[0].id;
+  commit("shop-suite", "Admin only", { id: "boppy", name: "Boppy" });
+  let m = web.calls.length;
+  assert.equal((await post("shop-suite", { ws: WS, action: "deploy", env: "staging", site: "shop-suite-admin" })).status, 200);
+  assert.deepEqual(callsSince(m, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [siteProject("shop-suite-admin-staging").id]);
+  goLive(siteProject("shop-suite-admin-staging"));
+  const adminServes = siteProject("shop-suite-admin-staging").deployments.at(-1).source_version;
+  m = web.calls.length;
+  const p = await post("shop-suite", { ws: WS, action: "promote" });
+  assert.equal(p.status, 200);
+  assert.deepEqual(callsSince(m, "POST", /\/deployments$/).map((c) => [c.path.split("/")[5], c.body.at]), [[siteProject("shop-suite").id, head], [siteProject("shop-suite-admin").id, adminServes]], "each site's Prod gets its own Staging's changeset");
+  for (const x of suiteProjects()) goLive(x);
+  // Remove site: its Staging, then its Prod.
+  const [adminStaging, admin] = [siteProject("shop-suite-admin-staging"), siteProject("shop-suite-admin")];
+  m = web.calls.length;
+  assert.equal((await post("shop-suite", { ws: WS, action: "removeSite", site: "shop-suite-admin" })).status, 200);
+  assert.deepEqual(writesSince(m).map((c) => [c.method, c.path]), [
+    ["DELETE", `/api/computers/c_boppy/deploy-projects/${adminStaging.id}`],
+    ["DELETE", `/api/computers/c_boppy/deploy-projects/${admin.id}`],
+  ]);
+  // Remove app: every site's Staging, then each Prod.
+  const [ownStaging, own] = [siteProject("shop-suite-staging"), siteProject("shop-suite")];
+  m = web.calls.length;
+  const gone = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
+  assert.deepEqual([gone.status, gone.body], [200, { removed: "shop-suite", repo: false }]);
+  assert.deepEqual(writesSince(m).map((c) => [c.method, c.path]), [
+    ["DELETE", `/api/computers/c_boppy/deploy-projects/${ownStaging.id}`],
+    ["DELETE", `/api/computers/c_boppy/deploy-projects/${own.id}`],
+  ]);
+  assert.deepEqual(suiteProjects(), [], "nothing of it left on the computer");
+});
+
+await check("An app moved off a computer that's still up: its Staging projects there are kept with its Prod ones as left behind (which a Bops from before Staging knows, and Remove app takes down), read after the move", async () => {
+  const st = notesProject("field-notes-staging");
+  const prod = notesProject("field-notes");
+  const had = S.getState().bots.find((b) => b.id === "boppy").computerId;
+  const onto = (c) => S.update((s) => (s.bots.find((b) => b.id === "boppy").computerId = c));
+  try {
+    onto("c_boppy2");
+    H.appWork("boppy", { app: "field-notes", name: null, change: "A third page" });
+    await until(() => notes().behind?.some((x) => x.projectId === st.id));
+    assert.deepEqual(notes().behind, [
+      { site: "field-notes", computerId: "c_boppy", projectId: prod.id },
+      { site: "field-notes", computerId: "c_boppy", projectId: st.id },
+    ]);
+    assert.deepEqual(Object.keys(notes()).filter((k) => !KNOWN.includes(k)), []);
+  } finally {
+    onto(had);
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"] = { botId: "boppy", computerId: "c_boppy", projectId: prod.id, url: prod.url }));
+  }
+});
+
+await check("Local: Start puts bops-local on the app's computer (once) and runs its working folder there, with Staging's project named for its variables and a port of its own; status never wakes an asleep computer, nor does Stop; Open puts it on its screen; its own variables go on stdin, never kept here; why not, in words; only from the window; the bot's local_app", async () => {
+  forgetReady();
+  const st = notesProject("field-notes-staging");
+  const r = await localAsk({ action: "start" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.sites["field-notes"], { state: "running", port: 4100, command: "npm run dev", since: 1761134400000, error: null, url: null, env: [] });
+  assert.equal(boppy.localInstalls, 1, "bops-local put there");
+  assert.deepEqual(boppy.localAsked.find((x) => x[0] === "start"), ["start", "field-notes", "field-notes", "-", "-", st.name], "Staging's project for its variables");
+  const again = await localRead();
+  assert.deepEqual([again.status, again.body.sites["field-notes"].state], [200, "running"]);
+  assert.equal(boppy.localInstalls, 1, "not put there again");
+  // Asleep: nothing runs there, and it isn't woken to say so, nor to stop.
+  boppy.status = "suspended";
+  const k = ran.length;
+  const asleep = await localRead();
+  assert.deepEqual(asleep.body, { sites: {}, asleep: true });
+  assert.deepEqual((await localAsk({ action: "stop" })).body, { sites: {}, asleep: true });
+  assert.equal(ran.length, k, "no command on the computer");
+  assert.equal(web.woke, undefined, "never woken");
+  boppy.status = "running";
+  // Its own command, kept on the computer for next time.
+  const c = await localAsk({ action: "start", command: "npm run dev -- --port $PORT" });
+  assert.equal(c.body.sites["field-notes"].command, "npm run dev -- --port $PORT");
+  assert.equal(Buffer.from(boppy.localAsked.at(-2)[3], "base64").toString(), "npm run dev -- --port $PORT");
+  // Its own variables: on stdin to the computer, their names back.
+  const SECRET = "local-only-secret-9c2";
+  const e = await ask(EnvRoute, "PATCH", "/api/hosted-apps/field-notes/env", NOTES, { ws: WS, where: "local", env: { LOCAL_FLAG: SECRET } });
+  assert.deepEqual([e.status, e.body], [200, { env: ["LOCAL_FLAG"] }]);
+  assert.ok(!ran.slice(-1)[0].command.split("\n").some((l) => l.includes("bops-local env") && /env field-notes field-notes \S/.test(l)), "nothing after the site on its command line");
+  assert.deepEqual((await localRead()).body.sites["field-notes"].env, ["LOCAL_FLAG"]);
+  await S.flushState(5000);
+  assert.ok(!JSON.stringify(S.getState()).includes(SECRET) && ![...warned, ...heard].some((l) => l.includes(SECRET)), "never kept or said here");
+  // Open on its screen, then Stop.
+  const o = await localAsk({ action: "open" });
+  assert.deepEqual([o.status, o.body.opened], [200, true]);
+  assert.deepEqual(boppy.opened, ["http://localhost:4100/"]);
+  const s = await localAsk({ action: "stop" });
+  assert.equal(s.body.sites["field-notes"].state, "stopped");
+  // Why not, in words; only from the window.
+  boppy.folders.delete("/workspace/apps/field-notes");
+  const nofolder = await localAsk({ action: "start" });
+  assert.deepEqual([nofolder.status, nofolder.body.error], [409, "Its working folder isn't on its computer yet. Ask its bot to work on it first."]);
+  boppy.folders.set("/workspace/apps/field-notes", `${PROJECT}/field-notes`);
+  assert.deepEqual((await localAsk({ action: "jump" })).status, 400);
+  assert.deepEqual((await localAsk({ action: "start", site: "nope" })).body.error, "There's no site by that name in this app.");
+  const away = await localAsk({ action: "start" }, { window: false });
+  assert.deepEqual([away.status, away.body.error], [403, "An app's Local can only be started in the Bops app."]);
+  // A stopped one that stopped by itself says its last words.
+  boppy.localFails = "Error: Cannot find module 'next'";
+  assert.deepEqual((await localAsk({ action: "start" })).body.sites["field-notes"].error, "Error: Cannot find module 'next'");
+  boppy.localFails = undefined;
+  // The bot.
+  const t = await turnWith("Run field notes locally so I can look", [toolCall("local_app", { app: "field-notes", action: "start" })]);
+  assert.equal(t.out(), "field-notes's Local is running on its computer at http://localhost:4100/ (open it in that computer's browser). It isn't on the web.");
+  const off = await turnWith("Stop field notes locally", [toolCall("local_app", { app: "field-notes", action: "stop" })]);
+  assert.equal(off.out(), "Stopped field-notes's Local.");
+});
+
+await check("Prod's domain, Cloudflare first: a domain typed into Use a domain I own whose zone is in the user's Cloudflare goes in from there, with what Bops would set (its plan, DNS only, written only on the user's word); one whose zone isn't gets the records to copy, as before", async () => {
+  cloudflareAgain();
+  const b = cloudflare.batches.length;
+  const r = await ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "connect", domain: "Blog.Acme.Test" });
+  assert.equal(r.status, 200);
+  const d = r.body.domain;
+  assert.deepEqual([d.domain, d.cloudflare, r.body.fresh], ["blog.acme.test", { zone: "acme.test", zoneId: Z_TEST }, true]);
+  const token = web.domains.find((x) => x.id === d.id).token;
+  assert.deepEqual(lines(r.body.cloudflare), [["add", "TXT", "_orgo-verify.blog", token], ["add", "CNAME", "blog", "edge.orgo.dev"]]);
+  assert.equal(cloudflare.batches.length, b, "nothing written in Cloudflare yet");
+  const other = await ask(DomainsRoute, "POST", "/api/hosted-apps/recipe-box/domains", RB, { ws: WS, action: "connect", domain: "shop.example.org" });
+  assert.equal(other.status, 200);
+  assert.ok(!other.body.cloudflare && !other.body.domain.cloudflare, "not in the user's Cloudflare: the records to copy");
+  assert.ok(other.body.domain.publish.length > 0);
+});
+
 await check("All of it only for an @orgo.ai account: anyone else gets 404s from every new route, and nothing is asked of Orgo or Ingot, nor started", async () => {
   addingAgain();
   const was = S.getState().account;
@@ -3286,8 +4893,21 @@ await check("All of it only for an @orgo.ai account: anyone else gets 404s from 
       await ask(DomainRoute, "POST", "/api/hosted-apps/recipe-box/domains/cd_mine", { name: "recipe-box", domainId: "cd_mine" }, { ws: WS }),
       await ask(DomainRoute, "DELETE", "/api/hosted-apps/recipe-box/domains/cd_mine", { name: "recipe-box", domainId: "cd_mine" }, { ws: WS }),
       await post("recipe-box", { ws: WS, action: "addSite", site: "recipe-box-admin" }),
+      await post("recipe-box", { ws: WS, action: "deploy", env: "staging" }),
+      await post("recipe-box", { ws: WS, action: "promote" }),
+      await ask(LocalRoute, "GET", `/api/hosted-apps/recipe-box/local?ws=${WS}`, RB),
+      await ask(LocalRoute, "POST", "/api/hosted-apps/recipe-box/local", RB, { ws: WS, action: "start" }),
       await post("recipe-box", { ws: WS, action: "removeSite", site: "recipe-box-admin" }),
       await ask(AppRoute, "DELETE", "/api/hosted-apps/recipe-box", RB, { ws: WS, repo: true }),
+      // Settings, Domains.
+      await ask(WsDomainsRoute, "GET", `/api/domains?ws=${WS}`, null),
+      await ask(WsDomainsRoute, "POST", "/api/domains", null, { ws: WS, domain: "guest.example", registrant: AVA, price: 1200 }),
+      await ask(WsSearchRoute, "GET", `/api/domains/search?ws=${WS}&q=guest`, null),
+      await ask(WsZoneRoute, "GET", `/api/domains/${ZONE}?ws=${WS}`, { zone: ZONE }),
+      await ask(WsZoneRoute, "PATCH", `/api/domains/${ZONE}`, { zone: ZONE }, { ws: WS, autoRenew: false }),
+      await ask(WsRecordsRoute, "POST", `/api/domains/${ZONE}/records`, { zone: ZONE }, { ws: WS, type: "TXT", name: "x", value: "y" }),
+      await ask(WsRecordRoute, "PATCH", `/api/domains/${ZONE}/records/AAAAAAAAAAAAAAAA`, { zone: ZONE, recordId: "AAAAAAAAAAAAAAAA" }, { ws: WS, type: "TXT", name: "x", value: "y" }),
+      await ask(WsRecordRoute, "DELETE", `/api/domains/${ZONE}/records/AAAAAAAAAAAAAAAA`, { zone: ZONE, recordId: "AAAAAAAAAAAAAAAA" }, { ws: WS }),
     ];
     assert.deepEqual(all.map((x) => x.status), all.map(() => 404));
     assert.equal(web.calls.length, n, "nothing asked of Orgo");
@@ -3394,6 +5014,90 @@ await check("Plain words: nothing a person or a bot reads has a dash", async () 
   const DASHES = /[‒–—―]| - /;
   for (const t of heard) assert.ok(!DASHES.test(t), `a dash in: ${t}`);
   assert.ok(heard.length > 20);
+});
+
+/* ---------------- What members with Your Apps see (lib/server/apps-for-members.ts) ---------------- */
+
+await check("what members see: kept only while someone has Your Apps at Read, written when it changed, never a variable, token or error", async () => {
+  const F = await import(`${root}/lib/server/apps-for-members.ts`);
+  const app = (o = {}) => ({
+    name: "seen",
+    head: "cs-2",
+    updatedAt: 9,
+    hosting: { botId: "boppy", computerId: "c_secret", projectId: "p_secret", url: "https://seen.orgo.dev" },
+    serving: "cs-2",
+    live: { id: "dep-2", at: "cs-2", state: "succeeded", when: 9, error: "SECRET_ERROR_TEXT", url: "https://seen.orgo.dev" },
+    ...o,
+  });
+  let reads = 0;
+  const readers = (a = app()) => ({
+    list: async () => ({ apps: [a] }),
+    commits: async () => (reads++, { commits: [{ id: "cs-2", message: "Ship it", author: "Ivy", at: 9, changes: { added: 1, modified: 0, deleted: 0 }, serving: true }], head: "cs-2", next: null }),
+    settings: async () => ({
+      url: "https://seen.orgo.dev",
+      settings: { port: 3000, install: "npm ci", build: null, start: "npm start" },
+      env: ["SECRET_VAR_NAME"],
+      deploys: [{ id: "dep-2", state: "succeeded", at: "cs-2", rollback: false, when: 9, error: "SECRET_ERROR_TEXT", live: true, canRollback: false }],
+    }),
+    owned: async () => ({ buy: { open: true }, owned: [{ id: "zone-1", domain: "acme.example", inUse: [{ name: "x.acme.example", app: "seen" }] }], contact: { email: "SECRET_REGISTRANT" } }),
+  });
+  const ws = () => S.getState().workspaces.find((w) => w.id === WS);
+  const keptHosted = ws().hostedApps;
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    w.hostedApps = { ...w.hostedApps, seen: { botId: "boppy", computerId: "c_secret" } };
+    w.memberAccess = { "tom@orgo.ai": { others: "none", bots: {}, apps: "none", at: 1 } };
+    delete w.appsForMembers;
+  });
+  // Nobody at Read: nothing kept, nothing read.
+  await F.seeApps(WS, undefined, readers());
+  assert.equal(ws().appsForMembers, undefined);
+  assert.equal(reads, 0);
+  S.update((s) => void (s.workspaces.find((x) => x.id === WS).memberAccess["tom@orgo.ai"].apps = "read"));
+  let t = 1_000;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  const seen = ws().appsForMembers;
+  assert.equal(seen.at, 1_000);
+  assert.deepEqual(seen.apps.seen.sites, [{ name: "seen", url: "https://seen.orgo.dev", serving: "cs-2", live: { id: "dep-2", state: "succeeded", when: 9 } }]);
+  assert.deepEqual(seen.apps.seen.head, { id: "cs-2", message: "Ship it", at: 9 });
+  assert.deepEqual(seen.apps.seen.deploys, [{ id: "dep-2", state: "succeeded", at: "cs-2", rollback: false, when: 9, live: true, canRollback: false, site: "seen" }]);
+  assert.deepEqual(seen.apps.seen.settings, { seen: { port: 3000, install: "npm ci", build: null, start: "npm start" } });
+  assert.deepEqual(seen.owned, [{ id: "zone-1", domain: "acme.example" }]);
+  const text = JSON.stringify(seen);
+  for (const hidden of ["SECRET_VAR_NAME", "SECRET_ERROR_TEXT", "SECRET_REGISTRANT", "c_secret", "p_secret", "inUse"]) assert.ok(!text.includes(hidden), `"${hidden}" isn't kept`);
+  // Nothing changed, within the hour: not written again. Past the hour: written, so members see it's fresh.
+  t = 2_000;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal(ws().appsForMembers.at, 1_000);
+  t = 1_000 + F.FRESH_MS;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal(ws().appsForMembers.at, t);
+  // Something changed: written at once. A member's act kept on the app stays through a read.
+  F.noteMemberAct(WS, "seen", { key: "k1", userId: "u_tom", name: "Tom", act: "deploy", ok: true, at: 5 });
+  t += 10;
+  await F.seeApps(WS, undefined, readers(app({ serving: "cs-3" })), () => t);
+  assert.equal(ws().appsForMembers.at, t);
+  assert.equal(ws().appsForMembers.apps.seen.sites[0].serving, "cs-3");
+  assert.deepEqual(ws().appsForMembers.apps.seen.acts.map((a) => a.key), ["k1"]);
+  assert.equal(F.actKept(WS, "seen", "k1"), true);
+  // The page's own reads (every few seconds while a deploy runs): at most once in PAGE_GAP_MS per workspace.
+  // (After the page's reads earlier in this file, on the real clock.)
+  const p0 = Date.now() + F.PAGE_GAP_MS;
+  const before = reads;
+  for (const dt of [0, 3_000, 6_000]) await F.seeAppsFromPage(WS, [app()], readers(), () => p0 + dt);
+  const once = reads - before;
+  assert.ok(once > 0, "the first one reads");
+  await F.seeAppsFromPage(WS, [app()], readers(), () => p0 + F.PAGE_GAP_MS);
+  assert.equal(reads - before, once * 2, "the next only once the gap has passed");
+  // Nobody at Read any more: what was kept goes.
+  S.update((s) => void (s.workspaces.find((x) => x.id === WS).memberAccess["tom@orgo.ai"].apps = "none"));
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal(ws().appsForMembers, undefined);
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    w.hostedApps = keptHosted;
+    delete w.memberAccess;
+  });
 });
 
 console.log(`\nhosted apps: ${passed} passed, ${failed} failed`);

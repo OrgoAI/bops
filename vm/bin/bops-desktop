@@ -18,6 +18,12 @@ fi
 mkdir -p /var/log/bops
 
 read -r W H < <(DISPLAY=:100 xdotool getdisplaygeometry 2>/dev/null || echo "1280 720")
+# Screen 4 (display 99) is Orgo's own desktop, and its settings live in that session's xfconfd. Asked from
+# any other session bus (this script's, or the fresh one made for the docks below), xfconf-query changes a
+# copy nobody reads: the taskbar stayed up and the themes didn't take. So :99 is always asked on its
+# panel's own bus.
+BUS99=$(tr '\0' '\n' < "/proc/$(pgrep -o -x xfce4-panel 2>/dev/null || echo none)/environ" 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+x99() { env DISPLAY=:99 ${BUS99:+DBUS_SESSION_BUS_ADDRESS=$BUS99} xfconf-query "$@"; }
 
 # 1. Wallpaper: render Bops' wallpaper page to an image with headless Chrome, then paint every screen.
 # Straight to the Chrome binary, with a hard timeout: on Orgo's image a headless Chrome can pick up
@@ -30,8 +36,8 @@ for N in 99 100 101 102; do
   DISPLAY=":$N" hsetroot -fill "$D/wall.png" >/dev/null 2>&1 || true
 done
 # The boot screen runs xfdesktop, which draws its own backdrop.
-for P in $(DISPLAY=:99 xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image); do
-  DISPLAY=:99 xfconf-query -c xfce4-desktop -p "$P" -s "$D/wall.png" 2>/dev/null
+for P in $(x99 -c xfce4-desktop -l 2>/dev/null | grep last-image); do
+  x99 -c xfce4-desktop -p "$P" -s "$D/wall.png" 2>/dev/null
 done
 
 # 2. Chrome: the bot's color, and its home screen on every new tab. The home screen comes from a
@@ -71,7 +77,7 @@ cat > /usr/share/applications/bops-browser.desktop <<'EOF'
 Type=Application
 Name=Browser
 Icon=google-chrome
-Exec=sh -c 'google-chrome-stable --no-sandbox --user-data-dir=/root/profiles/s${DISPLAY#:} --class=BopsBrowser --new-window'
+Exec=sh -c 'google-chrome-stable --no-sandbox --user-data-dir=/root/profiles/s${DISPLAY#:} --class=BopsBrowser --new-window --start-maximized'
 StartupWMClass=BopsBrowser
 NoDisplay=true
 EOF
@@ -122,7 +128,8 @@ for N in 99 100 101 102; do
   S="net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock$N/"
   gsettings set "$S" theme 'Bops' 2>/dev/null
   gsettings set "$S" icon-size 40 2>/dev/null
-  gsettings set "$S" hide-mode 'none' 2>/dev/null
+  # Out of the way of a window that fills the screen; it slides up when the pointer reaches the bottom edge.
+  gsettings set "$S" hide-mode 'intelligent' 2>/dev/null
   # No hover zoom: the live view misses some of its repaints and leaves ghost icons behind.
   gsettings set "$S" zoom-enabled false 2>/dev/null
   gsettings set "$S" show-dock-item false 2>/dev/null
@@ -132,11 +139,9 @@ for N in 99 100 101 102; do
 done
 
 # A light system theme, like a fresh laptop (Orgo's base image is dark, and Chrome follows it).
-for N in 99; do
-  DISPLAY=":$N" xfconf-query -c xsettings -p /Net/ThemeName -s Arc-Lighter 2>/dev/null
-  DISPLAY=":$N" xfconf-query -c xsettings -p /Net/IconThemeName -s Papirus 2>/dev/null
-  DISPLAY=":$N" xfconf-query -c xfwm4 -p /general/theme -s Arc-Lighter 2>/dev/null
-done
+x99 -c xsettings -p /Net/ThemeName -s Arc-Lighter 2>/dev/null
+x99 -c xsettings -p /Net/IconThemeName -s Papirus 2>/dev/null
+x99 -c xfwm4 -p /general/theme -s Arc-Lighter 2>/dev/null
 mkdir -p /root/.config/gtk-3.0
 if [ -f /root/.config/gtk-3.0/settings.ini ]; then
   sed -i 's/^gtk-theme-name=.*/gtk-theme-name=Arc-Lighter/; s/^gtk-icon-theme-name=.*/gtk-icon-theme-name=Papirus/; s/^gtk-application-prefer-dark-theme=.*/gtk-application-prefer-dark-theme=0/' /root/.config/gtk-3.0/settings.ini
@@ -144,26 +149,17 @@ else
   printf '[Settings]\ngtk-theme-name=Arc-Lighter\ngtk-icon-theme-name=Papirus\ngtk-application-prefer-dark-theme=0\n' > /root/.config/gtk-3.0/settings.ini
 fi
 
-# Screen 4 is Orgo's own desktop: its taskbar (a clock bar on top, launchers under Bops' dock)
-# stays out of sight, and window buttons sit on the right like on the other screens. Hidden, not
-# quit: Orgo's watchdog restarts the taskbar whenever it exits.
-for P in $(DISPLAY=:99 xfconf-query -c xfce4-panel -p /panels 2>/dev/null | grep -E '^[0-9]+$'); do
-  DISPLAY=:99 xfconf-query -c xfce4-panel -p "/panels/panel-$P/autohide-behavior" -n -t uint -s 2 2>/dev/null
-done
-DISPLAY=:99 xfconf-query -c xfwm4 -p /general/button_layout -s "O|HMC" 2>/dev/null
-DISPLAY=:99 xfconf-query -c xsettings -p /Gtk/DecorationLayout -n -t string -s "menu:minimize,maximize,close" 2>/dev/null
+# Screen 4 is Orgo's own desktop: window buttons sit on the right like on the other screens (its taskbar
+# and launcher are hidden by bops-screen-layout, below).
+x99 -c xfwm4 -p /general/button_layout -s "O|HMC" 2>/dev/null
+x99 -c xsettings -p /Gtk/DecorationLayout -n -t string -s "menu:minimize,maximize,close" 2>/dev/null
 
 # Windows stay solid when they lose focus (xfwm4 fades them by default, which reads as glitchy here).
 for K in inactive_opacity move_opacity resize_opacity popup_opacity frame_opacity; do
-  DISPLAY=:99 xfconf-query -c xfwm4 -p "/general/$K" -s 100 2>/dev/null
+  x99 -c xfwm4 -p "/general/$K" -s 100 2>/dev/null
 done
 
-# 4. Windows sit on the desktop, above the dock, instead of covering it edge to edge.
-place() {
-  for WIN in $(DISPLAY=":$1" xdotool search --onlyvisible --class BopsBrowser 2>/dev/null); do
-    DISPLAY=":$1" xdotool windowsize "$WIN" $((W - 160)) $((H - 150)) windowmove "$WIN" 80 60 2>/dev/null
-  done
-}
+# 4. Chrome fills its screen, like a browser on any computer, and the dock hides under it.
 if [ "${1:-}" = "--restart-chrome" ]; then
   for N in 99 100 101 102; do
     pkill -f "[u]ser-data-dir=/root/profiles/s$N" 2>/dev/null; sleep 1
@@ -171,5 +167,5 @@ if [ "${1:-}" = "--restart-chrome" ]; then
   done
   sleep 3
 fi
-for N in 99 100 101 102; do place "$N"; done
+bops-screen-layout >/dev/null 2>&1
 echo "dressed as $NAME"

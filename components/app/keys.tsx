@@ -19,8 +19,15 @@ import { post, teamOf } from "./ui";
  */
 
 type Provider = { name: string; label: string; where: string; tip: string; readOnly: boolean };
-type Scope = "workspace" | "all";
-type KeyRow = Provider & { updatedAt: string | null; scope: Scope; bots: string[] };
+export type Scope = "workspace" | "all";
+/**
+ * A key as GET /api/keys lists it for the open workspace. `usedIn`: the other workspaces it's switched on in (Used in,
+ * lib/server/logins.ts); `from`: the workspace it's from, when it's another's switched on here (its value, a new one
+ * and removing it are that workspace's).
+ */
+export type KeyRow = Provider & { updatedAt: string | null; scope: Scope; bots: string[]; usedIn?: string[]; from?: string };
+/** A key's id on the Logins page: its scope and name (one name may be in both). */
+export const keyId = (k: Pick<KeyRow, "scope" | "name">) => `${k.scope}:${k.name}`;
 type KeysInfo = { signedIn: boolean; keys: KeyRow[]; providers: Provider[]; workspaceKeys?: boolean; error?: string };
 
 /** The two scopes, as Orgo's Secrets names them. */
@@ -65,6 +72,34 @@ function useKeys(ws: string) {
     return () => void readers.delete(again);
   }, [read, ws]);
   return { info, failed, retry: () => read(true) };
+}
+
+/**
+ * The names of the keys the Vault has (both scopes), for an agent that runs on one (lib/agents.ts agentState: none
+ * there, and it says so). Undefined until they're read, when the Vault can't say (not signed in, no answer), or
+ * when not asked for (`on`: the bot has an agent on a key): nothing is fetched then.
+ */
+export function useVaultKeyNames(ws: string, on: boolean): ReadonlySet<string> | undefined {
+  const [names, setNames] = useState<{ ws: string; names: ReadonlySet<string> } | null>(null);
+  useEffect(() => {
+    if (!on) return;
+    let gone = false;
+    const read = (fresh = false) =>
+      void fetch(`/api/keys${fresh ? "?fresh=1" : ""}`, { cache: "no-store" })
+        .then(async (r) => {
+          const j = (await r.json().catch(() => ({}))) as Partial<KeysInfo>;
+          if (!gone && r.ok && j.signedIn !== false && Array.isArray(j.keys)) setNames({ ws, names: new Set(j.keys.map((k) => k.name)) });
+        })
+        .catch(() => {});
+    read();
+    const again = () => read(true);
+    readers.add(again);
+    return () => {
+      gone = true;
+      readers.delete(again);
+    };
+  }, [on, ws]);
+  return on && names?.ws === ws ? names.names : undefined;
 }
 
 /** "Oct 15", as Orgo's Secrets shows when a secret was set. */
@@ -212,8 +247,29 @@ async function grant(name: string, botId: string, allowed: boolean): Promise<str
  * a bot's profile to add one for that bot, so it comes into view with the form open and that bot picked.
  * `uses`: when each key was last used, and by which bot.
  */
-export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: AppState; keysFor?: string; uses?: LastUses; onOpenWatch: (w: Watch) => void }) {
+export function KeysSettings({
+  state,
+  keysFor,
+  uses,
+  onOpenWatch,
+  picked: open,
+  onPick,
+  onKeys,
+}: {
+  state: AppState;
+  keysFor?: string;
+  uses?: LastUses;
+  onOpenWatch: (w: Watch) => void;
+  /** The key open in the Logins page's side panel (keyId), and how a key's name opens it there. */
+  picked?: string | null;
+  onPick?: (k: KeyRow) => void;
+  /** The keys as last read, for the side panel. */
+  onKeys?: (keys: KeyRow[]) => void;
+}) {
   const { info, failed, retry } = useKeys(state.workspace ?? MAIN_WORKSPACE);
+  useEffect(() => {
+    if (info) onKeys?.(info.keys);
+  }, [info, onKeys]);
   const team = teamOf(state);
   const main = team.find((b) => b.isMain) ?? team[0];
   const picked = keysFor && team.some((b) => b.id === keysFor) ? keysFor : main?.id;
@@ -276,6 +332,9 @@ export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: App
           <Fragment key={`${k.scope}:${k.name}`}>
             <KeyLine
               k={k}
+              state={state}
+              picked={open === keyId(k)}
+              onPick={onPick && (() => onPick(k))}
               team={team}
               used={usedLine(uses?.[k.name], team)}
               onReplace={() => setForm({ replace: k, bots: [] })}
@@ -304,7 +363,7 @@ export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: App
     <div ref={ref} className="flex scroll-mt-4 flex-col gap-2 pt-2">
       <div className="flex items-end justify-between gap-3">
         <div className="flex flex-col gap-0.5">
-          <span className="text-[15px] font-semibold leading-5">API keys</span>
+          <span className="text-[15px] font-semibold leading-5">Keys</span>
           <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Kept in your Orgo vault, the same keys as Orgo&apos;s Settings, Secrets. Bots call through Orgo and never see them.</span>
         </div>
         {info?.signedIn && !form && (
@@ -367,6 +426,9 @@ const KEY_CHOICES: { id: "act" | "none"; name: string; hint: string }[] = [
  */
 function KeyLine({
   k,
+  state,
+  picked,
+  onPick,
   team,
   used,
   onReplace,
@@ -375,6 +437,10 @@ function KeyLine({
   anchorRef,
 }: {
   k: KeyRow;
+  state: AppState;
+  /** Open in the Logins page's side panel; `onPick` opens it there from its name. */
+  picked?: boolean;
+  onPick?: () => void;
   team: Bot[];
   /** "Used 2h ago by Iris", when a bot of this workspace did. */
   used: string | null;
@@ -415,22 +481,30 @@ function KeyLine({
     }
   };
   const when = setOn(k.updatedAt);
+  // Another workspace's, switched on here (Used in): its value, a new one and removing it are that workspace's.
+  const fromName = k.from ? (state.workspaces?.find((w) => w.id === k.from)?.name ?? "another workspace") : null;
   // Where it applies is the tab it's under, so the line says only what's this key's own.
-  const meta = [k.readOnly && "Read only", when && `Updated ${when}`].filter(Boolean).join(" · ");
+  const meta = [fromName && `From ${fromName}`, k.readOnly && "Read only", when && `Updated ${when}`].filter(Boolean).join(" · ");
   return (
-    <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0">
+    <div data-key={keyId(k)} className={`flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0 ${picked ? "-mx-2 rounded-xl px-2 shadow-[0_0_0_1.5px_#0A0A0A]" : ""}`}>
       <div className="flex items-center gap-2">
         {/* Where focus goes when the last of its routines is deleted (autopilot.tsx, focusAfterRemove). */}
-        <span data-list-heading tabIndex={-1} className="min-w-0 truncate font-mono text-[13px] font-medium leading-[18px] outline-none">
-          {k.name}
-        </span>
+        {onPick ? (
+          <button type="button" data-list-heading onClick={onPick} aria-pressed={!!picked} className="min-w-0 truncate rounded-md text-left font-mono text-[13px] font-medium leading-[18px] outline-none hover:underline focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]">
+            {k.name}
+          </button>
+        ) : (
+          <span data-list-heading tabIndex={-1} className="min-w-0 truncate font-mono text-[13px] font-medium leading-[18px] outline-none">
+            {k.name}
+          </span>
+        )}
         {meta && (
           <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
             {meta}
           </span>
         )}
         <span className="flex-1" />
-        <div className="flex shrink-0 items-center">
+        <div className={`flex shrink-0 items-center ${fromName ? "hidden" : ""}`}>
           <button
             type="button"
             disabled={busy || v.busy}

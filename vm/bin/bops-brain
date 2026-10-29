@@ -21,23 +21,61 @@
 #   bops-brain cancel <brain>              close that sign-in's terminal, and its Chrome (bops-brain-browser)
 #   bops-brain logout <brain>              Claude Code's own `auth logout` for that brain
 #   bops-brain forget <brain>              sign out, and delete the brain's folder
-#   bops-brain run <brain> claude|codex [--computer <computer>] [--key-file <file>] [--] <args...>
-#       run the brain's CLI. A key brain's key comes in a 0600 file that's read into the environment
-#       (ANTHROPIC_API_KEY for Claude Code, CODEX_API_KEY for Codex) and deleted, never on a command line.
-#       With --computer, a folder signed in on another computer is deleted first, as status does. Of
-#       the caller's environment only DISPLAY carries over (the screen its tools work on). Codex runs
-#       only on a key (never a ChatGPT sign-in), with Bops' settings in its folder (config.toml).
+#   bops-brain run <brain|-> claude|codex|opencode [--computer <computer>] [--key-file <file>]
+#                  [--bot <bot> --agent <agent> [--model <m>] [--effort low|medium|high] [--route <r>]
+#                   [--also <agents>] [--oc-config <file>] [--label <word>] [--shell-after|--shell-only]] [--] <args...>
+#       run the brain's CLI. Without --bot, as before: a key brain's key comes in a 0600 file that's read
+#       into the environment (ANTHROPIC_API_KEY for Claude Code, CODEX_API_KEY for Codex) and deleted, never
+#       on a command line. With --computer, a folder signed in on another computer is deleted first, as
+#       status does. Of the caller's environment only DISPLAY carries over (the screen its tools work on).
+#       Codex runs only on a key (never a ChatGPT sign in), with Bops' settings in its folder (config.toml).
+#       With --bot, it is that bot's agent (a bot's AI profile, lib/agents.ts): see "A bot's own settings".
+#   bops-brain bin <bot> [--also <agents>]
+#       the bin folder of the bot's own Bops agent (its executor's commands: bops-exec's fourth argument),
+#       with the bot's wrappers in it. Prints its path.
+#   bops-brain bot-clear <bot> [<agent>]
+#       the bot's (or one agent's) key gates stop and its folder here goes: it was switched or removed.
+#   bops-brain rebin <bot> [--also <agents>]
+#       the bot's profile changed: every one of its agents' bin folders here gets its wrappers for the bot's
+#       other agents again, from <agents> (all its CLI agents now), so a Claude plan it doesn't run anymore
+#       isn't left in a thread's or its Bops agent's claude. Each agent's own wrapper stays. <agents> is kept
+#       in the bot's folder (also), where a Codex or OpenCode thread already going reads it for its next run.
+#
+# A bot's own settings (--bot): every process a bot's thread starts on this computer runs as that bot's
+# agent and nothing else, even with other bots on the same computer. The run starts from an empty
+# environment and sets only that bot's and that agent's settings, on that process only (never in
+# /root/.bashrc, /etc/environment or a shared ~/.claude, ~/.codex or OpenCode folder):
+#   /root/.bops/bots/<bot>/agents/<agent>/bin   first on PATH: claude, codex, opencode and agy there are this
+#                                               bot's own small scripts (wrappers), so a command the agent
+#                                               runs gets this bot's account and model. No secret is in them.
+#   /root/.bops/bots/<bot>/tmp                  TMPDIR for all of it
+#   /root/.bops/bots/<bot>/opencode/            OpenCode's own folders for this bot (XDG_*)
+# On a key, the key never enters the bot's processes: a gate of this run's own (bops-ai-gate) holds it and
+# the agent gets a token for it and its 127.0.0.1 address. The token is worth nothing once the run is over.
+# --also names the bot's other agents for its wrappers ("claude:plan:<brain>:<model>,codex:key"): a Claude
+# plan works in any of its threads; a key works only in that agent's own threads (its key isn't in this run).
+# A thread's own model and thinking are in its run's environment (BOPS_MODEL, BOPS_EFFORT), never in a file:
+# two threads of one agent may run on two models side by side, and each one's nested claude, codex or
+# opencode keeps to its own. OpenCode's agent file is the same for all of them (its providers at the gate);
+# the run's model and provider come in OPENCODE_CONFIG_CONTENT.
 set -euo pipefail
 BRAINS="${BOPS_BRAINS:-/root/.bops/brains}"
 CLAUDE="${BOPS_CLAUDE:-/opt/bops/claude/bin/claude}"
 CODEX="${BOPS_CODEX:-/usr/local/bin/codex}"
 LOGS="${BOPS_LOGS:-/var/log/bops}"
+BOTS="${BOPS_BOTS:-/root/.bops/bots}"
+OPENCODE="${BOPS_OPENCODE:-/opt/bops/opencode/bin/opencode}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Read now: the clean environment below has no PATH to find dirname with.
-RUNS="$(dirname "$CLAUDE"):/usr/local/bin:/usr/bin:/bin"
+GATE_BIN="${BOPS_GATE_BIN:-$HERE/bops-ai-gate}"
+# Tests only: the gate's fake provider (bops-ai-gate reads these).
+GATE_TEST="${BOPS_GATE_TEST:-}"; GATE_UPSTREAM="${BOPS_GATE_UPSTREAM:-}"
+# No CLI's own folder is on a run's PATH: claude and opencode are found only through a bot's wrappers. Claude
+# Code's own sign in, status and sign out (its account's own, no bot's) keep its folder on theirs, as before.
+RUNS="/usr/local/bin:/usr/bin:/bin"
+ACCOUNT_RUNS="$(dirname "$CLAUDE"):$RUNS"
 RUN_HOME="${BOPS_HOME:-/root}"
 CMD="${1:-}"; ID="${2:-}"
-[[ "$ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "usage: bops-brain status|login|cancel|logout|forget|run <brain> ..." >&2; exit 2; }
+[[ "$ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "usage: bops-brain status|login|cancel|logout|forget|run|bin|rebin|bot-clear <brain|bot> ..." >&2; exit 2; }
 DIR="$BRAINS/$ID"
 # The Chrome a sign-in's page opens in (bops-brain-browser): a profile of its own, never the bots'.
 SIGNIN="$BRAINS/.signin-$ID"
@@ -58,16 +96,18 @@ bare() {
 
 # Bops' settings for Codex in a brain's folder, its CODEX_HOME (never ~/.codex): the user's OpenAI key only,
 # so a ChatGPT sign-in is never used even if one were made here; no update check (Bops pins it); live web
-# search, as Bops agent has; and the commands it runs never get its key (or any other) in their environment,
-# which Codex would otherwise hand them. Written whole and then moved in, as threads of one brain start side
-# by side.
+# search, as Bops agent has; and the commands it runs never get Codex's own key variable. A bot's agent
+# (--bot) has only its run token in OPENAI_API_KEY, which its commands keep (Codex's default would drop every
+# *KEY* and *TOKEN*), so codex, an SDK or curl there work on the bot's account; a run without --bot has no
+# OPENAI_API_KEY at all. Written whole and then moved in, as threads of one brain start side by side.
 codex_config() {
   local want='forced_login_method = "api"
 check_for_update_on_startup = false
 web_search = "live"
 
 [shell_environment_policy]
-exclude = ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_*", "CLAUDE_CODE_OAUTH_TOKEN"]'
+ignore_default_excludes = true
+exclude = ["CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"]'
   [ "$(cat "$DIR/config.toml" 2>/dev/null)" = "$want" ] && return 0
   (umask 077; printf '%s\n' "$want" > "$DIR/config.toml.$$") && mv -f "$DIR/config.toml.$$" "$DIR/config.toml"
 }
@@ -99,12 +139,175 @@ PY
   (umask 077; printf '%s\n' 'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY OPENAI_API_KEY' > "$DIR/.shell-env")
 }
 
+# ---------------- A bot's own settings (--bot) ----------------
+
+# A file of a bot's folder from stdin, 0700 or 0600 ($2), only when it changed: written whole, then moved in.
+put_file() {
+  local f="$1" mode="$2" body
+  body="$(cat)"
+  [ -f "$f" ] && [ "$(cat "$f")" = "$body" ] && return 0
+  (umask 077; printf '%s\n' "$body" > "$f.$$") && chmod "$mode" "$f.$$" && mv -f "$f.$$" "$f"
+}
+
+NAMES_claude="Claude Code"; NAMES_codex="Codex"; NAMES_opencode="OpenCode"
+HEAD='#!/bin/sh
+# Bops writes this for one bot'"'"'s agent each time it starts work (vm/bin/bops-brain). Nothing secret is in it.'
+
+# Claude Code on a plan: its login in the account's folder, so no key or token may reach it. $2: the model
+# another agent of the bot is set to (an --also entry's); none for the agent's own, whose model is its run's.
+w_claude_plan() {
+  local own=""
+  [ -z "${3:-}" ] || own='[ -z "${BOPS_MODEL:-}" ] || export ANTHROPIC_MODEL="$BOPS_MODEL"'
+  printf '%s\n' "$HEAD" \
+    "unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN" \
+    "export CLAUDE_CONFIG_DIR='$BRAINS/$1' CLAUDE_ENV_FILE='$G/shell-env'${2:+ ANTHROPIC_MODEL='$2'}" \
+    ${own:+"$own"} \
+    "exec '$CLAUDE' \"\$@\""
+}
+# Claude Code on a key: only where this run's gate is (its own threads and terminal), on the run's model.
+w_claude_key() {
+  printf '%s\n' "$HEAD" \
+    "[ -n \"\${BOPS_GATE:-}\" ] || { echo \"claude runs on this bot's key only inside its threads and terminal.\" >&2; exit 1; }" \
+    "unset ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN" \
+    "export ANTHROPIC_BASE_URL=\"\$BOPS_GATE/anthropic\" CLAUDE_CONFIG_DIR='$BRAINS/$1' CLAUDE_ENV_FILE='$G/shell-env'" \
+    "[ -z \"\${BOPS_MODEL:-}\" ] || export ANTHROPIC_MODEL=\"\$BOPS_MODEL\"" \
+    "exec '$CLAUDE' \"\$@\""
+}
+# Codex on a key: its folder, and the run's model, thinking and gate on its own command line (Codex has no model variable).
+w_codex_key() {
+  printf '%s\n' "$HEAD" \
+    "[ -n \"\${BOPS_GATE:-}\" ] || { echo \"codex runs on this bot's key only inside its threads and terminal.\" >&2; exit 1; }" \
+    "export CODEX_HOME='$BRAINS/$1' CODEX_API_KEY=\"\${OPENAI_API_KEY:-}\" OPENAI_BASE_URL=\"\$BOPS_GATE/openai/v1\"" \
+    "exec '$CODEX' \${BOPS_MODEL:+-c \"model=\\\"\$BOPS_MODEL\\\"\"} -c \"openai_base_url=\\\"\$BOPS_GATE/openai/v1\\\"\" \${BOPS_EFFORT:+-c \"model_reasoning_effort=\\\"\$BOPS_EFFORT\\\"\"} \"\$@\""
+}
+# OpenCode on a key: this bot's folders, never a project's config, and a private server for every run
+# (without --standalone, OpenCode serves every run on a computer from one background service). Its model and
+# provider are the run's (OPENCODE_CONFIG_CONTENT, which a nested opencode keeps).
+w_opencode_key() {
+  printf '%s\n' "$HEAD" \
+    "[ -n \"\${BOPS_GATE:-}\" ] || { echo \"opencode runs on this bot's key only inside its threads and terminal.\" >&2; exit 1; }" \
+    "export OPENCODE_CONFIG='$G/opencode.json' XDG_CONFIG_HOME='$B/opencode/config' XDG_DATA_HOME='$B/opencode/data' XDG_STATE_HOME='$B/opencode/state' XDG_CACHE_HOME='$B/opencode/cache' OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1" \
+    'case "${1:-}" in' \
+    "  run) shift; exec '$OPENCODE' run --standalone \"\$@\" ;;" \
+    "  upgrade|update|uninstall|service) echo \"Bops keeps OpenCode at its own version.\" >&2; exit 1 ;;" \
+    "  ''|-*) exec '$OPENCODE' --standalone \"\$@\" ;;" \
+    "  *) exec '$OPENCODE' \"\$@\" ;;" \
+    'esac'
+}
+w_stub() { printf '%s\n' "$HEAD" "echo \"$1\" >&2" "exit $2"; }
+
+# A wrapper for one of the bot's other agents, from ALSO: a Claude plan (the first plan of its entries, ahead of
+# any key: a plan works in every thread of the bot), else a stub that says why not.
+also_wrapper() {
+  local name="$1" entry kind pays acct model plan="" has="" nm
+  for entry in ${ALSO//,/ }; do
+    IFS=: read -r kind pays acct model <<< "$entry"
+    [ "$kind" = "$name" ] || continue
+    has=1
+    if [ "$kind" = claude ] && [ "$pays" = plan ] && [ -z "$plan" ]; then plan="$acct:$model"; fi
+  done
+  eval "nm=\$NAMES_$name"
+  if [ -n "$plan" ]; then w_claude_plan "${plan%%:*}" "${plan#*:}"
+  elif [ -n "$has" ]; then w_stub "$nm runs on this bot's key only in a thread with $nm. Start one in Bops with New thread." 1
+  else w_stub "This bot doesn't run $nm. Add it in its profile in Bops." 127; fi
+}
+
+# The agent's bin folder: claude, codex, opencode and agy. Its own kind runs on its own account, on the run's
+# model; a Claude plan the bot also has works here too (no key needed); a key of another agent doesn't (it
+# isn't in this run). Its kind is kept by the folder (kind), for rebin.
+wrappers() {
+  local name drop
+  for name in claude codex opencode; do
+    if [ "$KIND" = "$name" ]; then w_"$name"_"$PAYS" "$ID" "" own
+    else also_wrapper "$name"; fi | put_file "$G/bin/$name" 700
+  done
+  w_stub "agy isn't in Bops yet." 127 | put_file "$G/bin/agy" 700
+  printf '%s\n' "$KIND" | put_file "$G/kind" 600
+  # Claude Code's shell commands, anywhere in this agent's processes: no other sign in may reach them. A key
+  # agent's commands keep its run token (claude, an SDK or curl there work on the bot's account); a plan's, as
+  # before, have no key or token at all. They start from a snapshot of the login shell, where /root/.bashrc may
+  # have put the computer's own claude or codex first on the PATH, or made an alias of one: this agent's
+  # commands go first again and no alias is left, so each one is the bot's own there too.
+  if [ "$KIND" = claude ] && [ "$PAYS" = plan ]; then drop='unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY OPENAI_API_KEY'
+  else drop='unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN CODEX_API_KEY'; fi
+  printf '%s\n' "$drop" 'unalias claude codex opencode agy 2>/dev/null || true' "export PATH='$G/bin':\"\$PATH\"" | put_file "$G/shell-env" 600
+}
+
+# The bot's folder and this agent's in it, its own only.
+bot_dir() {
+  B="$BOTS/$BOT"; G="$B/agents/$AGENT"
+  mkdir -p "$G/bin" "$B/tmp"
+  chmod 700 "$BOTS" "$B" "$B/agents" "$G" "$G/bin" "$B/tmp"
+}
+
+# OpenCode's settings for this agent, the same for every one of its runs: each provider at the run's gate,
+# nothing secret ({env:...} is read by OpenCode from the run's environment, where only the token is). No model
+# or provider is picked here: two of its threads may run side by side on two (oc_content).
+opencode_config() {
+  mkdir -p "$B/opencode/config" "$B/opencode/data" "$B/opencode/state" "$B/opencode/cache"
+  chmod 700 "$B/opencode" "$B/opencode/config" "$B/opencode/data" "$B/opencode/state" "$B/opencode/cache"
+  printf '%s\n' '{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "anthropic": { "options": { "baseURL": "{env:BOPS_GATE}/anthropic/v1", "apiKey": "{env:ANTHROPIC_API_KEY}" } },
+    "openai": { "options": { "baseURL": "{env:BOPS_GATE}/openai/v1", "apiKey": "{env:OPENAI_API_KEY}" } },
+    "deepinfra": { "options": { "baseURL": "{env:BOPS_GATE}/deepinfra/v1/openai", "apiKey": "{env:DEEPINFRA_API_KEY}" } }
+  }
+}' | put_file "$G/opencode.json" 600
+}
+
+# This run's own OpenCode settings (OPENCODE_CONFIG_CONTENT): the thread's (its MCP servers and briefing, from
+# --oc-config), then the run's model, on its provider only. A provider's address never comes from the thread's.
+oc_content() {
+  printf '%s' "$OCCONTENT" | python3 -I -c '
+import json, sys
+model, route = sys.argv[1], sys.argv[2]
+try:
+    c = json.loads(sys.stdin.read() or "{}")
+except ValueError:
+    c = {}
+if not isinstance(c, dict):
+    c = {}
+c.pop("provider", None)
+c.update({"model": model, "small_model": model, "enabled_providers": [route], "provider": {route: {"models": {model.split("/", 1)[-1]: {}}}}})
+print(json.dumps(c))
+' "$MODEL" "$ROUTE"
+}
+
+# This run's gate (bops-ai-gate): the key goes into its stdin, never a command line or a variable anything
+# else sees, and the run gets a fresh token and the gate's address. The gate's parent is this process, which
+# becomes the CLI (exec), so the gate goes when the run does.
+gate_up() {
+  [ -n "$KEY" ] || { echo "no key for this run" >&2; exit 1; }
+  TOKEN="bopsrun_$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+  PF="$G/gate-$$.port"
+  rm -f "$PF"
+  if [ -n "$GATE_TEST" ]; then
+    printf '%s\n%s\n' "$TOKEN" "$KEY" | BOPS_GATE_TEST="$GATE_TEST" BOPS_GATE_UPSTREAM="$GATE_UPSTREAM" python3 -I "$GATE_BIN" --route "$ROUTE" --port-file "$PF" > /dev/null 2>&1 &
+  else
+    printf '%s\n%s\n' "$TOKEN" "$KEY" | python3 -I "$GATE_BIN" --route "$ROUTE" --port-file "$PF" > /dev/null 2>&1 &
+  fi
+  KEY=""
+  for _ in $(seq 1 50); do [ -s "$PF" ] && break; sleep 0.1; done
+  [ -s "$PF" ] || { echo "Bops couldn't start the key gate for this run" >&2; exit 1; }
+  GURL="http://127.0.0.1:$(cat "$PF")"
+}
+
+# The bot's shell, after its agent's CLI or on its own: this run's settings, never /root/.bashrc (which may
+# read /root/.env, where the computer's own Orgo key is kept).
+bot_shell() {
+  printf '%s\n' "PS1='$LABEL \\W \$ '" | put_file "$B/shellrc" 600
+  exec bash --noprofile --rcfile "$B/shellrc" -i
+}
+
 case "$CMD" in
   status)
     C="${3:-}"; [[ "$C" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "which computer?" >&2; exit 2; }
     [ -d "$DIR" ] || { echo '{"loggedIn":false}'; exit 0; }
     if [ "$(cat "$DIR/.computer" 2>/dev/null)" != "$C" ]; then rm -rf "$DIR"; echo '{"loggedIn":false}'; exit 0; fi
-    (bare; export CLAUDE_CONFIG_DIR="$DIR"; exec "$CLAUDE" auth status --json) || true
+    (bare; export PATH="$ACCOUNT_RUNS" CLAUDE_CONFIG_DIR="$DIR"; exec "$CLAUDE" auth status --json) || true
     ;;
   login)
     N="${3:-}"; [[ "$N" =~ ^[0-9]+$ ]] || { echo "which display?" >&2; exit 2; }
@@ -131,7 +334,7 @@ case "$CMD" in
     N="${3:?display}"
     mkdir -p "$BRAINS/.open"
     ln -sf "$HERE/bops-brain-browser" "$BRAINS/.open/xdg-open"
-    if (bare; export DISPLAY=":$N" CLAUDE_CONFIG_DIR="$DIR" BROWSER="$HERE/bops-brain-browser" PATH="$BRAINS/.open:$PATH"; exec "$CLAUDE" auth login); then exit 0; fi
+    if (bare; export DISPLAY=":$N" CLAUDE_CONFIG_DIR="$DIR" BROWSER="$HERE/bops-brain-browser" PATH="$BRAINS/.open:$ACCOUNT_RUNS"; exec "$CLAUDE" auth login); then exit 0; fi
     echo
     echo "Claude Code didn't finish signing in. Close this window and try again from Bops."
     read -r _ || true
@@ -142,43 +345,190 @@ case "$CMD" in
     ;;
   logout|forget)
     close_signin
-    if [ -d "$DIR" ]; then (bare; export CLAUDE_CONFIG_DIR="$DIR"; exec "$CLAUDE" auth logout) > /dev/null 2>&1 || true; fi
+    if [ -d "$DIR" ]; then (bare; export PATH="$ACCOUNT_RUNS" CLAUDE_CONFIG_DIR="$DIR"; exec "$CLAUDE" auth logout) > /dev/null 2>&1 || true; fi
     [ "$CMD" = forget ] && rm -rf "$DIR"
     echo "signed out"
     ;;
   run)
     KIND="${3:-}"; shift 3
-    KEYFILE=""; C=""
+    KEYFILE=""; C=""; BOT=""; AGENT=""; MODEL=""; EFFORT=""; ROUTE=""; ALSO=""; OCC=""; LABEL="bot"; AFTER=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --computer) C="${2:?computer}"; shift 2 ;;
         --key-file) KEYFILE="${2:?key file}"; shift 2 ;;
+        --bot) BOT="${2:?bot}"; shift 2 ;;
+        --agent) AGENT="${2:?agent}"; shift 2 ;;
+        --model) MODEL="${2:?model}"; shift 2 ;;
+        --effort) EFFORT="${2:?effort}"; shift 2 ;;
+        --route) ROUTE="${2:?route}"; shift 2 ;;
+        --also) ALSO="${2:?agents}"; shift 2 ;;
+        --oc-config) OCC="${2:?file}"; shift 2 ;;
+        --label) LABEL="${2:?label}"; shift 2 ;;
+        --shell-after) AFTER=after; shift ;;
+        --shell-only) AFTER=only; shift ;;
         --) shift; break ;;
         *) break ;;
       esac
     done
-    if [ -n "$C" ] && [ -f "$DIR/.computer" ] && [ "$(cat "$DIR/.computer")" != "$C" ]; then rm -rf "$DIR"; fi
-    folder
-    # A folder a run makes knows its computer too (a key brain's has no sign-in to say so), so a copy's goes.
-    if [ -n "$C" ] && [ ! -f "$DIR/.computer" ]; then printf '%s' "$C" > "$DIR/.computer"; fi
+    bad() { echo "bops-brain run: $1" >&2; exit 2; }
+    if [ -n "$BOT" ]; then
+      [[ "$BOT" =~ ^[A-Za-z0-9_-]+$ && "$AGENT" =~ ^[A-Za-z0-9_-]+$ ]] || bad "which bot and agent?"
+      [ -z "$MODEL" ] || [[ "$MODEL" =~ ^[A-Za-z0-9._:/-]{1,120}$ ]] || bad "that model"
+      [ -z "$EFFORT" ] || [[ "$EFFORT" =~ ^(low|medium|high)$ ]] || bad "that effort"
+      [ -z "$ROUTE" ] || [[ "$ROUTE" =~ ^(anthropic|openai|deepinfra)$ ]] || bad "that route"
+      [ -z "$ALSO" ] || [[ "$ALSO" =~ ^[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?(,[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?)*$ ]] || bad "those agents"
+      [[ "$LABEL" =~ ^[A-Za-z0-9._-]{1,30}$ ]] || bad "that label"
+      [ -z "$OCC" ] || [[ "$OCC" =~ ^/[A-Za-z0-9._/\ -]+\.json$ ]] || bad "that OpenCode config"
+      case "$KIND" in
+        claude) [ "$ID" != - ] || bad "Claude Code runs on an account" ;;
+        codex) [ "$ID" != - ] || bad "Codex runs on an account" ;;
+        opencode) [ "$ID" = - ] && [ -n "$ROUTE" ] && [ -n "$MODEL" ] || bad "OpenCode runs on a key, by its model" ;;
+        *) bad "claude, codex or opencode?" ;;
+      esac
+    elif [ "$KIND" != claude ] && [ "$KIND" != codex ]; then
+      echo "claude or codex?" >&2; exit 2
+    fi
+    if [ "$ID" != - ]; then
+      if [ -n "$C" ] && [ -f "$DIR/.computer" ] && [ "$(cat "$DIR/.computer")" != "$C" ]; then rm -rf "$DIR"; fi
+      folder
+      # A folder a run makes knows its computer too (a key brain's has no sign in to say so), so a copy's goes.
+      if [ -n "$C" ] && [ ! -f "$DIR/.computer" ]; then printf '%s' "$C" > "$DIR/.computer"; fi
+    fi
     KEY=""
     if [ -n "$KEYFILE" ]; then
       [ -f "$KEYFILE" ] || { echo "missing $KEYFILE" >&2; exit 1; }
       KEY="$(cat "$KEYFILE")"; rm -f "$KEYFILE"
     fi
+    OCCONTENT=""
+    [ -n "$OCC" ] && [ -f "$OCC" ] && OCCONTENT="$(cat "$OCC")"
     SCREEN="${DISPLAY:-}"
+    if [ -z "$BOT" ]; then
+      # As before: the brain's own folder, its key (if any) in its CLI's own environment.
+      case "$KIND" in
+        claude)
+          claude_settings
+          bare; export CLAUDE_CONFIG_DIR="$DIR" CLAUDE_ENV_FILE="$DIR/.shell-env"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; [ -n "$KEY" ] && export ANTHROPIC_API_KEY="$KEY"; exec "$CLAUDE" "$@" ;;
+        codex)
+          [ -n "$KEY" ] || { echo "Codex runs on your OpenAI key only" >&2; exit 2; }
+          codex_config
+          bare; export CODEX_HOME="$DIR" CODEX_API_KEY="$KEY"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; exec "$CODEX" "$@" ;;
+      esac
+    fi
+    # A bot's agent: an empty environment, the bot's and the agent's own settings, nothing else.
+    PAYS=plan
+    [ -n "$KEYFILE" ] && PAYS=key
+    [ "$KIND" = claude ] || PAYS=key
+    [ "$PAYS" = key ] && [ -z "$KEY" ] && { echo "$KIND runs on your key here, and none came with this run" >&2; exit 1; }
+    if [ "$PAYS" = key ] && [ -z "$ROUTE" ]; then ROUTE=anthropic; [ "$KIND" = codex ] && ROUTE=openai; fi
+    [ "$KIND" = claude ] && claude_settings
+    [ "$KIND" = codex ] && codex_config
+    bare
+    bot_dir
+    wrappers
+    [ "$KIND" = opencode ] && opencode_config
+    GURL=""; TOKEN=""
+    [ "$PAYS" = key ] && gate_up
+    export PATH="$G/bin:$RUNS" TMPDIR="$B/tmp" BOPS_BOT="$BOT" BOPS_AGENT="$AGENT"
+    # The thread's own model and thinking, for its nested claude, codex and opencode (their wrappers read them).
+    [ -n "$MODEL" ] && export BOPS_MODEL="$MODEL"
+    [ -n "$EFFORT" ] && export BOPS_EFFORT="$EFFORT"
+    [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"
+    CLI=()
     case "$KIND" in
       claude)
-        claude_settings
-        bare; export CLAUDE_CONFIG_DIR="$DIR" CLAUDE_ENV_FILE="$DIR/.shell-env"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; [ -n "$KEY" ] && export ANTHROPIC_API_KEY="$KEY"; exec "$CLAUDE" "$@" ;;
+        export CLAUDE_CONFIG_DIR="$DIR" CLAUDE_ENV_FILE="$G/shell-env"
+        [ -n "$MODEL" ] && export ANTHROPIC_MODEL="$MODEL"
+        [ -n "$GURL" ] && export ANTHROPIC_API_KEY="$TOKEN" ANTHROPIC_BASE_URL="$GURL/anthropic" BOPS_GATE="$GURL"
+        CLI=("$CLAUDE" ${MODEL:+--model "$MODEL"} ${EFFORT:+--effort "$EFFORT"})
+        ;;
       codex)
-        [ -n "$KEY" ] || { echo "Codex runs on your OpenAI key only" >&2; exit 2; }
-        codex_config
-        bare; export CODEX_HOME="$DIR" CODEX_API_KEY="$KEY"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; exec "$CODEX" "$@" ;;
-      *) echo "claude or codex?" >&2; exit 2 ;;
+        export CODEX_HOME="$DIR" CODEX_API_KEY="$TOKEN" OPENAI_API_KEY="$TOKEN" OPENAI_BASE_URL="$GURL/openai/v1" BOPS_GATE="$GURL"
+        CX=(-c "openai_base_url=\"$GURL/openai/v1\"" ${MODEL:+-c "model=\"$MODEL\""} ${EFFORT:+-c "model_reasoning_effort=\"$EFFORT\""})
+        # Its settings go after its subcommand (exec, exec resume, resume), where Codex reads them.
+        PRE=()
+        while [ $# -gt 0 ] && { [ "$1" = exec ] || [ "$1" = resume ]; }; do PRE+=("$1"); shift; done
+        CLI=("$CODEX" ${PRE[@]+"${PRE[@]}"} "${CX[@]}")
+        ;;
+      opencode)
+        export OPENCODE_CONFIG="$G/opencode.json" XDG_CONFIG_HOME="$B/opencode/config" XDG_DATA_HOME="$B/opencode/data" \
+          XDG_STATE_HOME="$B/opencode/state" XDG_CACHE_HOME="$B/opencode/cache" \
+          OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 BOPS_GATE="$GURL"
+        case "$ROUTE" in
+          anthropic) export ANTHROPIC_API_KEY="$TOKEN" ANTHROPIC_BASE_URL="$GURL/anthropic" ;;
+          openai) export OPENAI_API_KEY="$TOKEN" OPENAI_BASE_URL="$GURL/openai/v1" ;;
+          deepinfra) export DEEPINFRA_API_KEY="$TOKEN" ;;
+        esac
+        OPENCODE_CONFIG_CONTENT="$(oc_content)" || { echo "Bops couldn't set up OpenCode for this run" >&2; exit 1; }
+        export OPENCODE_CONFIG_CONTENT
+        CLI=("$OPENCODE")
+        ;;
     esac
+    TOKEN=""
+    [ "$AFTER" = only ] && bot_shell
+    if [ "$AFTER" = after ]; then
+      set +e
+      "${CLI[@]}" "$@"
+      set -e
+      eval "NM=\$NAMES_$KIND"
+      echo
+      echo "$NM is closed. This is $LABEL's shell: $KIND here is $LABEL's. Reply in the thread in Bops and it carries on there."
+      bot_shell
+    fi
+    exec "${CLI[@]}" "$@"
+    ;;
+  bin|rebin)
+    # bin: the bot's own Bops agent's commands (bops-exec): its wrappers, nothing else.
+    # rebin: every agent's folder of the bot gets its wrappers for the bot's other agents again (its own stays),
+    # in place, so what runs now (its Bops agent's executor, a thread, a terminal) has the new ones at once.
+    shift 2
+    ALSO=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --also) ALSO="${2:?agents}"; shift 2 ;;
+        *) echo "usage: bops-brain $CMD <bot> [--also <agents>]" >&2; exit 2 ;;
+      esac
+    done
+    [ -z "$ALSO" ] || [[ "$ALSO" =~ ^[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?(,[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?)*$ ]] || { echo "bops-brain $CMD: those agents" >&2; exit 2; }
+    BOT="$ID"
+    if [ "$CMD" = bin ]; then
+      AGENT=bops; KIND=bops; PAYS=credit; MODEL=""; EFFORT=""
+      bot_dir
+      wrappers
+      echo "$G/bin"
+      exit 0
+    fi
+    B="$BOTS/$BOT"
+    [ -d "$B" ] || { echo rebinned; exit 0; }
+    # The bot's agents now, for the Codex and OpenCode runners already going (bops-agent): each of their
+    # messages' runs takes these instead of the ones it began with.
+    (umask 077; printf '%s\n' "$ALSO" > "$B/also.$$") && mv -f "$B/also.$$" "$B/also"
+    for G in "$B"/agents/*; do
+      [ -d "$G/bin" ] || continue
+      OWN="$(cat "$G/kind" 2>/dev/null || true)"
+      [ "${G##*/}" = bops ] && OWN=bops
+      # A folder that doesn't say its kind gets all three from the bot's agents now (none of the old ones stays).
+      for name in claude codex opencode; do
+        [ "$name" = "$OWN" ] && continue
+        also_wrapper "$name" | put_file "$G/bin/$name" 700
+      done
+    done
+    echo rebinned
+    ;;
+  bot-clear)
+    # A bot's agent switched or removed (or the bot back to the default, or gone): its gates stop, so its
+    # tokens are worth nothing, and its folder here goes. Its accounts' folders stay: another bot may use them.
+    A="${3:-}"
+    if [ -n "$A" ]; then
+      [[ "$A" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "which agent?" >&2; exit 2; }
+      pkill -f "[b]ops-ai-gate .*$BOTS/$ID/agents/$A/" 2>/dev/null || true
+      rm -rf "${BOTS:?}/$ID/agents/$A"
+    else
+      pkill -f "[b]ops-ai-gate .*$BOTS/$ID/" 2>/dev/null || true
+      rm -rf "${BOTS:?}/$ID"
+    fi
+    echo cleared
     ;;
   *)
-    echo "usage: bops-brain status|login|cancel|logout|forget|run <brain> ..." >&2; exit 2
+    echo "usage: bops-brain status|login|cancel|logout|forget|run|bin|rebin|bot-clear <brain|bot> ..." >&2; exit 2
     ;;
 esac

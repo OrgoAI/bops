@@ -209,16 +209,72 @@ await check("a bot's Composio session holds the apps it has by default, read onl
   assert.match(C.appList(bot("iris")), /^Gmail \(sam@acme\.com: read & act\), Notion \(Work: read only\)$/);
 });
 
-await check("a task someone outside Bops started gets no apps, nor one a member with Write started or told something, nor a part of one", async () => {
+await check("a task someone outside Bops started gets no apps, nor a part of one", async () => {
   const n = created.length;
-  assert.match(await C.findAppActions("iris", "find emails", { sessionId: "ses_out" }), /^Not on this task: someone other than Sam asked for it/);
-  assert.match(await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId: "ses_out" }), /^Not on this task/);
-  for (const sessionId of ["ses_member", "ses_told", "ses_part"]) {
-    assert.match(await C.findAppActions("iris", "find emails", { sessionId }), /^Not on this task/, sessionId);
-    assert.match(await C.runAppAction("iris", "GMAIL_SEND_EMAIL", {}, { sessionId }), /^Not on this task/, sessionId);
+  state.sessions.push({ id: "ses_out_part", botId: "iris", partOf: "ses_out", replies: [] });
+  for (const sessionId of ["ses_out", "ses_out_part"]) {
+    assert.match(await C.findAppActions("iris", "find emails", { sessionId }), /^Not on this task: someone outside Bops asked for it/, sessionId);
+    assert.match(await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId }), /^Not on this task/, sessionId);
   }
   assert.equal(created.length, n);
   assert.ok(!executed.length, "nothing ran");
+  assert.equal(T.outsideThread(state.sessions.find((x) => x.id === "ses_member"), (id) => state.sessions.find((x) => x.id === id)), false, "a member's isn't a stranger's");
+});
+
+await check("a member's task (one they started or told something, or a part of one) has the apps its bot has: reading runs, and every write asks the owner, named as theirs, whatever the bot's rules or Just do it say", async () => {
+  const ran = executed.length;
+  const iris = bot("iris");
+  const had = { permissions: iris.permissions, autoApprove: iris.autoApprove };
+  // Iris always may send email, and does it without asking: neither counts for a member.
+  iris.permissions = [{ action: "GMAIL_SEND_EMAIL in Gmail (sam@acme.com)", resource: "*", effect: "allow" }];
+  iris.autoApprove = true;
+  try {
+    for (const sessionId of ["ses_member", "ses_told", "ses_part"]) {
+      assert.equal(await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId }), '{"ok":true}', `${sessionId}: a read runs`);
+      const asked = await C.runAppAction("iris", "GMAIL_SEND_EMAIL", { to: "a@b.c" }, { sessionId }).then(() => null, (e) => e);
+      assert.ok(asked instanceof P.NeedsOk, `${sessionId}: a write asks`);
+      assert.equal(asked.ask.askedFor, "Dee", `${sessionId}: named as Dee's`);
+      assert.equal(asked.ask.kind, "app", "an app's ask: only the owner answers it (member-access.ts ownerOnlyAsk)");
+    }
+    // Only what Iris has: Notion read only, HubSpot none.
+    assert.match(await C.runAppAction("iris", "NOTION_CREATE_PAGE", {}, { sessionId: "ses_member" }), /You can only read Notion/);
+    assert.match(await C.runAppAction("iris", "HUBSPOT_FETCH_CONTACTS", {}, { sessionId: "ses_member" }), /You don't have that app/);
+    // A member's turn in the chat (UseWhere.member) the same way.
+    const turn = await C.runAppAction("iris", "GMAIL_SEND_EMAIL", { to: "a@b.c" }, { chatId: "bot:iris", member: "Dee" }).then(() => null, (e) => e);
+    assert.equal(turn?.ask?.askedFor, "Dee");
+    // The owner's own still go by the rule.
+    assert.equal(await C.runAppAction("iris", "GMAIL_SEND_EMAIL", { to: "a@b.c" }, { sessionId: "ses_mine" }), '{"ok":true}', "the owner's own task: the rule allows it");
+  } finally {
+    Object.assign(iris, had);
+  }
+  assert.equal(executed.length, ran + 3 + 1, "three reads and the owner's send");
+  assert.equal(A.viaOf({ sessionId: "ses_told" }).for, "Dee", "each use logged as for Dee");
+  assert.equal(A.viaOf({ sessionId: "ses_mine" }).for, undefined);
+});
+
+await check("Used in: an account switched on in another workspace is every bot's there by default, the picker narrowing it; off, no bot there has it, whatever it was given", async () => {
+  const L = await import(`${root}/lib/server/logins.ts`);
+  const lo = bot("lo");
+  const gmail = account("ca_gmail");
+  assert.equal(T.levelIn(state, lo, gmail), null, "Lo, of Local, hasn't Main's Gmail");
+  assert.deepEqual(L.setAppIn("ca_gmail", "ws_local", true), { ok: true });
+  assert.deepEqual(state.workspaces[1].loginsOn["app:ca_gmail"].at > 0, true);
+  assert.equal(T.levelIn(state, lo, gmail), "act", "switched on in Local: Read & act, the default");
+  assert.ok(C.accountsOf(lo).some((x) => x.account.id === "ca_gmail"), "and it's in Lo's apps");
+  lo.access = { ca_gmail: "read" };
+  assert.equal(T.levelIn(state, lo, gmail), "read", "the picker narrows it");
+  assert.deepEqual(T.accountIn(state, gmail).sort(), ["ws_local", "ws_main"]);
+  assert.deepEqual(L.setAppIn("ca_gmail", "ws_local", false), { ok: true });
+  assert.equal(T.levelIn(state, lo, gmail), null, "off: Lo has none");
+  assert.equal(lo.access.ca_gmail, undefined, "its Read went too");
+  assert.equal(state.workspaces[1].loginsOn, undefined);
+  assert.equal(L.setAppIn("ca_gmail", "ws_main", false).status, 409, "never off where it was connected");
+  // Given to a bot of another workspace by name (as before Used in): that workspace counts as one it's in, and off there takes it.
+  lo.access = { ca_notion: "act" };
+  assert.deepEqual(T.accountIn(state, account("ca_notion")).sort(), ["ws_local", "ws_main"]);
+  L.setAppIn("ca_notion", "ws_local", false);
+  assert.equal(T.levelIn(state, lo, account("ca_notion")), null);
+  delete lo.access;
 });
 
 await check("the set orgo-web takes: every bot of the workspace times every account, key and login", () => {

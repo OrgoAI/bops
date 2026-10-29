@@ -434,6 +434,19 @@ export async function recentMessages(userId: string, chatIds: string[], perChat:
   return { rows: r.rows.map(rowOf), more: [...more] };
 }
 
+/**
+ * The ids of these chats' messages removed after `afterSeq` (their rows kept, json NULL, for REMOVED_KEEP_DAYS),
+ * the newest `limit`: what a member's copy as new as that seq drops (members.ts, SharedWsState.gone).
+ */
+export async function removedAfter(userId: string, chatIds: string[], afterSeq: number, limit: number): Promise<string[]> {
+  if (!chatIds.length) return [];
+  const r = await query<{ id: string }>(
+    "SELECT id FROM bops.chat_messages WHERE user_id = $1 AND chat_id = ANY($2::text[]) AND json IS NULL AND seq > $3 ORDER BY seq DESC LIMIT $4",
+    [userId, chatIds, afterSeq, limit],
+  );
+  return r.rows.map((x) => x.id);
+}
+
 /** The newest message write (a removal too) in these chats' rows (0: none): what a member's copy of them is as new as. */
 export async function chatsSeq(userId: string, chatIds: string[]): Promise<number> {
   if (!chatIds.length) return 0;

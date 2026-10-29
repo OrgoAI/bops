@@ -306,3 +306,89 @@ export function useSelfHosted() {
   }, []);
   return selfHosted;
 }
+
+/**
+ * Asking first, in place: the button that asked turns into its question ("Remove Jamie? Remove, Cancel"), the way a
+ * bot's Delete asks (bot-panel.tsx DeleteBot), never a dialog over the app. `danger` reds the action. Esc is Cancel,
+ * and only Cancel (it's heard before anything behind it). `focus`: which button the keyboard starts on. `compact`:
+ * the smaller one, for a menu or a card's row. `children`: more under the line (what goes with it).
+ */
+export function AskInPlace({
+  title,
+  line,
+  action,
+  danger = false,
+  busy = false,
+  error,
+  focus = "action",
+  compact = false,
+  cancelLabel = "Cancel",
+  other,
+  children,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  line?: string;
+  action: string;
+  danger?: boolean;
+  busy?: boolean;
+  error?: string | null;
+  focus?: "action" | "cancel";
+  compact?: boolean;
+  cancelLabel?: string;
+  /** A third way, at the start of the row (Pay another way). */
+  other?: React.ReactNode;
+  children?: React.ReactNode;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const first = useRef<HTMLButtonElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  useEffect(() => (focus === "cancel" ? cancel : first).current?.focus({ preventScroll: true }), [focus]);
+  const last = useRef({ busy, onCancel });
+  useEffect(() => {
+    last.current = { busy, onCancel };
+  });
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!last.current.busy) last.current.onCancel();
+    };
+    document.addEventListener("keydown", esc, true);
+    return () => document.removeEventListener("keydown", esc, true);
+  }, []);
+  const pill = `rounded-full font-medium leading-4 disabled:opacity-50 ${compact ? "px-3 py-1.5 text-[12.5px]" : "px-3.5 py-1.5 text-[13px]"}`;
+  return (
+    <div
+      role="group"
+      aria-label={title}
+      data-ask-in-place
+      onClick={(e) => e.stopPropagation()}
+      className={`motion-rise-in flex w-full flex-col ${compact ? "gap-2 rounded-[12px] px-3 py-2.5" : "gap-2.5 rounded-2xl px-4 py-3"} ${danger ? "bg-[#FEF3F2] shadow-[0_0_0_1px_#FECDCA]" : "bg-[#F7F7F6] shadow-[0_0_0_1px_#E6E6E3]"}`}
+    >
+      <div className="flex flex-col gap-0.5">
+        <span className={`font-semibold text-ink ${compact ? "text-[13px] leading-[18px]" : "text-[14px] leading-5"}`}>{title}</span>
+        {line && <span className={`text-[#3A3A38] ${compact ? "text-[12px] leading-4" : "text-[13px] leading-[18px]"}`}>{line}</span>}
+      </div>
+      {children}
+      {error && (
+        <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {other}
+        <span className="flex-1" />
+        <button ref={cancel} type="button" disabled={busy} onClick={onCancel} className={`${pill} bg-white shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]`}>
+          {cancelLabel}
+        </button>
+        <button ref={first} type="button" disabled={busy} onClick={onConfirm} className={`${pill} flex min-w-[72px] items-center justify-center text-white ${danger ? "bg-[#B42318]" : "bg-ink"}`}>
+          {busy ? <Spinner size={12} color="#FFFFFF" /> : action}
+        </button>
+      </div>
+    </div>
+  );
+}

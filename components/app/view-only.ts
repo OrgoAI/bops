@@ -49,6 +49,8 @@ const OWN_READS = [
   /^\/api\/drafts\/source(\/|\?|$)/,
   /^\/api\/made-apps(\/|\?|$)/,
   /^\/api\/hosted-apps(\/|\?|$)/,
+  // Settings → Domains, by workspace id: the user's own workspace's domains and who they registered them to, never the owner's.
+  /^\/api\/domains(\/|\?|$)/,
   // A watch's suggestions read a bot's screen by its id: the user's own bot of that id, never the owner's.
   /^\/api\/watches(\/|\?|$)/,
   // The windows on this Mac and their pictures: the viewer's own Mac, never the owner's.

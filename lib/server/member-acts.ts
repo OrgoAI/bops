@@ -1,7 +1,9 @@
 import "server-only";
-import { MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, type MemberAct, type MemberActPayload } from "@/cloud/protocol";
+import { isAppAct, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen, appsOpenTo } from "@/lib/apps-access";
-import { accessOf, cleanName, currentFor, levelOf, ownerOnlyAsk, permits, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
+import { accessOf, appsLevelOf, cleanName, currentFor, levelOf, ownerOnlyAsk, permits, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
+import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
+import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
 import { workspaceOf, type Workspace } from "@/lib/types";
 import { handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
@@ -35,7 +37,24 @@ function actOf(a: unknown): MemberAct | null {
   if (x.act === "answer") return short(x.askId, 120) && ["once", "always", "reject"].includes(x.reply as string) && (x.message === undefined || (typeof x.message === "string" && x.message.length <= MEMBER_MAX_NOTE)) ? (x as MemberAct) : null;
   if (x.act === "stop") return Array.isArray(x.sessionIds) && x.sessionIds.length > 0 && x.sessionIds.length <= MEMBER_STOP_MAX && x.sessionIds.every((id) => short(id, 120)) ? (x as MemberAct) : null;
   if (x.act === "dismiss") return short(x.sessionId, 120) ? (x as MemberAct) : null;
+  if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
   return null;
+}
+
+const OPAQUE = /^[A-Za-z0-9_-]{1,80}$/;
+/** An act on an app (Your Apps at Write), as cloud/members.ts cleanAct checks it: only its own fields. */
+function appActOf(x: Record<string, unknown>): MemberAct | null {
+  if (!isAppName(x.app) || (x.site !== undefined && !isSiteName(x.site))) return null;
+  const site = typeof x.site === "string" ? { site: x.site } : {};
+  if (x.act === "deploy") return x.at === undefined || (typeof x.at === "string" && OPAQUE.test(x.at)) ? { act: "deploy", app: x.app, ...site, ...(typeof x.at === "string" ? { at: x.at } : {}) } : null;
+  if (x.act === "rollback") return typeof x.deployment === "string" && OPAQUE.test(x.deployment) ? { act: "rollback", app: x.app, deployment: x.deployment, ...site } : null;
+  if (x.act === "domain")
+    return typeof x.zone === "string" && OPAQUE.test(x.zone) && (x.subdomain === undefined || (typeof x.subdomain === "string" && x.subdomain.length <= 63)) ? { act: "domain", app: x.app, ...site, zone: x.zone, ...(typeof x.subdomain === "string" ? { subdomain: x.subdomain } : {}) } : null;
+  // Settings: the port, and the four commands (never its variables: changeEnv isn't a member's).
+  const port = x.port === undefined || (typeof x.port === "number" && Number.isInteger(x.port) && x.port >= 1 && x.port <= 65535);
+  const cmds = (["install", "build", "start", "health"] as const).filter((k) => x[k] !== undefined);
+  if (!port || cmds.some((k) => !short(x[k], 1000)) || (x.port === undefined && !cmds.length)) return null;
+  return { act: "settings", app: x.app, ...site, ...(typeof x.port === "number" ? { port: x.port } : {}), ...Object.fromEntries(cmds.map((k) => [k, x[k] as string])) };
 }
 
 /**
@@ -84,6 +103,14 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
   // A thread on the owner's Mac: a member's words never reach work there (it has the owner's own apps, browsers and
   // logins), so no reply, Nothing to add or answer to its asks. Stop still ends it.
   const onMac = (id: string | undefined) => !!id && session(id)?.runsOn === "mac";
+  // An app's: Your Apps at Write, while apps are open to them and to the owner, an app and site of the workspace's.
+  if (isAppAct(act)) {
+    if (!(appsOpenTo(who.email) && appsOpen(getState()))) return "apps aren't open";
+    if (appsLevelOf(access) !== "write") return "not at Write on Your Apps";
+    const h = ws.hostedApps?.[act.app];
+    if (!h || !sitesOfHosting(h, act.app).includes(act.site ?? act.app)) return "no such app";
+    return null;
+  }
   switch (act.act) {
     case "chat": {
       const c = chat(act.chatId);
@@ -110,16 +137,36 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
 }
 
 /**
+ * The acts on an app being done now, by workspace, app and key: the same act again while it runs (the tunnel dropped
+ * and sent it again before its ack) isn't started twice. Kept on the app once it's done (actKept) and taken out here.
+ */
+const going = new Set<string>();
+
+/**
  * Carry out what a member did (a "member" event, `eventId` for the log). Never throws for one refused: it's
- * taken and dropped. A chat's turn isn't waited for (events come one at a time, and a turn takes seconds).
+ * taken and dropped. Nothing is waited for: events come one at a time (texts, calls, plan changes queue behind
+ * this one), and a chat's turn takes seconds, an app's deploy or its Ingot set up on the computer minutes.
  */
 export async function memberEvent(p: MemberActPayload, eventId: string): Promise<void> {
   if (onRunner()) return;
   const act = actOf(p?.act);
   const who = whoOf(p?.member);
   if (!act || !who || typeof p.wsId !== "string" || typeof p.key !== "string") return void console.warn(`[members] event ${eventId}: not a member's act`);
+  // The same act on an app again (an ack that was lost): done, or refused, once; or still being done.
+  const doing = isAppAct(act) ? `${p.wsId}\n${act.app}\n${p.key}` : "";
+  if (isAppAct(act) && (going.has(doing) || actKept(p.wsId, act.app, p.key))) return;
   const why = refused(p, act, who);
+  if (why && isAppAct(act) && why !== "too late" && why !== "no such workspace" && why !== "no such app") {
+    // Said where they'll see it: on the app, as refused.
+    noteMemberAct(p.wsId, act.app, keptAct(p, act, who, false, REFUSED[why] ?? "That didn't go."));
+    return void console.warn(`[members] event ${eventId}: not done (${why})`);
+  }
   if (why) return void console.warn(`[members] event ${eventId}: not done (${why})`);
+  if (isAppAct(act)) {
+    going.add(doing);
+    void appEvent(p, act, who, eventId).finally(() => going.delete(doing));
+    return;
+  }
   const said = { ...who, ref: p.key };
   const warn = (e: Error) => console.warn(`[members] event ${eventId}: ${e.message}`);
   switch (act.act) {
@@ -150,4 +197,55 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       return;
     }
   }
+}
+
+/** What a refused act on an app says, on the app where the member sees it (and the owner's rows). */
+const REFUSED: Record<string, string> = {
+  "not at Write on Your Apps": "The owner took away Write on Your Apps.",
+  "access from before they joined": "The owner took away Write on Your Apps.",
+  "apps aren't open": "The owner took away Write on Your Apps.",
+};
+
+const keptAct = (p: MemberActPayload, act: MemberAppAct, who: MemberWho, ok: boolean, said?: string): KeptAct => ({
+  key: p.key,
+  userId: who.userId,
+  name: who.name,
+  act: act.act,
+  ...(act.site ? { site: act.site } : {}),
+  ...(act.act === "domain" ? { domain: act.subdomain ? `${act.subdomain}.${act.zone}` : act.zone } : {}),
+  ok,
+  ...(said ? { said } : {}),
+  at: Date.now(),
+});
+
+/** Plain words for what the page's own functions said: their message, dashes made commas (as the window does). */
+const plain = (e: unknown) => (e instanceof Error ? e.message : "That didn't go.").replace(/(\d)\s*[–—]\s*(\d)/g, "$1 to $2").replace(/\s*[—–]\s*/g, ", ");
+
+/**
+ * An act on an app, done as the owner's page does it (lib/server/hosted-apps.ts): deploy, go back to an earlier
+ * deploy, change a site's settings (never its variables), point one of the workspace's own domains at it (connectDomain
+ * checks the domain is one Orgo lists for the workspace, and refuses any other). Never buying a domain, DNS, auto renew,
+ * adding or removing a site or the app. Kept on the app, as done or refused with why (named as the member), then what
+ * members see is read again.
+ */
+async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, eventId: string): Promise<void> {
+  const h = await import("./hosted-apps");
+  let said: string | undefined;
+  let domain: string | undefined;
+  try {
+    if (act.act === "deploy") await h.deployApp(p.wsId, act.app, { ...(act.at ? { at: act.at } : {}), ...(act.site ? { site: act.site } : {}) });
+    else if (act.act === "rollback") await h.rollbackApp(p.wsId, act.app, act.deployment, act.site);
+    else if (act.act === "settings") await h.changeSettings(p.wsId, act.app, { port: act.port, install: act.install, build: act.build, start: act.start, health: act.health }, act.site);
+    else {
+      const got = await h.connectDomain(p.wsId, act.app, { zone: act.zone, ...(act.subdomain ? { subdomain: act.subdomain } : {}) }, act.site);
+      domain = got.domain?.domain;
+      if (got.error) said = got.error;
+    }
+  } catch (e) {
+    said = plain(e);
+    console.warn(`[members] event ${eventId}: ${said}`);
+  }
+  const kept = keptAct(p, act, who, !said, said);
+  noteMemberAct(p.wsId, act.app, domain ? { ...kept, domain } : kept);
+  void seeApps(p.wsId).catch(() => {});
 }

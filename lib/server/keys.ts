@@ -1,11 +1,12 @@
 import "server-only";
 import { sameApp } from "@/lib/routine-catalog";
-import { MAIN_WORKSPACE, workspaceOf, type AccessUse, type Bot } from "@/lib/types";
-import { accessChanged, logUse, viaOf, type UseWhere } from "./access-sync";
+import { keyLoginKey, MAIN_WORKSPACE, switchedOn, workspaceOf, type AccessUse, type Bot } from "@/lib/types";
+import { accessChanged, forMember, logUse, viaOf, type UseWhere } from "./access-sync";
 import { allows, NeedsOk, type AskSpec } from "./permission";
 import { orgoHeaders } from "./app-version";
 import { apiKey } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
+import { forgetLogin } from "./logins";
 import { bot, getState, ownerName, update } from "./store";
 
 /**
@@ -78,12 +79,17 @@ export const keyProvider = (name: string) => KEY_PROVIDERS.find((p) => p.name ==
 /** A vault name the way orgo-web saves it: "stripe-secret-key" is STRIPE_SECRET_KEY. */
 export const keyName = (name: string) => name.trim().toUpperCase().replace(/-/g, "_");
 
-/** Orgo turned a Keys call down: its status (401 when Bops isn't signed in to Orgo), and words for the user. */
+/**
+ * Orgo turned a Keys call down: its status (401 when Bops isn't signed in to Orgo), and words for the user.
+ * `said`: Orgo's own words, when it gave some (never a key's value: the broker redacts it).
+ */
 export class KeysError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  said?: string;
+  constructor(message: string, status: number, said?: string) {
     super(message);
     this.status = status;
+    if (said) this.said = said;
   }
 }
 
@@ -124,14 +130,40 @@ export type KeyScope = "workspace" | "all";
 /** A workspace's own Orgo project, which its keys are scoped to; undefined when it has none. */
 export const keysProject = (wsId: string = getState().workspace ?? MAIN_WORKSPACE) => getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId;
 
-/** The keys a workspace sees: the account's, and its own project's. */
+/**
+ * The keys a workspace sees: the account's, its own project's, and another workspace's it's switched on in (Used in:
+ * Workspace.loginsOn, lib/server/logins.ts).
+ */
 export const keysOf = (all: VaultKey[], wsId?: string) => {
   const project = keysProject(wsId);
-  return all.filter((k) => !k.workspaceId || (!!project && k.workspaceId === project));
+  const here = getState().workspaces?.find((w) => w.id === (wsId ?? getState().workspace ?? MAIN_WORKSPACE));
+  return all.filter((k) => !k.workspaceId || (!!project && k.workspaceId === project) || switchedOn(here, keyLoginKey(k.workspaceId, k.name)));
 };
 
+/**
+ * The Orgo project a call with key `name` goes to for workspace `wsId`: its own (Orgo's broker takes its own key by that
+ * name, else the account's), unless only another workspace's key by that name is switched on there: then that one's.
+ */
+export function keyProjectFor(all: VaultKey[], wsId: string, name: string): string | undefined {
+  const project = keysProject(wsId);
+  const seen = keysOf(all, wsId).filter((k) => k.name === name);
+  if (!seen.length || seen.some((k) => !k.workspaceId || (!!project && k.workspaceId === project))) return project;
+  return seen[0].workspaceId ?? project;
+}
+
+/** Each key's workspace (null: all of them) and the other workspaces it's switched on in, for the Logins page. */
+export function keyHomes(all: VaultKey[]) {
+  const ws = getState().workspaces ?? [];
+  return all.map((k) => ({
+    name: k.name,
+    project: k.workspaceId,
+    home: k.workspaceId ? (ws.find((w) => w.orgoProjectId === k.workspaceId)?.id ?? null) : null,
+    usedIn: k.workspaceId ? ws.filter((w) => switchedOn(w, keyLoginKey(k.workspaceId!, k.name))).map((w) => w.id) : [],
+  }));
+}
+
 /** The vault's names, for a short while: a chat turn asks which keys are set, and that shouldn't cost a call each time. */
-const g = globalThis as unknown as { bopsKeys?: { at: number; keys: VaultKey[]; who: string } };
+const g = globalThis as unknown as { bopsKeys?: { at: number; keys: VaultKey[]; who: string }; bopsVaultNames?: { at: number; keys: VaultKey[]; who: string } };
 const LIST_MS = 30_000;
 
 /**
@@ -153,7 +185,25 @@ export async function listKeys({ fresh = false } = {}): Promise<VaultKey[]> {
   return keys;
 }
 
-const forget = () => void (g.bopsKeys = undefined);
+/**
+ * Every name in the user's vault, whatever it's for, with its scope: for what Bops does itself with a key its
+ * bots never get (an app's domains in Cloudflare, lib/server/cloudflare.ts). Names only, as listKeys reads
+ * them, kept for as short a while; never on the Keys page, in call_api, or offered to a bot.
+ */
+export async function vaultNames({ fresh = false } = {}): Promise<VaultKey[]> {
+  const who = await apiKey().catch(() => "");
+  if (!who) throw new KeysError(NOT_SIGNED_IN, 401);
+  const c = g.bopsVaultNames;
+  if (!fresh && c && c.who === who && Date.now() - c.at < LIST_MS) return c.keys;
+  const { json } = await vault<{ secrets?: { name?: unknown; workspace_id?: unknown; updated_at?: unknown }[] }>("GET", "/api/secrets");
+  const keys = (json.secrets ?? [])
+    .filter((s) => typeof s.name === "string")
+    .map((s) => ({ name: s.name as string, updatedAt: typeof s.updated_at === "string" ? s.updated_at : null, workspaceId: typeof s.workspace_id === "string" ? s.workspace_id : null }));
+  g.bopsVaultNames = { at: Date.now(), keys, who };
+  return keys;
+}
+
+const forget = () => void ((g.bopsKeys = undefined), (g.bopsVaultNames = undefined));
 
 /** Where a key of `scope` goes for the current workspace: its project (This workspace), or null (All workspaces). */
 function scopeProject(scope: KeyScope, wsId?: string): string | null {
@@ -198,6 +248,8 @@ export async function removeKey(name: string, scope: KeyScope = "all", wsId?: st
   const project = scopeProject(scope, wsId);
   await vault("DELETE", `/api/secrets/${encodeURIComponent(n)}${project ? `?workspace_id=${encodeURIComponent(project)}` : ""}`);
   forget();
+  // Switched on in other workspaces: off there too, so a key by that name added again starts in its own workspace only.
+  if (project) update((s) => forgetLogin(s, keyLoginKey(project, n)));
   accessChanged();
   // A bot keeps a name another scope still has for its workspace.
   const scoped = (getState().workspaces ?? []).some((w) => w.orgoProjectId);
@@ -288,8 +340,8 @@ export async function callKey(c: KeyCall): Promise<KeyAnswer> {
     throw new KeysError(`The ${label} key isn't in ${ownerName()}'s vault anymore.`, 404);
   }
   if (status === 429) throw new KeysError(`Orgo is limiting calls to ${label} right now. Wait a minute before trying again.`, 429);
-  if (status === 502 || status === 504) throw new KeysError(`${label} didn't answer${said ? ` (${said})` : ""}.`, 502);
-  throw new KeysError(`Orgo didn't send it${said ? `: ${said}` : ""}.`, status);
+  if (status === 502 || status === 504) throw new KeysError(`${label} didn't answer${said ? ` (${said})` : ""}.`, 502, said);
+  throw new KeysError(`Orgo didn't send it${said ? `: ${said}` : ""}.`, status, said);
 }
 
 /** How much of an answer the model gets. */
@@ -401,8 +453,9 @@ export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, op
   const did = `Called ${p.label} ${method} ${shown}`;
   const run = async (approvedBy?: AccessUse["approvedBy"]): Promise<CallApiDone> => {
     try {
-      // The bot's workspace: Orgo uses its own key by that name, else the account's.
-      const r = await callKey({ name, method, path, query: q.v as Record<string, unknown> | null, body: body.v, workspaceId: keysProject(workspaceOf(b)) });
+      // The bot's workspace: Orgo uses its own key by that name, else the account's; or the workspace's whose key is switched on there (Used in).
+      const all = await listKeys().catch(() => [] as VaultKey[]);
+      const r = await callKey({ name, method, path, query: q.v as Record<string, unknown> | null, body: body.v, workspaceId: keyProjectFor(all, workspaceOf(b), name) });
       used(action, r.status >= 400 ? "failed" : "ok", approvedBy);
       // Orgo sent it, but the service said no (a refund already made, a page not found): not done.
       if (r.status >= 400) return { text: answerForBot(p.label, r), brought: answerTextOf(r), failed: { did, why: `${p.label} answered ${r.status}` } };
@@ -416,8 +469,10 @@ export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, op
   if (opts.approved) return run("user");
   const detail = [q.v ? `query: ${JSON.stringify(q.v)}` : "", body.v !== null ? `body: ${typeof body.v === "string" ? body.v : JSON.stringify(body.v, null, 1)}` : ""].filter(Boolean).join("\n");
   if (detail.length > SHOW_CAP) return { text: `That's too long to show ${owner} for a yes (${detail.length} characters, at most ${SHOW_CAP}). Send a shorter query and body.` };
-  const ask: AskSpec = { action: `Call ${p.label}`, resources: [`${method} ${path}`], preview: detail, kind: "api", api: { key: name, label: p.label, method, path } };
-  if (allows(b, ask, { justDoIt: false })) return run("auto");
+  // For a member (their turn, or a thread of theirs): it asks the owner, whose key it is, every time, named as theirs.
+  const asker = forMember(where);
+  const ask: AskSpec = { action: `Call ${p.label}`, resources: [`${method} ${path}`], preview: detail, kind: "api", api: { key: name, label: p.label, method, path }, ...(asker ? { askedFor: asker } : {}) };
+  if (!asker && allows(b, ask, { justDoIt: false })) return run("auto");
   used(action, "waiting");
   throw new NeedsOk(ask);
 }

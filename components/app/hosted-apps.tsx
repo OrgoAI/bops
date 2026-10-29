@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, Fragment, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { DNS_TYPES, dnsNeeds } from "@/lib/hosted-apps";
 import type {
@@ -17,19 +17,41 @@ import type {
   AppHosting,
   AppRenewal,
   AppSettingsAnswer,
+  CloudflareApplied,
+  CloudflarePlan,
   DeployState,
   HostedApp,
   HostedAppAction,
   HostedAppsAnswer,
   HostedSite,
+  LocalAnswer,
   RemoveAppAnswer,
   SiteDomain,
 } from "@/lib/hosted-apps";
+import type { AppEnv } from "@/lib/hosted-apps";
 import { botChatId, workspaceOf, type AppState } from "@/lib/types";
-import { AddAppForm, AddDomain, AppAddress, AppDeploys, AppEnd, AppSettingsSection, checkDomain, readSettings, removeDomain, RenewalLine } from "./app-settings";
+import {
+  AddAppForm,
+  AddDomain,
+  AppAddress,
+  AppDeploys,
+  AppEnd,
+  AppSettingsSection,
+  checkDomain,
+  CloudflarePlanBox,
+  readCloudflarePlan,
+  readSettings,
+  removeDomain,
+  RenewalLine,
+  setAutoRenew,
+  type RenewalFlip,
+} from "./app-settings";
 import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
 import { InlineConfirm, undash } from "./side-group";
 import { ago, post } from "./ui";
+import { AppEnvs, LocalSection, openIntent, useLocal } from "./app-envs";
+import { actLine } from "./shared-apps";
+import type { MemberAppAct } from "@/lib/hosted-apps";
 
 /*
  * Apps the workspace runs on the web (lib/hosted-apps.ts), in Bops' right panel. Each one is an Ingot repo,
@@ -65,6 +87,16 @@ import { ago, post } from "./ui";
  */
 export const AppSite = createContext<string | undefined>(undefined);
 
+/**
+ * Which of its environments what's under it is about, for every call it makes (`env` in its query or body; the
+ * variables route's `where`): "staging", "local" (its own variables, on its computer), or undefined for Prod, as
+ * before there was Staging.
+ */
+export const AppEnvCtx = createContext<"staging" | "local" | undefined>(undefined);
+
+/** `env` as a query part, or nothing for Prod. */
+export const envQuery = (env?: string) => (env === "staging" ? "&env=staging" : "");
+
 /** `site` as a query part, or nothing for the app's own. */
 export const siteQuery = (site?: string) => (site ? `&site=${encodeURIComponent(site)}` : "");
 
@@ -73,6 +105,9 @@ export const OpenHostedApp = createContext<((ws: string, name: string) => void) 
 
 /** Open the task Add app started (bops-app.tsx: its thread, else its bot's chat); null where there's no window. */
 export const OpenAppTask = createContext<((a: AddAppAnswer) => void) | null>(null);
+
+/** Open Settings (bops-app.tsx), at its Domains when `at` says so; null where there's no window. */
+export const OpenSettings = createContext<((at?: "domains") => void) | null>(null);
 
 /** How often the list (and a running deploy's log) is read again while a deploy waits or runs. */
 const POLL_MS = 3000;
@@ -191,10 +226,12 @@ export const useSending = () =>
  * Why Deploy can't be pressed for it now (undefined: it can). `at`: a changeset picked from its history, not
  * the newest. `site`: Deploy for that site alone (else every site of it).
  */
-export function whyNot(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: HostedApp, at?: string, site?: HostedSite) {
+export function whyNot(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: HostedApp, at?: string, site?: HostedSite, env: "staging" | "prod" = "prod") {
   if (!answer.enabled) return answer.why || "Deploying isn't open here.";
   if (!at && !a.head) return "Nothing is committed yet.";
-  if (site ? deploying(site) : anyDeploying(a)) return "A deploy is running. Wait for it to finish.";
+  // (To Staging: only a deploy running there holds it up.)
+  const busy = env === "staging" ? (site ? !!site.staging && deploying(site.staging) : [a, ...(a.sites ?? [])].some((x) => !!x.staging && deploying(x.staging))) : site ? deploying(site) : anyDeploying(a);
+  if (busy) return env === "staging" ? "The preview is deploying. Wait for it to finish." : "A deploy is running. Wait for it to finish.";
   if (sending.has(a.name)) return "A deploy is being sent. Wait for it.";
   return undefined;
 }
@@ -222,8 +259,8 @@ export async function readCommits(ws: string, name: string, before?: string | nu
 }
 
 /** The newest deploy's log after `after` (null: from the start), of `site` (none: the app's own). */
-export const readLog = (ws: string, name: string, after: string | number | null, site?: string) =>
-  json<DeployLogAnswer>(`${at(name)}/logs?ws=${encodeURIComponent(ws)}${after === null ? "" : `&after=${encodeURIComponent(String(after))}`}${siteQuery(site)}`);
+export const readLog = (ws: string, name: string, after: string | number | null, site?: string, env?: string) =>
+  json<DeployLogAnswer>(`${at(name)}/logs?ws=${encodeURIComponent(ws)}${after === null ? "" : `&after=${encodeURIComponent(String(after))}`}${siteQuery(site)}${envQuery(env)}`);
 
 /**
  * Deploy (the newest changeset, or `at`), roll back, add or remove a site: the app as it is now, or why not
@@ -264,8 +301,18 @@ export type DnsChange = { ws: string; zone: string; site?: string } & ({ action:
 export type DnsChanged = { written?: AppDnsWritten; error?: string; field?: string; now?: AppDnsWritten };
 
 export async function changeDns(name: string, c: DnsChange): Promise<DnsChanged> {
-  const url = `${at(name)}/dns/records${c.action === "add" ? "" : `/${encodeURIComponent(c.id)}`}`;
-  const r = await post(url, { ...(c.action === "remove" ? {} : c.record), ws: c.ws, zone: c.zone, ...(c.site ? { site: c.site } : {}) }, c.action === "add" ? "POST" : c.action === "change" ? "PATCH" : "DELETE").catch(() => null);
+  return dnsAt(`${at(name)}/dns/records`, c, { ws: c.ws, zone: c.zone, ...(c.site ? { site: c.site } : {}) });
+}
+
+/** A change to one of the workspace's own domains' zones, from Settings (app/api/domains): any of them, whether an app uses it or not. */
+export async function changeWorkspaceDns(ws: string, c: DnsChange): Promise<DnsChanged> {
+  return dnsAt(`/api/domains/${encodeURIComponent(c.zone)}/records`, c, { ws });
+}
+
+/** A DNS change sent to the records at `base` (one by its id for a change or a remove), with `where` saying whose zone it is. */
+async function dnsAt(base: string, c: DnsChange, where: Record<string, string>): Promise<DnsChanged> {
+  const url = `${base}${c.action === "add" ? "" : `/${encodeURIComponent(c.id)}`}`;
+  const r = await post(url, { ...(c.action === "remove" ? {} : c.record), ...where }, c.action === "add" ? "POST" : c.action === "change" ? "PATCH" : "DELETE").catch(() => null);
   const j = ((await r?.json().catch(() => null)) ?? {}) as Partial<AppDnsWritten> & { error?: unknown; field?: unknown; stale?: unknown };
   const records = typeof j.zone === "string" && Array.isArray(j.records) ? { zone: j.zone, records: j.records } : null;
   if (r?.ok && records) return { written: records };
@@ -498,7 +545,9 @@ export function HostedApps({ state, ws }: { state?: Pick<AppState, "workspaces" 
   const { answer, failed, put } = useHostedApps(ws, appsStamp(state, ws));
   const started = useContext(OpenAppTask);
   const builder = state?.bots?.find((b) => b.isMain && workspaceOf(b) === ws)?.name ?? null;
-  return <HostedAppsList ws={ws} answer={answer} failed={failed} onChanged={put} builder={builder} onStarted={started ?? undefined} />;
+  // What people with Your Apps did to each app, newest first (lib/server/apps-for-members.ts): its row says the newest.
+  const seen = state?.workspaces?.find((w) => w.id === ws)?.appsForMembers?.apps;
+  return <HostedAppsList ws={ws} answer={answer} failed={failed} onChanged={put} builder={builder} onStarted={started ?? undefined} actOf={(name) => seen?.[name]?.acts?.[0]} />;
 }
 
 /**
@@ -516,6 +565,7 @@ export function HostedAppsList({
   onChanged,
   builder,
   onStarted,
+  actOf,
 }: {
   ws: string;
   answer: HostedAppsAnswer | null;
@@ -523,11 +573,11 @@ export function HostedAppsList({
   onChanged: (app: HostedApp) => void;
   builder?: string | null;
   onStarted?: (a: AddAppAnswer) => void;
+  /** The newest thing someone the workspace is shared with did to an app (Your Apps at Write), said under its row. */
+  actOf?: (name: string) => MemberAppAct | undefined;
 }) {
   const open = useContext(OpenHostedApp);
-  const { busy, error, run } = useDeploy(onChanged);
   const [adding, setAdding] = useState(false);
-  const wrong = error && answer?.apps.find((a) => a.name === error.name);
   if (answer && !answer.enabled && !answer.apps.length) return null;
   const why = answer && !answer.enabled ? answer.why || "Apps can't go on the web from here." : undefined;
   const addButton = answer && !adding && (
@@ -576,9 +626,10 @@ export function HostedAppsList({
         <div className="-mx-2 flex flex-col">
           {answer.apps.map((a) => {
             const url = urlOf(a);
+            const theirs = actOf?.(a.name);
             return (
+              <Fragment key={a.name}>
               <div
-                key={a.name}
                 data-hosted-app={a.name}
                 data-state={a.live?.state ?? "none"}
                 onClick={() => open?.(ws, a.name)}
@@ -604,24 +655,27 @@ export function HostedAppsList({
                   </span>
                 )}
                 <span className="flex-1" />
-                {a.serving && (
-                  <span data-serving title={`Its site serves ${a.serving}`} className="shrink-0 font-mono text-[11px] leading-[14px] text-[#6B6B6B]">
-                    {short(a.serving)}
-                  </span>
-                )}
-                <DeployButton why={whyNot(answer, a)} busy={busy(a.name, a.name)} onClick={() => void run(a.name, a.name, { ws, action: "deploy" })} />
               </div>
+              {/* Its three environments, all on its computer: Local, Staging (where Deploy goes), Prod (Promote to Prod). */}
+              <ListedEnvs ws={ws} answer={answer} app={a} onChanged={onChanged} />
+              {theirs && (
+                <span data-member-act className={`-mt-1 truncate pl-[26px] pr-2 text-[11.5px] leading-4 ${theirs.ok ? "text-[#9A9A98]" : "text-[#B42318]"}`}>
+                  {actLine(theirs)}
+                </span>
+              )}
+              </Fragment>
             );
           })}
         </div>
       )}
-      {wrong && (
-        <span className={PROBLEM} title={error.text}>
-          {wrong.name}: {error.text}
-        </span>
-      )}
     </div>
   );
+}
+
+/** An app's three lines on the Apps page (AppEnvs), its Local read from its computer (never one gone). */
+function ListedEnvs({ ws, answer, app, onChanged }: { ws: string; answer: Pick<HostedAppsAnswer, "enabled" | "why">; app: HostedApp; onChanged: (app: HostedApp) => void }) {
+  const local = useLocal(ws, app.name, !app.hosting?.lost);
+  return <AppEnvs compact ws={ws} answer={answer} app={app} sites={app.sites ?? [app]} local={local.answer} onLocal={local.put} onChanged={onChanged} />;
 }
 
 /**
@@ -642,6 +696,10 @@ export function HostedAppTab({
 }) {
   // The site picked, of one with more than one (none: its own); one removed since is its own again.
   const [picked, setPicked] = useState<string | undefined>(undefined);
+  // Which of its environments the sections are about (Prod by default), and Add a domain opened from Domain in Prod's menu.
+  const [intent] = useState(() => openIntent(name));
+  const [env, setEnv] = useState<AppEnv>("prod");
+  const local = useLocal(ws, name);
   // (Read again when another site is picked too: the lines of the others then say what Orgo says now, a
   // domain the one left was checking gone live, say.)
   const { answer, failed, put, drop, putDomains } = useHostedApps(ws, `${appsStamp(state, ws)}\n${picked ?? ""}`);
@@ -657,6 +715,8 @@ export function HostedAppTab({
   const dns = useDomains(ws, name, site, `${shown?.hosting?.projectId ?? ""}:${shown ? (urlOf(shown) ?? "") : ""}`);
   // Its settings and recent deploys, again when a deploy moves it on (the picked site's).
   const settings = useSettings(ws, name, site, `${shown?.hosting?.projectId ?? ""}:${shown?.live?.id ?? ""}:${shown?.live?.state ?? ""}`);
+  // Staging's (its own variables, settings and deploys), read while it's picked.
+  const staging = useSettings(ws, name, site, `${shown?.staging?.projectId ?? ""}:${shown?.staging?.live?.id ?? ""}:${shown?.staging?.live?.state ?? ""}`, "staging", env === "staging");
   // The picked site's domains as its Domains section has them (just read, or changed there), on its line in
   // the Sites list too: again after each read of the list, so one that began before a change and lands after
   // it never puts back what was there.
@@ -698,6 +758,13 @@ export function HostedAppTab({
       settings={settings.answer}
       onSettings={settings.put}
       email={state?.account?.user.email ?? null}
+      env={env}
+      onEnv={setEnv}
+      staging={staging.answer}
+      onStaging={staging.put}
+      local={local.answer}
+      onLocal={local.put}
+      addDomain={intent === "domain"}
     />
   );
 }
@@ -710,14 +777,15 @@ const settingsRead = new Map<string, AppSettingsAnswer>();
  * changes and when the window comes back into focus. `put`: as a change answered them. Never a variable's
  * value: Orgo answers names only.
  */
-function useSettings(ws: string, name: string, site: string | undefined, stamp: string) {
-  const key = `${ws}\n${name}\n${site ?? ""}`;
+function useSettings(ws: string, name: string, site: string | undefined, stamp: string, env?: "staging", on = true) {
+  const key = `${ws}\n${name}\n${site ?? ""}\n${env ?? ""}`;
   const [got, setGot] = useState<{ key: string; answer: AppSettingsAnswer | null } | null>(null);
   const answer = (got?.key === key ? got.answer : null) ?? settingsRead.get(key) ?? null;
   useEffect(() => {
+    if (!on) return;
     let stop = false;
     const read = () =>
-      void readSettings(ws, name, site).then((r) => {
+      void readSettings(ws, name, site, env).then((r) => {
         if (stop) return;
         if (r.ok) settingsRead.set(key, r.ok);
         setGot((g) => ({ key, answer: r.ok ?? (g?.key === key ? g.answer : null) }));
@@ -728,7 +796,7 @@ function useSettings(ws: string, name: string, site: string | undefined, stamp: 
       stop = true;
       off();
     };
-  }, [key, ws, name, site, stamp]);
+  }, [key, ws, name, site, stamp, env, on]);
   const put = (a: AppSettingsAnswer) => {
     settingsRead.set(key, a);
     setGot({ key, answer: a });
@@ -881,6 +949,13 @@ export function HostedAppView({
   settings = null,
   onSettings = () => {},
   email = null,
+  env: picked,
+  onEnv,
+  staging = null,
+  onStaging = () => {},
+  local = null,
+  onLocal = () => {},
+  addDomain = false,
 }: {
   ws: string;
   answer: Pick<HostedAppsAnswer, "enabled" | "why">;
@@ -909,8 +984,24 @@ export function HostedAppView({
   onSettings?: (a: AppSettingsAnswer) => void;
   /** The signed-in account's email, to fill who a domain bought here is registered to. */
   email?: string | null;
+  /** Which of its environments the sections are about (none: Prod, kept here when no one listens), and who hears another picked. */
+  env?: AppEnv;
+  onEnv?: (env: AppEnv) => void;
+  /** Staging's settings, variables' names and recent deploys (null: being read, or none yet). */
+  staging?: AppSettingsAnswer | null;
+  onStaging?: (a: AppSettingsAnswer) => void;
+  /** Its Local, as its computer said (null: not read yet). */
+  local?: LocalAnswer | null;
+  onLocal?: (a: LocalAnswer) => void;
+  /** Add a domain open on Prod, from Domain in Prod's menu on the Apps page. */
+  addDomain?: boolean;
 }) {
   const { busy, error, run } = useDeploy(onChanged);
+  const [envMine, setEnvMine] = useState<AppEnv>(addDomain ? "prod" : "prod");
+  const env = onEnv ? (picked ?? "prod") : envMine;
+  const pickEnv = (x: AppEnv) => (onEnv ? onEnv(x) : setEnvMine(x));
+  // Add a domain opened from Prod's menu here (or the Apps page's): Prod picked, its Domains' Add a domain open.
+  const [adding, setAdding] = useState(addDomain ? 1 : 0);
   const [mine, setMine] = useState<string | undefined>(undefined);
   const sites = app.sites;
   const current = sites?.find((x) => x.name === (onSite ? site : mine)) ?? sites?.[0];
@@ -926,21 +1017,39 @@ export function HostedAppView({
   /** The sites that serve a changeset, of one with more than one. */
   const servedBy = (id: string) => sites?.filter((x) => x.serving === id).map((x) => x.name) ?? [];
   // What a deploy waiting or running builds (the newest, when it doesn't say): any site's.
-  const going = new Set([app, ...(sites ?? [])].filter(deploying).map((x) => x.live?.at ?? online?.head ?? app.head));
+  const going = new Set(
+    [app, ...(sites ?? [])]
+      .flatMap((x) => [x, ...(x.staging ? [x.staging] : [])])
+      .filter(deploying)
+      .map((x) => x.live?.at ?? online?.head ?? app.head),
+  );
+  /** Where a changeset is on Staging: the sites whose Staging serves it (the app, for one with one site). */
+  const stagingSites = (id: string) => (sites ? sites.filter((x) => x.staging?.serving === id).map((x) => x.name) : app.staging?.serving === id ? [app.name] : []);
   /** The end of a changeset's line: Live (its site serves it; the ones that do, of more), Deploying, else "Deploy this one". */
   const end = (c: AppCommit) => {
     const on = sites ? servedBy(c.id) : c.id === serving ? [app.name] : [];
+    const st = stagingSites(c.id);
+    const chip = st.length ? (
+      <span data-on-staging className="flex shrink-0 items-center gap-1 rounded-full bg-[#EEF2FF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3346A8]">
+        <span className="size-1.5 shrink-0 rounded-full bg-[#5B6BD6]" />
+        Preview
+      </span>
+    ) : null;
     if (on.length)
       return (
+        <span className="flex shrink-0 items-center gap-1">
+        {chip}
         <span
           data-live
           title={sites ? `Live on ${on.join(", ")}` : undefined}
           className="flex min-w-0 max-w-[180px] shrink-0 items-center gap-1 rounded-full bg-[#EAF7EF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#1E7A4C]"
         >
           <span className="size-1.5 shrink-0 rounded-full bg-[#2BB673]" />
-          <span className="truncate">{sites && on.length < sites.length ? `Live on ${on.join(", ")}` : "Live"}</span>
+          <span className="truncate">{sites && on.length < sites.length ? `Published: ${on.join(", ")}` : "Published"}</span>
+        </span>
         </span>
       );
+    if (chip && !going.has(c.id)) return chip;
     if (going.has(c.id))
       return (
         <span data-going className="flex shrink-0 items-center gap-1 rounded-full bg-[#F2F2F0] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3A3A38]">
@@ -951,7 +1060,7 @@ export function HostedAppView({
     return (
       // Shown as its line is pointed at or reached with the keyboard, so the history reads as a list.
       <span className="flex shrink-0 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
-        <DeployButton label={sites ? "Deploy this one to all" : "Deploy this one"} why={whyNot(answer, app, c.id)} busy={busy(c.id, app.name)} onClick={() => void run(c.id, app.name, { ws, action: "deploy", at: c.id })} />
+        <DeployButton label={sites ? "Preview this one, all sites" : "Preview this one"} why={whyNot(answer, app, c.id, undefined, "staging")} busy={busy(c.id, app.name)} onClick={() => void run(c.id, app.name, { ws, action: "deploy", env: "staging", at: c.id })} />
       </span>
     );
   };
@@ -980,7 +1089,7 @@ export function HostedAppView({
             Work on it
           </button>
         )}
-        <DeployButton primary label={sites ? "Deploy all" : "Deploy"} why={whyNot(answer, app)} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy" })} />
+        <DeployButton primary label={sites ? "Deploy all previews" : "Deploy preview"} why={whyNot(answer, app, undefined, undefined, "staging")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "staging" })} />
       </div>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-4 py-3">
         {lost && (
@@ -1001,10 +1110,10 @@ export function HostedAppView({
                   onPick={() => pick(x.name)}
                   deploy={
                     <DeployButton
-                      label="Deploy this site"
-                      why={whyNot(answer, app, undefined, x)}
+                      label="Deploy preview"
+                      why={whyNot(answer, app, undefined, x, "staging")}
                       busy={busy(`site:${x.name}`, app.name)}
-                      onClick={() => void run(`site:${x.name}`, app.name, { ws, action: "deploy", site: x.name })}
+                      onClick={() => void run(`site:${x.name}`, app.name, { ws, action: "deploy", env: "staging", site: x.name })}
                     />
                   }
                 />
@@ -1026,14 +1135,53 @@ export function HostedAppView({
             )}
           </div>
         )}
-        {/* Made again for each site picked: what was typed for one (its settings, a variable, a domain) never follows to another. */}
-        <AppSite.Provider key={siteName ?? app.name} value={siteName}>
-          <AppAddress url={domains?.url ?? settings?.url ?? urlOf(view)} />
-          <Domains ws={ws} app={view} answer={domains} failed={domainsFailed} onDns={onDns} onDomains={onDomains} onDomain={onDomain} onRenewal={onRenewal} email={email} />
-          {/* Before its first deploy, there to set where deploying is open (the first save makes its project). */}
-          {settings && (settings.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={settings} onSaved={onSettings} />}
-          {/* One log per deploy: a deploy that ends keeps its log open where it was. */}
-          <AppDeploys ws={ws} app={view} deploys={settings?.deploys ?? []} onChanged={onChanged} log={view.live && <DeployLog key={`${siteName ?? ""}:${view.live.id}`} ws={ws} name={app.name} live={view.live} />} />
+        {/* Its three environments, all on its computer (the picked site's): a line pressed picks what the sections under it are about. */}
+        <AppEnvs
+          ws={ws}
+          answer={answer}
+          app={view}
+          site={siteName}
+          sites={[current ?? app]}
+          local={local}
+          onLocal={onLocal}
+          onChanged={onChanged}
+          picked={env}
+          onPick={pickEnv}
+          onDomain={() => {
+            pickEnv("prod");
+            setAdding((n) => n + 1);
+          }}
+        />
+        {/* Made again for each site and environment picked: what was typed for one (its settings, a variable, a domain) never follows to another. */}
+        <AppSite.Provider key={`${siteName ?? app.name}:${env}`} value={siteName}>
+          {env === "prod" && (
+            <>
+              <AppAddress url={domains?.url ?? settings?.url ?? urlOf(view)} />
+              <Domains ws={ws} app={view} answer={domains} failed={domainsFailed} onDns={onDns} onDomains={onDomains} onDomain={onDomain} onRenewal={onRenewal} email={email} adding={adding} />
+              {/* Before its first deploy, there to set where deploying is open (the first save makes its project). */}
+              {settings && (settings.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={settings} onSaved={onSettings} />}
+              {/* One log per deploy: a deploy that ends keeps its log open where it was. */}
+              <AppDeploys ws={ws} app={view} deploys={settings?.deploys ?? []} onChanged={onChanged} log={view.live && <DeployLog key={`${siteName ?? ""}:${view.live.id}`} ws={ws} name={app.name} live={view.live} />} />
+            </>
+          )}
+          {env === "staging" && (
+            <AppEnvCtx.Provider value="staging">
+              <AppAddress url={staging?.url ?? view.staging?.url ?? null} />
+              {staging && (staging.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={staging} onSaved={onStaging} />}
+              <AppDeploys
+                ws={ws}
+                app={{ ...view, live: view.staging?.live ?? null, serving: view.staging?.serving ?? null }}
+                deploys={staging?.deploys ?? []}
+                onChanged={onChanged}
+                log={view.staging?.live && <DeployLog key={`staging:${siteName ?? ""}:${view.staging.live.id}`} ws={ws} name={app.name} live={view.staging.live} />}
+              />
+            </AppEnvCtx.Provider>
+          )}
+          {env === "local" && (
+            <AppEnvCtx.Provider value="local">
+              <LocalSection ws={ws} app={view} site={siteName} local={local} onLocal={onLocal} />
+            </AppEnvCtx.Provider>
+          )}
         </AppSite.Provider>
         <div data-history className="flex flex-col">
           <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">History</span>
@@ -1173,6 +1321,7 @@ function Changes({ changes }: { changes?: AppCommit["changes"] | null }) {
  */
 function DeployLog({ ws, name, live }: { ws: string; name: string; live: NonNullable<HostedApp["live"]> }) {
   const site = useContext(AppSite);
+  const env = useContext(AppEnvCtx);
   const [open, setOpen] = useState(false);
   const [log, setLog] = useState<{ text: string; state: DeployState | null; failed: boolean } | null>(null);
   const box = useRef<HTMLPreElement>(null);
@@ -1185,7 +1334,7 @@ function DeployLog({ ws, name, live }: { ws: string; name: string; live: NonNull
     let misses = 0;
     const read = async () => {
       const first = after === null;
-      const r = await readLog(ws, name, after, site);
+      const r = await readLog(ws, name, after, site, env);
       if (stop) return;
       if (!r) {
         setLog((l) => ({ text: first ? "" : (l?.text ?? ""), state: l?.state ?? null, failed: true }));
@@ -1205,7 +1354,7 @@ function DeployLog({ ws, name, live }: { ws: string; name: string; live: NonNull
     };
     // The deploy's state as it opened is where reading starts; the reads say it from then on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, ws, name, site]);
+  }, [open, ws, name, site, env]);
   // The newest line stays in sight as more comes.
   useEffect(() => {
     if (box.current) box.current.scrollTop = box.current.scrollHeight;
@@ -1233,7 +1382,7 @@ function DeployLog({ ws, name, live }: { ws: string; name: string; live: NonNull
 
 /* ---------------- Its domains and their DNS ---------------- */
 
-const DOMAIN_STATES: Record<AppDomainStatus, { word: string; dot: string }> = {
+export const DOMAIN_STATES: Record<AppDomainStatus, { word: string; dot: string }> = {
   pending: { word: "Waiting for its DNS", dot: PULSE },
   verifying: { word: "Checking its DNS", dot: PULSE },
   active: { word: "Live", dot: "bg-[#2BB673]" },
@@ -1268,9 +1417,9 @@ const CHECKS = 30;
  * doing, and Remove (asked once more first); one bought elsewhere has its DNS greyed out under it (the
  * records to set where it's kept, each value to copy, and Verify). Add a domain (AddDomain) under
  * them, once it's on the web. Then the DNS records of each one bought through Orgo (DnsZone), with its
- * renewal. A domain just pointed here whose records Orgo writes itself is checked every few seconds until
- * it's live (a couple of minutes at most), its line saying so. Each line is one 32px line, so what's read
- * comes in under it a line at a time.
+ * renewal. A domain just pointed here whose records Orgo writes itself, or whose records Bops just set in the
+ * user's Cloudflare, is checked every few seconds until it's live (a couple of minutes at most), its line
+ * saying so. Each line is one 32px line, so what's read comes in under it a line at a time.
  */
 function Domains({
   ws,
@@ -1282,6 +1431,7 @@ function Domains({
   onDomain,
   onRenewal,
   email,
+  adding: open = 0,
 }: {
   ws: string;
   app: HostedApp;
@@ -1292,15 +1442,39 @@ function Domains({
   onDomain: (d: AppDomain) => void;
   onRenewal: (zone: string, r: AppRenewal) => void;
   email?: string | null;
+  /** Each time it goes up (Domain in Prod's menu), Add a domain opens. */
+  adding?: number;
 }) {
   const site = useContext(AppSite);
+  const openSettings = useContext(OpenSettings);
   // Never deployed: no project, so no port for a domain to serve. Nothing to read.
   const deployed = !!app.hosting?.projectId;
   const none = !deployed || (answer && !answer.domains.length);
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(open > 0);
+  const [opened, setOpened] = useState(open);
+  if (open !== opened) {
+    setOpened(open);
+    if (open > 0) setAdding(true);
+  }
   const [watching, setWatching] = useState<string[]>([]);
   const [said, setSaid] = useState<Record<string, string | null>>({});
   const say = (id: string, text: string | null) => setSaid((x) => ({ ...x, [id]: text }));
+  // What a removal couldn't do in Cloudflare, under the title once the domain's line is gone.
+  const [removedSaid, setRemovedSaid] = useState<string | null>(null);
+  // The domain whose plan for Cloudflare is open in Add a domain: its line doesn't offer the same again.
+  const [addPlan, setAddPlan] = useState<string | null>(null);
+  const planIn = adding ? addPlan : null;
+  // The ones Bops couldn't set in Cloudflare just now: their records to copy again.
+  const [cantSet, setCantSet] = useState<string[]>([]);
+  const cant = (id: string) => setCantSet((x) => (x.includes(id) ? x : [...x, id]));
+  const watch = (id: string) => setWatching((w) => [...w.filter((x) => x !== id), id]);
+  /** Its records just set in Cloudflare: checked until it's live, its line saying so. */
+  const applied = (a: CloudflareApplied) => {
+    onDomain(a.domain);
+    if (a.domain.status === "active") return say(a.domain.id, a.said ? undash(a.said) : null);
+    watch(a.domain.id);
+    say(a.domain.id, "Set in Cloudflare. Orgo is checking it now.");
+  };
   const watched = watching.join(",");
   useEffect(() => {
     if (!watched) return;
@@ -1314,8 +1488,9 @@ function Domains({
           if (stop || !r.ok) return;
           onDomain(r.ok.domain);
           const over = r.ok.domain.status === "active" || r.ok.domain.status === "failed" || r.ok.domain.status === "disabled";
-          say(id, over ? (r.ok.said ?? null) : null);
-          if (over) setWatching((w) => w.filter((x) => x !== id));
+          if (!over) return;
+          say(id, r.ok.said ?? null);
+          setWatching((w) => w.filter((x) => x !== id));
         });
       if (tries >= CHECKS) {
         setWatching([]);
@@ -1331,11 +1506,40 @@ function Domains({
   }, [watched, ws, app.name, site]);
   return (
     <div data-domains className="flex flex-col">
-      <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Domains</span>
+      <div className="flex items-center gap-2 pb-1">
+        <span className="text-[12px] font-semibold leading-4 text-[#6B6B6B]">Domains</span>
+        <span className="flex-1" />
+        {/* Every domain the workspace bought, in Settings. */}
+        {openSettings && (
+          <button data-all-domains onClick={() => openSettings("domains")} className="text-[12px] leading-4 text-[#6B6B6B] hover:text-ink hover:underline">
+            All domains
+          </button>
+        )}
+      </div>
+      {removedSaid && (
+        <span data-removed-said className="pb-1 text-[12px] leading-[18px] text-[#6B6B6B]">
+          {removedSaid}
+        </span>
+      )}
       {!none && (
         <div className="-mx-2 flex flex-col">
           {answer?.domains.map((d) => (
-            <DomainLine key={d.id} ws={ws} name={app.name} d={d} checking={watching.includes(d.id)} said={said[d.id] ?? null} onSaid={(t) => say(d.id, t)} onDomain={onDomain} onDomains={onDomains} />
+            <DomainLine
+              key={d.id}
+              ws={ws}
+              name={app.name}
+              d={d}
+              checking={watching.includes(d.id)}
+              said={said[d.id] ?? null}
+              onSaid={(t) => say(d.id, t)}
+              onDomain={onDomain}
+              onDomains={onDomains}
+              onApplied={applied}
+              onRemovedSaid={setRemovedSaid}
+              planElsewhere={planIn === d.id}
+              cantSet={cantSet.includes(d.id)}
+              onCantSet={() => cant(d.id)}
+            />
           ))}
         </div>
       )}
@@ -1356,9 +1560,14 @@ function Domains({
             onClose={() => setAdding(false)}
             onAdded={(all, d) => {
               onDomains(all);
+              setRemovedSaid(null);
               // One Orgo writes the records of goes live in a minute or two: checked until it is.
-              if (d && d.managed && d.status !== "active") setWatching((w) => [...w.filter((x) => x !== d.id), d.id]);
+              if (d && d.managed && d.status !== "active") watch(d.id);
             }}
+            onSaid={(id, text) => say(id, text)}
+            onApplied={applied}
+            onPlan={setAddPlan}
+            onCantSet={cant}
           />
         ) : (
           <button
@@ -1372,7 +1581,7 @@ function Domains({
             Add a domain
           </button>
         ))}
-      {!none && answer?.zones.map((z) => <DnsZone key={z.id} ws={ws} name={app.name} zone={z} onDns={onDns} onRenewal={onRenewal} />)}
+      {!none && answer?.zones.map((z) => <DnsZone key={z.id} ws={ws} name={app.name} zone={z} onDns={onDns} onRenewal={onRenewal} flip={(on) => setAutoRenew(ws, app.name, z.id, on, site)} />)}
     </div>
   );
 }
@@ -1392,6 +1601,11 @@ function DomainLine({
   onSaid,
   onDomain,
   onDomains,
+  onApplied,
+  onRemovedSaid,
+  planElsewhere,
+  cantSet,
+  onCantSet,
 }: {
   ws: string;
   name: string;
@@ -1401,6 +1615,15 @@ function DomainLine({
   onSaid: (text: string | null) => void;
   onDomain: (d: AppDomain) => void;
   onDomains: (a: AppDomainsAnswer) => void;
+  /** Its records just set in the user's Cloudflare (from its greyed box), and Orgo checked it. */
+  onApplied?: (a: CloudflareApplied) => void;
+  /** What its removal couldn't do in Cloudflare, said under the title once its line is gone. */
+  onRemovedSaid?: (text: string | null) => void;
+  /** Its plan for Cloudflare is open in Add a domain, below: not offered here as well. */
+  planElsewhere?: boolean;
+  /** Bops couldn't set it in Cloudflare just now (OutsideDns), so its records are to copy again. */
+  cantSet?: boolean;
+  onCantSet?: () => void;
 }) {
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState<"check" | "remove" | null>(null);
@@ -1424,6 +1647,7 @@ function DomainLine({
       setBusy(null);
       if (!r.ok) return setError(r.no.error);
       setRemoving(false);
+      onRemovedSaid?.(r.ok.said ? undash(r.ok.said) : null);
       onDomains(r.ok);
     });
   };
@@ -1472,7 +1696,7 @@ function DomainLine({
       {removing && (
         <div className="px-2 pb-1" onKeyDown={(e) => e.key === "Escape" && e.stopPropagation()}>
           <InlineConfirm
-            text={`Remove ${d.domain} from this app?${d.managed ? " The domain stays yours." : ""}`}
+            text={d.cloudflare ? `Remove ${d.domain} from this app? Bops also takes off the records it set for it in Cloudflare.` : `Remove ${d.domain} from this app?${d.managed ? " The domain stays yours." : ""}`}
             action="Remove"
             doing="Removing…"
             busy={busy === "remove"}
@@ -1491,7 +1715,23 @@ function DomainLine({
           Couldn&apos;t read its DNS records.
         </span>
       )}
-      {!d.managed && d.status !== "disabled" && <OutsideDns d={d} busy={busy === "check"} disabled={!!busy} onVerify={check} />}
+      {!d.managed && d.status !== "disabled" && (
+        <OutsideDns
+          ws={ws}
+          name={name}
+          d={d}
+          busy={busy === "check"}
+          disabled={!!busy}
+          onVerify={check}
+          onApplied={(a) => {
+            setError(null);
+            onApplied?.(a);
+          }}
+          planElsewhere={planElsewhere}
+          cantSet={cantSet}
+          onCantSet={onCantSet}
+        />
+      )}
       {(said || error) && (
         <span role={error ? "alert" : undefined} className={`mb-1 ml-6 text-[12px] leading-[18px] ${error ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
           {error ?? said}
@@ -1504,16 +1744,77 @@ function DomainLine({
 /**
  * The DNS of a domain bought elsewhere, greyed out: Orgo can't change it, so it's only the records to set
  * where it's kept (once it's live, what routes it there), each value to copy, with what Orgo found of each,
- * and Verify, which looks again (and turns it live once they answer).
+ * and Verify, which looks again (and turns it live once they answer). One whose zone is in the user's own
+ * Cloudflare account (AppDomain.cloudflare) has Set it in Cloudflare in place of copying, while any record
+ * isn't found as it should be: what Bops would set there, read then, inside the box (CloudflarePlanBox); not
+ * while that plan is open in Add a domain (`planElsewhere`). Once Bops can't set it there (its plan not read,
+ * blocked, or not written: `cantSet`, kept by Domains), each value is to copy again.
  */
-function OutsideDns({ d, busy, disabled, onVerify }: { d: AppDomain; busy: boolean; disabled: boolean; onVerify: () => void }) {
+function OutsideDns({
+  ws,
+  name,
+  d,
+  busy,
+  disabled,
+  onVerify,
+  onApplied,
+  planElsewhere,
+  cantSet,
+  onCantSet,
+}: {
+  ws: string;
+  name: string;
+  d: AppDomain;
+  busy: boolean;
+  disabled: boolean;
+  onVerify: () => void;
+  onApplied: (a: CloudflareApplied) => void;
+  planElsewhere?: boolean;
+  cantSet?: boolean;
+  onCantSet?: () => void;
+}) {
+  const site = useContext(AppSite);
+  const [plan, setPlan] = useState<CloudflarePlan | null>(null);
+  const [reading, setReading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   // Who keeps it is on the domain's line already.
   const there = d.where ? `at ${d.where}` : "where its DNS is kept";
-  const said = d.status === "active" ? `Orgo doesn't change its DNS.${d.publish.length ? ` This is what's set ${there}.` : ""}` : `Orgo can't set these. Add them ${there}, then Verify.`;
+  const live = d.status === "active";
+  const cf = d.cloudflare;
+  const off = d.publish.filter((r) => r.found && r.found !== "ok");
+  const allFound = d.publish.length > 0 && d.publish.every((r) => r.found === "ok");
+  // Set it in Cloudflare while what Orgo looks for isn't all there (live: only once a look found it off).
+  const offer = !!cf && (live ? off.length > 0 : !allFound);
+  const said = cf
+    ? live
+      ? off.length
+        ? `Its ${off.map((r) => r.type).join(" and ")} record at Cloudflare isn't set as shown.`
+        : "Orgo doesn't change its DNS. This is what's set at Cloudflare."
+      : allFound
+        ? "These are set in Cloudflare. Orgo turns it on once they answer."
+        : "Its DNS is at Cloudflare, in your account. Bops can set these for you."
+    : live
+      ? `Orgo doesn't change its DNS.${d.publish.length ? ` This is what's set ${there}.` : ""}`
+      : `Orgo can't set these. Add them ${there}, then Verify.`;
+  const look = () => {
+    setReading(true);
+    setError(null);
+    void readCloudflarePlan(ws, name, d.id, site).then((r) => {
+      setReading(false);
+      if (r.ok) setPlan(r.ok);
+      else setError(r.no.error);
+      if (!r.ok || r.ok.blocked) onCantSet?.();
+    });
+  };
   return (
     <div data-publish={d.domain} data-outside-dns className="mb-1 ml-6 flex min-w-0 flex-col rounded-lg bg-[#F6F6F4] px-2.5 py-1.5">
       <div className="flex min-w-0 items-center gap-2">
         <span className="min-w-0 flex-1 text-[12px] leading-[18px] text-[#9A9A98]">{said}</span>
+        {offer && !plan && !planElsewhere && (
+          <button data-set-in-cloudflare onClick={look} disabled={disabled || reading} className="shrink-0 whitespace-nowrap rounded-full bg-ink px-2 py-0.5 text-[12px] font-medium leading-4 text-white disabled:opacity-40">
+            {reading ? "Reading…" : "Set it in Cloudflare"}
+          </button>
+        )}
         <button data-verify onClick={onVerify} disabled={disabled} className="shrink-0 whitespace-nowrap rounded-full bg-white px-2 py-0.5 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#FBFBFA] disabled:text-[#9A9A98]">
           {busy ? "Verifying…" : "Verify"}
         </button>
@@ -1527,10 +1828,33 @@ function OutsideDns({ d, busy, disabled, onVerify }: { d: AppDomain; busy: boole
           <span title={r.value} className="min-w-0 flex-1 truncate font-mono text-[11.5px] leading-4 text-[#6B6B6B]">
             {r.value}
           </span>
-          <CopyLink url={r.value} label={`Copy the ${r.type} value`} />
+          {/* Nothing to copy where Bops sets them itself, but when it can't. */}
+          {(!cf || cantSet) && <CopyLink url={r.value} label={`Copy the ${r.type} value`} />}
           {r.found && FOUND[r.found] && <span className={`shrink-0 text-[12px] leading-4 ${FOUND[r.found].look}`}>{FOUND[r.found].word}</span>}
         </div>
       ))}
+      {error && (
+        <span role="alert" className="text-[12px] leading-[18px] text-[#B42318]">
+          {undash(error)}
+        </span>
+      )}
+      {plan && (
+        <div className="mt-1.5 rounded-lg bg-white p-2.5 shadow-[0_0_0_1px_#ECECEA]">
+          <CloudflarePlanBox
+            key={plan.fingerprint}
+            ws={ws}
+            name={name}
+            plan={plan}
+            from="box"
+            onCancel={() => setPlan(null)}
+            onApplied={(a) => {
+              setPlan(null);
+              onApplied(a);
+            }}
+            onCantSet={onCantSet}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -1565,9 +1889,26 @@ const nextTo = (before: AppDnsRecord[], id: string) => {
  * record's id is what it says, so ids change with it); one that changed since it was read comes back as
  * it is now, with why. While its nameservers aren't Orgo's, the records are kept but don't answer, and it
  * says so. As a form or a question closes, focus goes back where it was asked (a record's Change or
- * Remove, or Add record); a record removed, to the next one.
+ * Remove, or Add record); a record removed, to the next one. `change` sends a change (the app's own DNS
+ * routes, of its site, unless Settings sends it to the workspace's); `flip` its auto-renew.
  */
-function DnsZone({ ws, name, zone, onDns, onRenewal = () => {} }: { ws: string; name: string; zone: AppDnsZone; onDns: (w: AppDnsWritten) => void; onRenewal?: (zone: string, r: AppRenewal) => void }) {
+export function DnsZone({
+  ws,
+  name,
+  zone,
+  onDns,
+  onRenewal = () => {},
+  change,
+  flip,
+}: {
+  ws: string;
+  name: string;
+  zone: AppDnsZone;
+  onDns: (w: AppDnsWritten) => void;
+  onRenewal?: (zone: string, r: AppRenewal) => void;
+  change?: (c: DnsChange) => Promise<DnsChanged>;
+  flip: RenewalFlip;
+}) {
   const [editing, setEditing] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1584,7 +1925,7 @@ function DnsZone({ ws, name, zone, onDns, onRenewal = () => {} }: { ws: string; 
     const before = zone.records;
     setBusy(true);
     setError(null);
-    const r = await changeDns(name, site ? { ...c, site } : c);
+    const r = await (change ? change(c) : changeDns(name, site ? { ...c, site } : c));
     const why = { text: r.error ?? "Couldn't change the DNS. Try again.", ...(r.field ? { field: r.field } : {}) };
     // Focus moves on only from the form or the question (or the page): put somewhere else meanwhile, it stays there.
     const at = document.activeElement;
@@ -1642,7 +1983,7 @@ function DnsZone({ ws, name, zone, onDns, onRenewal = () => {} }: { ws: string; 
         )}
         {zone.ttl !== null && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">TTL {zone.ttl}s</span>}
       </div>
-      <RenewalLine ws={ws} name={name} zone={zone} onRenewal={onRenewal} />
+      <RenewalLine zone={zone} flip={flip} onRenewal={onRenewal} />
       {zone.error ? (
         <span className={`flex h-8 items-center ${QUIET}`}>{zone.error}</span>
       ) : (

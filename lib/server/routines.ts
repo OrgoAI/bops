@@ -1,7 +1,7 @@
 import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
-import { botChatId, lastWorkOf, levelOf, live, pausedForOk, workspaceOf, type Bot, type Delivery, type Message, type ReplyDraft, type Routine, type SkillProposal, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
+import { botChatId, lastWorkOf, levelIn, live, pausedForOk, workspaceOf, type Bot, type Delivery, type Message, type ReplyDraft, type Routine, type SkillProposal, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
 import { appNameFor, CHECK_TEMPLATE, tagsOf } from "@/lib/routine-catalog";
 import { draftsText } from "@/lib/reply-drafts";
 import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, sameWallTime, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
@@ -547,7 +547,7 @@ function checkBlocked(r: Routine, b: Bot): string | undefined {
   const a = getState().accounts?.find((x) => x.id === r.source!.account);
   if (!a) return `That ${appWord(r.source.app)} account isn't connected anymore. Delete this routine, or connect it again in Logins.`;
   if (a.status !== "active") return `${checkWord(r.source)} is signed out. Sign in again in Logins.`;
-  if (!levelOf(b, a)) return `${b.name} can't use ${checkWord(r.source)} now. Give it access in Logins, or delete this routine.`;
+  if (!levelIn(getState(), b, a)) return `${b.name} can't use ${checkWord(r.source)} now. Give it access in Logins, or delete this routine.`;
   return undefined;
 }
 

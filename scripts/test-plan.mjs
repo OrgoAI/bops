@@ -330,7 +330,7 @@ assert.equal(asked("POST", "/api/computers"), 0);
 // Hacker with its one computer free: made at the plan's 8 GB; its vCPUs are the template's, as far as the plan allows.
 onPlan("hacker_v2", 1, 0, { replies: { "POST /api/computers": () => json(201, { id: "c-main", name: "boppy-b", status: "creating" }) } });
 assert.deepEqual(plain(await L.makeMainComputer(main(), "boppy-b")), { id: "c-main", name: "boppy-b", status: "creating" });
-assert.deepEqual(calls.at(-1).body, { workspace_id: "ws_bops", name: "boppy-b", template_ref: "system/bops-base@0.1.8", ram: 8 });
+assert.deepEqual(calls.at(-1).body, { workspace_id: "ws_bops", name: "boppy-b", template_ref: "system/bops-base@0.1.11", ram: 8 });
 // Startup and Scale too: 8 GB, so their 4 and 16 computers fit their memory.
 for (const [tier, max] of [["startup_v2", 4], ["scale_v2", 16]]) {
   onPlan(tier, max, 0, { replies: { "POST /api/computers": () => json(201, { id: "c-x", name: "boppy-x", status: "creating" }) } });
@@ -926,7 +926,7 @@ assert.equal(P.bopsComputers([{ computerId: "c-f", freeComputer: true }, { compu
 let fo = freeOrgo("free", 0);
 const madeFree = await L.makeMainComputer(main(), "boppy-free");
 assert.deepEqual(plain(madeFree), { id: "c-free-1", free: true });
-assert.deepEqual(calls.filter((c) => c.method === "POST" && c.path === "/api/computers").at(-1).body, { workspace_id: "ws_bops", name: "boppy-free", template_ref: "system/bops-base@0.1.8", bops_free: true });
+assert.deepEqual(calls.filter((c) => c.method === "POST" && c.path === "/api/computers").at(-1).body, { workspace_id: "ws_bops", name: "boppy-free", template_ref: "system/bops-base@0.1.11", bops_free: true });
 assert.deepEqual({ id: main().computerId, free: main().freeComputer }, { id: "c-free-1", free: true });
 // Another workspace's main bot on Free: no second free one (none is asked for), it works on the free one
 // with its team, and its chat says why.
@@ -950,7 +950,7 @@ assert.equal(workBotOf(S.bot("lu")).id, "kai");
 // Then its own is on the plan, at the plan's size: never a second free one.
 const kaiOwn = await L.makeMainComputer(kai(), "kai-b");
 assert.deepEqual([kaiOwn.id, kaiOwn.free], ["c-plan-1", undefined]);
-assert.deepEqual(calls.at(-1).body, { workspace_id: "ws_bops", name: "kai-b", template_ref: "system/bops-base@0.1.8", ram: 8 });
+assert.deepEqual(calls.at(-1).body, { workspace_id: "ws_bops", name: "kai-b", template_ref: "system/bops-base@0.1.11", ram: 8 });
 S.update(() => Object.assign(kai(), { computerId: undefined, computer: undefined }));
 
 // The free one is on Orgo, but no bot here has it (this Mac's state is new): the main bot takes it up again.

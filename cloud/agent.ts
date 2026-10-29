@@ -14,13 +14,12 @@ import {
   ownerNameOf,
   timeZoneOf,
   windowSize,
-  workspaceOf,
   type InputItem,
 } from "./agent-prompt.ts";
 import { config } from "./config.ts";
 import { requireCredit } from "./credit.ts";
 import { query } from "./db.ts";
-import { bindingFor, keptFromOthers, memoryBlock, saveChat } from "./honcho.ts";
+import { bindingsOfBot, keptFromOthers, memoryBlock, saveChat } from "./honcho.ts";
 import { HttpError, readJson, sendJson, type Route } from "./http.ts";
 import {
   AGENT_BUSY,
@@ -464,8 +463,10 @@ async function answer(t: Turn, c: TurnFor) {
     const quoted = [...new Set(window.map((m) => m.replyTo).filter((x): x is string => typeof x === "string"))].filter((x) => !window.some((m) => m.id === x));
     const roots = new Map((await messagesById(c.userId, quoted)).flatMap((r) => (r.json ? [[r.id, r.json] as const] : [])));
     // Memory only with the user's say-so from the phone: it's another company's AI (Honcho).
-    const binding = c.memory ? bindingFor(workspaceOf(b), v.workspaces.find((w) => w.id === workspaceOf(b))?.memory) : null;
-    const memory = binding ? await memoryBlock(c.userId, binding, c.message.text, owner, timing.memoryMs) : "";
+    // Its memory scope (lib/server/memory.ts scopeOf): its own bank first when it keeps its memory to itself, saved to there.
+    const banks = c.memory ? bindingsOfBot(v, b.id) : null;
+    const binding = banks?.[0] ?? null;
+    const memory = banks ? await memoryBlock(c.userId, banks, c.message.text, owner, timing.memoryMs) : "";
     const input = [...historyInput(window, roots, v, b.id, owner), nowNote(v, b, owner, c.tz, memory)];
     const a = await respond(instructionsFor(v, b, c.orgoName), input, c.tz);
     try {

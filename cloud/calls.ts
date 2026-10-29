@@ -39,6 +39,8 @@ export type Bot = {
   id: string;
   name: string;
   isMain?: boolean;
+  /** What it does on the team ("Sales"), as the app shows it under its name. */
+  role?: unknown;
   workspaceId?: string;
   phone?: string;
   phoneLine?: { numberId: string; agentId: string };
@@ -59,8 +61,11 @@ type CallMessage = NonNullable<CloudCallPayload["message"]>;
  */
 export type State = {
   owner: string | null;
+  /** What the owner wrote about themselves (Settings, You), as the app's calls are told it (ownerLine in lib/server/store.ts). */
+  ownerAbout: string | null;
   bots: Bot[];
-  workspaces: { id: string; line?: Line }[];
+  /** `botSettings`: what each bot's settings page set, by bot id (lib/types.ts BotSettings): read through callSettings. */
+  workspaces: { id: string; line?: Line; botSettings?: unknown; loginsOn?: unknown }[];
   accounts: Account[];
   channels: Channel[];
 };
@@ -68,9 +73,10 @@ export type State = {
 export function view(raw: unknown): State {
   const s = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const list = <T>(x: unknown, ok: (item: T) => boolean) => (Array.isArray(x) ? (x as T[]).filter((item) => item && typeof item === "object" && ok(item)) : []);
-  const owner = s.owner as { name?: unknown } | undefined;
+  const owner = s.owner as { name?: unknown; about?: unknown } | undefined;
   return {
     owner: typeof owner?.name === "string" && owner.name.trim() ? owner.name.trim() : null,
+    ownerAbout: typeof owner?.about === "string" && owner.about.trim() ? owner.about.trim().slice(0, 1000) : null,
     bots: list<Bot>(s.bots, (b) => typeof b.id === "string" && typeof b.name === "string"),
     workspaces: list<State["workspaces"][number]>(s.workspaces, (w) => typeof w.id === "string"),
     accounts: list<Account>(s.accounts, (a) => typeof a.id === "string" && typeof a.app === "string"),
@@ -124,6 +130,21 @@ export async function userForCall(headers: SipHeader[]): Promise<string | null> 
 }
 
 const workspaceOf = (b: Bot) => b.workspaceId ?? "ws_main";
+
+/** What a call reads of what bot `b`'s settings page set (lib/types.ts BotSettings, on its workspace by bot id), only in the shapes the app writes. */
+export type CallSettings = { callVoice?: string; answersCalls?: false; othersCallsOff?: true };
+export function callSettings(s: Pick<State, "workspaces">, b: Pick<Bot, "id" | "workspaceId">): CallSettings {
+  const all = s.workspaces.find((w) => w.id === workspaceOf(b as Bot))?.botSettings;
+  const x = all && typeof all === "object" && Object.hasOwn(all, b.id) ? (all as Record<string, unknown>)[b.id] : undefined;
+  if (!x || typeof x !== "object") return {};
+  const o = x as { callVoice?: unknown; answersCalls?: unknown; sequencesOff?: unknown };
+  const off = o.sequencesOff && typeof o.sequencesOff === "object" ? (o.sequencesOff as Record<string, unknown>) : null;
+  return {
+    ...(typeof o.callVoice === "string" && VOICES.has(o.callVoice) ? { callVoice: o.callVoice } : {}),
+    ...(o.answersCalls === false ? { answersCalls: false as const } : {}),
+    ...(off?.othersCalls === true ? { othersCallsOff: true as const } : {}),
+  };
+}
 const mainBot = (s: State, workspaceId: string) => s.bots.find((b) => b.isMain && workspaceOf(b) === workspaceId);
 
 /** Which bot an AgentPhone agent's events are for: a workspace's main bot, or a bot's own number (routeFor in lib/server/phone.ts). */
@@ -174,7 +195,10 @@ function calledBot(s: State, headers: SipHeader[]): { bot: Bot; number: string }
  */
 const MALE_VOICES = ["cedar", "ash", "echo", "ballad", "verse"];
 const VOICES = new Set([...MALE_VOICES, "marin", "coral", "shimmer", "sage"]);
-function voiceFor(b: Bot) {
+function voiceFor(b: Bot, s: Pick<State, "workspaces">) {
+  // The one picked on its settings page first (BotSettings.callVoice), as the app's voiceFor does.
+  const picked = callSettings(s, b).callVoice;
+  if (picked) return picked;
   if (typeof b.voice === "string" && VOICES.has(b.voice)) return b.voice;
   if (b.isMain && (b.name === "Boppy" || b.name === "Sam")) return "cedar";
   return MALE_VOICES[[...b.id].reduce((n, ch) => n + ch.charCodeAt(0), 0) % MALE_VOICES.length];
@@ -191,15 +215,20 @@ export const and = (items: string[]) => (items.length > 1 ? `${items.slice(0, -1
 
 /**
  * What a bot may do in an account, as levelOf in lib/types.ts: what the owner set, else Read & act in an
- * account of its own workspace; Bops' Slack app ("slackbot") only when set, and an account from before
+ * account of its own workspace or one it's switched on in; Bops' Slack app ("slackbot") only when set, and an account from before
  * every bot had every app by default (no workspace, as v0.0.28 uploads it, or onlyGiven) only where given.
  * Null: no access.
  */
-function levelIn(b: Bot, a: Account): "read" | "act" | null {
-  const set = b.access?.[a.id];
+function levelIn(s: State, b: Bot, a: Account): "read" | "act" | null {
+  const set = b.access && Object.hasOwn(b.access, a.id) ? b.access[a.id] : undefined;
   if (set === "read" || set === "act") return set;
   if (set === "none" || a.app === "slackbot" || typeof a.workspaceId !== "string" || !a.workspaceId || !!a.onlyGiven) return null;
-  return a.workspaceId === workspaceOf(b) ? "act" : null;
+  if (a.workspaceId === workspaceOf(b)) return "act";
+  // Switched on in the bot's workspace too (Used in: Workspace.loginsOn["app:<id>"]).
+  const on = s.workspaces.find((w) => w.id === workspaceOf(b))?.loginsOn;
+  const key = `app:${a.id}`;
+  const entry = on && typeof on === "object" && Object.hasOwn(on, key) ? (on as Record<string, unknown>)[key] : undefined;
+  return !!entry && typeof entry === "object" ? "act" : null;
 }
 
 /**
@@ -212,7 +241,7 @@ function levelIn(b: Bot, a: Account): "read" | "act" | null {
 export function skillsOf(s: State, b: Bot) {
   const apps = new Map<string, { name: string; accounts: string[] }>();
   for (const a of s.accounts) {
-    const level = levelIn(b, a);
+    const level = levelIn(s, b, a);
     if (a.status !== "active" || !level) continue;
     const app = apps.get(a.app) ?? { name: clip(a.appName, 60) || a.app, accounts: [] };
     const title = [clip(a.label, 40), clip(a.name, 80)].filter(Boolean).join(" · ") || app.name;
@@ -300,7 +329,7 @@ function sessionFor(c: Call) {
     type: "live",
     model: "gpt-live-1",
     instructions: frontPrompt(c),
-    audio: { output: { voice: voiceFor(c.bot) } },
+    audio: { output: { voice: voiceFor(c.bot, c.s) } },
     delegation: {
       type: "responses",
       responses: { model: BACKEND_MODEL, instructions: backendPrompt(c), tools: TOOLS, parallel_tool_calls: false, reasoning: { effort: "low" } },
@@ -348,6 +377,11 @@ export async function answerInCloud(userId: string, event: unknown): Promise<voi
   if (!(await callerVerdict(userId, called.number, from, "call")).owner) {
     console.log(`[calls] ${sessionId}: turned away, not from one of ${userId}'s verified numbers`);
     return refuse(403);
+  }
+  // Its settings page turned calls off (BotSettings.answersCalls): busy, as the app's incomingCall does.
+  if (callSettings(s, bot).answersCalls === false) {
+    console.log(`[calls] ${sessionId}: turned away, ${bot.name} isn't taking calls`);
+    return refuse(486);
   }
   if (!(await hasCredit(userId))) {
     console.log(`[calls] ${sessionId}: turned away, ${userId} is out of AI credit`);

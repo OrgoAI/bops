@@ -1,5 +1,6 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
+import { cleanAi, isCli, legacyAi } from "@/lib/agents";
 import { lastWorkOf, live, pausedForOk, workspaceOf, MAIN_WORKSPACE, botChatId, type AppState, type Bot, type Chat, type Message, type Session, type Reaction, type Tapback } from "@/lib/types";
 import { fileStore, onPostgres, onRunner, selfHosted, type Persistence, type StateAccess, type Went } from "./persist";
 import { cloudStore } from "./persist-cloud";
@@ -120,6 +121,7 @@ function migrate(raw: Record<string, unknown>): AppState {
   // Accounts and each bot's access, from the one-account-per-app shape (any saved state, a backup too).
   appAccounts(state);
   brains(state);
+  botAgents(state);
   return state;
 }
 
@@ -148,6 +150,30 @@ function brains(state: AppState) {
   }
   if (spaces) state.brains = state.brains.filter((x) => spaces.has(x.workspaceId));
   for (const b of state.bots) if (b.brain && !state.brains.some((x) => x.id === b.brain)) delete b.brain;
+}
+
+/**
+ * Each bot's AI profile (lib/agents.ts, Bot.ai) as this build keeps it, and its brains moved over: a bot on one
+ * or more brains' lists ("may use") gets an agent for each, after Bops agent, and the brain it used (Bot.brain,
+ * when that still let it in) becomes its Default; one on none, and with no brain, gets nothing (no profile is
+ * today's Bops agent). A profile is cleaned (lib/agents.ts cleanAi: an account of another workspace goes) and one
+ * equal to the default is dropped. Then the older fields are kept in step for older Bops: Bot.brain is the
+ * Default's account when the Default is Claude Code or Codex, and each brain's bots are those with an agent on it.
+ * Threads are never rewritten (lib/agents.ts threadAgent reads an old one's brainRun). Safe to run repeatedly.
+ */
+function botAgents(state: AppState) {
+  const brains = state.brains ?? [];
+  for (const b of state.bots) {
+    const ai = cleanAi(b.ai ?? legacyAi(b, brains), brains, workspaceOf(b));
+    if (ai) b.ai = ai;
+    else delete b.ai;
+  }
+  for (const b of state.bots) {
+    const def = b.ai?.agents.find((a) => a.id === b.ai!.default);
+    if (def && isCli(def.kind) && def.account) b.brain = def.account;
+    else delete b.brain;
+  }
+  for (const x of brains) x.bots = state.bots.filter((b) => b.ai?.agents.some((a) => a.account === x.id)).map((b) => b.id);
 }
 
 /**

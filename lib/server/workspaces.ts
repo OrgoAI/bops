@@ -1,6 +1,7 @@
 import "server-only";
 import { appsOpen } from "@/lib/apps-access";
-import { cleanAccess, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
+import { cleanAccess, isAccessLevel, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
+import { chainWithout, cleanChain, leadOf, type Chain, type ChainBot } from "@/lib/chain";
 import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type AppState, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
 import { cleanFavorites } from "@/lib/favorites";
 import { freeBotId } from "./bots";
@@ -328,11 +329,15 @@ export function setFavorites(workspaceId: string, list: unknown) {
 export const currentWorkspaceId = () => getState().workspace ?? MAIN_WORKSPACE;
 
 const sameAccess = (a: MemberAccess, b: MemberAccess) =>
-  a.others === b.others && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
+  a.others === b.others && a.apps === b.apps && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
 
 /** `map` without `key`'s entry. */
 const without = (map: MemberAccessMap, key: string): MemberAccessMap => Object.fromEntries(Object.entries(map).filter(([k]) => k !== key));
-/** Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). */
+/**
+ * Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). Your Apps
+ * comes with a bot: with none, the person's window has nothing of the workspace to open, and a Bops from before deletes
+ * such an entry whenever it saves one (its showsAny knows only bots), so the People sheet asks for a bot first.
+ */
 const showsAny = (a: MemberAccess) => a.others !== "none" || Object.keys(a.bots).length > 0;
 
 /**
@@ -351,9 +356,13 @@ const showsAny = (a: MemberAccess) => a.others !== "none" || Object.keys(a.bots)
  */
 export function setMemberAccess(workspaceId: string, key: string, access: MemberAccess | null, how: { invite?: boolean; at?: number } = {}) {
   const clean = access && cleanAccess(access);
-  const keep: MemberAccess | null = clean && showsAny(clean) ? { ...clean, at: how.at ?? Date.now(), ...(how.invite ? { invite: true as const } : {}) } : null;
   const map = getState().workspaces?.find((w) => w.id === workspaceId)?.memberAccess;
   const kept = map && Object.hasOwn(map, key) ? map[key] : undefined;
+  // Your Apps: what was sent, else the level kept (a save that sends only bots keeps it). Never a level nobody picked:
+  // one not set yet is left so, for giveAppsRead (an entry from before the scope) and the sheet ("not set").
+  const apps = isAccessLevel(clean?.apps) ? clean.apps : isAccessLevel(kept?.apps) ? kept.apps : undefined;
+  const withApps: MemberAccess | null = clean && { ...clean, ...(apps ? { apps } : {}) };
+  const keep: MemberAccess | null = withApps && showsAny(withApps) ? { ...withApps, at: how.at ?? Date.now(), ...(how.invite ? { invite: true as const } : {}) } : null;
   if (keep ? kept && sameAccess(keep, kept) && !!kept.invite === !!keep.invite && (how.at === undefined || kept.at === how.at) : !kept) return;
   if (keep) ensureMain();
   if (!getState().workspaces?.some((w) => w.id === workspaceId)) throw new Error("no such workspace");
@@ -363,6 +372,33 @@ export function setMemberAccess(workspaceId: string, key: string, access: Member
     if (keep) x.memberAccess = { ...x.memberAccess, [key]: keep };
     else if (x.memberAccess) x.memberAccess = without(x.memberAccess, key);
   });
+}
+
+/**
+ * Your Apps at Read for everyone a workspace was already shared with, the first time this Mac sees it (the scope is
+ * new): every entry without a level gets Read, and the workspace is marked (Workspace.appsScopeAt), in one change. Once
+ * only: with the mark there it does nothing, so an entry an older Bops rewrote later (which drops the level) is never
+ * given Read again by this (state-merge.ts keepAppsLevels puts back what it had); an entry with a level is never
+ * touched. On the owner's Mac only (a runner never writes access), at start and in the 10 minute look. How many it gave.
+ */
+export function giveAppsRead(now = Date.now()): number {
+  if (onRunner() || !stateReady() || stateTooNew()) return 0;
+  if (!(getState().workspaces ?? []).some((w) => w.memberAccess && w.appsScopeAt === undefined)) return 0;
+  let n = 0;
+  update((s) => {
+    for (const w of s.workspaces ?? []) {
+      if (!w.memberAccess || w.appsScopeAt !== undefined) continue;
+      w.memberAccess = Object.fromEntries(
+        Object.entries(w.memberAccess).map(([k, a]) => {
+          if (isAccessLevel(a.apps)) return [k, a];
+          n++;
+          return [k, { ...a, apps: "read" as const }];
+        }),
+      );
+      w.appsScopeAt = now;
+    }
+  });
+  return n;
 }
 
 /**
@@ -381,6 +417,56 @@ export function forgetBotAccess(state: AppState, botId: string) {
     }
   }
 }
+
+/* ---------------- The team chart ---------------- */
+
+/**
+ * The team chart of a workspace (Workspace.chain, lib/chain.ts), from what the window sent: made safe with
+ * cleanChain (this workspace's bots, its people's keys) and stamped with now. Only the owner's own Bops
+ * writes it: the route refuses while a workspace shared with the user is open, and a runner never does.
+ * It rides in the synced state (one field: state-merge.ts), so every Bops of the owner's and Bops Cloud
+ * follow it; it never goes to a member (cloud/ws-slice.ts). What was kept comes back.
+ */
+export function setChain(workspaceId: string, input: unknown): Chain {
+  if (onRunner()) throw new WorkspaceError("Only the owner can change the org chart.", 403);
+  const w = getState().workspaces?.find((x) => x.id === workspaceId);
+  if (!w) throw new WorkspaceError("no such workspace", 404);
+  const bots = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
+  const clean: Chain = { ...cleanChain(input, bots, w.memberAccess), at: Date.now() };
+  update((s) => {
+    const x = s.workspaces?.find((y) => y.id === workspaceId);
+    if (x) x.chain = clean;
+  });
+  return clean;
+}
+
+/**
+ * A deleted bot out of its workspace's chart, in `state` (inside the deletion's update): its entry goes, the
+ * bots under it answer to its lead, and exceptions naming it go. `lead`: the bot's lead before it went (leadOf).
+ */
+export function forgetBotInChain(state: AppState, botId: string, wsId: string, lead: string | undefined) {
+  const w = state.workspaces?.find((x) => x.id === wsId);
+  if (!w?.chain) return;
+  const chief = state.bots.find((b) => b.isMain && workspaceOf(b) === wsId);
+  w.chain = chainWithout(w.chain, botId, lead && lead !== chief?.id ? lead : undefined);
+}
+
+/** One bot's entry on its workspace's chart changed by Bops itself (a field set to undefined goes): its own memory brought in or let go. */
+export function setChainBot(botId: string, patch: Partial<Record<keyof ChainBot, unknown>>) {
+  const b = getState().bots.find((x) => x.id === botId);
+  if (!b) return;
+  const ws = workspaceOf(b);
+  const chain = getState().workspaces?.find((w) => w.id === ws)?.chain ?? {};
+  const entry: Record<string, unknown> = { ...(chain.bots?.[botId] ?? {}) };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) delete entry[k];
+    else entry[k] = v;
+  }
+  setChain(ws, { ...chain, bots: { ...(chain.bots ?? {}), [botId]: entry } });
+}
+
+/** A bot's lead on the chart now (the chief's id when it answers to the chief), for forgetBotInChain. */
+export const leadNow = (botId: string) => leadOf(getState(), botId);
 
 /* ---------------- Names from orgo.ai ---------------- */
 

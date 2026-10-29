@@ -1,16 +1,22 @@
 import { deleteWorkspace } from "@/lib/server/remove";
-import { createWorkspace, deletePreview, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, setFavorites, switchWorkspace, syncWorkspaceNames, WorkspaceError } from "@/lib/server/workspaces";
+import { createWorkspace, deletePreview, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, setChain, setFavorites, switchWorkspace, syncWorkspaceNames, WorkspaceError } from "@/lib/server/workspaces";
 import { notReady } from "@/lib/server/ready";
-import { closeShared } from "@/lib/server/shared";
+import { closeShared, sharedOpen } from "@/lib/server/shared";
+import { fromBopsWindow } from "@/lib/server/ui-token";
+import { olderBopsOnAccount } from "@/lib/server/chart";
 
 /**
  * `?preview=<id>`: what deleting that workspace takes with it, for the confirm (its computers, keys, skills
  * and apps, Bops' and its Orgo workspace's). 400 for the default workspace, 502 when Orgo didn't say.
+ * `?olderBops=1`: whether a Mac or runner on the account runs a Bops older than the team chart's, for the
+ * chart's note ({ older }).
  */
 export async function GET(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const id = new URL(request.url).searchParams.get("preview");
+  const params = new URL(request.url).searchParams;
+  if (params.get("olderBops") === "1") return Response.json({ older: await olderBopsOnAccount() });
+  const id = params.get("preview");
   if (!id) return Response.json({ error: "Say which workspace (?preview=<id>)." }, { status: 400 });
   ensureMain();
   try {
@@ -42,12 +48,14 @@ export async function POST(request: Request) {
  * app on the account to be new, and says so in `waiting`). `noticeSeen`: the switcher's note about names Orgo
  * already had was seen. `syncNames`: take renames made on orgo.ai (the sidebar asks every 10 minutes). `revertOrgoMove`: undo the move onto Orgo workspaces
  * (revertWorkspaceMigration, DESIGN.md section 8), for a rollback. `favorites` (with `id`): the kinds pinned to
- * the sidebar, the whole list in order (setFavorites).
+ * the sidebar, the whole list in order (setFavorites). `chain` (with `id`): the workspace's team chart, whole
+ * (setChain), only from the Bops window and never while a workspace shared with the user is open; what was kept
+ * comes back.
  */
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites } = (await request.json().catch(() => ({}))) as {
+  const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites, chain } = (await request.json().catch(() => ({}))) as {
     id?: string;
     name?: string;
     current?: string;
@@ -55,8 +63,19 @@ export async function PATCH(request: Request) {
     revertOrgoMove?: boolean;
     syncNames?: boolean;
     favorites?: unknown;
+    chain?: unknown;
   };
   ensureMain();
+  // Who may ask whom is the owner's to say: from their own window, with their own workspace open.
+  if (chain !== undefined) {
+    if (!id) return Response.json({ error: "Say which workspace." }, { status: 400 });
+    if (!fromBopsWindow(request) || sharedOpen()) return Response.json({ error: "Only the owner can change the org chart." }, { status: 403 });
+    try {
+      return Response.json({ ok: true, chain: setChain(id, chain) });
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: e instanceof WorkspaceError ? e.status : 400 });
+    }
+  }
   if (noticeSeen === true) dismissRenamedNotice();
   if (syncNames === true) {
     const r = await syncWorkspaceNames().catch(() => null);

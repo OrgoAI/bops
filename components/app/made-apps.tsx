@@ -1,6 +1,7 @@
 "use client";
 
 import { appsShown } from "@/lib/apps-access";
+import { SharedAppsPage } from "./shared-apps";
 import { createContext, createElement, useContext, useEffect, useRef, useState } from "react";
 import type { AppState, MadeApp, Message } from "@/lib/types";
 import { HostedApps } from "./hosted-apps";
@@ -456,12 +457,18 @@ function History({ app, onDone }: { app: MadeApp; onDone: () => void }) {
 
 /** Every app in a workspace: the ones on the web (hosted-apps.tsx), one line each, then the ones the bots made, as tiles that show each one live (Paper 2B). */
 export function MadeAppsHome({ state, ws }: { state: AppState; ws: string }) {
+  // A workspace someone shared with the user, with Your Apps: its apps on the web as its owner gave them; never tiles (the owner's).
+  if (state.shared) return <SharedAppsPage state={state} />;
+  return <OwnAppsHome state={state} ws={ws} />;
+}
+
+function OwnAppsHome({ state, ws }: { state: AppState; ws: string }) {
   const open = useContext(OpenMadeApp);
   const apps = (state.madeApps ?? []).filter((a) => a.ws === ws).sort((a, b) => b.updatedAt - a.updatedAt);
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
       <div className="flex flex-col gap-1">
-        <span className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">Apps</span>
+        <span className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">Your Apps</span>
         <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">
           {apps.length ? `${apps.length} made by your bots · they keep what you put in them` : "Tools your bots make for you. Ask any bot: “make me an app that…”"}
         </span>

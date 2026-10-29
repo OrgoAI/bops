@@ -6,7 +6,8 @@ import type { LiveTransportIncomingWebhookEvent } from "openai/resources/webhook
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { CallerVerdict, CloudCallPayload } from "@/cloud/protocol";
-import { botChatId, live, TAPBACKS, turnsOwn, workspaceOf, type Bot, type Tapback, type WorkspaceLine } from "@/lib/types";
+import { botChatId, isCallVoice, live, settingsOf, TAPBACKS, turnsOwn, workspaceOf, type Bot, type CallVoice, type LineVoice, type Tapback, type WorkspaceLine } from "@/lib/types";
+import { closestPhoneVoice, phoneVoicesIn, type PhoneVoice } from "@/lib/phone-voices";
 import { callEnded, callStarted } from "./attention";
 import { delegate, endCall, rememberVoices, voiceFor, voicePrompt } from "./call";
 import { appHeaders } from "./app-version";
@@ -15,7 +16,7 @@ import { installId } from "./mail";
 import { loopHere, onPostgres } from "./persist";
 import { ownerPhoneTable } from "./persist-pg";
 import { forgetOwnerNumber, syncCloudLines, tellCloudLine } from "./phone-lines";
-import { OWNER_WHO, saveToMemory, wsOf } from "./memory";
+import { OWNER_WHO, saveToMemory, scopeOf } from "./memory";
 import { saveUpload } from "./uploads";
 import { plainLinks } from "./style";
 import { addMessage, bot, getState, ofThisUser, ownerName, patchSession, react, sameState, stateEpoch, stateReady, stateUser, update, userDir } from "./store";
@@ -46,8 +47,10 @@ import { checkVerification, forgetVerification, pendingConsentAt, pendingVerific
  *   assigns has its calls routed there, and lineUpkeep puts back one that isn't). AgentPhone hears the
  *   caller and sends each turn to the same webhook; phone-voice.ts answers it as the bot: the owner
  *   gets the whole bot (work goes through `delegate()`, as on a call in the app), anyone else a bot
- *   that only takes a message. The GPT-Live path over a SIP trunk (incomingCall, below) is kept for a
- *   number someone routes to a trunk by hand.
+ *   that only takes a message. AgentPhone speaks the answers in the agent's voice, which Bops sets to
+ *   the closest of AgentPhone's voices to the bot's own (voiceToAgent: when a number is made, when its
+ *   voice is picked, and at each start). The GPT-Live path over a SIP trunk (incomingCall, below) is
+ *   kept for a number someone routes to a trunk by hand.
  * - **Who the user is:** the numbers they verified with a texted code in Settings, and, on Bops
  *   Cloud, whoever the cloud says owns the line (bops.phone_lines: the first phone to call or text a
  *   new number in its 15 minutes; phone-lines.ts). On Bops Cloud the cloud decides it for every call
@@ -340,6 +343,8 @@ export async function ensurePhone(botId: string, areaCode?: string) {
   // cloud keeps (it checks each delivery with it and knows whose it is); self-hosting has the sub-account's.
   if (cloudOn()) await ap("POST", `/agents/${agentId}/webhook`, { url: await hookUrl(), contextLimit: 10, timeout: 30 });
   await callsToAgent(number.id, agentId, "sub", !madeAgent);
+  // Its calls speak in its voice from the first one.
+  await voiceToAgent(b, agentId, "sub");
   const line = { numberId: number.id, agentId };
   update((s) => {
     const x = s.bots.find((y) => y.id === botId);
@@ -368,19 +373,21 @@ async function callsToAgent(numberId: string, agentId: string, scope: "sub" | "p
   }
 }
 
-type ApAgentVoice = { id: string; voiceMode?: string | null };
+type ApAgentVoice = { id: string; voiceMode?: string | null; voice?: string | null };
 
 /**
  * Once a start: each of the bots' numbers takes calls through its agent (one from before, or one
- * whose calls someone pointed at a SIP trunk or at nothing, is put back), and Bops Cloud knows which
- * bot each line is for. Answers what it changed.
+ * whose calls someone pointed at a SIP trunk or at nothing, is put back), speaks in its bot's voice
+ * (voiceToAgent: a number from before this, or one whose voice was changed elsewhere, is put right),
+ * and Bops Cloud knows which bot each line is for. Answers what it changed.
  */
 export async function lineUpkeep() {
   const fixed: string[] = [];
   if (!phoneOn()) return fixed;
+  const mainOf = (id: string) => getState().bots.find((b) => b.isMain && workspaceOf(b) === id)?.id;
   const lines = [
-    ...(getState().workspaces ?? []).flatMap((w) => (w.line ? [{ numberId: w.line.numberId, agentId: w.line.agentId, scope: w.line.scope }] : [])),
-    ...getState().bots.flatMap((b) => (b.phoneLine ? [{ ...b.phoneLine, scope: "sub" as const }] : [])),
+    ...(getState().workspaces ?? []).flatMap((w) => (w.line ? [{ numberId: w.line.numberId, agentId: w.line.agentId, scope: w.line.scope, botId: mainOf(w.id) }] : [])),
+    ...getState().bots.flatMap((b) => (b.phoneLine ? [{ ...b.phoneLine, scope: "sub" as const, botId: b.id as string | undefined }] : [])),
   ];
   for (const scope of ["sub", "parent"] as const) {
     const mine = lines.filter((l) => l.scope === scope);
@@ -392,14 +399,90 @@ export async function lineUpkeep() {
       const a = agents.find((x) => x.id === l.agentId);
       if (!n) continue;
       const agentToo = !!a?.voiceMode && a.voiceMode !== "webhook";
-      if (n.voiceRouting?.method === "agent" && !agentToo) continue;
-      await callsToAgent(l.numberId, l.agentId, scope, agentToo);
-      fixed.push(`${n.phoneNumber}: ${n.voiceRouting?.method ?? "unknown"} → agent${agentToo ? ` (voice mode ${a?.voiceMode} → webhook)` : ""}`);
+      if (n.voiceRouting?.method !== "agent" || agentToo) {
+        await callsToAgent(l.numberId, l.agentId, scope, agentToo);
+        fixed.push(`${n.phoneNumber}: ${n.voiceRouting?.method ?? "unknown"} → agent${agentToo ? ` (voice mode ${a?.voiceMode} → webhook)` : ""}`);
+      }
+      const b = l.botId ? bot(l.botId) : undefined;
+      const voice = b && a ? await voiceToAgent(b, l.agentId, scope, a.voice ?? null) : null;
+      if (voice) fixed.push(`${n.phoneNumber}: voice → ${voice}`);
     }
   }
   if (fixed.length) callLog({ event: "calls routed to agents", fixed });
   await syncCloudLines();
   return fixed;
+}
+
+/* ---------------- A line's voice ---------------- */
+
+/** AgentPhone's voices (GET /v1/agents/voices), kept 6 hours; none when it can't say, and asked again next time. */
+const VOICES_KEPT_MS = 6 * 60 * 60_000;
+const gv = globalThis as unknown as { bopsPhoneVoices?: { at: number; voices: PhoneVoice[] } };
+async function phoneVoices(): Promise<PhoneVoice[]> {
+  const kept = gv.bopsPhoneVoices;
+  if (kept && Date.now() - kept.at < VOICES_KEPT_MS) return kept.voices;
+  const got = await ap<unknown>("GET", "/agents/voices").catch((e: Error) => (console.warn(`[phone] AgentPhone's voices: ${e.message}`), null));
+  const voices = phoneVoicesIn(got);
+  if (voices.length) gv.bopsPhoneVoices = { at: Date.now(), voices };
+  return voices;
+}
+
+/** The lines whose calls bot `b` answers (routeFor): its own number's agent, and as its workspace's main bot, the workspace number's. */
+function agentsOf(b: Bot): { agentId: string; scope: "sub" | "parent" }[] {
+  const ws = workspaceLine(b);
+  return [...(b.phoneLine?.agentId ? [{ agentId: b.phoneLine.agentId, scope: "sub" as const }] : []), ...(ws?.agentId ? [{ agentId: ws.agentId, scope: ws.scope }] : [])];
+}
+
+const sameLineVoice = (x: LineVoice | undefined, y: LineVoice) => !!x && x.for === y.for && x.id === y.id && x.name === y.name && !!x.exact === !!y.exact;
+
+/**
+ * Calls to bot `b`'s number speak in its voice: the agent's voice is set (PATCH /v1/agents) to AgentPhone's closest
+ * to the bot's call voice (its settings page's pick, else voiceFor's for its name: closestPhoneVoice), unless the
+ * agent has it already (`current`, as AgentPhone listed it; else as last set), and noted on its workspace once
+ * AgentPhone took it (Workspace.lineVoices), for the settings page. The words are still the bot's own, answered turn
+ * by turn (phone-voice.ts, cloud/voice.ts); AgentPhone only speaks them. Without AgentPhone's voices (it can't say,
+ * or a Bops Cloud from before doesn't pass them on) nothing changes: the line keeps its own voice. Never throws.
+ * Answers what it set, or null.
+ */
+async function voiceToAgent(b: Bot, agentId: string, scope: "sub" | "parent", current?: string | null): Promise<string | null> {
+  try {
+    const voices = await phoneVoices();
+    if (!voices.length) return null;
+    const v = await voiceFor(b);
+    const want: CallVoice | null = isCallVoice(v) ? v : null;
+    const got = want ? closestPhoneVoice(want, voices) : null;
+    if (!want || !got) return null;
+    const wsId = workspaceOf(b);
+    const kept = getState().workspaces?.find((w) => w.id === wsId)?.lineVoices?.[agentId];
+    const has = current === undefined ? kept?.id : current;
+    if (has !== got.voice.id) await ap("PATCH", `/agents/${agentId}`, { voice: got.voice.id }, scope);
+    const lv: LineVoice = { for: want, id: got.voice.id, name: got.voice.name, ...(got.exact ? { exact: true as const } : {}) };
+    if (!sameLineVoice(kept, lv))
+      update((s) => {
+        const w = s.workspaces?.find((x) => x.id === wsId);
+        if (w) w.lineVoices = { ...(w.lineVoices ?? {}), [agentId]: lv };
+      });
+    return has !== got.voice.id ? `${got.voice.name} (${want})` : null;
+  } catch (e) {
+    console.warn(`[phone] agent ${agentId}: its voice wasn't set: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Bot `botId`'s lines (every bot's without one) speak in its voice now: after its voice is picked on its settings page,
+ * after a rename (a voice picked for its name may change). Answers what it set.
+ */
+export async function syncLineVoices(botId?: string) {
+  const set: string[] = [];
+  if (!phoneOn()) return set;
+  for (const b of getState().bots.filter((x) => !botId || x.id === botId))
+    for (const a of agentsOf(b)) {
+      const v = await voiceToAgent(b, a.agentId, a.scope);
+      if (v) set.push(`${b.name}: ${v}`);
+    }
+  if (set.length) callLog({ event: "line voices", set });
+  return set;
 }
 
 /** A bot's text, plain: links written out (a web source as one line at the end), no markdown (a text shows it raw). */
@@ -799,6 +882,12 @@ export async function incomingCall(e: LiveTransportIncomingWebhookEvent, verdict
       await openai.live.sessions.reject(sessionId, { status_code: 403 }).catch(() => {});
       return;
     }
+    // Its settings page turned calls off (BotSettings.answersCalls): busy, before it connects (Bops Cloud's answerInCloud the same).
+    if (settingsOf(getState(), b).answersCalls === false) {
+      callLog({ sessionId, event: "rejected", bot: b.id, from, why: "calls off" });
+      await openai.live.sessions.reject(sessionId, { status_code: 486 }).catch(() => {});
+      return;
+    }
     await openai.live.sessions.accept(sessionId, {
       session: {
         type: "live",
@@ -974,7 +1063,7 @@ export function cloudCall(p: CloudCallPayload, eventId: string) {
     call: { seconds, phone: p.from },
   });
   const turns = callTurns(p.transcript);
-  if (turns.length) saveToMemory(wsOf(b.id), "chat", botChatId(b.id), turns.slice(-200).map((t) => ({ who: t.caller ? OWNER_WHO : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
+  if (turns.length) saveToMemory(scopeOf(b.id), "chat", botChatId(b.id), turns.slice(-200).map((t) => ({ who: t.caller ? OWNER_WHO : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
 }
 
 /** The cloud's transcript of a call ("Caller: …" and "Bot: …" lines) as turns; a line with no speaker goes with the turn before it. */
@@ -995,6 +1084,7 @@ export async function renameAgents(botId: string) {
   if (b.phoneLine?.agentId) await ap("PATCH", `/agents/${b.phoneLine.agentId}`, { name: `${b.name} (Bops)` });
   const ws = getState().workspaces?.find((w) => w.id === workspaceOf(b));
   if (b.isMain && ws?.line?.agentId) await ap("PATCH", `/agents/${ws.line.agentId}`, { name: `Bops · ${ws.name} (${b.name})` }, ws.line.scope);
+  await syncLineVoices(botId);
 }
 
 /* ---------------- A workspace's number ---------------- */
@@ -1048,6 +1138,8 @@ export async function assignWorkspaceLine(workspaceId: string, phoneNumber: stri
     const w = s.workspaces?.find((x) => x.id === workspaceId);
     if (w) w.line = line;
   });
+  // Its calls speak in the main bot's voice.
+  await voiceToAgent(main, agent.id, scope);
   await tellCloudLine({ numberId: number.id, botId: main.id, workspaceId, open: true }).catch((e: Error) => console.warn(`[phone] couldn't tell Bops Cloud about ${ws.name}'s number: ${e.message}`));
   return { line, agent: { id: agent.id, name: agent.name }, previous: previous ? { id: previous.id, name: previous.name, webhook: previousHook?.url ?? null } : null };
 }

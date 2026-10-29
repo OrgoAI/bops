@@ -4,7 +4,7 @@ import { config } from "./config.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { query } from "./db.ts";
 import { canWatch, hub, liveScope, seedSeen, serveStream, type LiveTarget } from "./live.ts";
-import { cleanName, levelOf, ownerOnlyAsk, permits, timeOf, writesChat, type MemberWho } from "./member-access.ts";
+import { cleanName, levelOf, ownerOnlyAsk, permits, timeOf, writesChat, type MemberAccess, type MemberWho } from "./member-access.ts";
 import { planSigned } from "./plans.ts";
 import {
   MEMBER_ACT_MS,
@@ -12,15 +12,19 @@ import {
   MEMBER_MAX_NOTE,
   MEMBER_MAX_TEXT,
   MEMBER_OWNER_ONLY,
+  MEMBER_APPS_READ_ONLY,
   MEMBER_READ_ONLY,
   MEMBER_STOP_MAX,
+  MAX_GONE,
   MESSAGES_PER_CHAT,
   NOT_WAITING,
   OWN_WORKSPACE,
   SLOW_DOWN,
   WS_NOT_SHAREABLE,
   WS_ROLES,
+  isAppAct,
   type MemberAct,
+  type MemberAppAct,
   type MemberActAnswer,
   type MemberActPayload,
   type PendingKind,
@@ -29,9 +33,9 @@ import {
   type WsAccess,
   type WsRole,
 } from "./protocol.ts";
-import { chatPage, chatsSeq, loadState, recentMessages, sendZipped, type MessageRow } from "./state.ts";
+import { chatPage, chatsSeq, loadState, recentMessages, removedAfter, sendZipped, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
-import { appBotsFor, appThreadsFor, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, type SliceViewer } from "./ws-slice.ts";
+import { appBotsFor, appsFor, appThreadsFor, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, type SliceViewer } from "./ws-slice.ts";
 
 /**
  * Shared workspaces (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -301,9 +305,13 @@ const readState: Route = {
       const body: SharedWsState = { ...head, state: slice, messages: shown(page.rows, bots, handed, apps, appBots), more: page.more ? [chat] : [] };
       return sendZipped(req, res, 200, body);
     }
-    if (url.searchParams.get("have") === `${hash}.${seq}`) return sendZipped(req, res, 200, { hash, seq, unchanged: true } satisfies SharedWsUnchanged);
+    const have = url.searchParams.get("have");
+    if (have === `${hash}.${seq}`) return sendZipped(req, res, 200, { hash, seq, unchanged: true } satisfies SharedWsUnchanged);
     const recent = await recentMessages(target.account, chatIds, MESSAGES_PER_CHAT);
-    const body: SharedWsState = { ...head, state: slice, messages: shown(recent.rows, bots, handed, apps, appBots), more: recent.more };
+    // Read again over a copy: what the owner deleted since it, so it goes from the older pages that copy read too.
+    const since = Number(have?.slice(have.lastIndexOf(".") + 1));
+    const gone = have && Number.isSafeInteger(since) && since > 0 && since < seq ? await removedAfter(target.account, chatIds, since, MAX_GONE) : [];
+    const body: SharedWsState = { ...head, state: slice, messages: shown(recent.rows, bots, handed, apps, appBots), more: recent.more, ...(gone.length ? { gone } : {}) };
     await sendZipped(req, res, 200, body);
   },
 };
@@ -357,9 +365,61 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
     }
     case "dismiss":
       return anId(x.sessionId) ? { key, act: { act: "dismiss", sessionId: x.sessionId } } : null;
+    case "deploy":
+    case "rollback":
+    case "settings":
+    case "domain":
+      return appAct(key, x);
     default:
       return null;
   }
+}
+
+/** An app's or a site's name (lib/hosted-apps.ts isAppName, isSiteName). */
+const APP_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const appName = (v: unknown, max = 64): v is string => typeof v === "string" && v.length <= max && APP_NAME.test(v);
+/** A changeset's, a deploy's or a domain's id as Orgo and Ingot give them. */
+const OPAQUE = /^[A-Za-z0-9_-]{1,80}$/;
+const command = (v: unknown) => typeof v === "string" && v.length <= 1000;
+
+/** An act on an app (Your Apps at Write), its fields checked as cleanAct's others are: the shapes only; what they name is checked against the slice (appsTouched). */
+function appAct(key: string, x: Record<string, unknown>): { key: string; act: MemberAct } | null {
+  if (!appName(x.app) || (x.site !== undefined && !appName(x.site, 32))) return null;
+  const site = x.site !== undefined ? { site: x.site as string } : {};
+  switch (x.act) {
+    case "deploy":
+      if (x.at !== undefined && (typeof x.at !== "string" || !OPAQUE.test(x.at))) return null;
+      return { key, act: { act: "deploy", app: x.app, ...site, ...(typeof x.at === "string" ? { at: x.at } : {}) } };
+    case "rollback":
+      return typeof x.deployment === "string" && OPAQUE.test(x.deployment) ? { key, act: { act: "rollback", app: x.app, deployment: x.deployment, ...site } } : null;
+    case "settings": {
+      if (x.port !== undefined && (typeof x.port !== "number" || !Number.isInteger(x.port) || x.port < 1 || x.port > 65535)) return null;
+      const cmds = ["install", "build", "start", "health"] as const;
+      if (cmds.some((c) => x[c] !== undefined && !command(x[c]))) return null;
+      const set = Object.fromEntries([...(x.port !== undefined ? [["port", x.port]] : []), ...cmds.filter((c) => x[c] !== undefined).map((c) => [c, x[c]])]);
+      return Object.keys(set).length ? { key, act: { act: "settings", app: x.app, ...site, ...set } } : null;
+    }
+    case "domain":
+      if (typeof x.zone !== "string" || !OPAQUE.test(x.zone) || (x.subdomain !== undefined && (typeof x.subdomain !== "string" || x.subdomain.length > 63 || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(x.subdomain)))) return null;
+      return { key, act: { act: "domain", app: x.app, ...site, zone: x.zone, ...(typeof x.subdomain === "string" ? { subdomain: x.subdomain } : {}) } };
+  }
+  return null;
+}
+
+/**
+ * An act on an app, against the caller's own view of the apps (ws-slice.ts appsFor): an app they aren't shown is "no
+ * such" (never saying whether it exists), Read is MEMBER_APPS_READ_ONLY, a domain the workspace doesn't own or a site
+ * the app doesn't have "no such", a deploy that can't be put back NOT_WAITING. The owner's Mac checks it all again.
+ */
+function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct) {
+  const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)));
+  const app = apps?.list.find((x) => x.name === act.app);
+  if (!apps || !app) throw new HttpError(404, "No such app.");
+  if (apps.level !== "write") throw new HttpError(403, "You can see these apps. Ask the owner for Write to change them.", { code: MEMBER_APPS_READ_ONLY });
+  const site = act.site ?? app.name;
+  if (![app.name, ...(app.siteNames ?? [])].includes(site)) throw new HttpError(404, "No such app.");
+  if (act.act === "domain" && !apps.owned?.some((d) => d.id === act.zone)) throw new HttpError(404, "Pick a domain this workspace has.");
+  if (act.act === "rollback" && !app.deploys?.some((d) => d.id === act.deployment && d.site === site && d.canRollback)) throw new HttpError(409, "That deploy can't be put back.", { code: NOT_WAITING });
 }
 
 /** Whether a thread of the owner's is an app thread left out of this view (ws-slice.ts appThreadsFor). */
@@ -418,6 +478,9 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       if (!ts.some((t) => liveStatus(t!))) throw new HttpError(409, "That's already stopped.", { code: NOT_WAITING });
       return [...new Set(ts.flatMap(botOf))];
     }
+    default:
+      // An app's goes by Your Apps (appsTouched), never here.
+      throw new HttpError(400, "Send {key, act}");
   }
 }
 
@@ -505,10 +568,13 @@ const actIn: Route = {
     const slice = sliceOf(blob, target.ws, viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
-    const bots = botsTouched(blob, slice, body.act);
-    // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.
-    const may = body.act.act === "chat" ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
-    if (!may) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
+    if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
+    else {
+      const bots = botsTouched(blob, slice, body.act);
+      // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.
+      const may = body.act.act === "chat" ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
+      if (!may) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
+    }
     const payload: MemberActPayload = { projectId, wsId: target.ws, member: whoOf(user!), ...(role.joinedAt !== undefined ? { joinedAt: role.joinedAt } : {}), key: body.key, at: Date.now(), act: body.act };
     // One row per member and key (cloud_pending_dedupe): the same act sent again adds nothing.
     await queue(target.account, "member", payload, `member:${user!.id}:${body.key}`, new Date(Date.now() + MEMBER_ACT_MS));

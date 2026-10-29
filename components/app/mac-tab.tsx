@@ -20,7 +20,7 @@ export function MacIcon({ size = 14, color = "currentColor" }: { size?: number; 
   );
 }
 
-/** Your Mac's settings, in a sheet over the Your Mac tab: whether bots can work here, and the words that mean the Mac. */
+/** Your Mac's settings, a page of the Your Mac tab: whether bots can work here, and the words that mean the Mac. */
 export function MacSettings({ state }: { state: AppState }) {
   const m = state.mac;
   const retry = m?.next === "codex" && !m.installing;

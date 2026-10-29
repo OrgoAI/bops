@@ -137,6 +137,28 @@ export const ROLE_LINES: Record<MemberRole, string> = {
  * and stop its runs, from their own Bops (cloud/members.ts act). Never the owner's logins, keys, Macs or
  * settings. The levels are Bops': on orgo.ai Orgo's role covers every bot's computer, None's too.
  */
+/** What each Your Apps level lets someone do (the People sheet's Your Apps row, lib/apps-access.ts). */
+export const APPS_TIPS: Record<AccessLevel, string> = {
+  none: "Doesn't see your apps.",
+  read: "Sees your apps on the web: sites, deploys, history and domains.",
+  write: "Also deploys them, goes back to an earlier deploy, changes a site's settings and uses your domains.",
+};
+/** The People sheet's words for Your Apps. */
+export const APPS_WORDS = {
+  row: "Your Apps",
+  legend: "Your Apps never shows them variables or keys, and only you buy domains.",
+  older: "One of your Macs runs an older Bops. A change made there can hide Your Apps from someone until this Mac is on again.",
+  needsBot: "Give them a bot first. Your Apps comes with one.",
+  notYet: "They see your apps once Bops Cloud updates. Until then, nothing changes for them.",
+};
+
+/**
+ * Whether Bops Cloud shows members a workspace's apps (cloud/ws-slice.ts appsFor) and takes their acts on them
+ * (cloud/members.ts). False until a Bops Cloud deploy carries that change: the level is kept meanwhile, and the People
+ * sheet says it starts then. The release that deploys it flips this.
+ */
+export const CLOUD_SHARES_APPS = false;
+
 export const ACCESS_TIPS: Record<AccessLevel, string> = {
   none: "Can't see this bot in Bops. On orgo.ai they still see its computer.",
   read: "Sees everything this bot does, including your chats with it.",

@@ -42,13 +42,12 @@ PY
     FRESH=1
   fi
 fi
-# The window sits on the desktop above the dock, sized to this screen (screens can be any resolution).
-read -r W H < <(DISPLAY=":$N" xdotool getdisplaygeometry 2>/dev/null || echo "1280 720")
+# The window fills its screen, like a browser on any computer (screens can be any resolution).
 # Light GTK theme: Chrome takes dark or light from it, and the base image is dark.
 DISPLAY=":$N" GTK_THEME=Arc-Lighter setsid nohup /usr/bin/google-chrome-stable \
   --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --hide-crash-restore-bubble \
   --remote-debugging-port="$((9200 + N))" --user-data-dir="$PROFILE" --class=BopsBrowser \
-  --window-position=80,60 --window-size="$((W - 160)),$((H - 150))" ${URL:+"$URL"} \
+  --start-maximized ${URL:+"$URL"} \
   < /dev/null > "/var/log/bops/chrome-$N.log" 2>&1 &
 # Installing the extension, Chrome opens its first tab before it lands: wait for it, then start
 # again so the window opens on the home screen.
@@ -60,7 +59,7 @@ if [ "$FRESH" = 1 ]; then
   DISPLAY=":$N" GTK_THEME=Arc-Lighter setsid nohup /usr/bin/google-chrome-stable \
     --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --hide-crash-restore-bubble \
     --remote-debugging-port="$((9200 + N))" --user-data-dir="$PROFILE" --class=BopsBrowser \
-    --window-position=80,60 --window-size="$((W - 160)),$((H - 150))" \
+    --start-maximized \
     < /dev/null >> "/var/log/bops/chrome-$N.log" 2>&1 &
 fi
 echo "chrome on :$N (profile $PROFILE, devtools $((9200 + N)))"

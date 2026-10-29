@@ -1,6 +1,6 @@
 import "server-only";
 import { onRunner } from "./persist";
-import { bankInUse, deleteBank, memoryGoesWith, memoryOn, purgeMemory, type Binding } from "./memory";
+import { bankInUse, bringIn, deleteBank, memoryGoesWith, memoryOn, ownBankOf, purgeMemory, wsOf, type Binding } from "./memory";
 import { outbox } from "./sync-outbox";
 
 /**
@@ -10,11 +10,12 @@ import { outbox } from "./sync-outbox";
  * outbox on disk (sync-outbox.ts) until memory took it, so a quit or memory not answering loses none of
  * it: tried again after a backoff of 1 to 30 minutes and at the next start. A bank another workspace
  * took up meanwhile is never deleted. Memory never taking it (a 400, a 403) is given up on, said in the
- * log. Never on a computer's runner.
+ * log. Never on a computer's runner. A bot's own bank (one it kept its memory to itself in, lib/chain.ts) goes the
+ * same way, when the bot is deleted or the bank it kept apart is let go or brought into the team's.
  */
 
-/** A bank to delete (no `sessions`), or only these sessions in it. */
-type MemoryDelete = { bank: string; peer: string; sessions?: string[] };
+/** A bank to delete (no `sessions`), or only these sessions in it. `bot`: the deleted bot's own bank, whose id no new bot gets while it waits. */
+type MemoryDelete = { bank: string; peer: string; sessions?: string[]; bot?: string };
 const box = outbox<MemoryDelete>("memory-deletes", 50);
 
 const RETRY_MS = 60_000;
@@ -47,6 +48,31 @@ export function deleteWorkspaceMemory(ws: string, what: MemoryDelete | null): Pr
   box.add(ws, what);
   return flushMemoryDeletes();
 }
+
+/** Where a bot's own bank is: its workspace and the bank (read while the bot is still listed: the name comes from its workspace). */
+export const ownBankAt = (botId: string) => ({ ws: wsOf(botId), bank: ownBankOf(botId) });
+
+/**
+ * A bot's own bank deleted for good, through the outbox: queued and sent at once, so memory being off (signed out)
+ * or not answering loses none of it, and a bot made meanwhile never gets the id (botIdsWaiting) and with it the
+ * bank. `at`: where it is, read before the bot went (ownBankAt). True when it's gone already.
+ */
+export function dropOwnBank(botId: string, at = ownBankAt(botId)): Promise<boolean> {
+  if (onRunner()) return Promise.resolve(true);
+  box.add(at.ws, { bank: at.bank.bank, peer: at.bank.peer, bot: botId });
+  return flushMemoryDeletes();
+}
+
+/** "Bring it in": what the bot kept to itself copied into the team's memory (memory.ts bringIn), then its bank deleted. How many facts came in. */
+export async function bringInOwnBank(botId: string): Promise<number> {
+  const at = ownBankAt(botId);
+  const count = await bringIn(botId);
+  await dropOwnBank(botId, at);
+  return count;
+}
+
+/** The bot ids whose own bank is still waiting to be deleted: a new bot never gets one (bots.ts freeBotId). */
+export const botIdsWaiting = () => new Set(box.waiting().flatMap((e) => (e.item.bot ? [e.item.bot] : [])));
 
 /** Send what's waiting, one run at a time. True when nothing is left waiting. */
 export function flushMemoryDeletes(): Promise<boolean> {

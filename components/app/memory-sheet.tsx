@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppState, MemoryGroup } from "@/lib/types";
 import { currentWorkspace, post } from "./ui";
 
@@ -27,7 +27,8 @@ type Preview = { personal: number; work: number; skipped: number; examples: { pe
 /**
  * A workspace's memory: where it comes from (its own, or shared with another workspace), copying
  * what another workspace knows about the user (personal, work, or both), what's on their card, and a
- * check for facts that were learned wrong.
+ * check for facts that were learned wrong. In place under the bot's Memory, where Manage asked for it
+ * (bot-memory.tsx), never over the app; Done or Esc in it folds it away.
  */
 export function MemorySheet({ state, onClose }: { state: AppState; onClose: () => void }) {
   const ws = currentWorkspace(state);
@@ -46,36 +47,33 @@ export function MemorySheet({ state, onClose }: { state: AppState; onClose: () =
     };
   }, [ws, tick]);
   const reload = useCallback(() => setTick((t) => t + 1), []);
-  // Esc closes the sheet, and only the sheet: the profile behind it stays (it sees the dialog, and preventDefault).
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      onClose();
-    };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
+  // Brought into view as it opens, under the line that asked for it.
+  const box = useRef<HTMLElement>(null);
+  useEffect(() => box.current?.scrollIntoView?.({ block: "nearest" }), []);
 
   return (
-    <div onClick={onClose} className="motion-fade-in fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 backdrop-blur-[2px]">
-      <div
-        role="dialog"
-        aria-modal="true"
+      <section
+        ref={box}
         aria-label="Memory"
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in relative flex max-h-full w-full max-w-[560px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
+        data-memory-manage
+        // Esc in it folds it away, and only it: preventDefault keeps the profile it's in.
+        onKeyDown={(e) => {
+          if (e.key !== "Escape") return;
+          e.preventDefault();
+          onClose();
+        }}
+        className="motion-rise-in relative flex w-full flex-col rounded-[18px] bg-white text-left shadow-[0_0_0_1px_#E6E6E3]"
       >
-        <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0]">
-          <svg width="11" height="11" viewBox="0 0 12 12">
-            <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        </button>
-        <div className="px-6 pb-3 pt-5">
-          <div className="text-[18px] font-semibold leading-6 tracking-[-0.01em]">Memory</div>
-          <div className="pt-0.5 text-[13px] leading-5 text-[#6B6B6B]">What {here?.name ?? "this workspace"}&rsquo;s bots know about you. They add to it as you talk.</div>
+        <div className="flex items-start gap-3 px-5 pb-3 pt-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-[15px] font-semibold leading-5">Memory</div>
+            <div className="pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">What {here?.name ?? "this workspace"}&rsquo;s bots know about you. They add to it as you talk.</div>
+          </div>
+          <button onClick={onClose} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+            Done
+          </button>
         </div>
-        <div className="flex min-h-0 flex-col gap-5 overflow-y-auto px-6 pb-6">
+        <div className="flex flex-col gap-5 px-5 pb-5">
           {!info ? (
             <div className="py-6 text-center text-[13px] text-[#9A9A98]">Loading…</div>
           ) : !info.on ? (
@@ -89,8 +87,7 @@ export function MemorySheet({ state, onClose }: { state: AppState; onClose: () =
             </>
           )}
         </div>
-      </div>
-    </div>
+      </section>
   );
 }
 

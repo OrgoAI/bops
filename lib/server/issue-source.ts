@@ -2,7 +2,7 @@ import "server-only";
 import type { Issue } from "@/lib/orbit-issues";
 import { discordRefOf, gmailReply, gmailThreadIdOf, messagesIn, parseDiscordMessages, parseGmailThread, parseSlackMessages, slackFirst, slackMessagesIn, slackRefOf, slackUserIds } from "@/lib/source-parse";
 import { SOURCE_NAME, sourceAppOf, sourceError, type ChatThread, type IssueSource, type MailThread, type SourceApp, type SourceCode } from "@/lib/source-view";
-import { levelOf, workspaceOf, type AppAccount, type ReplyDraft } from "@/lib/types";
+import { levelIn, workspaceOf, type AppAccount, type ReplyDraft } from "@/lib/types";
 import { accountTitle, runAs } from "./composio";
 import { updateIssue } from "./orbit-issues";
 import { onRunner } from "./persist";
@@ -234,7 +234,7 @@ function accountsFor(app: SourceApp, opts: { prefer?: (string | undefined)[]; ws
   const prefer = (opts.prefer ?? []).filter(Boolean) as string[];
   const rank = (a: AppAccount) => {
     const p = prefer.indexOf(a.id);
-    return [p < 0 ? prefer.length : p, opts.ws && workspaceOf(a) === opts.ws ? 0 : 1, b && levelOf(b, a) ? 0 : 1, -(a.usedAt ?? a.at ?? 0)];
+    return [p < 0 ? prefer.length : p, opts.ws && workspaceOf(a) === opts.ws ? 0 : 1, b && levelIn(getState(), b, a) ? 0 : 1, -(a.usedAt ?? a.at ?? 0)];
   };
   const cmp = (x: number[], y: number[]) => x.map((v, k) => v - y[k]).find((d) => d !== 0) ?? 0;
   return all

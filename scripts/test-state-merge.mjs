@@ -524,5 +524,123 @@ check("an older Bops's kept copy: what it added goes in, what the newer one remo
   assert.equal(merged.stopAsked, "Stopped by you");
 });
 
+/* ---------------- A workspace's team chart (Workspace.chain) ---------------- */
+
+check("a workspace's team chart is one field: changed on both Macs, the one saving now goes whole, never a mix; one side's change stays", () => {
+  const ws = (chain, more = {}) => ({ id: "ws_acme", name: "Acme", ...(chain ? { chain } : {}), ...more });
+  const base = { workspaces: [ws({ sideways: "open", bots: { juno: { lead: "max" } }, at: 1 })] };
+  const here = { workspaces: [ws({ sideways: "closed", bots: { juno: { lead: "max" } }, at: 2 })] };
+  const there = { workspaces: [ws({ sideways: "open", bots: { juno: { lead: "nova" } }, pairs: { "max>rex": true }, at: 3 })] };
+  assert.deepEqual(M.merge3(base, here, there).workspaces[0].chain, here.workspaces[0].chain, "this Mac's, whole");
+  assert.deepEqual(M.merge3(base, there, here).workspaces[0].chain, there.workspaces[0].chain);
+  // Changed on one side only (a rename on the other): that side's chart, and the rename too.
+  const renamed = { workspaces: [{ ...base.workspaces[0], name: "Acme Inc" }] };
+  assert.deepEqual(M.merge3(base, renamed, there).workspaces[0], { ...there.workspaces[0], name: "Acme Inc" });
+  // Made on one Mac where none was: kept.
+  const none = { workspaces: [ws()] };
+  assert.deepEqual(M.merge3(none, none, here).workspaces[0].chain, here.workspaces[0].chain);
+});
+
+check("an older Bops's kept copy keeps the team chart it doesn't know, and never undoes one made since", () => {
+  const ws = (chain) => ({ id: "ws_acme", name: "Acme", ...(chain ? { chain } : {}) });
+  const chain = { sideways: "closed", bots: { juno: { memory: "own" } }, at: 7 };
+  // The older app read the state with the chart in it and wrote it back as it was (a field it doesn't know): it stays.
+  const base = { workspaces: [ws(chain)] };
+  const kept = { workspaces: [{ ...ws(chain), name: "Acme" }] };
+  const newer = { workspaces: [ws({ ...chain, sideways: "open", at: 9 })] };
+  assert.deepEqual(M.merge3(base, kept, newer, OLD).workspaces[0].chain, newer.workspaces[0].chain);
+  // Both changed it: the newer one's, whole.
+  const odd = { workspaces: [ws({ sideways: "closed", at: 8 })] };
+  assert.deepEqual(M.merge3(base, odd, newer, OLD).workspaces[0].chain, newer.workspaces[0].chain);
+});
+
+/* ---------------- A bot's settings page: kept on its workspace, by bot id ---------------- */
+
+check("a bot's settings page settings (Workspace.botSettings): two Macs setting different bots keep both, field by field", () => {
+  const ws = (botSettings) => ({ id: "ws_main", name: "Main", createdAt: 1, ...(botSettings ? { botSettings } : {}) });
+  const base = { workspaces: [ws({ juno: { callVoice: "sage" } })] };
+  const mine = { workspaces: [ws({ juno: { callVoice: "sage", answersCalls: false }, sam: { mailNever: true } })] };
+  const theirs = { workspaces: [ws({ juno: { callVoice: "ash" } })] };
+  assert.deepEqual(M.merge3(base, mine, theirs).workspaces[0].botSettings, { juno: { callVoice: "ash", answersCalls: false }, sam: { mailNever: true } });
+  // What v0.0.32 does with them: scripts/test-compat-0032.mjs, with its own merge3.
+});
+
+/* ---------------- Your Apps: a person's level kept, and put back where an older Bops dropped it ---------------- */
+
+{
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  const AVA = "ava@acme.example";
+  const JUNO = "juno@acme.example";
+  const SEEN = { at: 1, apps: { shop: { head: null, sites: [], commits: [], deploys: [] } } };
+  const ws = (memberAccess, extra = {}) => ({ id: "ws_main", name: "Main", createdAt: 1, memberAccess, hostedApps: { shop: { botId: "boppy", computerId: "c1" } }, ...extra });
+  const entry = (apps, bots = { boppy: "read" }) => ({ others: "none", bots, at: 100, ...(apps ? { apps } : {}) });
+  const blob = (map, extra) => ({ owner: { name: "Ava" }, workspace: "ws_main", workspaces: [ws(map, extra)], bots: [{ id: "boppy", isMain: true, name: "Boppy" }], chats: [] });
+  const appsOf = (b, who = AVA) => b.workspaces[0].memberAccess?.[who]?.apps;
+  // What an older Bops's People sheet (or its look at who's still there) keeps for a person: { ...cleanAccess, at, invite? }, its cleanAccess { others, bots }.
+  const oldSet = (state, key, access, how = {}) => {
+    const s = clone(state);
+    s.workspaces[0].memberAccess = { ...s.workspaces[0].memberAccess, [key]: { others: access.others, bots: access.bots, at: how.at ?? 200, ...(how.invite ? { invite: true } : {}) } };
+    return s;
+  };
+  check("Your Apps: an older Bops saving something else keeps the level", () => {
+    const base = blob({ [AVA]: entry("write") });
+    const mine = clone(base);
+    mine.owner.name = "Ava B";
+    assert.equal(appsOf(M.merge3(clone(base), mine, clone(base))), "write");
+  });
+  check("Your Apps: an older Bops saving while this one set the level keeps it", () => {
+    const base = blob({ [AVA]: entry(undefined) });
+    const mine = clone(base);
+    mine.owner.name = "Ava B";
+    assert.equal(appsOf(M.merge3(base, mine, blob({ [AVA]: entry("write") }))), "write");
+  });
+  check("Your Apps: an older sheet changing someone else keeps this person's", () => {
+    const base = blob({ [AVA]: entry("write"), [JUNO]: entry("read") });
+    assert.equal(appsOf(M.merge3(clone(base), oldSet(base, JUNO, { others: "read", bots: {} }), clone(base))), "write");
+  });
+  check("Your Apps: an older Bops deleting a bot (its entry spread) keeps it", () => {
+    const base = blob({ [AVA]: entry("write", { boppy: "read", gone: "write" }) });
+    const mine = clone(base);
+    mine.workspaces[0].memberAccess[AVA] = { ...mine.workspaces[0].memberAccess[AVA], bots: { boppy: "read" } };
+    assert.equal(appsOf(M.merge3(clone(base), mine, clone(base))), "write");
+  });
+  check("Your Apps: loaded and written back, the level and appsForMembers ride along", () => {
+    const back = M.toShared(M.fromShared(blob({ [AVA]: entry("write") }, { appsForMembers: SEEN }), "mac_old"), "mac_old");
+    assert.equal(appsOf(back), "write");
+    assert.deepEqual(back.workspaces[0].appsForMembers, SEEN);
+  });
+  check("Your Apps: an older Bops renaming the workspace keeps appsForMembers", () => {
+    const base = blob({ [AVA]: entry("read") }, { appsForMembers: SEEN });
+    const mine = clone(base);
+    mine.workspaces = mine.workspaces.map((w) => ({ ...w, name: "Renamed" }));
+    const r = M.merge3(clone(base), mine, clone(base));
+    assert.deepEqual(r.workspaces[0].appsForMembers, SEEN);
+    assert.equal(r.workspaces[0].name, "Renamed");
+  });
+  check("Your Apps: an older sheet rewriting this person drops it; this Mac's next pull puts it back", () => {
+    const base = blob({ [AVA]: { ...entry("write"), invite: true } });
+    const older = oldSet(base, AVA, base.workspaces[0].memberAccess[AVA], { at: 150 });
+    // Merged where the older Bops saves: the merge here puts it back from the copy before.
+    const there = M.merge3(clone(base), older, clone(base));
+    assert.equal(appsOf(there), "write", "even the older Bops's save keeps it when this merge3 runs it");
+    // This Mac pulls what Bops Cloud kept from the older Bops (no level): put back, its new `at` kept.
+    const r = M.merge3(clone(base), clone(base), older);
+    assert.deepEqual(r.workspaces[0].memberAccess[AVA], { others: "none", bots: { boppy: "read" }, at: 150, apps: "write" });
+  });
+  check("Your Apps: removed on an older Bops stays removed", () => {
+    const base = blob({ [AVA]: entry("write") });
+    const mine = clone(base);
+    delete mine.workspaces[0].memberAccess[AVA];
+    assert.equal(M.merge3(clone(base), clone(base), mine).workspaces[0].memberAccess[AVA], undefined);
+  });
+  check("Your Apps: removed and invited again on an older Bops starts fresh (no level from before)", () => {
+    const base = blob({ [AVA]: entry("write") });
+    const older = oldSet(base, AVA, { others: "none", bots: { boppy: "read" } }, { invite: true, at: 300 });
+    const r = M.merge3(clone(base), clone(base), older);
+    assert.equal(appsOf(r), undefined, "reads as none");
+    assert.equal(M.keepAppsLevels([{ id: "x", memberAccess: { [AVA]: { others: "none", bots: {}, invite: true } } }], [[{ id: "x", memberAccess: { [AVA]: { others: "none", bots: {}, invite: true, apps: "read" } } }]])[0].memberAccess[AVA].apps, "read", "from a copy that was an invite too");
+  });
+}
+
 console.log(`state merge: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

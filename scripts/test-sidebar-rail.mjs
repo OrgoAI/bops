@@ -103,7 +103,7 @@ const render = (state, extra = {}) =>
       onAccount: noop,
       onSettings: noop,
       onSetup: noop,
-      onMembers: noop,
+      onTeam: noop,
       onVault: noop,
       onOpenAutopilot: noop,
       onOpenMemory: noop,
@@ -205,7 +205,8 @@ await test("the footer's pages in a column, every one round, you last", () => {
   assert.match(html, /data-footer-column="true" class="flex flex-col items-center gap-2 [^"]*\[&amp;&gt;\[data-footer-key\]\]:w-9/, "each slot a 36px circle, your initials too");
   assert.doesNotMatch(column, /max-w-\[160px\] translate-x-0 opacity-100/, "no pill");
   const slots = [...column.matchAll(/data-footer-slot="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(slots.slice(0, 3), ["People", "Logins", "Routines"]);
+  assert.deepEqual(slots.slice(0, 2), ["Logins", "Routines"], "no People: Team is in your initials' menu");
+  assert.match(column, /data-footer-slot="You"/, "your initials there, last");
   assert.ok(column.indexOf("Tess Ito") > column.lastIndexOf("data-footer-slot=\"Routines\""), "you after the pages");
 });
 
@@ -215,7 +216,7 @@ await test("the workspace's initial when there's another to switch to, which exp
   const one = render(world({ workspaces: [{ id: "ws_main", name: "Main", createdAt: 1 }] }));
   assert.doesNotMatch(one, /switch workspaces/);
   const side = readFileSync(`${root}/components/app/sidebar.tsx`, "utf8");
-  assert.match(side, /<WorkspaceSwitcher state=\{state\} opened=\{workspaces\} \/>/);
+  assert.match(side, /<WorkspaceSwitcher state=\{state\} opened=\{workspaces\}(?: onTeamChart=\{onTeamChart\})? \/>/);
 });
 
 await test("the app: a 72px rail, its column sliding with the title bar's, and no toggle in the title bar", () => {

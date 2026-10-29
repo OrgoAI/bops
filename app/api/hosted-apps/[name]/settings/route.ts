@@ -12,7 +12,8 @@ const answer = (e: unknown) =>
 
 /**
  * An app's settings (AppSettingsAnswer in lib/hosted-apps.ts): its address, its port and commands, its
- * variables' names and its recent deploys, from its deploy project at orgo-web (the computer is never asked).
+ * variables' names and its recent deploys, from its deploy project at orgo-web (the computer is never asked):
+ * Prod's, or Staging's with env=staging (with Prod's variables' names too).
  */
 export async function GET(request: Request, ctx: { params: Promise<{ name: string }> }) {
   const unready = notReady();
@@ -22,7 +23,8 @@ export async function GET(request: Request, ctx: { params: Promise<{ name: strin
   const { name } = await ctx.params;
   const wsId = new URL(request.url).searchParams.get("ws") ?? getState().workspace ?? MAIN_WORKSPACE;
   try {
-    return Response.json(await appSettings(wsId, name, new URL(request.url).searchParams.get("site") ?? undefined));
+    const q = new URL(request.url).searchParams;
+    return Response.json(await appSettings(wsId, name, q.get("site") ?? undefined, q.get("env") ?? undefined));
   } catch (e) {
     return answer(e);
   }
@@ -40,7 +42,7 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ name: str
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = (typeof b.ws === "string" && b.ws.trim()) || getState().workspace || MAIN_WORKSPACE;
   try {
-    return Response.json(await changeSettings(wsId, name, { port: b.port, install: b.install, build: b.build, start: b.start, health: b.health }, b.site));
+    return Response.json(await changeSettings(wsId, name, { port: b.port, install: b.install, build: b.build, start: b.start, health: b.health }, b.site, b.env));
   } catch (e) {
     return answer(e);
   }

@@ -83,6 +83,8 @@ const vault = new Map([
   ["MERCURY_API_KEY", "fake_mercury"],
   ["SOME_TEMPLATE_SECRET", "fake_template"],
 ]);
+/** Values in `vault` for the workspace-scoped key by that name only (the GITHUB_TOKEN listed below), never an account one. */
+const scopedOnly = new Set();
 const orgoCalls = [];
 /** Orgo's reveal answers 429 while this is set: its rate limit. */
 let revealLimited = false;
@@ -108,8 +110,12 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/api/secrets" && req.method === "GET")
     return send(200, {
       secrets: [
-        ...[...vault.keys()].map((name) => ({ name, workspace_id: null, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-02T00:00:00Z" })),
+        // (A value kept only for the workspace-scoped key by that name below isn't an account one: scopedOnly.)
+        ...[...vault.keys()].filter((name) => !scopedOnly.has(name)).map((name) => ({ name, workspace_id: null, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-02T00:00:00Z" })),
         { name: "GITHUB_TOKEN", workspace_id: "6f1c1b7e-1111-4222-8333-944455556666", created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" },
+        // A Cloudflare key for one Orgo workspace and its zone's id for all: no provider Bops' bots can call.
+        { name: "CLOUDFLARE_API_TOKEN", workspace_id: "6f1c1b7e-1111-4222-8333-944455556666", created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-03T00:00:00Z" },
+        { name: "CLOUDFLARE_ZONE_ID", workspace_id: null, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-03T00:00:00Z" },
       ],
     });
   if (url.pathname === "/api/secrets" && req.method === "POST") {
@@ -243,6 +249,35 @@ await check("the list is read from Orgo once for a short while, and again when a
   assert.equal(orgoCalls.filter((c) => c.path === "/api/secrets").length, n);
   await (await KeysRoute.GET(req("GET", "/api/keys?fresh=1"))).json();
   assert.equal(orgoCalls.filter((c) => c.path === "/api/secrets").length, n + 1);
+});
+
+await check("every name in the vault, with its scope, for Bops' own use (an app's domains in Cloudflare): read once for a short while, never one of the Keys, nor offered to a bot", async () => {
+  const n = orgoCalls.filter((c) => c.path === "/api/secrets").length;
+  const all = await Keys.vaultNames({ fresh: true });
+  assert.deepEqual(
+    all.filter((k) => k.name.startsWith("CLOUDFLARE_")).map((k) => [k.name, k.workspaceId, k.updatedAt]),
+    [
+      ["CLOUDFLARE_API_TOKEN", "6f1c1b7e-1111-4222-8333-944455556666", "2026-10-03T00:00:00Z"],
+      ["CLOUDFLARE_ZONE_ID", null, "2026-10-03T00:00:00Z"],
+    ],
+    "every name, whatever it's for, with the Orgo workspace it's for",
+  );
+  assert.ok(all.some((k) => k.name === "GITHUB_TOKEN" && k.workspaceId) && all.some((k) => k.name === "STRIPE_SECRET_KEY"));
+  assert.ok(all.every((k) => Object.keys(k).sort().join() === "name,updatedAt,workspaceId"), "names only, never a value");
+  await Keys.vaultNames();
+  assert.equal(orgoCalls.filter((c) => c.path === "/api/secrets").length, n + 1, "read once for a short while");
+  assert.ok(!(await Keys.listKeys({ fresh: true })).some((k) => k.name.startsWith("CLOUDFLARE_")), "not one of the Keys");
+  const page = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+  assert.ok(!JSON.stringify(page).includes("CLOUDFLARE"), "not on the Keys page, nor among what can be added there");
+  assert.equal(Keys.keyProvider("CLOUDFLARE_API_TOKEN"), undefined, "no provider a bot can call");
+  assert.throws(() => Keys.grantKey("CLOUDFLARE_API_TOKEN", "boppy", true), /No such key/, "nor given to a bot");
+  const was = S.bot("boppy").keys;
+  S.update(() => (S.bot("boppy").keys = ["CLOUDFLARE_API_TOKEN"]));
+  try {
+    assert.deepEqual(await Keys.usableKeys(S.bot("boppy")), [], "a bot that somehow has it can't use it");
+  } finally {
+    S.update(() => (S.bot("boppy").keys = was));
+  }
 });
 
 await check("a save sends the value to Orgo and nowhere else: not the state, a file or a log", async () => {
@@ -604,6 +639,78 @@ await check("a turn someone outside Bops started (a text, an email) has no call_
   const n = asked.length;
   await Chat.outsideNews("boppy", text.id, "A text");
   assert.ok(!toolNames(asked[n]).includes("call_api"));
+});
+
+await check("a member's turn (someone Alex gave Write on the bot) has call_api for the keys its bot has: a GET runs, and anything else asks Alex every time, named as theirs, even with an Always allow saved", async () => {
+  const dee = { userId: "user_dee", email: "dee@example.com", name: "Dee" };
+  const had = S.getState().workspaces;
+  S.update((st) => (st.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, memberAccess: { "dee@example.com": { others: "none", bots: { boppy: "write" }, at: 1 } } }]));
+  S.update(() => (S.bot("boppy").permissions = [{ action: "Call Stripe", resource: "*", effect: "allow" }]));
+  try {
+    await Keys.listKeys({ fresh: true });
+    answers.push(reply("Ok."));
+    const n = asked.length;
+    await Chat.handleMessage(chatId, "what's our Stripe balance?", undefined, undefined, undefined, undefined, undefined, undefined, undefined, dee);
+    assert.ok(toolNames(asked[n]).includes("call_api"), "the keys Boppy has");
+    const k = brokerCalls().length;
+    const get = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "GET", path: "/v1/balance", query: null, body: null }, { chatId, member: "Dee" }, { chat: true });
+    assert.equal(get.did, "Called Stripe GET /v1/balance", "a GET runs");
+    const post = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: '{"charge": "ch_7"}' }, { chatId, member: "Dee" }, { chat: true }).then(() => null, (e) => e);
+    assert.ok(post instanceof P.NeedsOk, "a POST asks, the rule notwithstanding");
+    assert.deepEqual([post.ask.kind, post.ask.askedFor], ["api", "Dee"], "Alex's to answer (member-access.ts ownerOnlyAsk), named as Dee's");
+    assert.equal(brokerCalls().length, k + 1, "only the GET went out");
+    const mine = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: '{"charge": "ch_7"}' }, { chatId }, { chat: true });
+    assert.equal(mine.did, "Called Stripe POST /v1/refunds", "Alex's own goes by the rule");
+  } finally {
+    S.update((st) => {
+      st.workspaces = had;
+      delete S.bot("boppy").permissions;
+    });
+  }
+});
+
+await check("Used in: a key of one workspace switched on in another is listed there, may be given to its bots, and is called through its own workspace's project; off, the bots there lose it", async () => {
+  const PROJ_A = "6f1c1b7e-1111-4222-8333-944455556666";
+  const had = { workspaces: S.getState().workspaces, workspace: S.getState().workspace };
+  S.update((st) => {
+    st.workspaces = [
+      { id: "ws_main", name: "Main", createdAt: 0, orgoProjectId: PROJ_A },
+      { id: "ws_fern", name: "Fernway", createdAt: 1, orgoProjectId: "7a2d3c4e-1111-4222-8333-944455556666" },
+    ];
+    st.bots.push({ id: "juno", name: "Juno", role: "Sales", color: "#2EC4B6", isMain: false, computerStatus: "none", workspaceId: "ws_fern" });
+  });
+  vault.set("GITHUB_TOKEN", "ghp_fake_token");
+  scopedOnly.add("GITHUB_TOKEN");
+  try {
+    const all = await Keys.listKeys({ fresh: true });
+    assert.ok(!Keys.keysOf(all, "ws_fern").some((k) => k.name === "GITHUB_TOKEN"), "Main's GitHub key isn't Fernway's");
+    const LoginsRoute = await import(`${root}/app/api/logins/route.ts`);
+    const flip = (on, window = true) => LoginsRoute.PATCH(req("PATCH", "/api/logins", { kind: "key", id: `${PROJ_A}:GITHUB_TOKEN`, workspaceId: "ws_fern", on }, window));
+    assert.equal((await flip(true, false)).status, 403, "only from the Bops window");
+    assert.equal((await flip(true)).status, 200);
+    assert.ok(Keys.keysOf(all, "ws_fern").some((k) => k.name === "GITHUB_TOKEN"), "switched on in Fernway");
+    Keys.grantKey("GITHUB_TOKEN", "juno", true);
+    assert.deepEqual((await Keys.usableKeys(S.bot("juno"))).map((k) => k.name), ["GITHUB_TOKEN"]);
+    S.update((st) => (st.workspace = "ws_fern"));
+    const listed = (await (await KeysRoute.GET(req("GET", "/api/keys"))).json()).keys.find((k) => k.name === "GITHUB_TOKEN");
+    assert.deepEqual([listed.scope, listed.from, listed.bots], ["workspace", "ws_main", ["juno"]], "listed in Fernway as Main's");
+    const r = await Keys.callApi("juno", { key: "GITHUB_TOKEN", method: "GET", path: "/user/repos", query: null, body: null }, { chatId: botChatId("juno") }, { chat: true });
+    assert.equal(r.did, "Called GitHub GET /user/repos");
+    assert.equal(brokerCalls().at(-1).body.workspace_id, PROJ_A, "through Main's project, where the key is");
+    assert.equal((await flip(false)).status, 200);
+    assert.equal(S.getState().workspaces[1].loginsOn, undefined);
+    assert.equal(S.bot("juno").keys, undefined, "off: Juno can't use it any more");
+    assert.equal((await LoginsRoute.PATCH(req("PATCH", "/api/logins", { kind: "key", id: `${PROJ_A}:GITHUB_TOKEN`, workspaceId: "ws_main", on: false }))).status, 409, "never off in its own workspace");
+  } finally {
+    vault.delete("GITHUB_TOKEN");
+    scopedOnly.delete("GITHUB_TOKEN");
+    S.update((st) => {
+      st.workspaces = had.workspaces;
+      st.workspace = had.workspace;
+      st.bots = st.bots.filter((b) => b.id !== "juno");
+    });
+    await Keys.listKeys({ fresh: true });
+  }
 });
 
 await check("a query in the path goes in the query, and a GET's body is dropped", async () => {

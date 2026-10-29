@@ -6,6 +6,9 @@ import { dirname, join } from "node:path";
 import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { forgetGoneMembers, othersCanUse } from "./members";
+import { giveAppsRead } from "./workspaces";
+import { seeApps } from "./apps-for-members";
+import { appsOpen } from "@/lib/apps-access";
 import { apiKey, callOrgo, orgo } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
 import { loopHere } from "./persist";
@@ -493,6 +496,14 @@ async function look() {
     .catch((e: Error) => console.warn(`[runner-install] waking for answers: ${e.message}`));
   // Bot access kept for people Orgo no longer lists goes, whether or not the People sheet is opened (in the background).
   void forgetGoneMembers(key).catch((e: Error) => console.warn(`[runner-install] members: ${e.message}`));
+  // Your Apps at Read for everyone already shared with, once per workspace (the scope is new), and what they see of the apps.
+  try {
+    giveAppsRead();
+    if (appsOpen(getState()))
+      for (const w of getState().workspaces ?? []) if (w.hostedApps || w.appsForMembers) void seeApps(w.id).catch((e: Error) => console.warn(`[runner-install] members' apps: ${e.message}`));
+  } catch (e) {
+    console.warn(`[runner-install] apps scope: ${(e as Error).message}`);
+  }
   const host = getState().host === "mac";
   const cloud = mode === "cloud" && !runsOnMissing() && !host;
   const wanted = cloud ? await wantedComputers(key) : new Map<string, Wanted>();

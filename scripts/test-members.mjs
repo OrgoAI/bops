@@ -629,7 +629,10 @@ const levels = (map) => map && Object.fromEntries(Object.entries(map).map(([k, a
 const rawKept = () => S.getState().workspaces?.find((w) => w.id === sheetWs())?.memberAccess;
 const kept = () => levels(rawKept());
 const NONE = { others: "none", bots: {} };
-const accessOf = (body) => Object.fromEntries([...body.people.map((p) => [p.id, p.access]), ...body.invites.map((i) => [i.email, i.access])]);
+/** Each person's bot levels as the sheet reads them (Your Apps, also there, is checked on its own below). */
+const botsOnly = (a) => a && { others: a.others, bots: a.bots };
+const accessOf = (body) => Object.fromEntries([...body.people.map((p) => [p.id, botsOnly(p.access)]), ...body.invites.map((i) => [i.email, botsOnly(i.access)])]);
+const appsLevels = (body) => Object.fromEntries([...body.people.map((p) => [p.id, p.access.apps]), ...body.invites.map((i) => [i.email, i.access.apps])]);
 replies = usual();
 list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
 assert.equal(kept(), undefined, "nothing kept yet");
@@ -683,7 +686,73 @@ for (const access of ["write", ["read"], null, 7]) {
   assert.deepEqual([r.status, r.body.code], [400, "BAD_ACCESS"], JSON.stringify(access));
 }
 assert.equal(calls.length, n, "nothing asked of Orgo");
+// An invite still waiting gets other bots without being sent again (the team chart's Make it theirs): kept as the invite's,
+// from when it was first kept; one Orgo doesn't list as waiting is gone.
+const sentBefore = calls.filter((c) => c.method === "POST").length;
+const lee = kept()["lee@example.com"];
+const leeAt = rawKept()["lee@example.com"].at;
+await new Promise((res) => setTimeout(res, 5));
+r = await route("PATCH", { invite: "Lee@example.com", access: { others: "none", bots: { rook: "read" } } });
+assert.deepEqual(r, { status: 200, body: { ok: true } });
+assert.deepEqual(kept()["lee@example.com"], { others: "none", bots: { rook: "read" } });
+assert.deepEqual([rawKept()["lee@example.com"].invite, rawKept()["lee@example.com"].at], [true, leeAt], "still the invite's, from when it was sent");
+assert.equal(calls.filter((c) => c.method === "POST").length, sentBefore, "not sent again");
+r = await route("PATCH", { invite: "nobody@example.com", access: { others: "none", bots: { rook: "read" } } });
+assert.deepEqual([r.status, r.body.code], [404, "GONE"]);
+r = await route("PATCH", { invite: "lee@example.com", access: "write" });
+assert.deepEqual([r.status, r.body.code], [400, "BAD_ACCESS"]);
+r = await route("PATCH", { invite: "lee@example.com", access: lee });
+assert.deepEqual(kept()["lee@example.com"], lee, "put back");
 console.log("ok - bot access: invite, send again, cleaned");
+
+/* ---------------- 10c. Your Apps: a level of its own on each entry ---------------- */
+{
+  const raw = (k) => rawKept()[k];
+  r = await get();
+  assert.ok(Object.values(appsLevels(r.body)).every((v) => v === undefined || v === "none" || v === "read" || v === "write"), "the sheet reads a level, or none set yet");
+  // Sent with the bots: kept. A save that sends only bots keeps the level that was there.
+  W.setMemberAccess(sheetWs(), "ann@example.com", { others: "none", bots: { boppy: "read" }, apps: "write" });
+  assert.equal(raw("ann@example.com").apps, "write");
+  W.setMemberAccess(sheetWs(), "ann@example.com", { others: "none", bots: { boppy: "write" } });
+  assert.deepEqual([raw("ann@example.com").apps, raw("ann@example.com").bots], ["write", { boppy: "write" }], "kept when none is sent");
+  // Never a level nobody picked: one not sent and not kept stays unset (the sheet says "not set"; giveAppsRead gives Read once).
+  W.setMemberAccess(sheetWs(), "bo@example.com", { others: "read", bots: {} });
+  assert.equal("apps" in raw("bo@example.com"), false);
+  W.setMemberAccess(sheetWs(), "bo@example.com", { others: "write", bots: {} });
+  assert.equal("apps" in raw("bo@example.com"), false, "a later save of the bots doesn't make it None");
+  // Your Apps comes with a bot: with no bot, no entry (a Bops from before would delete it, and nothing of the workspace opens for them).
+  W.setMemberAccess(sheetWs(), "cy@example.com", { others: "none", bots: {}, apps: "read" });
+  assert.equal(raw("cy@example.com"), undefined, "only Your Apps: no entry");
+  W.setMemberAccess(sheetWs(), "cy@example.com", { others: "none", bots: { boppy: "read" }, apps: "read" });
+  assert.equal(raw("cy@example.com").apps, "read");
+  W.setMemberAccess(sheetWs(), "cy@example.com", { others: "none", bots: {}, apps: "read" });
+  assert.equal(raw("cy@example.com"), undefined, "every bot taken away: the entry goes, Your Apps with it");
+  // Through the route: a level that isn't one is left out, and the kept one stays.
+  r = await route("PATCH", { invite: "lee@example.com", access: { ...lee, apps: "write" } });
+  assert.equal(r.status, 200);
+  assert.equal(raw("lee@example.com").apps, "write");
+  r = await route("PATCH", { invite: "lee@example.com", access: { ...lee, apps: "admin" } });
+  assert.equal(raw("lee@example.com").apps, "write", "not a level: the one kept stays");
+  r = await get();
+  assert.equal(appsLevels(r.body)["lee@example.com"], "write", "the sheet reads it back");
+  // Everyone already shared with: Read once, marked; a second run, or an entry a Bops from before rewrote later, gets nothing.
+  S.update((st) => {
+    const w = st.workspaces.find((x) => x.id === sheetWs());
+    delete w.appsScopeAt;
+    w.memberAccess = { ...w.memberAccess, "old@example.com": { others: "read", bots: {}, at: 5 }, "ann@example.com": { ...w.memberAccess["ann@example.com"], apps: "none" } };
+  });
+  const gave = W.giveAppsRead(1234);
+  assert.ok(gave >= 1);
+  assert.deepEqual([raw("old@example.com").apps, raw("old@example.com").at], ["read", 5], "Read, its `at` kept (still the same membership)");
+  assert.equal(raw("ann@example.com").apps, "none", "an entry with a level is never touched");
+  assert.equal(S.getState().workspaces.find((x) => x.id === sheetWs()).appsScopeAt, 1234);
+  S.update((st) => void (st.workspaces.find((x) => x.id === sheetWs()).memberAccess["old@example.com"] = { others: "read", bots: {}, at: 6 }));
+  assert.equal(W.giveAppsRead(), 0, "once only");
+  assert.equal(raw("old@example.com").apps, undefined);
+  W.setMemberAccess(sheetWs(), "old@example.com", null);
+  for (const k of ["ann@example.com", "bo@example.com"]) W.setMemberAccess(sheetWs(), k, null);
+}
+console.log("ok - Your Apps: kept, kept when not sent, never None unpicked, only with a bot, Read once for everyone already here");
 
 // Changing: access only, by the member as Orgo lists them; never a key the window sent.
 n = calls.length;
@@ -1004,8 +1073,14 @@ console.log("ok - a message kept between us deleted: the answers to it stay kept
   const X = await import(`${root}/lib/server/sessions.ts`);
   const T = await import(`${root}/lib/types.ts`);
   const threadNow = (id) => S.getState().sessions.find((x) => x.id === id);
-  S.update((st) => st.bots.push({ id: "you", name: "You", role: "Helper", color: "#60A5FA", isMain: false, computerStatus: "none" }));
-  const handed = X.startSession({ botId: "boppy", goal: "Send every payroll report to the accountant.", title: "Payroll", chatId: "bot:you", sentVia: "you", viaBot: true, where: "cloud", fresh: true });
+  // (It leads Kid on the team chart, lib/chain.ts: work goes only down a line.)
+  S.update((st) => {
+    st.bots.push({ id: "you", name: "You", role: "Helper", color: "#60A5FA", isMain: false, computerStatus: "none" }, { id: "kid", name: "Kid", role: "Helper", color: "#60A5FA", isMain: false, computerStatus: "none" });
+    st.workspaces.find((w) => w.id === "ws_main").chain = { bots: { kid: { lead: "you" } } };
+  });
+  const handed = X.startSession({ botId: "kid", goal: "Send every payroll report to the accountant.", title: "Payroll", chatId: "bot:you", sentVia: "you", viaBot: true, where: "cloud", fresh: true });
+  // Never up the chart, whatever path starts it: the last check refuses in the words the bot reads.
+  assert.throws(() => X.startSession({ botId: "boppy", goal: "Do the payroll.", title: "Up", chatId: "bot:you", sentVia: "you", viaBot: true, where: "cloud", fresh: true }), /^Error: Not handed off: Boppy isn't under You on the org chart\.$/);
   assert.deepEqual([handed.sentVia, handed.sentViaBot, T.ownerSent(handed), T.sentByBot(handed)], ["you", true, false, "you"]);
   assert.equal(threadNow(handed.id)?.sentViaBot, true, "as the state keeps it");
   const mine = X.startSession({ botId: "boppy", goal: "Check the invoices", title: "Invoices", chatId: "bot:boppy", where: "cloud", fresh: true });
@@ -1016,9 +1091,12 @@ console.log("ok - a message kept between us deleted: the answers to it stay kept
   // A bot whose id names neither: nothing to say.
   const byHelper = X.startSession({ botId: "boppy", goal: "Help out", title: "Help", chatId: "bot:boppy", sentVia: "helper", viaBot: true, where: "cloud", fresh: true });
   assert.deepEqual([byHelper.sentVia, byHelper.sentViaBot, T.sentByBot(byHelper)], ["helper", undefined, "helper"]);
-  // Moved to the Mac: still the bot's.
+  // Moved to the Mac: still the bot's, even once the chart has changed since (it carries on a thread already handed).
   const hadMac = S.getState().mac;
-  S.update((st) => (st.mac = { ready: true }));
+  S.update((st) => {
+    st.mac = { ready: true };
+    st.workspaces.find((w) => w.id === "ws_main").chain = { bots: { kid: { takesWork: false } } };
+  });
   const moved = X.moveToMac(handed.id);
   assert.notEqual(moved.id, handed.id);
   assert.deepEqual([moved.sentVia, moved.sentViaBot], ["you", true]);
@@ -1291,7 +1369,7 @@ console.log("ok - bot access: forgotten at the Mac's look too, whether or not th
   list = { members: [...MEMBERS, dana(joined)], invites: INVITES, seats: seatsOf() };
   r = await get();
   assert.deepEqual(accessOf(r.body)["u-dana"], read, "hers; the sheet never shows when it was set");
-  assert.deepEqual(raw()["dana@example.com"], { ...read, at: joined }, "tied to the membership her invite began");
+  assert.deepEqual(raw()["dana@example.com"], { ...read, at: joined }, "tied to the membership her invite began (Your Apps left unset: none was picked)");
   // Removed on orgo.ai, invited back there days later and in again, with no Mac on this Bops looking in between:
   // Orgo lists her as joined after it was set, so it's forgotten, at the sheet's read and at the Mac's look alike.
   list = { members: [...MEMBERS, dana(joined + 3 * DAY)], invites: INVITES, seats: seatsOf() };

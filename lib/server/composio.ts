@@ -3,8 +3,9 @@ import { execFile, execFileSync } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Composio } from "@composio/core";
 import { USAGE_APP_HEADER, USAGE_BOT_HEADER } from "@/cloud/protocol";
-import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, openToTeam, othersThread, workspaceOf, type AccessUse, type AppAccount, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
-import { logUse, targetNameOf, viaOf, type UseWhere } from "./access-sync";
+import { appLoginKey, CHANNEL_APPS, levelIn, live as running, MAIN_WORKSPACE, openToTeam, outsideThread, workspaceOf, type AccessUse, type AppAccount, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
+import { forMember, logUse, targetNameOf, viaOf, type UseWhere } from "./access-sync";
+import { forgetLogin } from "./logins";
 import { trackServerEvent } from "./analytics";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSession, cloudSessionNow, cloudUrl } from "./cloud";
@@ -350,6 +351,8 @@ function give(s: ReturnType<typeof getState>, accountId: string, grant?: AppConn
 function dropAccount(s: ReturnType<typeof getState>, accountId: string) {
   s.accounts = (s.accounts ?? []).filter((a) => a.id !== accountId);
   for (const b of s.bots) if (b.access) delete b.access[accountId];
+  // Nor is it switched on in any workspace (Used in).
+  forgetLogin(s, appLoginKey(accountId));
   // Bots in Slack through it can't be there any more.
   s.channels = (s.channels ?? []).filter((l) => l.slack?.accountId !== accountId);
 }
@@ -441,7 +444,7 @@ export async function syncApps() {
     for (const a of s.accounts ?? []) if (named.has(a.id)) a.name = named.get(a.id);
     // Gone from Composio, or signed out with no bot using it (nothing to sign back in for): off the list.
     for (const a of [...(s.accounts ?? [])])
-      if (!a.id.startsWith("open:") && (!found.has(a.id) || (a.status === "expired" && !a.label && !s.bots.some((b) => levelOf(b, a))))) dropAccount(s, a.id);
+      if (!a.id.startsWith("open:") && (!found.has(a.id) || (a.status === "expired" && !a.label && !s.bots.some((b) => levelIn(s, b, a))))) dropAccount(s, a.id);
     // Two syncs at once (the Vault opening twice) find the same new accounts: add each once.
     for (const a of added) if (!s.accounts?.some((x) => x.id === a.id)) (s.accounts ??= []).push(a);
   });
@@ -452,11 +455,15 @@ export async function syncApps() {
 /** How an account reads in a list: its label and its own name, else the app's name. */
 export const accountTitle = (a: AppAccount) => [a.label, a.name].filter(Boolean).join(" · ") || a.appName;
 
-/** The accounts this bot may use (working ones only), each with how much it may do (levelOf: every bot's by default). */
+/**
+ * The accounts this bot may use (working ones only), each with how much it may do (levelIn: every bot's of the
+ * workspace it was connected in by default, and of each one it's switched on in).
+ */
 export function accountsOf(b: Bot): { account: AppAccount; level: AppLevel }[] {
   const out: { account: AppAccount; level: AppLevel }[] = [];
-  for (const a of getState().accounts ?? []) {
-    const level = levelOf(b, a);
+  const s = getState();
+  for (const a of s.accounts ?? []) {
+    const level = levelIn(s, b, a);
     if (level && a.status === "active") out.push({ account: a, level });
   }
   return out;
@@ -589,7 +596,8 @@ export function withConsts(schema: Schema | undefined, value: unknown, root: Sch
 
 /* ---------------- The two tools bots get ---------------- */
 
-export const APP_TOOLS = (b: Bot) => {
+/** The app tools for bot `b`. `forMember`: a member's turn, where nothing that changes something runs without the owner's yes. */
+export const APP_TOOLS = (b: Bot, opts: { forMember?: boolean } = {}) => {
   const list = appList(b);
   if (!list) return [];
   const owner = ownerName();
@@ -609,7 +617,7 @@ export const APP_TOOLS = (b: Bot) => {
     {
       type: "function" as const,
       name: "use_app",
-      description: `Run one action in ${owner}'s apps (${list}): an exact name from find_app_actions, with its inputs. Reading runs at once. ${b.autoApprove ? `Everything else runs at once too (${owner} set you to "Just do it"), except anything that could move money: that still asks them first.` : `Anything that sends, creates, changes or pays asks ${owner} first; Bops shows them the details.`}`,
+      description: `Run one action in ${owner}'s apps (${list}): an exact name from find_app_actions, with its inputs. Reading runs at once. ${b.autoApprove && !opts.forMember ? `Everything else runs at once too (${owner} set you to "Just do it"), except anything that could move money: that still asks them first.` : `Anything that sends, creates, changes or pays asks ${owner} first; Bops shows them the details.`}`,
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -628,12 +636,13 @@ export const APP_TOOLS = (b: Bot) => {
 const clip = (s: string, n = 14_000) => (s.length > n ? `${s.slice(0, n)}… (cut short)` : s);
 
 /**
- * A thread someone outside Bops started (an email, a text or a call to a bot), one a member with Write started or
- * told something, or a part of one (lib/types.ts othersThread): it gets no apps, like their turns in the chat
- * (chat.ts), whatever access its bot has. Asked as each call comes, so a member's reply mid-task counts at once.
+ * A thread someone outside Bops started (an email, a text or a call to a bot), or a part of one (lib/types.ts
+ * outsideThread): it gets no apps, like their turns in the chat (chat.ts), whatever access its bot has. A member's
+ * (memberThread) does: they reach the owner's apps through the bots they may tell, and anything that changes something
+ * asks the owner (forMember). Asked as each call comes.
  */
-const fromOutside = (sessionId?: string) => !!sessionId && othersThread(threadOf(sessionId), threadOf);
-const NOT_FOR_OUTSIDE = () => `Not on this task: someone other than ${ownerName()} asked for it, and ${ownerName()}'s apps are only for their own work.`;
+const fromOutside = (sessionId?: string) => !!sessionId && outsideThread(threadOf(sessionId), threadOf);
+const NOT_FOR_OUTSIDE = () => `Not on this task: someone outside Bops asked for it, and ${ownerName()}'s apps are only for the people ${ownerName()} works with.`;
 
 /** find_app_actions: Composio's search, cut down to what the model needs. */
 export async function findAppActions(botId: string, query: string, where: { sessionId?: string } = {}) {
@@ -740,15 +749,17 @@ export async function runAppAction(
   if (opts.approved) return run("user");
   const destructive = info.tags.includes("destructiveHint");
   const what = `${info.name} in ${where_}`;
-  const ask: AskSpec = { action: what, resources: resourcesOf(sent), preview: describe(sent), kind: "app" };
+  // For a member (their turn, or a thread of theirs): it asks the owner, whose app it is, every time, named as theirs.
+  const asker = forMember(where);
+  const ask: AskSpec = { action: what, resources: resourcesOf(sent), preview: describe(sent), kind: "app", ...(asker ? { askedFor: asker } : {}) };
   // Done without asking, and said so in the chat: what the user always allows (a rule they saved for this action); with
   // Just do it on, anything but what could move money (by what it is, or as Jev judges it) or reaches someone found
   // through business data (treg.ts); otherwise what Jev judges low-stakes and easy to undo, only touching the user's own
   // things (marking read, a label, an event only they attend): never anything that reaches someone else, deletes, or
-  // costs money (strict; if it can't tell, the user is asked).
-  const saved = allows(b, ask, { justDoIt: false });
-  const just = !saved && !!b.autoApprove && allows(b, ask, { guarded: foundByBots(JSON.stringify(sent)) || surelyMoney(action, app) || (await movesMoney(what, ask.preview)) });
-  const low = !saved && !b.autoApprove && !destructive && !surelyMoney(action, app) && (await lowRisk(what, ask.preview));
+  // costs money (strict; if it can't tell, the user is asked). None of that for a member's: those are the owner's to allow.
+  const saved = !asker && allows(b, ask, { justDoIt: false });
+  const just = !asker && !saved && !!b.autoApprove && allows(b, ask, { guarded: foundByBots(JSON.stringify(sent)) || surelyMoney(action, app) || (await movesMoney(what, ask.preview)) });
+  const low = !asker && !saved && !b.autoApprove && !destructive && !surelyMoney(action, app) && (await lowRisk(what, ask.preview));
   if (saved || just || low) {
     const out = await run("auto");
     const chatId = where.chatId ?? (where.sessionId ? getState().sessions.find((x) => x.id === where.sessionId)?.chatId : undefined);

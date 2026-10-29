@@ -740,6 +740,25 @@
   animation: screen-in 160ms ease-out backwards;
 }
 
+/* A card dropped where it can't go (the team chart): a short shake back. */
+@keyframes shake-back {
+  20% {
+    translate: -5px 0;
+  }
+  40% {
+    translate: 5px 0;
+  }
+  60% {
+    translate: -3px 0;
+  }
+  80% {
+    translate: 2px 0;
+  }
+}
+.motion-shake {
+  animation: shake-back 380ms ease-out;
+}
+
 /* A sheet over the window or a screen: up from below. */
 @keyframes sheet-up {
   from {
@@ -836,6 +855,7 @@
   .motion-menu-in,
   .motion-dialog-in,
   .motion-fade-in,
+  .motion-shake,
   .motion-sheet-in,
   .motion-tab-in,
   .motion-tick,

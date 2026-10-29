@@ -92,6 +92,8 @@ before(async () => {
     if (g.method === "GET" && g.path === "/v1/numbers") return { json: { data: [{ id: `num_${tag}_1`, phoneNumber: numbers[0], type: "sms" }], hasMore: false, total: 1 } };
     if (g.method === "POST" && g.path === "/v1/numbers") return { json: { id: `num_${tag}_2`, phoneNumber: numbers[1], type: "sms", status: "active" } };
     if (g.method === "GET" && g.path === "/v1/agents") return { json: { data: [{ id: agent, name: "Sam", numbers: [{ id: `num_${tag}_3`, phoneNumber: numbers[2] }] }], total: 1 } };
+    if (g.method === "GET" && g.path === "/v1/agents/voices") return { json: { data: [{ voice_id: "voice_cedar_test", voice_name: "Cedar", gender: "male", accent: "American" }] } };
+    if (g.method === "PATCH" && /^\/v1\/agents\/[^/]+$/.test(g.path)) return { json: { id: agent, name: "Sam", voice: g.json.voice, numbers: [] } };
     const hook = /^\/v1\/agents\/([^/]+)\/webhook$/.exec(g.path);
     if (hook && g.method === "POST") return { json: { id: "wh_1", url: g.json.url, secret: "whsec_agent", status: "active", contextLimit: g.json.contextLimit, timeout: 30 } };
     if (hook && g.method === "GET") return { json: { id: "wh_1", url: "https://bops-api.test/hooks/agentphone", secret: "whsec_agent", status: "active" } };
@@ -247,6 +249,25 @@ test("AgentPhone: numbers for sale can be searched, in the user's own sub-accoun
   assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_usage WHERE user_id = $1", [alice])).rows[0].n, before);
   // Naming another sub-account in the query is still refused.
   assert.equal((await as(alice, "GET", `/proxy/agentphone/v1/numbers/available?areaCode=415&subAccountId=${sub(bob)}`)).status, 400);
+});
+
+test("AgentPhone: its voices can be listed, and an agent's voice set, in the user's own sub-account, with no credit asked", async () => {
+  const before = (await query("SELECT count(*)::int AS n FROM bops.cloud_usage WHERE user_id = $1", [alice])).rows[0].n;
+  const r = await as(alice, "GET", "/proxy/agentphone/v1/agents/voices");
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.data[0].voice_id, "voice_cedar_test");
+  const listed = agentphone.got.at(-1)!;
+  assert.equal(listed.path, "/v1/agents/voices");
+  assert.equal(listed.headers["x-sub-account-id"], sub(alice));
+  const set = await as(alice, "PATCH", `/proxy/agentphone/v1/agents/${agent}`, { voice: "voice_cedar_test" });
+  assert.equal(set.status, 200, set.text);
+  const sent = agentphone.got.at(-1)!;
+  assert.equal(sent.method, "PATCH");
+  assert.deepEqual(sent.json, { voice: "voice_cedar_test" });
+  assert.equal(sent.headers["x-sub-account-id"], sub(alice));
+  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_usage WHERE user_id = $1", [alice])).rows[0].n, before, "nothing counted");
+  // Another sub-account's voices can't be asked for.
+  assert.equal((await as(alice, "GET", `/proxy/agentphone/v1/agents/voices?subAccountId=${sub(bob)}`)).status, 400);
 });
 
 test("AgentPhone: a webhook registration points at the cloud, and its secret stays here, sealed", async () => {

@@ -117,7 +117,7 @@ const SPOTS = [
   [8, 14, 0, 22], [22, 70, 1, -10], [16, 40, 2, 15], [34, 22, 3, 0], [40, 84, 4, 12], [60, 12, 5, -18],
   [70, 58, 0, 8], [84, 26, 2, -25], [90, 76, 1, 30], [52, 90, 3, -6], [76, 88, 5, 20], [6, 88, 4, -14],
 ] as const;
-/** The wallpaper's doodles sit mostly in the margins around the floating window, where they show. */
+/** The wallpaper's doodles sit near its edges, where they show around a window. */
 const EDGE_SPOTS = [
   [2.2, 8, 0, 18], [2.6, 30, 1, -12], [2, 52, 2, 10], [2.8, 74, 3, -8], [3, 92, 4, 14],
   [94.6, 6, 5, -16], [95.2, 26, 0, 12], [94.8, 48, 2, -20], [95, 70, 1, 8], [94.4, 90, 3, -10],
@@ -198,6 +198,7 @@ export async function applyDesktop(b: Bot, { restartChrome = true }: { restartCh
     ["/opt/bops/bops-home.py", readFileSync(join(process.cwd(), "vm/bops-home.py")), "0755"],
     ["/usr/local/bin/bops-desktop", readFileSync(join(process.cwd(), "vm/bin/bops-desktop")), "0755"],
     ["/usr/local/bin/bops-chrome", readFileSync(join(process.cwd(), "vm/bin/bops-chrome")), "0755"],
+    ["/usr/local/bin/bops-screen-layout", readFileSync(join(process.cwd(), "vm/bin/bops-screen-layout")), "0755"],
     // The screen tools and their ledger, kept current with Bops (threads, helpers, one agent per screen).
     ["/opt/bops/screen_mcp.py", readFileSync(join(process.cwd(), "vm/screen_mcp.py")), "0644"],
     ["/usr/local/bin/bops-screens", readFileSync(join(process.cwd(), "vm/bin/bops-screens")), "0755"],

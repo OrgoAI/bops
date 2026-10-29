@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BRAIN_KEYS, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, planName, signInOn, threadRunner, workBot, type AppState, type Bot, type Brain, type BrainAuth, type BrainKind, type Session } from "@/lib/types";
+import { defaultAgent, isCli } from "@/lib/agents";
+import { BRAIN_KEYS, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, CLI_NAMES, planName, signInOn, threadRunner, workBot, type AppState, type Bot, type Brain, type BrainAuth, type BrainKind, type CliKind, type Session } from "@/lib/types";
 import { BotChip, BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
 import { Mascot } from "./mascot";
 import { undash } from "./side-group";
@@ -28,10 +29,10 @@ const light = `${btn} bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]`;
  * or "Bops agent" ("agent", only where that isn't what the user would think: a thread that stays on Bops
  * agent while its bot is on a brain now). `className`: its background where the gray doesn't read (a profile's glass).
  */
-export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: BrainKind | "agent"; title: string; className?: string }) {
+export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: CliKind | "agent"; title: string; className?: string }) {
   return (
     <span title={title} className={`shrink-0 rounded-full px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38] ${className}`}>
-      {kind === "agent" ? "Bops agent" : BRAIN_NAMES[kind]}
+      {kind === "agent" ? "Bops agent" : CLI_NAMES[kind]}
     </span>
   );
 }
@@ -41,12 +42,12 @@ export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: 
  * that stays there while its bot's tasks run on a brain now (it started on Bops agent, or Bops agent took it
  * over), so the user can tell it's on AI credit. Nothing for the rest, nor in a build without brains (BRAINS_ON).
  */
-export function threadBadge(s: Session, state: AppState): { kind: BrainKind | "agent"; title: string } | undefined {
+export function threadBadge(s: Session, state: AppState): { kind: CliKind | "agent"; title: string } | undefined {
   if (!BRAINS_ON) return undefined;
   const who = threadRunner(s);
-  if (who && who !== "agent") return { kind: who, title: `${BRAIN_NAMES[who]} ran this` };
+  if (who && who !== "agent") return { kind: who, title: `${CLI_NAMES[who]} ran this` };
   const b = state.bots.find((x) => x.id === s.botId);
-  if (who !== "agent" || !b || !brainOf(b, state) || brainRuns(b, state) === "none" || s.runsOn === "mac") return undefined;
+  if (who !== "agent" || !b || !isCli(defaultAgent(b, state).kind) || brainRuns(b, state) === "none" || s.runsOn === "mac") return undefined;
   return { kind: "agent", title: s.brainRun?.started ? "Bops agent took this over, so it finishes it, on AI credit" : "Started on Bops agent, so it finishes there, on AI credit" };
 }
 

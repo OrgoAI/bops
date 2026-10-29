@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+# One run's key gate (vm/bin/bops-brain run, for a bot's agent on the user's own key). The bot's CLI and
+# everything it runs get a run token and this gate's 127.0.0.1 address, never the user's key: the gate holds
+# the key in memory for this one run, checks the token on every request, and sends the request on to the
+# provider with the key. The provider's address is fixed here, so nothing the bot writes (a project's config,
+# a base URL of its own) can send the key anywhere else.
+#
+# The token and the key come on stdin, one line each, never on a command line or in the environment. It
+# listens on 127.0.0.1 on a port of its own and writes that port to --port-file (0600). It never logs a
+# request and never prints the token or the key. When the process that started it goes (bops-brain execs
+# the CLI, so that is the CLI, or the bot's shell after it), it exits and the token is worth nothing.
+#
+# Usage: bops-ai-gate --route anthropic|openai|deepinfra --port-file <file>
+import hmac
+import http.client
+import json
+import os
+import signal
+import ssl
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
+
+# Where each route goes. "gemini" is kept for agy, which isn't in Bops yet: it goes nowhere.
+UPSTREAMS = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com",
+    "deepinfra": "https://api.deepinfra.com",
+}
+# Bodies up to this size go on; bigger ones are turned down.
+MOST = 64 * 1024 * 1024
+HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
+AUTH = {"authorization", "x-api-key", "api-key", "x-goog-api-key"}
+
+
+def arg(name):
+    a = sys.argv[1:]
+    return a[a.index(name) + 1] if name in a and a.index(name) + 1 < len(a) else None
+
+
+route = arg("--route")
+port_file = arg("--port-file")
+if route not in UPSTREAMS or not port_file:
+    sys.stderr.write("usage: bops-ai-gate --route anthropic|openai|deepinfra --port-file <file>\n")
+    sys.exit(2)
+upstream = UPSTREAMS[route]
+# Tests only: a fake provider on this machine instead of the real one.
+if os.environ.get("BOPS_GATE_TEST") == "1" and os.environ.get("BOPS_GATE_UPSTREAM", "").startswith("http://127.0.0.1:"):
+    upstream = os.environ["BOPS_GATE_UPSTREAM"]
+UP = urlsplit(upstream)
+
+token = sys.stdin.readline().strip()
+key = sys.stdin.readline().strip()
+if not token.startswith("bopsrun_") or len(token) < 40 or not key:
+    sys.stderr.write("bops-ai-gate: no token or key\n")
+    sys.exit(2)
+parent = os.getppid()
+
+
+def provider_error(status, message):
+    """An error in the provider's own shape, so the CLI says it as it would its own."""
+    if route == "anthropic":
+        kind = "api_error" if status >= 500 else "not_found_error" if status == 404 else "authentication_error"
+        return json.dumps({"type": "error", "error": {"type": kind, "message": message}}).encode()
+    return json.dumps({"error": {"message": message, "type": "bops_gate", "code": status}}).encode()
+
+
+class Gate(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_):
+        pass
+
+    def log_error(self, *_):
+        pass
+
+    def deny(self, status, message):
+        body = provider_error(status, message)
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
+    def token_ok(self):
+        given = self.headers.get("x-api-key") or ""
+        bearer = self.headers.get("authorization") or ""
+        if not given and bearer.lower().startswith("bearer "):
+            given = bearer[7:].strip()
+        return bool(given) and hmac.compare_digest(given.encode(), token.encode())
+
+    def handle_any(self):
+        prefix = f"/{route}"
+        path = self.path
+        # Only this run's provider, and only its API (/v1/...); DeepInfra's OpenAI shaped API is under /v1/openai.
+        if not path.startswith(prefix + "/v1/") or ".." in path or "//" in path[len(prefix) :]:
+            return self.deny(404, "Not here.")
+        if not self.token_ok():
+            return self.deny(401, "This run's token isn't valid.")
+        try:
+            length = int(self.headers.get("content-length") or 0)
+        except ValueError:
+            return self.deny(400, "Bad length.")
+        if length > MOST or length < 0:
+            return self.deny(413, "That request is too big.")
+        body = self.rfile.read(length) if length else None
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP and k.lower() not in AUTH}
+        if route == "anthropic":
+            headers["x-api-key"] = key
+        else:
+            headers["Authorization"] = f"Bearer {key}"
+        headers["Host"] = UP.netloc
+        if body is not None:
+            headers["Content-Length"] = str(len(body))
+        rest = path[len(prefix) :]
+        try:
+            if UP.scheme == "https":
+                conn = http.client.HTTPSConnection(UP.hostname, UP.port or 443, timeout=600, context=ssl.create_default_context())
+            else:
+                conn = http.client.HTTPConnection(UP.hostname, UP.port or 80, timeout=600)
+            conn.request(self.command, (UP.path.rstrip("/") + rest) or "/", body=body, headers=headers)
+            res = conn.getresponse()
+        except (OSError, http.client.HTTPException):
+            return self.deny(502, f"Bops couldn't reach {UP.hostname}.")
+        self.send_response(res.status, res.reason)
+        for k, v in res.getheaders():
+            if k.lower() not in HOP:
+                self.send_header(k, v)
+        # Streamed back as it comes (server sent events), in chunks.
+        self.send_header("transfer-encoding", "chunked")
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            while True:
+                chunk = res.read1(65536) if hasattr(res, "read1") else res.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = handle_any
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+    def handle_error(self, *_):
+        pass
+
+
+server = Server(("127.0.0.1", 0), Gate)
+port = server.server_address[1]
+
+
+def gone(*_):
+    try:
+        os.remove(port_file)
+    except OSError:
+        pass
+    os._exit(0)
+
+
+signal.signal(signal.SIGTERM, gone)
+signal.signal(signal.SIGINT, gone)
+signal.signal(signal.SIGHUP, gone)
+fd = os.open(port_file + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, str(port).encode())
+os.close(fd)
+os.replace(port_file + ".tmp", port_file)
+
+
+def watch():
+    """The run is over once the process that started it is gone: the gate goes, and the token with it."""
+    while True:
+        time.sleep(0.5)
+        if os.getppid() != parent:
+            gone()
+
+
+threading.Thread(target=watch, daemon=True).start()
+try:
+    server.serve_forever(poll_interval=0.5)
+finally:
+    gone()

@@ -139,8 +139,15 @@ export function tierFrom(a: { difficulty?: Answer; stakes?: Answer; long?: Answe
  * What a new task runs on. A bot set to low, medium or high: that (high is Astra, as it always was).
  * Otherwise one Jev call: the old question (hard?) and the router's. The old rule runs unless
  * BOPS_ROUTER=on. Without Jev: the old rule's no-answer, medium on Sol.
+ * `model`: the model the bot's AI profile (or the thread) picked for Bops agent (lib/agents.ts): every route
+ * keeps its effort, and runs on that model. Unset (Auto): as before.
  */
-export async function routeTask(pref: Effort | undefined, goal: string, botId?: string, opts: { mode?: "off" | "shadow" | "on" } = {}): Promise<TaskRoute> {
+export async function routeTask(pref: Effort | undefined, goal: string, botId?: string, opts: { mode?: "off" | "shadow" | "on"; model?: string } = {}): Promise<TaskRoute> {
+  const r = await routed(pref, goal, botId, opts);
+  return opts.model && opts.model !== "auto" ? { ...r, model: opts.model, pinned: true, ...(r.router ? { router: { ...r.router, model: opts.model } } : {}) } : r;
+}
+
+async function routed(pref: Effort | undefined, goal: string, botId: string | undefined, opts: { mode?: "off" | "shadow" | "on" }): Promise<TaskRoute> {
   if (pref && pref !== "auto") return { by: "setting", model: pref === "high" ? ASTRA() : SOL(), effort: pref };
   const mode = opts.mode ?? routerMode();
   const a = await decide(
@@ -166,12 +173,15 @@ export async function routeTask(pref: Effort | undefined, goal: string, botId?: 
   return mode === "on" ? { by: "router", model: router.model, effort: router.effort, tier: router.tier, long: picked.long, router } : { ...rule, router };
 }
 
-/** The configuration for a task's next turn: a tier up for each bump, when the router chose it. */
+/**
+ * The configuration for a task's next turn: a tier up for each bump, when the router chose it. A model the bot's
+ * profile pinned for Bops agent stays that model: a bump thinks harder on it, never moves it to another.
+ */
 export function taskConfig(r: TaskRoute | undefined): Config | undefined {
   if (!r) return undefined;
   if (r.by !== "router" || !r.tier || !r.bumps) return { model: r.model, effort: r.effort };
   const c = configFor(up(r.tier, r.bumps), { long: r.long });
-  return { model: c.model, effort: c.effort };
+  return { model: r.pinned ? r.model : c.model, effort: c.effort };
 }
 
 /** A reply that says the last answer was wrong, or asks for another go. */

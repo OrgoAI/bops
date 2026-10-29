@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { createPortal } from "react-dom";
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { trackEvent } from "@/lib/analytics";
-import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, inviteDefault, levelOf, type AccessLevel, type MemberAccess } from "@/lib/member-access";
+import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, inviteDefault, isAccessLevel, levelOf, type AccessLevel, type MemberAccess } from "@/lib/member-access";
+import { appsOwnShown } from "@/lib/apps-access";
 import {
   ACCESS_TIPS,
+  APPS_TIPS,
+  APPS_WORDS,
+  CLOUD_SHARES_APPS,
   emailOf,
   FULL_ACCESS_IN_BOPS,
   ROLE_LINES,
@@ -20,16 +23,17 @@ import {
   type Person,
 } from "@/lib/members";
 import { peopleAside, peopleShort, upgradeLabel } from "@/lib/plan-includes";
-import { FooterButton } from "./sidebar-footer";
 import { workspaceOf, type AppState, type Bot } from "@/lib/types";
-import { initialsFrom, LoadFailed, Notice, Placeholder, Section, signOutOfOrgo } from "./account";
+import { initialsFrom, LoadFailed, Notice, Placeholder, Section, useSignOut } from "./account";
 import { Mascot, Spinner } from "./mascot";
 import { usePlan } from "./plan-note";
-import { CloseButton, NeedsYouDot, teamOf } from "./ui";
+import { AskInPlace, NeedsYouDot, teamOf } from "./ui";
 import { Badge } from "./vault";
+import { ChartIcon } from "./team-chart";
+import { AppsIcon } from "./made-apps";
 
 /*
- * People: who sees the user's bots, from the button at the bottom left of the sidebar. They're the
+ * Team: who sees the user's bots, a section of Settings (from the user's initials at the bottom left of the sidebar). They're the
  * members of the user's Orgo workspace named "bops", which holds the computers of every Bops workspace:
  * the user invites people by email, sends an invite again or cancels it, picks which of the open
  * workspace's bots each person sees in Bops (none, read or write per bot, and for bots made later:
@@ -41,7 +45,7 @@ import { Badge } from "./vault";
  * whoever holds it.
  */
 
-/* ---------------- The button and its count ---------------- */
+/* ---------------- The count on your initials ---------------- */
 
 /** Every count on the page, so a change in the sheet shows on the button at once (like refreshState). */
 const counters = new Set<() => void>();
@@ -50,7 +54,7 @@ export const refreshMembersCount = () => counters.forEach((read) => read());
 /**
  * How many people have access besides the user (GET /api/members?count=1): null while it isn't known, and
  * when there's none to show (signed out, self-hosted). Read when someone signs in, again when Bops comes
- * back to the front (at most once a minute), and after every change in the sheet.
+ * back to the front (at most once a minute), and after every change in Team.
  */
 export function useMembersCount(state: AppState) {
   const [count, setCount] = useState<{ user: string; n: number | null } | null>(null);
@@ -80,40 +84,23 @@ export function useMembersCount(state: AppState) {
 }
 
 /**
- * The People button, beside the user's initials: two people, and a grey count of who has access besides
- * the user (guests too, invites not). Grey, not highlighter: nothing here needs the user. The pill, with
- * its name, while the People sheet is open (sidebar-footer.tsx).
+ * How many people have access besides the user (guests too, invites not), as a grey count on the corner of the user's
+ * initials in the sidebar's footer, where Team is (their menu, sidebar.tsx YouMenu). Grey, not highlighter: nothing here
+ * needs the user. Nothing while there's none, or none known. `count`: given (tests), else read (useMembersCount).
  */
-export function MembersButton({ state, expanded = false, pressed = expanded, onClick }: { state: AppState; expanded?: boolean; pressed?: boolean; onClick: () => void }) {
-  const count = useMembersCount(state);
+export function TeamCount({ count }: { count: number | null }) {
+  if (!count) return null;
   return (
-    <FooterButton
-      name="people"
-      expanded={expanded}
-      pressed={pressed}
-      label="People"
-      tip="People: who sees your bots"
-      ariaLabel={count ? `People, ${count} with access` : "People"}
-      onClick={onClick}
-      icon={
-        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
-          <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
-          <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-          <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-        </svg>
-      }
-      badge={
-        count ? (
-          <span className="pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#EEEEEC] px-1 text-[11px] font-semibold leading-none tabular-nums text-[#3A3A38] shadow-[0_0_0_2px_#F9F9F8]">
-            {count}
-          </span>
-        ) : null
-      }
-    />
+    <span data-team-count className="pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#EEEEEC] px-1 text-[11px] font-semibold leading-none tabular-nums text-[#3A3A38] shadow-[0_0_0_2px_#F9F9F8]">
+      {count}
+    </span>
   );
 }
 
-/* ---------------- The sheet ---------------- */
+/** The people besides the user, in words for a label: "2 with access" (null: none, or not known). */
+export const teamWords = (count: number | null) => (count ? `${count} with access` : null);
+
+/* ---------------- Team, in Settings ---------------- */
 
 type Ready = Extract<MembersInfo, { state: "ready" }>;
 /** What the route answered: a state, or why it couldn't say ({code, error}). */
@@ -138,15 +125,15 @@ const pill = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4";
 const quiet = `${pill} shrink-0 bg-[#F2F2F0] hover:bg-[#EAEAE7]`;
 
 /**
- * The People sheet, over the app like Account and Settings: Esc or a click outside closes it (a dialog
- * on it closes first). It reads who has access as it opens, again when Bops comes back to the front and
- * every 30 seconds while it's open, showing what it has meanwhile. `onUpgrade` opens the plans (Account),
- * on top of it.
+ * Team: Settings' section of who sees which bots (bops-app.tsx Settings), a part of the page like its others. It
+ * reads who has access as it opens, again when Bops comes back to the front and every 30 seconds while it's open,
+ * showing what it has meanwhile. `onUpgrade` goes to the plans (Settings, Plan and credit); `onClose`, signing out
+ * from here leaves Settings too.
  */
-export function Members({ state, onClose, onUpgrade }: { state: AppState; onClose: () => void; onUpgrade: () => void }) {
+export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: AppState; onClose?: () => void; onUpgrade: () => void; /** The team chart (team-chart.tsx), for the open workspace. */ onTeamChart?: () => void }) {
   const [read, setRead] = useState<Read | null>(null);
   const [loading, setLoading] = useState(true);
-  // The route itself failed (a 500, or not JSON): the sheet says so and offers a retry.
+  // The route itself failed (a 500, or not JSON): Team says so and offers a retry.
   const [failed, setFailed] = useState(false);
   const shown = useRef<Read | null>(null);
   /**
@@ -202,7 +189,7 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
     [load],
   );
 
-  // Counted once a sheet has shown who has access.
+  // Counted once Team has shown who has access.
   const opened = useRef(false);
   const people = read?.state === "ready" ? read.people.length : null;
   useEffect(() => {
@@ -211,28 +198,22 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
     trackEvent("bops_members_opened", { people });
   }, [people]);
 
-  const signOut = async () => {
-    await signOutOfOrgo();
-    onClose();
-  };
+  const leaving = useSignOut(onClose);
 
   return (
-    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="members-title"
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
-      >
-        <div className="flex items-center justify-between gap-3 border-b border-[#F0F0EE] px-[22px] py-[18px]">
-          <div className="flex flex-col gap-0.5">
-            <span id="members-title" className="text-[18px] font-semibold leading-[22px]">
-              People
+    <section aria-labelledby="members-title" data-team className="flex max-w-[760px] flex-col">
+        <div className="flex flex-col gap-0.5 px-[22px] pt-6">
+            <span id="members-title" className="text-[22px] font-bold leading-7 tracking-[-0.02em]">
+              Team
             </span>
-            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">Who sees which of your bots, and their computers.</span>
-          </div>
-          <CloseButton onClick={onClose} />
+            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">Who sees which of your bots, and their computers.</span>
+            {/* Who answers to whom, and who may ask whom: the team chart (your own workspace only). */}
+            {onTeamChart && !state.shared && (
+              <button type="button" data-chart-link onClick={onTeamChart} className="mt-1 flex items-center gap-1.5 self-start text-[12.5px] font-medium leading-4 text-ink hover:underline">
+                <ChartIcon size={13} />
+                See the org chart
+              </button>
+            )}
         </div>
 
         {!read ? (
@@ -261,15 +242,20 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
                 {WORDS.selfHosted}
               </Notice>
             ) : read.state === "signed_out" ? (
-              <Notice
-                action={
-                  <button onClick={() => void signOut()} className={quiet}>
-                    Sign out
-                  </button>
-                }
-              >
-                {read.why === "rejected" ? WORDS.rejected : WORDS.noKey}
-              </Notice>
+              <>
+                <Notice
+                  action={
+                    !leaving.ask && (
+                      <button disabled={leaving.busy} onClick={() => void leaving.signOut()} className={`${quiet} disabled:opacity-50`}>
+                        Sign out
+                      </button>
+                    )
+                  }
+                >
+                  {read.why === "rejected" ? WORDS.rejected : WORDS.noKey}
+                </Notice>
+                {leaving.ask}
+              </>
             ) : read.state === "no_computers" ? (
               <Notice>{WORDS.noComputers}</Notice>
             ) : (
@@ -297,20 +283,22 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
         ) : (
           <div className="pb-5" />
         )}
-      </div>
-    </div>
+    </section>
   );
 }
 
-/** Who has access, and adding people: the sheet once Orgo has said. */
+/** Who has access, and adding people: the section once Orgo has said. */
 function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; state: AppState; act: Act; onRetry: () => void; onUpgrade: () => void }) {
   // Bops' own keys on the computers: said whenever anyone else is in (View only too: Orgo's agent, which
   // they may use on any of the computers, runs as root there), and when they're why the app has no Full access.
   const someoneElse = info.people.length > 0 || info.invites.length > 0;
   const keys = info.fullAccess === "off" || (info.keysOnComputers && someoneElse);
   const bots = sheetBots(state, info.wsId);
+  // Your Apps, beside each person's bots: only where apps are open to the owner (lib/apps-access.ts).
+  const apps = appsOwnShown(state);
+  const older = useOlderBops(apps);
   return (
-    <>
+    <AppsScope.Provider value={{ shown: apps, older }}>
       {(keys || info.host === "mac" || !bots) && (
         <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
           {!bots && <Notice>{WORDS.sharedOpen}</Notice>}
@@ -323,16 +311,16 @@ function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; stat
       <AddSomeone info={info} state={state} bots={bots} act={act} onRetry={onRetry} onUpgrade={onUpgrade} />
       <WhoHasAccess info={info} bots={bots} act={act} />
       {info.invites.length > 0 && <Invited info={info} bots={bots} act={act} />}
-    </>
+    </AppsScope.Provider>
   );
 }
 
 /* ---------------- Which bots they see ---------------- */
 
 /**
- * The bots people can be given: the workspace's whose people the sheet lists (`wsId`, MembersInfo; the
+ * The bots people can be given: the workspace's whose people Team lists (`wsId`, MembersInfo; the
  * open one when it isn't said), its main bot first. Null while a workspace shared with the user is open:
- * the window's bots are that one's then, and the sheet is about the user's own.
+ * the window's bots are that one's then, and Team is about the user's own.
  */
 export function sheetBots(state: AppState, wsId?: string): Bot[] | null {
   if (state.shared) return null;
@@ -340,16 +328,46 @@ export function sheetBots(state: AppState, wsId?: string): Bot[] | null {
   return [...team].sort((a, b) => Number(b.isMain) - Number(a.isMain));
 }
 
+/** Whether the sheet shows Your Apps (apps open to the owner), and whether a Mac on the account runs a Bops from before it. */
+const AppsScope = createContext<{ shown: boolean; older: boolean }>({ shown: false, older: false });
+
+/** A Mac or runner on the account on a Bops from before (the org chart's check, GET /api/workspaces?olderBops=1), asked only when `ask`. */
+function useOlderBops(ask: boolean) {
+  const [older, setOlder] = useState(false);
+  useEffect(() => {
+    if (!ask) return;
+    let gone = false;
+    void fetch("/api/workspaces?olderBops=1", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { older?: boolean } | null) => !gone && setOlder(j?.older === true))
+      .catch(() => {});
+    return () => {
+      gone = true;
+    };
+  }, [ask]);
+  return older;
+}
+
+/** A person's line under their name: their bots, then Your Apps where the sheet shows it. */
+function useSummary() {
+  const { shown } = useContext(AppsScope);
+  return (access: MemberAccess, ids: string[]) => [accessSummary(access, ids), shown && appsSummary(access)].filter(Boolean).join(" · ");
+}
+
 /**
  * `access` with one bot at `level`, or (`botId` null) every bot at `level`, new ones too. A bot at the
- * level of the rest isn't named, as cleanAccess keeps it, so the same access always looks the same.
+ * level of the rest isn't named, as cleanAccess keeps it, so the same access always looks the same. Your Apps stays.
  */
 export function withLevel(access: MemberAccess, botId: string | null, level: AccessLevel): MemberAccess {
-  if (botId === null) return { others: level, bots: {} };
+  const apps = access.apps ? { apps: access.apps } : {};
+  if (botId === null) return { others: level, bots: {}, ...apps };
   const bots: Record<string, AccessLevel> = Object.fromEntries(Object.entries(access.bots).filter(([id]) => id !== botId));
   if (level !== access.others) bots[botId] = level;
-  return { others: access.others, bots };
+  return { others: access.others, bots, ...apps };
 }
+
+/** `access` with Your Apps at `level`, the bots as they are. */
+export const withApps = (access: MemberAccess, level: AccessLevel): MemberAccess => ({ ...access, apps: level });
 
 /**
  * Which bots someone sees, like an API key's permissions: a row for every bot at once, bots made later
@@ -360,6 +378,9 @@ export function withLevel(access: MemberAccess, botId: string | null, level: Acc
  */
 export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; value: MemberAccess; onChange: (next: MemberAccess) => void; disabled?: boolean }) {
   const mixed = bots.some((b) => levelOf(value, b.id) !== value.others);
+  const scope = useContext(AppsScope);
+  // Your Apps comes with a bot: none seen, nothing of the workspace opens for them.
+  const hasBot = value.others !== "none" || bots.some((b) => levelOf(value, b.id) !== "none");
   return (
     <div data-bot-access className="flex flex-col gap-2">
       <div className="flex max-h-[250px] flex-col overflow-y-auto rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
@@ -384,13 +405,37 @@ export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; va
           />
         ))}
       </div>
+      {/* Your Apps: a scope of its own, behind the list's hairline (lib/member-access.ts MemberAccess.apps), only with a bot (workspaces.ts showsAny). */}
+      {scope.shown && (
+        <div data-apps-access className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+          <AccessRow
+            icon={<AppsIcon size={16} />}
+            name={APPS_WORDS.row}
+            level={!hasBot ? "none" : isAccessLevel(value.apps) ? value.apps : undefined}
+            tips={APPS_TIPS}
+            onPick={(level) => onChange(withApps(value, level))}
+            disabled={disabled || !hasBot}
+          />
+        </div>
+      )}
+      {scope.shown && (!hasBot || !CLOUD_SHARES_APPS) && (
+        <span data-apps-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
+          {!hasBot ? APPS_WORDS.needsBot : APPS_WORDS.notYet}
+        </span>
+      )}
       <ul data-access-levels className="flex flex-col gap-0.5 px-1 text-[12px] leading-4 text-[#6B6B6B]">
         {ACCESS_LEVELS.map((level) => (
           <li key={level}>
             <span className="font-medium text-[#3A3A38]">{ACCESS_LABELS[level]}:</span> {ACCESS_TIPS[level].charAt(0).toLowerCase() + ACCESS_TIPS[level].slice(1)}
           </li>
         ))}
+        {scope.shown && <li data-apps-legend>{APPS_WORDS.legend}</li>}
       </ul>
+      {scope.shown && scope.older && (
+        <span data-apps-older className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
+          {APPS_WORDS.older}
+        </span>
+      )}
     </div>
   );
 }
@@ -405,15 +450,19 @@ function AccessRow({
   loose,
   onPick,
   disabled,
+  tips,
 }: {
   icon: React.ReactNode;
   name: string;
   label?: string;
   tip?: string;
-  level: AccessLevel;
+  /** Unset: no level picked yet (Your Apps before one is given). */
+  level: AccessLevel | undefined;
   loose?: boolean;
   onPick: (level: AccessLevel) => void;
   disabled?: boolean;
+  /** What each level means here (a bot's, unless given: Your Apps has its own). */
+  tips?: Record<AccessLevel, string>;
 }) {
   const tipId = useId();
   return (
@@ -427,7 +476,7 @@ function AccessRow({
           {tip}
         </span>
       )}
-      <LevelPicker label={`What they can do with ${label ?? name}`} describedBy={tip ? tipId : undefined} value={level} loose={loose} onChange={onPick} disabled={disabled} />
+      <LevelPicker label={`What they can do with ${label ?? name}`} describedBy={tip ? tipId : undefined} value={level} loose={loose} onChange={onPick} disabled={disabled} tips={tips} />
     </div>
   );
 }
@@ -437,20 +486,22 @@ function AccessRow({
  * the level picked isn't every bot's (Every bot with single bots set apart), so it shows lighter and
  * picking it again still counts.
  */
-function LevelPicker({
+export function LevelPicker({
   label,
   describedBy,
   value,
   loose,
   onChange,
   disabled,
+  tips = ACCESS_TIPS,
 }: {
   label: string;
   describedBy?: string;
-  value: AccessLevel;
+  value: AccessLevel | undefined;
   loose?: boolean;
   onChange: (level: AccessLevel) => void;
   disabled?: boolean;
+  tips?: Record<AccessLevel, string>;
 }) {
   return (
     <div role="radiogroup" aria-label={label} aria-describedby={describedBy} className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[2px] ${disabled ? "opacity-50" : ""}`}>
@@ -463,7 +514,7 @@ function LevelPicker({
             role="radio"
             aria-checked={on}
             disabled={disabled}
-            data-tip={ACCESS_TIPS[level]}
+            data-tip={tips[level]}
             onClick={() => (!on || loose) && onChange(level)}
             className={`rounded-full px-2 py-0.5 text-[11.5px] leading-4 ${on && !loose ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : on ? "bg-white/60 text-[#3A3A38] hover:text-ink" : "text-[#6B6B6B] hover:text-ink"}`}
           >
@@ -627,6 +678,8 @@ function InviteForm({
   onSent: (sent: boolean) => void;
   onSaid: Dispatch<SetStateAction<Said | null>>;
 }) {
+  const summary = useSummary();
+  const scopeShown = useContext(AppsScope).shown;
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<MemberRole>("viewer");
   // The bots chosen, null for the default: it follows the workspace's bots until the user picks.
@@ -699,9 +752,9 @@ function InviteForm({
       {bots && (
         <span className="flex min-w-0 items-center gap-2 pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">
           <span data-access-summary className="truncate">
-            {accessSummary(access, ids)}
+            {summary(access, ids)}
           </span>
-          <BotsToggle open={choosing} label="Choose bots" onClick={() => setChoosing((x) => !x)} />
+          <BotsToggle open={choosing} label={scopeShown ? "Choose access" : "Choose bots"} onClick={() => setChoosing((x) => !x)} />
         </span>
       )}
       {bots && choosing && <BotAccess bots={bots} value={access} onChange={setChosen} disabled={busy} />}
@@ -778,7 +831,8 @@ function SubLine({ who, children }: { who?: string | null; children?: React.Reac
   if (!who && !children) return null;
   return (
     <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] leading-4 text-[#6B6B6B]">
-      {who && <span className="truncate">{who}</span>}
+      {/* Who first: their access line beside it gives way before it does. */}
+      {who && <span className={`truncate ${children ? "max-w-[55%] shrink-0" : ""}`}>{who}</span>}
       {who && children && <span aria-hidden>·</span>}
       {children}
     </span>
@@ -825,14 +879,16 @@ function WhoHasAccess({ info, bots, act }: { info: Ready; bots: Bot[] | null; ac
  * copied keeps working: never "access ended" when it hasn't.
  */
 function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots: Bot[] | null; fullAccess: FullAccess; act: Act }) {
+  const summary = useSummary();
+  const scopeShown = useContext(AppsScope).shown;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Their Full access was taken away in this sheet: they may still hold what it gave them.
+  // Their Full access was taken away in Team: they may still hold what it gave them.
   const [demoted, setDemoted] = useState(false);
   const [asking, setAsking] = useState<"remove" | "full" | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
-  // The bots as picked while that's saving; then what was saved, until the sheet reads them again
+  // The bots as picked while that's saving; then what was saved, until Team reads them again
   // (`from`: what it had read for them when that save landed), so a read that fails after a save
   // doesn't show the old ones.
   const [draft, setDraft] = useState<MemberAccess | null>(null);
@@ -849,7 +905,7 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
     if (sending.current) return;
     sending.current = true;
     setSaving(true);
-    // What the sheet has for them: as rendered now, then as each save's read after it came back (this
+    // What Team has for them: as rendered now, then as each save's read after it came back (this
     // render's `p` is never read again, so a save queued behind another is held to the newer read).
     let from = p.access;
     while (queued.current) {
@@ -905,10 +961,10 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
           <SubLine who={p.guest ? "Joined with a link on orgo.ai" : p.email && p.email !== p.name ? p.email : null}>
             {bots && (
               <>
-                <span data-access-summary className="shrink-0">
-                  {accessSummary(access, ids)}
+                <span data-access-summary className="min-w-0 truncate" title={summary(access, ids)}>
+                  {summary(access, ids)}
                 </span>
-                <BotsToggle open={choosing} label="Bots" onClick={() => setChoosing((x) => !x)} />
+                <BotsToggle open={choosing} label={scopeShown ? "Access" : "Bots"} onClick={() => setChoosing((x) => !x)} />
                 {saving && <Spinner size={11} color="#9A9A98" />}
               </>
             )}
@@ -931,9 +987,12 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
         ) : (
           <AccessPicker value={p.role} fullAccess={fullAccess} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />
         )}
-        <button onClick={() => setAsking("remove")} className={`${rowAction} shrink-0 text-[#B42318] hover:bg-[#FEF3F2]`}>
-          Remove
-        </button>
+        {/* Asked in place: while it asks, its question under the row stands for it. */}
+        {asking !== "remove" && (
+          <button onClick={() => setAsking("remove")} className={`${rowAction} shrink-0 text-[#B42318] hover:bg-[#FEF3F2]`}>
+            Remove
+          </button>
+        )}
       </div>
       {bots && choosing && (
         <div className="pl-12 pt-2">
@@ -1020,6 +1079,7 @@ function Invited({ info, bots, act }: { info: Ready; bots: Bot[] | null; act: Ac
  * waits for orgo-web's numbers (`canSend` false: the route would turn it down).
  */
 function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invite; bots: Bot[] | null; fullAccess: FullAccess; canSend: boolean; act: Act }) {
+  const summary = useSummary();
   const [busy, setBusy] = useState<"resend" | "cancel" | null>(null);
   const [sure, setSure] = useState(false);
   const [sent, setSent] = useState(false);
@@ -1065,7 +1125,7 @@ function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invi
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-[14px] font-medium leading-[18px]">{i.email}</span>
           <span data-access-summary className="truncate text-[12.5px] leading-4 text-[#6B6B6B]">
-            {bots && `${accessSummary(i.access, bots.map((b) => b.id))} · `}
+            {bots && `${summary(i.access, bots.map((b) => b.id))} · `}
             {onComputers(i.role)}
             {i.expiresAt !== null && ` · ${i.expired ? "expired" : "expires"} ${day(i.expiresAt)}`}
           </span>
@@ -1130,8 +1190,8 @@ function CopyLink({ link, tip }: { link: string; tip?: string }) {
 /* ---------------- Asking first ---------------- */
 
 /**
- * "Remove Jamie?" or "Give Jamie Full access?", over everything (the sheet too), like Restart Bops. Esc
- * closes this alone; the sheet under it stays.
+ * "Remove Jamie?" or "Give Jamie Full access?", asked in place under their row (ui.tsx AskInPlace). Esc is Cancel,
+ * and only Cancel: the page stays.
  */
 function Confirm({
   title,
@@ -1152,46 +1212,9 @@ function Confirm({
   onConfirm: () => void;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      if (!busy) onClose();
-    };
-    document.addEventListener("keydown", esc);
-    return () => document.removeEventListener("keydown", esc);
-  }, [busy, onClose]);
-  const button = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
-  return createPortal(
-    <div className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
-      <div
-        role="alertdialog"
-        aria-labelledby="member-confirm-title"
-        aria-describedby="member-confirm-line"
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
-      >
-        <span id="member-confirm-title" className="text-[15px] font-semibold leading-5">
-          {title}
-        </span>
-        <span id="member-confirm-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
-          {line}
-        </span>
-        {error && (
-          <span role="alert" className="pt-2 text-[12.5px] leading-[18px] text-[#B42318]">
-            {error}
-          </span>
-        )}
-        <div className="flex justify-end gap-2 pt-5">
-          <button disabled={busy} onClick={onClose} className={`${button} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-            Cancel
-          </button>
-          <button autoFocus disabled={busy} onClick={onConfirm} className={`${button} flex min-w-[76px] items-center justify-center text-white ${danger ? "bg-[#B42318]" : "bg-ink"}`}>
-            {busy ? <Spinner size={12} color="#FFFFFF" /> : action}
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+  return (
+    <div className="pt-2">
+      <AskInPlace compact title={title} line={line} action={action} danger={danger} busy={busy} error={error} onConfirm={onConfirm} onCancel={onClose} />
+    </div>
   );
 }

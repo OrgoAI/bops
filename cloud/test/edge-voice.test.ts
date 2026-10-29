@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 import { closeDb, query } from "../db.ts";
+import * as calls from "../calls.ts";
 import * as voice from "../voice.ts";
 import { dropUsers, fakeOpenAi, newNumber, newUserId, pending, prepareDb, seedUser, until } from "./edge-fakes.ts";
 
@@ -12,15 +13,15 @@ const users: string[] = [];
 const saved = { ...voice.timing };
 
 /** A user whose main bot Sam has the workspace's number (on agent `agentId`), with Alex as the owner and Gmail connected for Sam. */
-async function setUp() {
+async function setUp(sam: Record<string, unknown> = {}, settings?: Record<string, unknown>) {
   const userId = newUserId("voice");
   users.push(userId);
   const agentId = `agt_${randomUUID()}`;
   const line = { phone: newNumber(), numberId: `num_${randomUUID()}`, agentId, type: "sms", scope: "sub", at: 1 };
   const state = {
     owner: { name: "Alex", about: "Lives in Oakland." },
-    bots: [{ id: "sam", name: "Sam", isMain: true, access: { ca_1: "act" } }],
-    workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, line }],
+    bots: [{ id: "sam", name: "Sam", isMain: true, access: { ca_1: "act" }, ...sam }],
+    workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, line, ...(settings ? { botSettings: { sam: settings } } : {}) }],
     accounts: [{ id: "ca_1", app: "gmail", appName: "Gmail", name: "alex@example.com", status: "active" }],
   };
   await seedUser(userId, { state });
@@ -53,7 +54,8 @@ test("the owner's bot knows the computer is offline and what it can use, keeps t
   openai.state.respond = () => ({ text: "Hi Alex, it's Sam. My computer's offline, but I can take a note." });
   assert.deepEqual(await voice.cloudVoiceTurn(userId, turn(agentId, line.phone, from, callId, ""), { owner: true }), { text: "Hi Alex, it's Sam. My computer's offline, but I can take a note." });
   const first = openai.responses[0].body;
-  assert.match(String(first.instructions), /on a phone call with Alex, who you work for/);
+  assert.match(String(first.instructions), /^You are Sam, Alex's chief of staff in Bops, on a phone call with Alex, who you work for/);
+  assert.match(String(first.instructions), /About Alex: Lives in Oakland\./, "what the owner wrote about themselves, as a call in the app knows it");
   assert.match(String(first.instructions), /When it's back you can use Alex's apps again: Gmail \(alex@example\.com: read & act\)\./);
   assert.match(String(first.instructions), /no markdown/);
   assert.deepEqual(first.input, [{ role: "user", content: "(The call just connected; the caller hasn't said anything yet. Say hello.)" }]);
@@ -167,4 +169,25 @@ test("OpenAI failing mid-call asks the caller again instead of hanging up; a cal
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(await voice.cloudVoiceTurn(userId, turn(agentId, line.phone, newNumber(), callId, "Still there?"), { owner: true }), { text: "I have to go now. Bye!", hangup: true });
   assert.equal(openai.responses.length, 1, "no model call for the goodbye");
+});
+
+test("calls turned away on the bot's settings page hear a short no, with no model, and still reach the Mac", async () => {
+  // Answers calls off (its workspace's botSettings): everyone, the owner too; only the owner is told to text, as only their texts are answered.
+  const off = await setUp({}, { answersCalls: false });
+  assert.deepEqual(await voice.cloudVoiceTurn(off.userId, turn(off.agentId, off.line.phone, newNumber(), `call_${randomUUID()}`, ""), { owner: true }), { text: "Sorry, Sam isn't taking calls right now. You can text this number. Bye!", hangup: true });
+  assert.deepEqual(await voice.cloudVoiceTurn(off.userId, turn(off.agentId, off.line.phone, newNumber(), `call_${randomUUID()}`, ""), { owner: false }), { text: "Sorry, this number isn't taking calls right now. Bye!", hangup: true });
+  assert.equal(openai.responses.length, 0, "no model call");
+  await until(async () => (await pending(off.userId)).length === 2, "both calls to reach the Mac");
+  // Someone else calls off: a stranger hears a short no; the owner still gets through.
+  const others = await setUp({}, { sequencesOff: { othersCalls: true } });
+  assert.deepEqual(await voice.cloudVoiceTurn(others.userId, turn(others.agentId, others.line.phone, newNumber(), `call_${randomUUID()}`, "Hi?"), { owner: false }), { text: "Sorry, this number isn't taking calls right now. Bye!", hangup: true });
+  assert.equal(openai.responses.length, 0);
+  assert.deepEqual(await voice.cloudVoiceTurn(others.userId, turn(others.agentId, others.line.phone, newNumber(), `call_${randomUUID()}`, ""), { owner: true }), { text: "Hi there." });
+  assert.equal(openai.responses.length, 1, "the owner's call is answered");
+  // Nothing set (a Bops from before): answered as always; only the shapes the app writes count.
+  const st = (x: unknown) => ({ workspaces: [{ id: "ws_main", botSettings: { sam: x } }] });
+  assert.equal(voice.turnedAway({ name: "Sam" }, calls.callSettings(st(undefined), { id: "sam" }), false), null);
+  assert.equal(voice.turnedAway({ name: "Sam" }, calls.callSettings(st({ sequencesOff: "yes", answersCalls: "no" }), { id: "sam" }), false), null);
+  assert.deepEqual(calls.callSettings(st({ callVoice: "robot" }), { id: "sam" }), {}, "a voice that isn't one of the nine");
+  assert.deepEqual(calls.callSettings(st({ callVoice: "sage", answersCalls: false }), { id: "sam" }), { callVoice: "sage", answersCalls: false });
 });

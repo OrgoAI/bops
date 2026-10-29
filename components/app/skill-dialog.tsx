@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useState } from "react";
 import { Spinner } from "./mascot";
 import { post } from "./ui";
 
@@ -52,7 +51,7 @@ const LABEL = "flex flex-col gap-1";
 const LABEL_TEXT = "text-[12px] font-medium leading-4 text-[#6B6B6B]";
 const PILL = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
 
-/** "Save as skill", over everything: reads the chat, then the draft to edit, Save draft, Publish and Cancel. */
+/** "Save as skill", in place of the chat or thread it reads: reads it, then the draft to edit, Save draft, Publish and Cancel. */
 export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: string; chatId: string; sessionId?: string; onClose: () => void }) {
   // Each try at a draft (Try again asks for a new one).
   const [attempt, setAttempt] = useState(0);
@@ -63,10 +62,8 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
   const [problems, setProblems] = useState<Problem[]>([]);
   const [busy, setBusy] = useState<"draft" | "publish" | null>(null);
   const [saved, setSaved] = useState<"draft" | "publish" | null>(null);
-  // The user changed the draft: a stray click outside, or Escape in a field, doesn't throw that away.
+  // The user changed the draft: Escape in a field doesn't throw that away.
   const [edited, setEdited] = useState(false);
-  // Whether the press that ends in a click started on the scrim (a text selection that ends past the card doesn't).
-  const downOnScrim = useRef(false);
 
   useEffect(() => {
     let gone = false;
@@ -83,7 +80,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
     };
   }, [botId, chatId, sessionId, attempt]);
 
-  // Escape closes this alone, not the chat or sheet under it (the app closes its sheets on Escape, on window).
+  // Escape closes this alone, not the chat or thread it's on (the app's own Esc, on window, never hears it).
   // With changes made, Escape in a field leaves the field; Cancel (or Escape outside the fields) closes.
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {
@@ -137,23 +134,16 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
     }
   };
 
-  return createPortal(
-    <div
-      className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 p-6 backdrop-blur-[2px]"
-      onMouseDown={(e) => (downOnScrim.current = e.target === e.currentTarget)}
-      onClick={(e) => {
-        if (downOnScrim.current && e.target === e.currentTarget && !busy && !edited) onClose();
-        downOnScrim.current = false;
-      }}
-    >
+  return (
+    // In place of the chat (or the thread) it reads, as a page of the column: the chat comes back on Cancel or once saved.
+    <div className="motion-fade-in absolute inset-0 z-40 flex flex-col overflow-y-auto bg-white" onClick={(e) => e.stopPropagation()}>
       <div
-        role="dialog"
-        aria-modal="true"
+        role="region"
         aria-labelledby="skill-title"
         aria-describedby="skill-line"
         aria-busy={!fields && !error}
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in flex max-h-full w-[520px] max-w-full flex-col overflow-hidden rounded-[18px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        data-save-skill
+        className="mx-auto flex w-full max-w-[560px] flex-col pt-2"
       >
         <div className="flex flex-col px-5 pt-5">
           <span id="skill-title" className="text-[15px] font-semibold leading-5">
@@ -230,7 +220,6 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
           )}
         </div>
       </div>
-    </div>,
-    document.body,
+    </div>
   );
 }

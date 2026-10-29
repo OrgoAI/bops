@@ -2,6 +2,9 @@
 
 import { useEffect, useState } from "react";
 import {
+  CLEAR_OPTIONS,
+  clearGoesAny,
+  clearLine,
   DAY_MS,
   DELETED_OPTIONS,
   deletedGoesLine,
@@ -12,6 +15,8 @@ import {
   many,
   num,
   sizeOf,
+  type ClearChoice,
+  type ClearGoes,
   type DeletedGoes,
   type DeletedItem,
   type HereCount,
@@ -27,12 +32,20 @@ import { post } from "./ui";
  * now and asks once); what a delete leaves behind, with Recently deleted to restore from (fewer days says
  * how many copies go, here now and on the other Macs at their next check, and asks once too); and what none
  * of it covers yet. Asking never fails open: when Bops can't say what a choice deletes, it still asks, in
- * general. The user's own: not shown in a shared workspace (bops-app.tsx), whose server refuses it too, nor
+ * general. Delete now, beside the keep, deletes everything, or what's older, in every chat or one bot's, once:
+ * it says what it takes and asks once too, and with days to keep what's deleted it's one item in Recently
+ * deleted. The user's own: not shown in a shared workspace (bops-app.tsx), whose server refuses it too, nor
  * on a hosted server, which refuses it (nothing would sweep there).
  */
 
-const readInfo = async (proposed?: { keepDays: KeepDays } | { deletedDays: DeletedDays }): Promise<PrivacyInfo | null> => {
-  const q = !proposed ? "" : "keepDays" in proposed ? `?keepDays=${proposed.keepDays}` : `?deletedDays=${proposed.deletedDays}`;
+const readInfo = async (proposed?: { keepDays: KeepDays } | { deletedDays: DeletedDays } | { clear: ClearChoice }): Promise<PrivacyInfo | null> => {
+  const q = !proposed
+    ? ""
+    : "keepDays" in proposed
+      ? `?keepDays=${proposed.keepDays}`
+      : "deletedDays" in proposed
+        ? `?deletedDays=${proposed.deletedDays}`
+        : `?clear=${proposed.clear.olderThan}${proposed.clear.bot ? `&bot=${encodeURIComponent(proposed.clear.bot)}` : ""}`;
   try {
     const r = await fetch(`/api/privacy${q}`, { cache: "no-store" });
     return r.ok ? ((await r.json()) as PrivacyInfo) : null;
@@ -52,7 +65,20 @@ const DELETED_NAMES = new Map<DeletedDays, string>([
   [7, "Keep 7 days"],
   [30, "Keep 30 days"],
 ]);
-const KIND_NAMES: Record<DeletedItem["kind"], string> = { message: "Message", thread: "Thread", chat: "Group chat" };
+const KIND_NAMES: Record<DeletedItem["kind"], string> = { message: "Message", thread: "Thread", chat: "Group chat", many: "Delete now" };
+const CLEAR_NAMES = new Map<KeepDays, string>([
+  [null, "Everything"],
+  [365, "Older than 1 year"],
+  [90, "Older than 90 days"],
+  [30, "Older than 30 days"],
+]);
+
+/** What a copy in Recently deleted holds, as its row says it: "Message", "Messages · 5 messages", "Delete now · 1,240 messages · 32 threads". */
+function heldLine(item: DeletedItem) {
+  const kind = item.kind === "message" && item.messages > 1 ? "Messages" : KIND_NAMES[item.kind];
+  const counts = [item.kind !== "message" || item.messages > 1 ? (item.messages ? many(item.messages, "message") : "") : "", item.threads ? many(item.threads, "thread") : ""].filter(Boolean);
+  return [kind, ...counts].join(" · ");
+}
 
 
 /** A count of this Mac's files as a chip says it: "12 · 3.4 MB", or the size alone for a log. */
@@ -99,7 +125,7 @@ function WhereKept({ info }: { info: PrivacyInfo }) {
     {
       kind: "Chats, routines and settings",
       where: "Bops Cloud, Orgo's database, so your Macs and iPhone match.",
-      how: "Delete a message from its menu, or keep them for less time below.",
+      how: "Delete a message from its menu, or several from a chat's menu, or delete or keep them for less time below.",
       extra: <span className="text-[12px] leading-4 text-[#3A3A38]">{many(info.messages, "message")}</span>,
     },
     { kind: "Memory and Knowledge", where: "Honcho, the memory service Orgo uses, keeps what it learned from your chats and calls.", how: "It stays until you forget it in Knowledge." },
@@ -144,8 +170,7 @@ function DeletedRow({ item, busy, act }: { item: DeletedItem; busy: boolean; act
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-[12.5px] font-medium leading-4">{item.what}</span>
         <span className="text-[11.5px] leading-4 text-[#6B6B6B]">
-          {KIND_NAMES[item.kind]}
-          {item.kind !== "message" && item.messages ? ` · ${many(item.messages, "message")}` : ""} · deleted {daysAgo(item.at)} · goes {daysLeft(item.until)}
+          {heldLine(item)} · deleted {daysAgo(item.at)} · goes {daysLeft(item.until)}
         </span>
       </div>
       <button type="button" disabled={busy} onClick={() => act({ restore: item.id })} className={small}>
@@ -166,6 +191,12 @@ export function YourData() {
   const [asking, setAsking] = useState<{ keepDays: KeepDays; goes: KeepGoes | null } | null>(null);
   const [askingDeleted, setAskingDeleted] = useState<{ deletedDays: DeletedDays; goes: DeletedGoes | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Delete now: which bot's (empty: every bot's), the ask with what it takes (null: Bops couldn't say), and what's said after. */
+  const [clearBot, setClearBot] = useState("");
+  const [askingClear, setAskingClear] = useState<{ choice: ClearChoice; goes: ClearGoes | null } | null>(null);
+  const [clearNote, setClearNote] = useState<string | null>(null);
+  /** A restore of Delete now's that put back only some of it: how many couldn't go. */
+  const [left, setLeft] = useState<string | null>(null);
   useEffect(() => {
     void readInfo().then(setInfo);
   }, []);
@@ -177,19 +208,50 @@ export function YourData() {
   }, [info]);
   if (!info) return null;
 
-  const send = async (body: Record<string, unknown>) => {
+  type Answer = PrivacyInfo & { error?: string; left?: number; cleared?: { messages: number; threads: number; files: number; lines: number; restore: string | null } };
+  const send = async (body: Record<string, unknown>): Promise<Answer | null> => {
     setBusy(true);
     setError(null);
+    setLeft(null);
     try {
       const res = await post("/api/privacy", body);
-      const out = (await res.json().catch(() => null)) as (PrivacyInfo & { error?: string }) | null;
-      if (res.ok && out) setInfo(out);
-      else setError(out?.error ?? "That didn't work. Try again.");
+      const out = (await res.json().catch(() => null)) as Answer | null;
+      if (res.ok && out) {
+        setInfo(out);
+        if (out.left) setLeft(`${num(out.left)} couldn't go back, as their chat or bot is gone. They stay in Recently deleted.`);
+        return out;
+      }
+      setError(out?.error ?? "That didn't work. Try again.");
     } catch {
       setError("That didn't work. Try again.");
     } finally {
       setBusy(false);
     }
+    return null;
+  };
+  const botName = (id?: string) => (id ? info.bots?.find((b) => b.id === id)?.name : undefined);
+  /** Delete now asks first, with what it takes (Bops couldn't say: it asks anyway); with nothing to take, it says so and asks nothing. */
+  const pickClear = async (k: KeepDays) => {
+    setAsking(null);
+    setAskingDeleted(null);
+    setAskingClear(null);
+    setClearNote(null);
+    const choice: ClearChoice = clearBot ? { olderThan: k, bot: clearBot } : { olderThan: k };
+    setBusy(true);
+    const now = await readInfo({ clear: choice }).finally(() => setBusy(false));
+    if (now) setInfo(now);
+    const g = now?.goesNow;
+    const goes = g && g.olderThan === k && (g.bot ?? "") === clearBot ? g : null;
+    if (goes && !clearGoesAny(goes)) return setClearNote(clearLine(goes, now!.deletedDays, botName(clearBot)));
+    setAskingClear({ choice, goes });
+  };
+  const clearIt = async (choice: ClearChoice) => {
+    const out = await send({ clear: choice });
+    setAskingClear(null);
+    const c = out?.cleared;
+    if (!c) return;
+    const what = [c.messages ? many(c.messages, "message") : "", c.threads ? many(c.threads, "thread") : "", c.files ? many(c.files, "file") : "", c.lines ? many(c.lines, "line of notes", "lines of notes") : ""].filter(Boolean);
+    setClearNote(what.length ? `Deleted ${what.join(", ")}.${c.restore ? " The messages and threads are in Recently deleted below." : ""}` : "Nothing was left to delete.");
   };
   /** A shorter keep first says what it deletes now, and goes once the user says so (nothing to delete: it just goes; Bops couldn't say: it asks anyway). */
   const pickKeep = async (k: KeepDays) => {
@@ -253,13 +315,63 @@ export function YourData() {
             </div>
           </div>
         )}
+        {/* Once, now: everything or what's older, every bot's or one's; the keep above stays as it is. */}
+        <div className="flex flex-col gap-2 border-t border-[#F0F0EE] pt-2.5">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[13px] font-medium">Delete now</span>
+            <span className={sub}>Deletes messages and finished threads once, from Bops Cloud and all your Macs. What you keep above stays as it is.</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {CLEAR_OPTIONS.map((k) => (
+              <button key={String(k)} type="button" disabled={busy} aria-pressed={askingClear?.choice.olderThan === k} onClick={() => void pickClear(k)} className={pill(askingClear?.choice.olderThan === k)}>
+                {CLEAR_NAMES.get(k)}
+              </button>
+            ))}
+            {(info.bots?.length ?? 0) > 1 && (
+              <label className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
+                For
+                <select
+                  value={clearBot}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setClearBot(e.target.value);
+                    setAskingClear(null);
+                    setClearNote(null);
+                  }}
+                  className="rounded-full bg-white px-2.5 py-1.5 text-[12.5px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                >
+                  <option value="">Every bot</option>
+                  {info.bots!.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.workspace ? `${b.name}, ${b.workspace}` : b.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+          {askingClear && (
+            <div className="flex flex-col gap-2 rounded-[10px] bg-[#FFF4F2] p-3">
+              <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">{clearLine(askingClear.goes, info.deletedDays, botName(askingClear.choice.bot))}</span>
+              <div className="flex gap-2">
+                <button type="button" disabled={busy} onClick={() => void clearIt(askingClear.choice)} className={danger}>
+                  Delete
+                </button>
+                <button type="button" disabled={busy} onClick={() => setAskingClear(null)} className={small}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {clearNote && <span className="text-[12px] leading-4 text-[#3A3A38]">{clearNote}</span>}
+        </div>
       </div>
 
       <div className={card}>
         <div className="flex flex-col gap-0.5">
           <span className="text-[13px] font-medium">When you delete something</span>
           <span className={sub}>
-            A message, thread or group chat you delete leaves your chats and Bops Cloud at once.
+            Messages, threads and group chats you delete leave your chats and Bops Cloud at once.
             {info.deletedDays
               ? " A copy stays on this Mac only, so you can restore it. Bops Cloud never gets the copy, and what you kept between us is never copied."
               : " Its images on this Mac go too."}
@@ -297,6 +409,7 @@ export function YourData() {
         )}
       </div>
 
+      {left && <span className="text-[12px] leading-4 text-[#3A3A38]">{left}</span>}
       {error && <span className="text-[12px] leading-4 text-[#B42318]">{error}</span>}
       <span className={sub}>
         Not covered yet: Honcho keeps what it learned from chats and calls until you forget it in Knowledge. OpenAI keeps answers to chats and tasks 30 days. Start over keeps a copy of your chats in Bops Cloud.

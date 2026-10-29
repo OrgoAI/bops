@@ -547,14 +547,19 @@ assert.deepEqual(
 );
 assert.doesNotMatch(outsideAsk.instructions, /Bops CRM:/, "and no CRM note");
 assert.ok(!outsideAsk.tools.some((t) => t.name === "sign_in_from_vault"), "nor the owner's saved logins");
-// One a member with Write asked for (StartOptions.member): none of the owner's own either, logins, CRM or keys.
+// One a member with Write asked for (StartOptions.member): the logins its bot has (a member reaches the owner's logins
+// only through the bots they may tell: lib/types.ts memberThread), told whose task it is and that every write waits for
+// the owner's yes; never the owner's CRM.
 answers.push(() => response("resp_m1", [said("The table is booked for 6.")]));
 const fromMember = X.startSession({ botId: main.id, goal: "Book a table for 6", title: "Table for 6", where: "cloud", fresh: true, member: { userId: "user_dee", email: "dee@example.com", name: "Dee" } });
 s = await ended(fromMember.id);
 assert.equal(s.status, "done", `it finished (${s.error ?? ""})`);
 const memberNames = asked.at(-1).tools.map((t) => t.name ?? t.type);
-assert.ok(!memberNames.some((n) => n === "sign_in_from_vault" || n === "call_api" || n.startsWith("crm_")), `a member's task has none of the owner's own: ${memberNames}`);
-assert.doesNotMatch(asked.at(-1).instructions, /call sign_in_from_vault|Bops CRM:/, "and isn't told of them");
+assert.ok(memberNames.includes("sign_in_from_vault"), `a member's task has the saved logins its bot has (the ones that sign in by themselves): ${memberNames}`);
+assert.ok(!memberNames.some((n) => n.startsWith("crm_")), `and none of the owner's CRM: ${memberNames}`);
+assert.doesNotMatch(asked.at(-1).instructions, /Bops CRM:/, "and isn't told of it");
+assert.match(asked.at(-1).instructions, /Dee, someone the user gave this bot to, asked for this task\. Use the apps, keys and logins you have for it/);
+assert.match(asked.at(-1).instructions, /Anything that sends, changes, deletes or pays waits for the user's yes, and a saved site login signs in only when it's set to sign in by itself/);
 // The user's own tasks still have them.
 answers.push(() => response("resp_o2", [said("Done.")]));
 await task("Book a table for 4", "Table for 4");

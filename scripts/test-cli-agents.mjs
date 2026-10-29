@@ -32,7 +32,7 @@
 //          environment) through the same fake computer, on "Reply with the word ok.", and prints the events it saw.
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -114,16 +114,15 @@ if (process.argv[2] === "--render") {
   console.log("ok render: a brain's approval says what it wants to run");
   // Open in the terminal (the takeover the server made): it says where, and a reply closes it; done, it offers to open; a Codex thread has its badge and no terminal.
   const term = text(renderToStaticMarkup(h(ThreadSheet, { state: state(v.terminal, { takeover: v.takeover }), session: v.terminal, onClose: noop, onShowComputer: noop, onShowScreen: noop })));
-  assert.match(term, new RegExp(`^Migration Claude Code Boppy · in the terminal · \\d+ steps · left off on screen ${v.screenNo} `), term);
+  assert.match(term, new RegExp(`^Migration Claude Code · Opus 5\\.5 Your Max plan Boppy · in the terminal · \\d+ steps · left off on screen ${v.screenNo} `), term);
   assert.match(term, new RegExp(`Open in the terminal on screen ${v.screenNo}\\. Your next reply closes it, and it carries on here\\. Show`));
   assert.ok(!/Open in terminal|Paused while/.test(term), term);
   console.log("ok render: open in the terminal, the thread says where, and that a reply closes it");
   const done = sheet(v.done);
-  assert.match(done, /^Notes Claude Code Boppy · finished .* Open in terminal Delete/, done);
+  assert.match(done, /^Notes Claude Code · Opus 5\.5 Your Max plan Boppy · finished .* Open in terminal Delete/, done);
   const codex = sheet(v.codex);
-  assert.match(codex, /^Totals Codex Boppy · /, codex);
-  assert.ok(!/Open in terminal/.test(codex));
-  console.log("ok render: a thread says which brain ran it, and one Claude Code ran opens in a terminal");
+  assert.match(codex, /^Totals Codex · GPT 6\.1 Sol (Your OpenAI key )?Boppy · /, codex);
+  console.log("ok render: a thread says which agent ran it, and one Claude Code ran opens in a terminal");
   for (const t of [signIn.match(/Boppy needs.*Dismiss/)[0], limit.match(/Boppy is waiting.*Wait/)[0], chat.match(/Boppy wants to use.*Allow once/)[0], term]) assert.ok(!/[–—]/.test(t), t);
   process.exit(0);
 }
@@ -287,6 +286,7 @@ async function go() {
   out({ type: "turn.started" });
   if (text.includes("CRASH")) { console.error("thread 'main' panicked at core/src/codex.rs:42:9: the model stream ended early"); process.exit(101); }
   if (text.includes("QUOTA")) { out({ type: "error", message: "Reconnecting... 1/5" }); out({ type: "turn.failed", error: { message: "You exceeded your current quota, please check your plan and billing details." } }); process.exit(1); }
+  if (text.includes("OVERLOAD") && !existsSync(join(FLAGS, "up"))) { out({ type: "turn.failed", error: { message: "529 Overloaded" } }); process.exit(1); }
   if (text.includes("MCPDOWN")) out({ type: "item.completed", item: { id: "item_0", type: "error", message: "MCP client for \`browser\` failed to start: handshaking with MCP server failed: connection closed: initialize response" } });
   out({ type: "item.completed", item: { id: "item_1", type: "reasoning", text: "**Checking the cart totals**\\n\\nThe totals look off by the tax." } });
   out({ type: "item.completed", item: { id: "item_2", type: "agent_message", text: "Looking at the cart." } });
@@ -380,6 +380,8 @@ const runHere = (c, command) =>
           HOME: c.home,
           BOPS_AGENTS: c.agents,
           BOPS_BRAINS: c.brains,
+          // Each bot's agents' own folders (bops-brain --bot), under the fake computer's /root.
+          BOPS_BOTS: join(c.brains, "..", "bots"),
           BOPS_WORKSPACE: join(c.dir, "workspace"),
           BOPS_CLAUDE: c.claude,
           BOPS_CODEX: join(fakebin, "codex"),
@@ -425,6 +427,8 @@ const vault = new Map([
   ["OPENAI_API_KEY", OPENAI_KEY],
 ]);
 let reveals = 0;
+/** The Vault has given all the keys it allows this hour. */
+let vaultBusy = false;
 globalThis.fetch = async (input, init) => {
   const req = new Request(input, init);
   const url = new URL(req.url);
@@ -460,6 +464,7 @@ globalThis.fetch = async (input, init) => {
     if (path === "/secrets/reveal" && req.method === "POST") {
       reveals++;
       const { name } = JSON.parse(body);
+      if (vaultBusy) return json({ error: "Too many reveals" }, 429);
       return vault.has(name) ? json({ name, value: vault.get(name) }) : json({ error: "Secret not set" }, 404);
     }
     const m = /^\/computers\/([^/]+)(\/.*)?$/.exec(path);
@@ -575,16 +580,25 @@ await test("signed in there, the thread carries on: Claude Code on its screen, f
   assert.equal(arg("--mcp-config"), join(dir, "mcp.json"));
   assert.equal(arg("--append-system-prompt-file"), join(dir, "prompt.md"));
   assert.equal(arg("--setting-sources"), "user", "only the brain folder's settings, never a project's in /workspace");
-  // Its shell commands start by dropping any key or token from their environment (CLAUDE_ENV_FILE).
-  assert.equal(r.env.CLAUDE_ENV_FILE, join(pc(PC).brains, PLAN.id, ".shell-env"));
-  assert.match(readFileSync(r.env.CLAUDE_ENV_FILE, "utf8"), /^unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY OPENAI_API_KEY\n$/);
+  // Its shell commands start by dropping any key or token from their environment (CLAUDE_ENV_FILE): the bot's
+  // own agent's file (its AI profile, from the brain it was on), not one in the shared account folder.
+  assert.equal(r.env.CLAUDE_ENV_FILE, join(pc(PC).brains, "..", "bots", main.id, "agents", r.env.BOPS_AGENT, "shell-env"));
+  assert.match(r.env.BOPS_AGENT, /^ag_[A-Za-z0-9]{10}$/);
+  // Then its own claude, codex, opencode and agy go first again, whatever the shell they start from put first.
+  assert.equal(
+    readFileSync(r.env.CLAUDE_ENV_FILE, "utf8"),
+    `unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY OPENAI_API_KEY\nunalias claude codex opencode agy 2>/dev/null || true\nexport PATH='${join(r.env.CLAUDE_ENV_FILE, "..", "bin")}':"$PATH"\n`,
+  );
   // Its environment: nothing from the computer's (no Anthropic key, token or base URL), its own folder, its screen.
   const display = t.lastDisplay;
   for (const k of Object.keys(PLANTED)) assert.equal(r.env[k], undefined, `no ${k}`);
-  assert.ok(!Object.keys(r.env).some((k) => /^ANTHROPIC_/.test(k)), "no ANTHROPIC_ variable at all");
+  // No Anthropic key, token or base URL at all: only the model its agent runs on (the kind's default, Opus 5.5).
+  assert.deepEqual(Object.keys(r.env).filter((k) => /^ANTHROPIC_/.test(k)), ["ANTHROPIC_MODEL"]);
+  assert.equal(r.env.ANTHROPIC_MODEL, "claude-opus-5-5");
+  assert.equal(arg("--model"), "claude-opus-5-5");
   assert.equal(r.env.CLAUDE_CONFIG_DIR, join(pc(PC).brains, PLAN.id));
   assert.equal(r.env.DISPLAY, `:${display}`);
-  assert.equal(r.cwd.replace(/^\/private/, ""), join(pc(PC).dir, "workspace").replace(/^\/private/, ""));
+  assert.equal(realpathSync(r.cwd), realpathSync(join(pc(PC).dir, "workspace")));
   // Its tools: the same screen and browser MCP servers as Bops agent's, on its screen.
   const mcp = JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8"));
   assert.deepEqual(Object.keys(mcp.mcpServers), ["screen", "browser"]);
@@ -800,7 +814,7 @@ await test("a usage limit waits on the user with Finish on Bops agent and Wait; 
 
 /* ---------------- A key brain ---------------- */
 
-await test("a key brain's key is only in Claude Code's environment: never on a command line, its file gone", async () => {
+await test("a key brain's key never reaches Claude Code: a run token for a gate that holds it, never on a command line, its file gone", async () => {
   const KB = { id: "brain_key", kind: "claude", name: "Claude Code (API)", auth: "key", keyName: "ANTHROPIC_API_KEY", keyScope: "all", bots: [main.id], workspaceId: "ws_main", createdAt: 2 };
   S.update((s) => {
     s.brains.push(KB);
@@ -814,8 +828,11 @@ await test("a key brain's key is only in Claude Code's environment: never on a c
   assert.equal(t.brainRun.brainId, KB.id);
   assert.equal(reveals, before + 1, "revealed once, for its start");
   const r = runs().at(-1);
-  assert.equal(r.env.ANTHROPIC_API_KEY, KEY, "its own key, in its environment");
-  for (const k of ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDECODE"]) assert.equal(r.env[k], undefined, `no ${k}`);
+  // Its key stays with the run's gate (vm/bin/bops-ai-gate): Claude Code gets a token for it and its 127.0.0.1 address.
+  assert.match(r.env.ANTHROPIC_API_KEY, /^bopsrun_[0-9a-f]{64}$/, "a run token, not the key");
+  assert.match(r.env.ANTHROPIC_BASE_URL, /^http:\/\/127\.0\.0\.1:\d+\/anthropic$/, "the gate");
+  assert.ok(!Object.values(r.env).includes(KEY), "the key is nowhere in its environment");
+  for (const k of ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE"]) assert.equal(r.env[k], undefined, `no ${k}`);
   assert.ok(!r.args.join(" ").includes(KEY), "not in its arguments");
   assert.equal(r.env.CLAUDE_CONFIG_DIR, join(pc(PC).brains, KB.id), "its own folder");
   // On the computer, the key went only as a file Bops wrote from stdin, and the run read it and deleted it.
@@ -862,31 +879,47 @@ await test("a Codex brain runs its thread as a codex exec per message, on the us
   assert.match(thread1, /^[0-9a-f-]{36}$/);
   assert.equal(heardBy(r.pid).find((h) => h.got).thread, thread1, "the thread Codex began is the one Bops keeps");
   // A new thread: exec, JSON events, full access as Bops agent's executor has, the message on stdin.
-  assert.deepEqual(r.args.slice(0, 4), ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]);
+  // The bot's agent's own settings come right after its subcommand (bops-brain run): the gate, its model, its thinking.
+  assert.equal(r.args[0], "exec");
+  let at = 1;
+  const own = [];
+  while (r.args[at] === "-c") {
+    own.push(r.args[at + 1]);
+    at += 2;
+  }
+  assert.match(own[0], /^openai_base_url="http:\/\/127\.0\.0\.1:\d+\/openai\/v1"$/);
+  assert.deepEqual(own.slice(1), ['model="gpt-6.1-sol"', 'model_reasoning_effort="medium"'], "its model, and the bot's Thinking");
+  assert.deepEqual(r.args.slice(at, at + 3), ["--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]);
   assert.equal(r.args.at(-1), "-", "its message comes on stdin, not its command line");
   assert.ok(!r.args.includes("resume"));
   assert.ok(!r.args.join(" ").includes("Fix the totals"));
   assert.match(heardBy(r.pid).find((h) => h.got).got, /^Fix the totals\n\n<computer_state /, "the goal, then the computer's briefing, as Bops agent's");
-  // Its environment: the brain's own folder as CODEX_HOME (never ~/.codex), its own key only, nothing planted.
+  // Its environment: the brain's own folder as CODEX_HOME (never ~/.codex), a run token for the gate that holds its
+  // key (the same token for its commands, which keep OPENAI_API_KEY: config.toml), the gate's address, nothing planted.
   const home = join(pc(PC).brains, CODEX.id);
   assert.equal(r.env.CODEX_HOME, home);
-  assert.equal(r.env.CODEX_API_KEY, OPENAI_KEY);
-  for (const k of ["OPENAI_API_KEY", "OPENAI_BASE_URL", ...Object.keys(PLANTED).filter((k) => !k.startsWith("CODEX_"))]) assert.equal(r.env[k], undefined, `no ${k}`);
+  assert.match(r.env.CODEX_API_KEY, /^bopsrun_[0-9a-f]{64}$/);
+  assert.equal(r.env.OPENAI_API_KEY, r.env.CODEX_API_KEY);
+  assert.match(r.env.OPENAI_BASE_URL, /^http:\/\/127\.0\.0\.1:\d+\/openai\/v1$/);
+  assert.ok(!Object.values(r.env).includes(OPENAI_KEY), "the key is nowhere in its environment");
+  for (const k of Object.keys(PLANTED).filter((k) => !k.startsWith("CODEX_") && !k.startsWith("OPENAI_"))) assert.equal(r.env[k], undefined, `no ${k}`);
   assert.equal(r.env.DISPLAY, `:${t.lastDisplay}`);
-  assert.equal(r.cwd.replace(/^\/private/, ""), join(pc(PC).dir, "workspace").replace(/^\/private/, ""));
+  assert.equal(realpathSync(r.cwd), realpathSync(join(pc(PC).dir, "workspace")));
   // Bops' settings in that folder: the API key only (a ChatGPT sign-in is never used), no update check, live search.
   const config = readFileSync(join(home, "config.toml"), "utf8");
   assert.match(config, /^forced_login_method = "api"$/m);
   assert.match(config, /^check_for_update_on_startup = false$/m);
   assert.match(config, /^web_search = "live"$/m);
-  // The commands it runs get no key (Codex hands its environment to them otherwise).
+  // The commands it runs never get Codex's own key variable (Codex hands its environment to them otherwise). A
+  // bot's agent's commands keep its run token in OPENAI_API_KEY (scripts/test-bot-env.mjs); here there is none.
   const policy = JSON.parse(execFileSync("python3", ["-c", "import json, sys, tomllib\nprint(json.dumps(tomllib.loads(sys.stdin.read())))"], { input: config, env: { PATH: REAL_PATH } }).toString()).shell_environment_policy;
-  for (const k of ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_*"]) assert.ok(policy.exclude.includes(k), `${k} kept from its commands`);
+  for (const k of ["CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"]) assert.ok(policy.exclude.includes(k), `${k} kept from its commands`);
+  assert.equal(policy.ignore_default_excludes, true);
   // This thread's: Bops' briefing after Codex's own, and the same screen and browser MCP servers, without the approve tool.
   const c = settings(r.args);
   assert.match(c.developer_instructions, /^You are Boppy, the .* bot in Bops\./);
   assert.match(c.developer_instructions, /You run as Codex on this computer, for Bops\..*You have no helpers here/);
-  assert.deepEqual(Object.keys(c).sort(), ["developer_instructions", "mcp_servers.browser", "mcp_servers.screen"]);
+  assert.deepEqual(Object.keys(c).sort(), ["developer_instructions", "mcp_servers.browser", "mcp_servers.screen", "model", "model_reasoning_effort", "openai_base_url"]);
   const screen = c["mcp_servers.screen"];
   assert.equal(screen.command, "/opt/bops/venv/bin/python");
   assert.deepEqual(screen.args, ["/opt/bops/screen_mcp.py", "stdio", "--session", cx1, "--bot", main.id]);
@@ -896,7 +929,7 @@ await test("a Codex brain runs its thread as a codex exec per message, on the us
   assert.deepEqual(c["mcp_servers.browser"].args.slice(1, 3), ["--cdp-endpoint", `http://127.0.0.1:${9200 + t.lastDisplay}`]);
   // Its items are the thread's steps, worded as Bops agent's are.
   const d = details(cx1);
-  for (const x of ["Looking at the cart.", "ran npm test", "edited cart.ts", "clicked (10, 20)", "opened https://example.com/cart", 'searched "sales tax rules"', "updated its to-do list"])
+  for (const x of ["Looking at the cart.", "ran npm test", "edited cart.ts", "clicked (10, 20)", "opened https://example.com/cart", 'searched "sales tax rules"', "updated its todo list"])
     assert.ok(d.includes(x), `a step says ${JSON.stringify(x)}: ${JSON.stringify(d)}`);
   assert.equal(d.filter((x) => x === "ran npm test").length, 1, "a command once, as it starts");
   assert.ok(!d.includes("Done: Fix the totals"), "its answer isn't a step too");
@@ -921,7 +954,7 @@ await test("a reply picks the Codex thread back up: exec resume on the thread it
   assert.equal(t.status, "done", t.error);
   assert.equal(t.answer, "Done: Now add a test for it");
   const r = execs().at(-1);
-  assert.deepEqual(r.args.slice(0, 2), ["exec", "resume"]);
+  assert.deepEqual(r.args.slice(0, 3), ["exec", "resume", "-c"]);
   assert.deepEqual(r.args.slice(-2), [thread1, "-"], "the thread it began, then the message on stdin");
   assert.equal(t.brainRun.cli, thread1);
   assert.match(heardBy(r.pid).find((h) => h.got).got, /^Now add a test for it/);
@@ -983,6 +1016,39 @@ await test("at its key's quota, Codex waits on the user with Finish on Bops agen
   assert.equal(A.needsYou(t), true);
 });
 
+await test("its provider not answering: Try again carries it on on Codex; the Vault's hour: it starts again by itself", async () => {
+  const s = X.startSession({ botId: main.id, goal: "OVERLOAD: the totals", title: "Totals", where: "cloud", fresh: true });
+  let t = await ended(s.id);
+  assert.equal(t.status, "done", t.error);
+  assert.equal(t.answer, "OpenAI isn't answering right now. I can try again, or finish this on Bops agent, on your AI credit.");
+  assert.deepEqual(t.options, ["Try again", "Finish on Bops agent"]);
+  assert.equal(t.brainRun.waits, "down");
+  flagOn("up");
+  X.replyToSession(s.id, "Try again");
+  t = await until(() => thread(s.id).status === "done" && thread(s.id).answer?.startsWith("Done: (From Bops: this stopped a moment ago") && thread(s.id), "it to carry on, on Codex");
+  flagOff("up");
+  assert.equal(t.brainRun.waits, undefined);
+  assert.ok(!t.onBopsAgent, "still on its own agent");
+  assert.ok(t.replies.some((r) => r.note === "Try again"), "the tap shows as a quiet line");
+  // The Vault has given all it allows this hour: it waits (Wait is just that), and starts again by itself.
+  vaultBusy = true;
+  const v = X.startSession({ botId: main.id, goal: "Count the rows", title: "Rows", where: "cloud", fresh: true });
+  t = await ended(v.id);
+  vaultBusy = false;
+  assert.equal(t.status, "done", t.error);
+  assert.match(t.answer, /^Waiting for your Vault\. It allows 30 key uses an hour, so this starts again by itself in a few minutes\./);
+  assert.deepEqual(t.options, ["Finish on Bops agent", "Wait"]);
+  assert.equal(t.brainRun.waits, "vault");
+  X.replyToSession(v.id, "Wait");
+  X.brainSignedIn("brain_none", "pc_none");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(thread(v.id).brainRun.waits, "vault", "not before its few minutes");
+  S.update(() => void (S.session(v.id).endedAt = Date.now() - X.VAULT_RETRY_MS - 1000));
+  X.brainSignedIn("brain_none", "pc_none");
+  t = await until(() => thread(v.id).status === "done" && thread(v.id).answer === "Done: Count the rows" && thread(v.id), "it to start again by itself");
+  assert.equal(t.brainRun.waits, undefined);
+});
+
 await test("Codex never runs without its key: no ChatGPT sign-in, no key from anywhere else", async () => {
   const out = await runHere(pc(PC), "bops-brain run brain_codex codex -- exec --json -");
   assert.equal(out.exit_code, 2);
@@ -1019,7 +1085,7 @@ await test("Open in terminal: the thread's Claude Code session opens in a termin
   assert.equal(arg("--allowedTools"), runs().at(-1).args[runs().at(-1).args.indexOf("--allowedTools") + 1], "what it may do by itself, as the thread's");
   assert.ok(!JSON.parse(readFileSync(join(agentDir(s.id), "mcp.json"), "utf8")).mcpServers.screen.args.includes("--approve"), "the user answers it in the terminal");
   assert.equal(r.env.CLAUDE_CONFIG_DIR, join(pc(PC).brains, PLAN.id));
-  assert.ok(!Object.keys(r.env).some((k) => /^(ANTHROPIC_|CLAUDE_CODE_OAUTH|CLAUDECODE$|OPENAI_|CODEX_)/.test(k)), "no key or token from anywhere");
+  assert.ok(!Object.keys(r.env).some((k) => k !== "ANTHROPIC_MODEL" && /^(ANTHROPIC_|CLAUDE_CODE_OAUTH|CLAUDECODE$|OPENAI_|CODEX_)/.test(k)), "no key or token from anywhere, only its model");
   assert.equal(r.env.DISPLAY, `:${screen}`);
   assert.match(readFileSync(TERMINAL, "utf8"), new RegExp(`^:${screen} --disable-server --title Claude Code --maximize -x \\S+/bops-agent _term ${s.id} `, "m"));
   assert.ok(r.heard.some((h) => h.interactive));
@@ -1067,9 +1133,18 @@ await test("Open in terminal while it works pauses it; handing the screen back c
   assert.ok(t.replies.some((x) => x.note === "You closed the terminal"));
 });
 
-await test("only a thread Claude Code ran opens in a terminal", () => {
-  assert.throws(() => X.openInTerminal(cx1), /Only a thread Claude Code runs opens in a terminal/);
-  assert.throws(() => X.openInTerminal(t1), /Only a thread Claude Code runs opens in a terminal/, "Bops agent finished it");
+await test("a thread Codex ran opens in a terminal too (Codex's own resume, as the bot's agent); one Bops agent finished doesn't", async () => {
+  assert.throws(() => X.openInTerminal(t1), /Only a thread Claude Code, Codex or OpenCode runs opens in a terminal/, "Bops agent finished it");
+  const n = lines(CODEX_RUNS).length;
+  const at = X.openInTerminal(cx1);
+  assert.equal(at.botId, main.id);
+  const r = await until(() => lines(CODEX_RUNS).slice(n).find((x) => x.args[0] === "resume"), "the terminal's Codex");
+  assert.equal(r.args.at(-1), thread(cx1).brainRun.cli, "the thread it began");
+  assert.ok(r.args.includes("-c") && r.args.some((a) => /^openai_base_url="http:\/\/127\.0\.0\.1:\d+\/openai\/v1"$/.test(a)), "on its key's gate, as its thread is");
+  assert.equal(r.env.CODEX_HOME, join(pc(PC).brains, CODEX.id));
+  assert.match(readFileSync(TERMINAL, "utf8"), new RegExp(`--title Codex --maximize -x \\S+/bops-agent _term ${cx1} codex `));
+  X.returnControl();
+  await until(() => !existsSync(join(agentDir(cx1), "term.pid")), "its terminal to close");
 });
 
 /* ---------------- What the reviews found ---------------- */
@@ -1141,30 +1216,42 @@ await test("a thread Bops agent took over stays on Bops agent when its bot goes 
   let t = await ended(s.id);
   assert.equal(t.brainRun.started, true);
   const before = runs().length;
-  // Boppy off Claude Code: Bops agent carries the thread on, with what Claude Code did.
-  S.update(() => delete S.bot(main.id).brain);
+  // Boppy off Claude Code (it's no longer one of its agents): Bops agent carries the thread on, with what Claude Code did.
+  S.update((st) => {
+    const p = st.brains.find((x) => x.id === PLAN.id);
+    p.bots = p.bots.filter((x) => x !== main.id);
+    delete S.bot(main.id).brain;
+  });
   answers.push(() => response("resp_l1", [said("Bops agent: the date is set.")]));
   X.replyToSession(s.id, "Add the date");
   t = await until(() => thread(s.id).status === "done" && thread(s.id).answer === "Bops agent: the date is set." && thread(s.id), "Bops agent to answer");
   assert.ok(t.responseId, "Bops agent's response chain");
   // Back on Claude Code: the thread stays with Bops agent, which knows what it did; Claude Code's session doesn't.
-  S.update(() => (S.bot(main.id).brain = PLAN.id));
+  S.update((st) => {
+    st.brains.find((x) => x.id === PLAN.id).bots.push(main.id);
+    S.bot(main.id).brain = PLAN.id;
+  });
   answers.push(() => response("resp_l2", [said("Bops agent: the venue too.")]));
   X.replyToSession(s.id, "And the venue");
   t = await until(() => thread(s.id).status === "done" && thread(s.id).answer === "Bops agent: the venue too." && thread(s.id), "Bops agent to answer again");
   assert.equal(runs().length, before, "Claude Code didn't run again");
-  assert.throws(() => X.openInTerminal(s.id), /Only a thread Claude Code runs opens in a terminal/);
+  assert.throws(() => X.openInTerminal(s.id), /Only a thread Claude Code, Codex or OpenCode runs opens in a terminal/);
 });
 
-await test("taking the bot off its brain, or removing the brain, stops what it runs now, saying why", async () => {
+await test("taking an agent off the bot, or removing its account, stops what it runs now, saying why", async () => {
   const B = await import(`${root}/lib/server/brains.ts`);
   const s = X.startSession({ botId: main.id, goal: "SLOW: migrate the database", title: "Migrate", where: "cloud", fresh: true });
   await until(() => runs().some((r) => heardBy(r.pid).some((h) => h.got?.startsWith("SLOW: migrate"))), "it to start");
   const r = runs().at(-1);
+  // A new Default changes new threads only: this one keeps its agent.
   B.setBotBrain(main.id, null);
+  await sleep(300);
+  assert.equal(thread(s.id).status, "running", "a new Default doesn't stop a running thread");
+  // Its agent taken off the bot: it stops at once.
+  B.setBrainBot(PLAN.id, main.id, "none");
   let t = await ended(s.id);
   assert.equal(t.status, "failed");
-  assert.equal(t.error, "Stopped: Boppy doesn't use Claude Code anymore. Reply and it carries on with Bops agent.");
+  assert.equal(t.error, "Stopped: Boppy doesn't run Claude Code anymore. Reply and it carries on with Bops agent.");
   await until(() => heardBy(r.pid).some((h) => h.interrupted), "its Claude Code to be interrupted");
   // A key brain removed mid-task: its thread stops, then its process and folder go on the computer.
   const KB2 = { id: "brain_key2", kind: "claude", name: "Claude Code (team key)", auth: "key", keyName: "ANTHROPIC_API_KEY", keyScope: "all", bots: [main.id], workspaceId: "ws_main", createdAt: 9 };
@@ -1177,10 +1264,10 @@ await test("taking the bot off its brain, or removing the brain, stops what it r
   assert.ok(existsSync(join(pc(PC).brains, KB2.id)));
   B.removeBrain(KB2.id);
   t = await ended(k.id);
-  assert.equal(t.error, "Stopped: Boppy doesn't use Claude Code (team key) anymore. Reply and it carries on with Bops agent.");
+  assert.equal(t.error, "Stopped: Boppy doesn't run Claude Code anymore. Reply and it carries on with Bops agent.");
   await until(() => !existsSync(join(pc(PC).brains, KB2.id)), "its folder to go");
   assert.ok(pc(PC).commands.some((c) => c.startsWith(`bops-agent stop ${k.id}; bops-brain cancel ${KB2.id}; bops-brain forget ${KB2.id}`)), "its process first, then its folder");
-  S.update(() => (S.bot(main.id).brain = PLAN.id));
+  B.setBrainBot(PLAN.id, main.id, "use");
 });
 
 await test("a reply Claude Code hadn't answered when its turn failed is given again next time, and it doesn't carry on with it", async () => {
@@ -1253,8 +1340,22 @@ await test("a routine whose brain waits on the user isn't a run that went fine, 
 
 await test("the thread's words have no long dashes", () => {
   for (const id of [t1]) for (const x of [thread(id).answer, ...thread(id).steps.map((y) => y.detail)]) assert.ok(!/[–—]/.test(x), x);
-  for (const w of [C.signInWords(PLAN, "Boppy's computer", false), C.stoppedWords(PLAN, "limit", "x", "Boppy's computer", "max"), C.stoppedWords({ ...PLAN, auth: "key" }, "auth", "x", "Boppy's computer"), C.claudeDriver.note("Maya")])
-    assert.ok(!/[–—]/.test(w), w);
+  const plan = { kind: "claude", model: "claude-opus-5-5", agent: { id: "ag_planplan01", kind: "claude", pays: "plan" } };
+  const key = { kind: "claude", model: "claude-opus-5-5", agent: { id: "ag_keykeykey1", kind: "claude", pays: "key" } };
+  const oc = { kind: "opencode", model: "deepinfra/some-model", agent: { id: "ag_opencode01", kind: "opencode", pays: "key", model: "deepinfra/some-model" } };
+  // What the user reads: no dash of any kind (a hyphen joining words too), but in a model's own id (OpenCode's
+  // Other model is said as typed). The briefings the CLIs get: no long dash.
+  const shown = [
+    C.signInWords(PLAN, "Boppy's computer", false),
+    ...["limit", "auth", "model", "down", "vault"].flatMap((why) => [C.stoppedWords(plan, why, "x", "Boppy's computer", "max"), C.stoppedWords(key, why, "x", "Boppy's computer"), C.stoppedWords(oc, why, "x", "Boppy's computer")]),
+  ];
+  for (const w of shown) assert.ok(!/[–—]|\bOrbit\b/.test(w) && !/[A-Za-z]-[A-Za-z]/.test(w.replaceAll("some-model", "")), w);
+  for (const w of [C.claudeDriver.note("Maya"), C.codexDriver.note("Maya"), C.opencodeDriver.note("Maya")]) assert.ok(!/[–—]|\bOrbit\b/.test(w), w);
+  assert.equal(C.stoppedWords(plan, "model", "x", "Boppy's computer", "pro", "Rook"), "Your Pro plan can't use Opus 5.5. Pick another model for new threads in Rook's profile. I can finish this on Bops agent, on your AI credit, or wait.\n\nOptions: Finish on Bops agent | Wait");
+  assert.equal(C.stoppedWords(oc, "down", "x", "Boppy's computer"), "DeepInfra isn't answering right now. I can try again, or finish this on Bops agent, on your AI credit.\n\nOptions: Try again | Finish on Bops agent");
+  assert.match(C.stoppedWords(key, "vault", "x", "Boppy's computer"), /^Waiting for your Vault\. It allows 30 key uses an hour, so this starts again by itself in a few minutes\. .*\n\nOptions: Finish on Bops agent \| Wait$/);
+  assert.match(C.stoppedWords(plan, "limit", "Claude AI usage limit reached|1760032800", "Boppy's computer", "max"), /^Claude Code reached your Max plan's usage limit until .+\. I can finish this on Bops agent, on your AI credit, or wait\.\n\nOptions: Finish on Bops agent \| Wait$/);
+  assert.equal(C.limitPick("Try again."), "retry");
 });
 
 await test("the window's cards for them read right (the --render pass)", async () => {
@@ -1262,7 +1363,7 @@ await test("the window's cards for them read right (the --render pass)", async (
   const st = S.getState();
   writeFileSync(file, JSON.stringify({ ...views, screenNo: DISPLAYS.indexOf(views.takeover.display) + 1, bots: st.bots, brains: st.brains, chat: st.chats.find((c) => c.id === views.signIn.chatId) }));
   const out = await new Promise((resolve, reject) =>
-    execFile(process.execPath, [fileURLToPath(import.meta.url), "--render", file], { cwd: root, env: { PATH: REAL_PATH, HOME: process.env.HOME } }, (err, stdout, stderr) => (err ? reject(new Error(`${stdout}${stderr}`)) : resolve(stdout))),
+    execFile(process.execPath, [...process.execArgv.filter((a) => a.startsWith("--preserve-symlinks")), fileURLToPath(import.meta.url), "--render", file], { cwd: root, env: { PATH: REAL_PATH, HOME: process.env.HOME } }, (err, stdout, stderr) => (err ? reject(new Error(`${stdout}${stderr}`)) : resolve(stdout))),
   );
   assert.equal(out.match(/^ok render:/gm)?.length, 5, out);
   process.stdout.write(out.replace(/^/gm, "  "));

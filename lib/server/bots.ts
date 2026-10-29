@@ -2,6 +2,7 @@ import "server-only";
 import { botChatId, isScreenWatch, live, sharesComputer, workspaceOf, type Bot } from "@/lib/types";
 import { bot, getState, update } from "./store";
 import { botsNamedInDeleted } from "./deleted";
+import { botIdsWaiting } from "./memory-deletes";
 import { ensureInbox } from "./mail";
 import { noMainComputer, noOwnComputer } from "./plan";
 import { trackServerEvent } from "./analytics";
@@ -42,11 +43,13 @@ export const namesTheUser = (botId: string) => NOT_A_BOT.has(botId);
 
 /**
  * A bot id from a name, unique across all workspaces ("sam", then "sam-2"…), never one that names the user
- * or a routine (NOT_A_BOT), nor one a deleted bot left in what's kept (namedInHistory).
+ * or a routine (NOT_A_BOT), nor one a deleted bot left in what's kept (namedInHistory), nor one whose own memory
+ * bank is still waiting to be deleted (memory-deletes.ts botIdsWaiting): the new bot would get that bank.
  */
 export function freeBotId(name: string) {
   const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "bot";
   const named = namedInHistory();
+  for (const id of botIdsWaiting()) named.add(id);
   let botId = base;
   for (let n = 2; bot(botId) || NOT_A_BOT.has(botId) || named.has(botId); n++) botId = `${base}-${n}`;
   return botId;
@@ -170,8 +173,14 @@ export async function setComputer(botId: string, mode: "shared" | "own"): Promis
       return { error: `couldn't delete its own computer: ${(e as Error).message}` };
     }
   }
-  // Leaving the main bot's computer: its secret there goes with it (see dropGuestKey), and its team's too for a main bot.
-  if (mode === "own") for (const x of moving) await (await import("./sessions")).dropGuestKey(x.id);
+  // Leaving the main bot's computer: its secret there goes with it (see dropGuestKey), and its team's too for a main
+  // bot, and so does each one's own folder there (its agents' wrappers, gates and OpenCode threads: bot-ai.ts leaveComputer).
+  if (mode === "own") {
+    const [{ leaveComputer }, { workComputer }] = await Promise.all([import("./bot-ai"), import("./screens")]);
+    const left = moving.map((x) => [x, workComputer(x).computerId] as const);
+    for (const x of moving) await (await import("./sessions")).dropGuestKey(x.id);
+    for (const [x, computerId] of left) if (computerId !== x.computerId) leaveComputer(x, computerId);
+  }
   update((state) => {
     // A main bot's own is the default for a main bot.
     b.computer = b.isMain ? undefined : mode;

@@ -27,8 +27,14 @@ export type AccessLevel = "none" | "read" | "write";
 export const ACCESS_LEVELS: readonly AccessLevel[] = ["none", "read", "write"];
 export const ACCESS_LABELS: Record<AccessLevel, string> = { none: "None", read: "Read", write: "Write" };
 
-/** One person's access to a workspace's bots, and when it was set (`at`, `invite`: currentFor). */
-export type MemberAccess = { others: AccessLevel; bots: Record<string, AccessLevel>; at?: number; invite?: true };
+/**
+ * One person's access to a workspace's bots, and when it was set (`at`, `invite`: currentFor). `apps`: their level for
+ * the workspace's Your Apps (lib/apps-access.ts): Read sees its apps on the web, Write also deploys them. Missing reads
+ * as none (appsLevelOf): not set yet (an entry from before the scope, until the owner's Mac gives it Read once:
+ * workspaces.ts giveAppsRead), or dropped by an older Bops's save (lib/server/state-merge.ts keepAppsLevels puts it
+ * back). Only with a bot: an entry is kept only while it shows one (workspaces.ts showsAny).
+ */
+export type MemberAccess = { others: AccessLevel; bots: Record<string, AccessLevel>; at?: number; invite?: true; apps?: AccessLevel };
 /** Everyone's, by accessKey. */
 export type MemberAccessMap = Record<string, MemberAccess>;
 
@@ -40,6 +46,9 @@ const RANK: Record<AccessLevel, number> = { none: 0, read: 1, write: 2 };
 /** Whether `have` allows `need` (write takes in read). */
 export const permits = (have: AccessLevel, need: AccessLevel) => RANK[have] >= RANK[need];
 export const isAccessLevel = (v: unknown): v is AccessLevel => v === "none" || v === "read" || v === "write";
+
+/** A person's level for the workspace's Your Apps: the one kept, none when there's none (fails closed). */
+export const appsLevelOf = (a: { apps?: unknown } | null | undefined): AccessLevel => (isAccessLevel(a?.apps) ? a.apps : "none");
 
 /** How long an Orgo invite can be taken: a membership begun later than this after access set with one isn't that invite's. */
 export const INVITE_MS = 7 * 24 * 3_600_000;
@@ -93,7 +102,7 @@ export const levelOf = (access: MemberAccess, botId: string): AccessLevel =>
  */
 export function cleanAccess(v: unknown): MemberAccess | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  const o = v as { others?: unknown; bots?: unknown };
+  const o = v as { others?: unknown; bots?: unknown; apps?: unknown };
   const others: AccessLevel = isAccessLevel(o.others) ? o.others : "none";
   const bots: Record<string, AccessLevel> = {};
   if (o.bots && typeof o.bots === "object" && !Array.isArray(o.bots)) {
@@ -108,12 +117,13 @@ export function cleanAccess(v: unknown): MemberAccess | null {
       bots[id] = l;
     }
   }
-  return { others, bots };
+  // Your Apps: kept when it's a level; anything else is left out (the server then keeps the level it had).
+  return { others, bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}) };
 }
 
-/** A new invite's access before the owner changes it: every bot there now to read; bots made later hidden. */
+/** A new invite's access before the owner changes it: every bot there now to read, and Your Apps to read; bots made later hidden. */
 export function inviteDefault(botIds: string[]): MemberAccess {
-  return { others: "none", bots: Object.fromEntries(botIds.map((id) => [id, "read" as AccessLevel])) };
+  return { others: "none", bots: Object.fromEntries(botIds.map((id) => [id, "read" as AccessLevel])), apps: "read" };
 }
 
 /** The bots, of `botIds`, a person sees (read or write). */
@@ -174,3 +184,6 @@ export function accessSummary(access: MemberAccess, botIds: string[]): string {
   const how = writes === 0 ? "read" : writes === seen.length ? "write" : `${writes} to write`;
   return `${head}, ${how}${later}`;
 }
+
+/** A short line for a person's Your Apps, as accessSummary words bots: "Your Apps, read"; nothing at None; "not set" before a level. */
+export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(access.apps) ? "Your Apps not set" : access.apps === "none" ? "" : `Your Apps, ${access.apps}`);

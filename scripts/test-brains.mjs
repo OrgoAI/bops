@@ -187,6 +187,8 @@ const runHere = (c, command) =>
           PATH: `${c.bin}:${fakebin}:/usr/bin:/bin:/usr/sbin:/sbin`,
           HOME: join(c.dir, "home"),
           BOPS_BRAINS: c.brains,
+          // Each bot's agents' own folders (bops-brain --bot), under the fake computer's /root.
+          BOPS_BOTS: join(c.brains, "..", "bots"),
           BOPS_CLAUDE: join(fakebin, "claude"),
           BOPS_CODEX: join(fakebin, "codex"),
           BOPS_LOGS: join(c.dir, "logs"),
@@ -841,16 +843,16 @@ await test("a thread says which brain ran it; one Claude Code ran opens in a ter
   const sheetHtml = (s, more) => renderToStaticMarkup(h(ThreadSheet, { state: st([s], more), session: s, onClose: noop, onShowComputer: noop, onShowScreen: noop }));
   const sheet = (s, more) => text(sheetHtml(s, more));
   const no = T.DISPLAYS.indexOf(101) + 1;
-  // Claude Code ran it: its name by the title, and Open in terminal.
+  // Claude Code ran it: its name and model by the title (its agent's chip, agent-marks.tsx), and Open in terminal.
   const done = sheet(thread("ses_a"));
   noDashes(done, "a Claude Code thread");
-  assert.match(done, new RegExp(`^Cart total Claude Code Otto · finished · 1 steps · left off on screen ${no} Open in terminal Delete `), done);
+  assert.match(done, new RegExp(`^Cart total Claude Code · Opus 5\\.5 Otto · finished · 1 steps · left off on screen ${no} Open in terminal Delete `), done);
   // Open in the terminal there: it says so, with Show, and a reply closes it.
   const open = { botId: "otto", display: 101, sessionId: "ses_a", since: 5, terminal: {} };
   const html = sheetHtml(thread("ses_a"), { takeover: open });
   const inTerminal = text(html);
   noDashes(inTerminal, "a thread open in the terminal");
-  assert.match(inTerminal, /^Cart total Claude Code Otto · in the terminal · /);
+  assert.match(inTerminal, /^Cart total Claude Code · Opus 5\.5 Otto · in the terminal · /);
   assert.match(inTerminal, new RegExp(`Open in the terminal on screen ${no}\\. Your next reply closes it, and it carries on here\\. Show`));
   assert.doesNotMatch(inTerminal, /Open in terminal/, "it's open already");
   assert.match(html, /Reply in thread · closes the terminal and carries on/);
@@ -863,17 +865,20 @@ await test("a thread says which brain ran it; one Claude Code ran opens in a ter
   // Bops agent finished it, Codex ran it, Bops agent ran it, or the bots work on this Mac: no terminal.
   // Bops agent finishes it while Otto is on Claude Code: it says so, as it's on AI credit.
   const finished = sheet(thread("ses_a", { onBopsAgent: true }));
-  assert.match(finished, /^Cart total Bops agent Otto/, finished);
+  assert.match(finished, /^Cart total Bops agent Bops AI credit Otto/, finished);
   assert.doesNotMatch(finished, /Open in terminal|Claude Code/);
   // So does one Bops agent took over (its response chain) or began, and Otto off Claude Code has no terminal.
-  assert.match(sheet(thread("ses_a", { responseId: "resp_1" })), /^Cart total Bops agent Otto/);
-  assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" })), /^Cart total Bops agent Otto/);
+  assert.match(sheet(thread("ses_a", { responseId: "resp_1" })), /^Cart total Bops agent Bops AI credit Otto/);
+  assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" })), /^Cart total Bops agent Bops AI credit Otto/);
   assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" }), { bots: view(BRAINS).bots }), /^Cart total Otto · finished/, "no badge when Otto isn't on a brain");
-  assert.doesNotMatch(sheet(thread("ses_a"), { bots: view(BRAINS).bots }), /Open in terminal/, "Otto doesn't use Claude Code now");
+  // Otto's Default back to Bops agent: a thread keeps the agent it began on, so it still opens in the terminal.
+  assert.match(sheet(thread("ses_a"), { bots: view(BRAINS).bots }), /Open in terminal/, "a new Default doesn't move a thread");
+  // Claude Code off Otto altogether: no terminal.
+  assert.doesNotMatch(sheet(thread("ses_a"), { bots: view(BRAINS).bots, brains: BRAINS.map((x) => (x.id === "b_max" ? { ...x, bots: ["rook"] } : x)) }), /Open in terminal/, "Otto doesn't run Claude Code now");
   const codexHtml = sheetHtml(thread("ses_c", { status: "running", display: 101, brainRun: { brainId: "b_codex", kind: "codex", computerId: "pc-main", cli: "019a0000-1111-7a2b-9c3d-123456789abc", started: true } }));
   const codex = text(codexHtml);
-  assert.match(codex, /^Cart total Codex Otto · working · /);
-  assert.doesNotMatch(codex, /Open in terminal|Claude Code/);
+  assert.match(codex, /^Cart total Codex · GPT 6\.1 Sol Otto · working · /, codex);
+  assert.doesNotMatch(codex, /Claude Code/);
   assert.match(codexHtml, /Reply in thread · it takes this next/, "a reply waits for its next turn");
   assert.match(sheet(thread("ses_d", { brainRun: undefined })), /^Cart total Otto · finished/, "Bops agent's has no badge");
   assert.doesNotMatch(sheet(thread("ses_a"), { host: "mac" }), /Open in terminal/);

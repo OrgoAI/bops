@@ -59,18 +59,18 @@ export function useAuthStatus(key: unknown) {
 }
 
 /** What a sign-out asks first when some of the user's changes haven't reached Bops Cloud yet. */
-const UNSENT = "Some changes haven't reached Bops Cloud yet. Sign out anyway?";
+export const UNSENT = { title: "Sign out anyway?", line: "Some changes haven't reached Bops Cloud yet." };
 
 /**
- * Sign out of Orgo on this Mac (for the account page and the menu). The app goes back to the sign-in
- * screen. When some changes couldn't reach Bops Cloud the user is asked first.
+ * Sign out of Orgo on this Mac (for the menu, and Team). The app goes back to the sign-in screen. When some changes
+ * couldn't reach Bops Cloud the user is asked first, by `askFirst`, in place where they asked (account.tsx useSignOut).
  */
-export async function signOutOfOrgo() {
+export async function signOutOfOrgo(askFirst: () => Promise<boolean>) {
   const send = (force: boolean) => fetch("/api/auth/signout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }) });
   const res = await send(false);
   if (res.status !== 409) return res;
   const body = (await res.json().catch(() => ({}))) as { unsent?: boolean };
-  if (!body.unsent || !window.confirm(UNSENT)) return res;
+  if (!body.unsent || !(await askFirst())) return res;
   return send(true);
 }
 

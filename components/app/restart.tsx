@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore } from "react";
-import { createPortal } from "react-dom";
-import { Spinner } from "./mascot";
+import { useState, useSyncExternalStore } from "react";
+import { AskInPlace } from "./ui";
 
 /*
- * Restart Bops, for when something's off: in the account menu, on the setup screen (the badge on your
- * initials opens it) and on the Screen Recording card. It asks first, then the Mac app restarts
+ * Restart Bops, for when something's off: in the account menu, in Settings, This Mac (the badge on your initials
+ * opens it) and on the Screen Recording card. It asks first, in place, then the Mac app restarts
  * cleanly through its bridge (window.bopsMac.relaunch, desktop/main.cjs): the state is saved, the
  * cached sessions go, the server starts again, and the window opens again. You stay signed
  * in and nothing is lost. Only in the Mac app: a browser can't restart it.
@@ -29,20 +28,13 @@ export function RestartIcon() {
   );
 }
 
-/** "Restart Bops?", over everything (a sheet too). Restart hands over to the Mac app, which closes the window. */
-export function RestartConfirm({ onClose }: { onClose: () => void }) {
+/**
+ * "Restart Bops?", asked in place of the button that asked (ui.tsx AskInPlace): Restart hands over to the Mac app,
+ * which closes the window; Cancel (or Esc) puts the button back. `compact`: in a menu or a card's row.
+ */
+export function RestartAsk({ onCancel, compact = false }: { onCancel: () => void; compact?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    // Escape closes this alone, not the sheet under it (the app closes its sheets on Escape, on window).
-    const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      if (!busy) onClose();
-    };
-    document.addEventListener("keydown", esc);
-    return () => document.removeEventListener("keydown", esc);
-  }, [busy, onClose]);
   const restart = async () => {
     setBusy(true);
     setFailed(false);
@@ -53,33 +45,27 @@ export function RestartConfirm({ onClose }: { onClose: () => void }) {
       setBusy(false);
     }
   };
-  const pill = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
-  return createPortal(
-    <div className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
-      <div
-        role="alertdialog"
-        aria-labelledby="restart-title"
-        aria-describedby="restart-line"
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
-      >
-        <span id="restart-title" className="text-[15px] font-semibold leading-5">
-          Restart Bops?
-        </span>
-        <span id="restart-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
-          Your bots pause for a few seconds.
-        </span>
-        {failed && <span className="pt-2 text-[12.5px] leading-[18px] text-[#B42318]">Couldn&apos;t restart. Quit Bops and open it again.</span>}
-        <div className="flex justify-end gap-2 pt-5">
-          <button disabled={busy} onClick={onClose} className={`${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-            Cancel
-          </button>
-          <button autoFocus disabled={busy} onClick={() => void restart()} className={`${pill} flex min-w-[76px] items-center justify-center bg-ink text-white`}>
-            {busy ? <Spinner size={12} color="#FFFFFF" /> : "Restart"}
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+  return (
+    <AskInPlace
+      compact={compact}
+      title="Restart Bops?"
+      line="Your bots pause for a few seconds."
+      action="Restart"
+      busy={busy}
+      error={failed ? "Couldn't restart. Quit Bops and open it again." : null}
+      onConfirm={() => void restart()}
+      onCancel={onCancel}
+    />
+  );
+}
+
+/** Restart Bops as a button (`className`, `children`) that turns into its question where it is. */
+export function RestartButton({ className, compact, children }: { className: string; compact?: boolean; children: React.ReactNode }) {
+  const [asking, setAsking] = useState(false);
+  if (asking) return <RestartAsk compact={compact} onCancel={() => setAsking(false)} />;
+  return (
+    <button type="button" onClick={() => setAsking(true)} className={className}>
+      {children}
+    </button>
   );
 }

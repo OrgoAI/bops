@@ -688,12 +688,12 @@ export const orgoMembers = {
  * is made from (orgo-web lib/curated-templates.ts). BOPS_ORGO_TEMPLATE points at your own build
  * when the default isn't in your Orgo account.
  */
-export const BOPS_TEMPLATE = process.env.BOPS_ORGO_TEMPLATE || "system/bops-base@0.1.8";
+export const BOPS_TEMPLATE = process.env.BOPS_ORGO_TEMPLATE || "system/bops-base@0.1.11";
 /**
- * Every Bops computer's disk, in GB (Orgo's plan default is 20). Copies inherit their source's disk,
- * and older computers grow to this the next time Bops gets them ready (see growDisk).
+ * Every Bops computer's disk, in GB: what Orgo makes them with (orgo-web BOPS_COMPUTER_DISK_GB) and grows
+ * older ones to when they wake. Copies inherit their source's disk; growDisk asks for no more than Orgo allows.
  */
-export const BOPS_DISK_GB = Number(process.env.BOPS_DISK_GB) || 120;
+export const BOPS_DISK_GB = Number(process.env.BOPS_DISK_GB) || 80;
 /** Every screen on a Bops computer: 4:3, like the template's boot screen (orgo/bops-base.mjs). */
 export const BOPS_SCREEN = { width: 1280, height: 960 };
 
@@ -1021,12 +1021,28 @@ export async function deletePreview(projectId: string): Promise<OrgoDeletePrevie
 /** The first Bops release that finds its default workspace by bops_ws_id, not by the name "bops" (lib/types.ts). */
 export { WORKSPACE_APPS_SINCE };
 
-const olderVersion = (a: string, b: string) => {
+/** Whether version a ("0.0.31") is older than b. */
+export const olderVersion = (a: string, b: string) => {
   const x = a.split(".").map(Number);
   const y = b.split(".").map(Number);
   for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
   return false;
 };
+
+/**
+ * The Bops version each app on the account last sent (GET /api/bops/apps, as bopsAppsGate reads it; never Bops
+ * Cloud's), the ones that sent one; null when Orgo doesn't say (signed out, an orgo-web without the route, Orgo
+ * not answering).
+ */
+export async function bopsAppVersions(): Promise<string[] | null> {
+  const key = await apiKey().catch(() => "");
+  if (!key) return null;
+  const r = await callOrgo<{ apps?: unknown }>(key, "/api/bops/apps");
+  if (!r || r.status !== 200 || !Array.isArray(r.json.apps)) return null;
+  return (r.json.apps as { app_version?: unknown; caller?: unknown }[])
+    .filter((a) => a && typeof a === "object" && a.caller !== "cloud")
+    .flatMap((a) => (typeof a.app_version === "string" && /^v?\d+\.\d+\.\d+$/i.test(a.app_version.trim()) ? [a.app_version.trim().replace(/^v/i, "")] : []));
+}
 
 /**
  * Whether every Bops app on this account is new enough for the default's project to take the user's
@@ -1305,6 +1321,15 @@ export type OrgoRecordInput = { type: string; name: string; value: string; prior
 const seg = (s: string) => encodeURIComponent(s);
 
 /**
+ * How long a buy waits for Orgo's answer: 180 seconds, as orgo-web's registration alone can take 120 after
+ * its lookup, quote and hold (BOPS_DOMAIN_BUY_MS for a test). A buy not answered in time is never sent again.
+ */
+const buyMs = () => {
+  const n = Number(process.env.BOPS_DOMAIN_BUY_MS);
+  return Number.isFinite(n) && n > 0 ? n : 180_000;
+};
+
+/**
  * orgo-web's domains, with the user's key: the custom domains a computer serves (each on one of its ports),
  * and the DNS of a domain bought through Orgo, in its workspace. Changes to a zone rewrite all of it at the
  * registrar, at most 60 an hour per person, and nothing here touches a computer, so none waits for one to
@@ -1350,7 +1375,7 @@ export const domains = {
    * Never sent again by itself (an answer lost is REGISTRATION_UNKNOWN, settled by Orgo).
    */
   buy: (projectId: string, domain: string, registrant: Record<string, string>, expected: number) =>
-    call<OrgoBoughtDomain>("POST", `/projects/${seg(projectId)}/domains`, { domain, registrant, expected_price_cents: expected }, { wait: false, timeoutMs: 120_000 }),
+    call<OrgoBoughtDomain>("POST", `/projects/${seg(projectId)}/domains`, { domain, registrant, expected_price_cents: expected }, { wait: false, timeoutMs: buyMs() }),
   /** Turn a bought domain's auto-renew on (the caller pays its renewals from their credits from then on) or off. */
   autoRenew: (projectId: string, domainId: string, on: boolean) =>
     call<{ domain: OrgoBoughtDomain }>("PATCH", `/projects/${seg(projectId)}/domains/${seg(domainId)}`, { auto_renew: on }, { wait: false }),

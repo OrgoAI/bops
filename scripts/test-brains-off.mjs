@@ -403,15 +403,18 @@ const view = (sessions = [], more = {}) => ({ ...structuredClone(S.getState()), 
 /** Anything that's about brains. */
 const BRAINY = /\bBrain\b|their brain|Claude Code|Bops agent|Codex|Open in terminal|Sign in with your Claude plan/;
 
-await check("Settings has no Brain section, and its subtitle doesn't mention one", async () => {
+await check("Settings has no AI plans place, and This Mac no Brain section", async () => {
   const { Settings } = await import(pathToFileURL(`${root}/components/app/bops-app.tsx`).href);
-  const t = text(renderToStaticMarkup(h(Settings, { state: view(), onClose: noop, onShowScreen: noop, onOpenVault: noop })));
-  assert.match(t, /^Settings You, how your bots reach you, this Mac, and where your bots work /, t.slice(0, 200));
+  const html = renderToStaticMarkup(h(Settings, { state: view(), at: "mac", onClose: noop, onShowScreen: noop, onOpenVault: noop }));
+  const t = text(html);
+  const nav = [...html.matchAll(/data-settings-nav="([a-z]+)"/g)].map((m) => m[1]);
+  assert.ok(!nav.includes("ai"), `no AI plans in the nav: ${nav}`);
+  assert.deepEqual(nav.slice(0, 3), ["profile", "plan", "usage"], "Account first, as with brains on");
   assert.match(t, /Where your bots work .* Your bots' computers/, "the sections around where Brain was");
   assert.doesNotMatch(t, BRAINY);
 });
 
-await check("a bot's profile has no Brain and no badge for the brain it was set to", async () => {
+await check("a bot's profile has no Brain and no badge for the brain it was set to: its AI is Bops agent alone", async () => {
   const { BotPanel } = await import(pathToFileURL(`${root}/components/app/bot-panel.tsx`).href);
   const st = view();
   const b = st.bots.find((x) => x.id === main.id);
@@ -422,7 +425,9 @@ await check("a bot's profile has no Brain and no badge for the brain it was set 
       ),
     );
     assert.match(t, new RegExp(`${b.name} Chief of Staff · runs the team`), section);
-    assert.doesNotMatch(t, BRAINY, section);
+    // Its AI section (bot-ai.tsx) is Bops agent's alone: no CLI agent, no Add, no terminal.
+    assert.doesNotMatch(t, /\bBrain\b|their brain|Claude Code|Codex|OpenCode|\bagy\b|Open in terminal|Open its terminal|\+ Add|Sign in with your Claude plan/, section);
+    if (section === "details") assert.match(t, /▾ AI Default Bops agent Agents it can run Bops agent Default OpenAI · Bops credit Thinking/, t);
   }
 });
 

@@ -1,44 +1,58 @@
 import "server-only";
-import { botChatId, freeComputerOnDelete, live, MAIN_WORKSPACE, workspaceOf, type Message } from "@/lib/types";
-import { privacyOf, uploadIdsOf } from "@/lib/privacy";
+import { botChatId, freeComputerOnDelete, live, MAIN_WORKSPACE, workspaceOf, type Message, type Session } from "@/lib/types";
+import { clearPlan, inUse, pageIdsOf, privacyOf, uploadIdsOf, type ClearChoice } from "@/lib/privacy";
 import { dropGuestKey, resetComputer, stopSession } from "./sessions";
 import { bot, chat, getState, session, update } from "./store";
 import { keepDeleted, type Deleted, type DeletedKind } from "./deleted";
 import { dropFrame } from "./frames";
 import { dropUploads } from "./uploads";
+import { dropPages } from "./pages";
 import { onPostgres } from "./persist";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
 import { dropBotFromSkills, dropWorkspaceSkills } from "./workspace-skills";
-import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, forgetBotAccess, WorkspaceError } from "./workspaces";
+import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, forgetBotAccess, forgetBotInChain, leadNow, WorkspaceError } from "./workspaces";
 import { apiKey, orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
 import { routinesRemovedInWorkspace } from "./routine-sync";
+import { forgetBotSettings } from "./bot-settings";
 import { brainsOf, removeBrain } from "./brains";
 
 /**
- * What a delete leaves behind on this Mac (Settings → Your data, lib/privacy.ts), once its messages, thread or
+ * What a delete leaves behind on this Mac (Settings → Your data, lib/privacy.ts), once its messages, threads or
  * chat left the state (and so Bops Cloud and the user's other Macs, with the next save). With days to keep
  * what the user deletes (deletedDays), a copy under Recently deleted on this Mac (lib/server/deleted.ts),
- * with the images and the thread's frame moved into it. Never of what the user kept "between us"
- * (Message.secret; a thread started for one, Session.secret, whole): no copy ever holds a secret, so those go
- * for good at once, whatever deletedDays says. Nor on a hosted server, which is no one's Mac. Otherwise
- * (`forGood`, the Keep chats and calls sweep's, is always so), or when the copy couldn't be written (a full
- * disk: nothing of it is left), gone at once: the images on this Mac that no message left in the chats
- * shows, and the thread's last frame. A file that won't go never undoes the delete: the sweep looks again.
+ * with the images, the pages its messages linked to and the threads' frames moved into it. Never of what the
+ * user kept "between us" (Message.secret; a thread started for one, Session.secret, whole): no copy ever holds
+ * a secret, so those go for good at once, whatever deletedDays says. Nor on a hosted server, which is no one's
+ * Mac. Otherwise (`forGood`, the Keep chats and calls sweep's, is always so), or when the copy couldn't be
+ * written (a full disk: nothing of it is left), gone at once: the images and pages on this Mac that nothing
+ * left shows (lib/privacy.ts inUse), and the threads' last frames. A file that won't go never undoes the
+ * delete: the sweep looks again. The copy's id (null: none was kept), and how many of the messages were kept
+ * between us, so no copy holds them (when one was made).
  */
-function leaveBehind(kind: DeletedKind, what: Deleted, forGood: boolean) {
+function leaveBehind(kind: DeletedKind, what: Deleted, forGood: boolean, labelFor?: (copied: number) => string): { entry: string | null; between: number } {
   const copying = !forGood && !onPostgres() && privacyOf(getState()).deletedDays > 0 && !what.session?.secret;
-  const copied = copying ? copyable(what.messages) : [];
+  // Delete now's threads kept between us go whole, with what they said.
+  const hidden = new Set((what.threads ?? []).filter((t) => t.session.secret).map((t) => t.session.id));
+  const theirs = (m: Message) => (!!m.resultOf && hidden.has(m.resultOf)) || !!m.sessionIds?.some((x) => hidden.has(x));
+  const copied = copying ? copyable(what.messages).filter((m) => !theirs(m)) : [];
+  const threads = copying ? (what.threads ?? []).filter((t) => !hidden.has(t.session.id)) : [];
   const left = new Set(copied);
-  let kept = false;
-  if (copying && (copied.length || what.session || what.chat))
+  let entry: string | null = null;
+  if (copying && (copied.length || what.session || what.chat || threads.length))
     try {
-      kept = !!keepDeleted(kind, { ...what, messages: copied });
+      entry = keepDeleted(kind, { ...what, messages: copied, ...(what.threads ? { threads } : {}), ...(labelFor ? { label: labelFor(copied.length) } : {}) });
     } catch (e) {
       console.warn(`[remove] a copy for Recently deleted: ${(e as Error).message}`);
     }
   // What no copy holds: the secrets beside one, or all of it.
-  dropLeft(kept ? what.messages.filter((m) => !left.has(m)) : what.messages, what.session && !kept ? [what.session.id] : []);
+  const sessions = [...(what.session ? [what.session] : []), ...(what.threads ?? []).map((t) => t.session)];
+  const kept = new Set(entry ? threads.map((t) => t.session.id).concat(what.session && entry ? [what.session.id] : []) : []);
+  dropLeft(
+    entry ? what.messages.filter((m) => !left.has(m)) : what.messages,
+    sessions.filter((x) => !kept.has(x.id)).map((x) => x.id),
+  );
+  return { entry, between: copying ? what.messages.length - copied.length : 0 };
 }
 
 /**
@@ -59,10 +73,14 @@ function copyable(messages: readonly Message[]): Message[] {
   return messages.filter((m) => !m.secret && !beside.has(m.id));
 }
 
-/** What a delete with no copy leaves on this Mac goes: the images no message left in the chats shows, and the threads' last frames. */
+/** What a delete with no copy leaves on this Mac goes: the images and pages nothing left shows (lib/privacy.ts inUse), and the threads' last frames. */
 function dropLeft(messages: readonly Message[], sessionIds: readonly string[]) {
   try {
-    if (messages.length) dropUploads(uploadIdsOf(messages), uploadIdsOf(getState().messages));
+    if (messages.length) {
+      const used = inUse(getState());
+      dropUploads(uploadIdsOf(messages), used.images);
+      dropPages(pageIdsOf(messages), used.pages);
+    }
     for (const x of sessionIds) dropFrame(x);
   } catch (e) {
     console.warn(`[remove] what the delete left on this Mac: ${(e as Error).message}`);
@@ -70,38 +88,129 @@ function dropLeft(messages: readonly Message[], sessionIds: readonly string[]) {
 }
 
 /**
- * Delete messages from their chats: the one way a message goes, whether the user deleted it (deleteMessage)
- * or it's older than they keep chats (lib/server/privacy.ts, `forGood`: never kept under Recently deleted).
- * Gone from the state, so from Bops Cloud with the next save, which every Mac and the iPhone hear of. One the
- * user kept "between us" (Message.secret) leaves the bots' answers to it there (until the user's next
- * message) kept the same, so a procedure's draft still leaves them out (procedures.ts notSecret knew them by
- * the message before them). How many went.
+ * One the user kept "between us" (Message.secret) going leaves the bots' answers to it there (until the user's
+ * next message) kept the same, so a procedure's draft still leaves them out (procedures.ts notSecret knew them
+ * by the message before them). In `list`, the state's messages, as it's being changed.
  */
-export function deleteMessages(ids: readonly string[], { forGood = false }: { forGood?: boolean } = {}): number {
+function keepAnswersSecret(list: Message[], going: ReadonlySet<string>) {
+  for (let at = 0; at < list.length; at++) {
+    const m = list[at];
+    if (!going.has(m.id) || !m.secret || m.role !== "user") continue;
+    for (let i = at + 1; i < list.length; i++) {
+      const x = list[i];
+      if (x.chatId !== m.chatId) continue;
+      if (x.role === "user") break;
+      if (x.role === "bot") x.secret = true;
+    }
+  }
+}
+
+/**
+ * What a delete of messages did: how many went, the copy kept of them under Recently deleted to restore them
+ * from (null: none, as the user keeps none, or on a hosted server), and how many of them that copy doesn't hold
+ * as they were kept between us (gone for good at once).
+ */
+export type Removed = { count: number; restore: string | null; between: number };
+
+/**
+ * Delete messages from their chats: the one way a message goes, whether the user deleted it (one from its
+ * menu, several picked, a chat's every one: clearChat) or it's older than they keep chats (lib/server/privacy.ts,
+ * `forGood`: never kept under Recently deleted). Gone from the state, so from Bops Cloud with the next save,
+ * which every Mac and the iPhone hear of (a removed row, json NULL, cloud/state.ts). Several in one change and
+ * one copy (`labelFor`: what Settings lists the copy as, by how many it holds). One the user kept "between us"
+ * leaves the bots' answers to it kept the same (keepAnswersSecret).
+ */
+export function removeMessages(ids: readonly string[], { forGood = false, labelFor }: { forGood?: boolean; labelFor?: (copied: number) => string } = {}): Removed {
   const want = new Set(ids);
-  if (!getState().messages.some((m) => want.has(m.id))) return 0;
+  if (!getState().messages.some((m) => want.has(m.id))) return { count: 0, restore: null, between: 0 };
   let gone: Message[] = [];
   update((state) => {
-    const list = state.messages;
-    for (let at = 0; at < list.length; at++) {
-      const m = list[at];
-      if (!want.has(m.id) || !m.secret || m.role !== "user") continue;
-      for (let i = at + 1; i < list.length; i++) {
-        const x = list[i];
-        if (x.chatId !== m.chatId) continue;
-        if (x.role === "user") break;
-        if (x.role === "bot") x.secret = true;
-      }
-    }
-    gone = list.filter((m) => want.has(m.id));
-    state.messages = list.filter((m) => !want.has(m.id));
+    keepAnswersSecret(state.messages, want);
+    gone = state.messages.filter((m) => want.has(m.id));
+    state.messages = state.messages.filter((m) => !want.has(m.id));
   });
-  leaveBehind("message", { messages: gone }, forGood);
-  return gone.length;
+  const { entry, between } = leaveBehind("message", { messages: gone }, forGood, labelFor);
+  return { count: gone.length, restore: entry, between };
 }
+
+/** Delete messages (removeMessages), and how many went: the Keep chats and calls sweep's. */
+export const deleteMessages = (ids: readonly string[], opts: { forGood?: boolean } = {}): number => removeMessages(ids, opts).count;
 
 /** The user deletes one message from a chat (its menu's Delete). */
 export const deleteMessage = (messageId: string) => void deleteMessages([messageId]);
+
+/** A chat as Recently deleted names it: "Boppy's chat", a group's name, "Boppy and Otto's talk". */
+function chatLabel(chatId: string): string {
+  const name = (b: string) => bot(b)?.name ?? "a bot";
+  if (chatId.startsWith("pair:")) return `${chatId.slice(5).split(":").map(name).join(" and ")}'s talk`;
+  const c = chat(chatId);
+  if (c?.kind === "group") return c.title?.trim() || c.botIds.map(name).join(", ");
+  return c ? `${name(c.botIds[0])}'s chat` : "a chat";
+}
+
+/** Several messages the user picked in one chat, deleted at once, one copy under Recently deleted ("5 messages in Boppy's chat"). Only that chat's. */
+export function deletePicked(chatId: string, ids: readonly string[]): Removed {
+  const want = new Set(ids);
+  const mine = getState().messages.filter((m) => m.chatId === chatId && want.has(m.id)).map((m) => m.id);
+  return removeMessages(mine, { labelFor: (n) => (n > 1 ? `${n} messages in ${chatLabel(chatId)}` : "") });
+}
+
+/**
+ * Every message in a chat (a bot's own chat too), deleted at once, one copy under Recently deleted ("Every
+ * message in Boppy's chat"). The chat stays, and so do the bot's threads (in the sidebar, with all they did):
+ * only their results and notes in the chat go, as messages.
+ */
+export function clearChat(chatId: string): Removed {
+  const ids = getState().messages.filter((m) => m.chatId === chatId).map((m) => m.id);
+  return removeMessages(ids, { labelFor: () => `Every message in ${chatLabel(chatId)}` });
+}
+
+/** What Recently deleted lists Delete now's copy as: "Everything", "Older than 90 days", "All of Boppy's", "Boppy's, older than a year". */
+function clearLabel({ olderThan, bot: b }: ClearChoice): string {
+  const age = olderThan === null ? "" : `older than ${olderThan === 365 ? "a year" : `${olderThan} days`}`;
+  const who = b ? (bot(b)?.name ?? "A bot") : "";
+  if (!who) return age ? age[0].toUpperCase() + age.slice(1) : "Everything";
+  return age ? `${who}'s, ${age}` : `All of ${who}'s`;
+}
+
+/**
+ * Delete now (Settings → Your data): the messages and finished threads it takes (lib/privacy.ts clearPlan:
+ * everything, or what's older, in every chat or one bot's), with each thread's result and notes, the way the
+ * user's own deletes take them, in one change to the state; so from Bops Cloud and every Mac with the next
+ * save. One copy under Recently deleted of all of it, when the user keeps one (`forGood`: never). How many
+ * messages and threads went.
+ */
+export function deleteChats(choice: ClearChoice, { forGood = false, now = Date.now() }: { forGood?: boolean; now?: number } = {}): { messages: number; threads: number; restore: string | null } {
+  const plan = clearPlan(getState(), choice, now);
+  if (!plan.messages.size && !plan.threads.size) return { messages: 0, threads: 0, restore: null };
+  const going: Session[] = [];
+  const stripped = new Map<string, string[]>([...plan.threads].map((x) => [x, []]));
+  let gone: Message[] = [];
+  update((state) => {
+    keepAnswersSecret(state.messages, plan.messages);
+    going.push(...state.sessions.filter((x) => plan.threads.has(x.id)));
+    state.sessions = state.sessions.filter((x) => !plan.threads.has(x.id));
+    const kept: Message[] = [];
+    gone = [];
+    for (const m of state.messages) {
+      if (plan.messages.has(m.id)) {
+        gone.push(m);
+        continue;
+      }
+      const had = m.sessionIds?.filter((x) => plan.threads.has(x)) ?? [];
+      if (!had.length) {
+        kept.push(m);
+        continue;
+      }
+      for (const x of had) stripped.get(x)!.push(m.id);
+      kept.push({ ...m, sessionIds: m.sessionIds!.filter((x) => !plan.threads.has(x)) });
+    }
+    state.messages = kept;
+    for (const s of going) delete state.screens?.[`${s.botId}:${s.display}`];
+  });
+  const { entry } = leaveBehind("many", { messages: gone, threads: going.map((s) => ({ session: s, stripped: stripped.get(s.id) ?? [] })) }, forGood, () => clearLabel(choice));
+  return { messages: gone.length, threads: going.length, restore: entry };
+}
 
 /**
  * Delete a finished thread, its result in the chat, and its chips, and its last frame on this Mac (or, with
@@ -191,6 +300,12 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   for (const w of getState().watches?.filter((x) => x.botId === botId) ?? []) await stopWatch(w.id);
   // Its secret on the main bot's computer, if it shared that one, goes too.
   await dropGuestKey(botId);
+  // On the computer it shares, its own folder (its agents' wrappers, gates, and its OpenCode threads' words) goes
+  // too (bot-ai.ts leaveComputer). Its own computer is deleted whole.
+  if (!b.computerId) {
+    const [{ leaveComputer }, { workComputer }] = await Promise.all([import("./bot-ai"), import("./screens")]);
+    leaveComputer(b, workComputer(b).computerId);
+  }
   // The computer goes first: if Orgo can't delete it, the bot stays, so no computer is left behind unowned.
   if (b.computerId) await resetComputer(botId);
   // Its email inboxes go too (they count against the AgentMail plan).
@@ -210,6 +325,13 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     appsToMainBot(botId, wsId);
   }
   dropBotFromSkills(botId, workspaceOf(b));
+  // Its place on the team chart: the bots under it answer to its lead from now on. Whether it kept a memory of its
+  // own (now, or kept apart), which goes with it.
+  const lead = leadNow(botId);
+  const kept = getState().workspaces?.find((w) => w.id === wsId)?.chain?.bots?.[botId];
+  // (Where that bank is, read while the bot is still listed: its name comes from the bot's workspace.)
+  const { dropOwnBank, ownBankAt } = await import("./memory-deletes");
+  const ownBank = kept?.memory === "own" || kept?.kept === true ? ownBankAt(botId) : null;
   update((state) => {
     state.bots = state.bots.filter((x) => x.id !== botId);
     state.chats = state.chats
@@ -223,11 +345,16 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     state.routines = state.routines.filter((r) => r.botId !== botId);
     state.procedures = state.procedures?.filter((p) => p.botId !== botId);
     forgetBotAccess(state, botId);
+    forgetBotInChain(state, botId, wsId, lead);
+    forgetBotSettings(state, botId, wsId);
     for (const key of Object.keys(state.screens ?? {})) if (key.startsWith(`${botId}:`)) delete state.screens![key];
     if (state.takeover?.botId === botId) state.takeover = undefined;
   });
   // Its routines go from the workspace's Orgo copy too (the bot is gone, so by its workspace).
   if (hadRoutines) routinesRemovedInWorkspace(wsId);
+  // The memory it kept to itself (lib/chain.ts), if it did: its own bank goes too, through the outbox (memory-deletes.ts),
+  // so memory being off or not answering now only puts it off. Gone already is fine.
+  if (ownBank) await dropOwnBank(botId, ownBank).catch((e: Error) => console.warn(`[remove] ${b.name}'s own memory: ${e.message}`));
 }
 
 /**

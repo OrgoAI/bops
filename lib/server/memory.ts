@@ -6,6 +6,7 @@ import { openaiClient } from "./openai-client";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MAIN_WORKSPACE, workspaceOf, type MemoryGroup } from "@/lib/types";
+import { ownMemory, readsTeam } from "@/lib/chain";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSessionNow } from "./cloud";
 import { chose, decide, yes, type Question } from "./decide";
@@ -47,9 +48,32 @@ const ownBank = (ws: string): Binding =>
       ? { bank: "bops", peer: "user" }
       : { bank: process.env.HONCHO_WORKSPACE_ID ?? "bops", peer: process.env.HONCHO_USER_PEER ?? "user" };
 
-export function bindingOf(ws: string): Binding {
-  return getState().workspaces?.find((w) => w.id === ws)?.memory ?? ownBank(ws);
+/**
+ * Whose memory a save or a read is (lib/chain.ts): a workspace's, the team's bank its bots share; or one bot's own
+ * bank in it, for a bot that keeps its memory to itself (`bot`), which still reads the team's too (`readsTeam`).
+ * Every function here that takes a workspace takes a scope as well.
+ */
+export type MemoryScope = { ws: string; bot?: string; readsTeam?: boolean };
+type Where = string | MemoryScope;
+const scopeIn = (w: Where): MemoryScope => (typeof w === "string" ? { ws: w } : w);
+const wsIn = (w: Where) => (typeof w === "string" ? w : w.ws);
+
+/** A bot's memory scope now: its own bank while it keeps its memory to itself on the team chart, else its workspace's. */
+export function scopeOf(botId: string): MemoryScope {
+  const ws = wsOf(botId);
+  const st = getState();
+  return ownMemory(st, botId) ? { ws, bot: botId, readsTeam: readsTeam(st, botId) } : { ws };
 }
+
+/** The scope's bank: the workspace's, or a bot's own in it, "<team bank>-bot-<id>" with the team's peer (under the user's prefix in Bops Cloud: bankFor). */
+export function bindingOf(w: Where): Binding {
+  const sc = scopeIn(w);
+  const team = getState().workspaces?.find((x) => x.id === sc.ws)?.memory ?? ownBank(sc.ws);
+  return sc.bot ? { bank: `${team.bank}-bot-${clean(sc.bot)}`, peer: team.peer } : team;
+}
+
+/** A bot's own bank, whether or not it keeps its memory to itself now (one kept apart, to bring in or delete). */
+export const ownBankOf = (botId: string): Binding => bindingOf({ ws: wsOf(botId), bot: botId });
 
 /** The workspace uses its own bank (not one it shares from another workspace). */
 export const ownsBank = (ws: string) => bindingOf(ws).bank === ownBank(ws).bank;
@@ -244,23 +268,32 @@ async function card(b: Binding) {
  * learned that's relevant to `about` (unless `search` is false: just the card, which is quick).
  * Empty when memory is off or too slow.
  */
-export async function memoryBlock(ws: string, about: string, ms = 2500, { search = true }: { search?: boolean } = {}): Promise<string> {
+export async function memoryBlock(where: Where, about: string, ms = 2500, { search = true }: { search?: boolean } = {}): Promise<string> {
   if (!on()) return "";
-  const b = bindingOf(ws);
+  const sc = scopeIn(where);
   const owner = ownerName();
+  // A bot that keeps its memory to itself reads its own bank, and the team's too while it still knows what the team
+  // knows: both at once, within the same time.
+  const banks = sc.bot ? [bindingOf(sc), ...(sc.readsTeam ? [bindingOf(sc.ws)] : [])] : [bindingOf(sc.ws)];
+  const read = async (b: Binding) => {
+    // The card is cached and quick; the search is what takes time, so it's skipped when it won't help.
+    const [lines, ctx] = await Promise.all([
+      card(b),
+      search ? (await peer(b)).context({ searchQuery: about.slice(0, 400) || owner, searchTopK: 10, maxConclusions: 12, includeMostFrequent: false }) : null,
+    ]);
+    const learned = String(ctx?.representation ?? "")
+      .split("\n")
+      .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
+      .filter((l) => l && !l.startsWith("#"))
+      .slice(0, 16);
+    return [lines, learned] as const;
+  };
   try {
     const res = await within(
       (async () => {
-        // The card is cached and quick; the search is what takes time, so it's skipped when it won't help.
-        const [lines, ctx] = await Promise.all([
-          card(b),
-          search ? (await peer(b)).context({ searchQuery: about.slice(0, 400) || owner, searchTopK: 10, maxConclusions: 12, includeMostFrequent: false }) : null,
-        ]);
-        const learned = String(ctx?.representation ?? "")
-          .split("\n")
-          .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
-          .filter((l) => l && !l.startsWith("#"))
-          .slice(0, 16);
+        const got = await Promise.all(banks.map((b) => read(b).catch(() => [[], []] as readonly [string[], string[]])));
+        const lines = [...new Set(got.flatMap((g) => g[0]))];
+        const learned = [...new Set(got.flatMap((g) => g[1]))];
         const ok = new Set(await shareable([...lines, ...learned]));
         return [lines.filter((l) => ok.has(l)), learned.filter((l) => ok.has(l)).slice(0, 12)] as const;
       })(),
@@ -283,20 +316,24 @@ export async function memoryBlock(ws: string, about: string, ms = 2500, { search
  * Add what was said to Honcho (so it keeps learning about the user). `kind` is chat or task; the id is
  * the Bops chat or thread. Fire and forget: memory never holds up a reply.
  */
-export function saveToMemory(ws: string, kind: "chat" | "task", id: string, messages: { who: string; text: string }[], metadata: Record<string, unknown> = {}) {
+export function saveToMemory(where: Where, kind: "chat" | "task", id: string, messages: { who: string; text: string }[], metadata: Record<string, unknown> = {}) {
   if (!on()) return;
   const msgs = messages.filter((m) => m.text.trim());
   if (!msgs.length) return;
-  const b = bindingOf(ws);
+  // Only into the scope's bank: a bot that keeps its memory to itself saves to its own, never the team's.
+  const sc = scopeIn(where);
+  const ws = sc.ws;
+  const b = bindingOf(sc);
   const sid = `bops-${kind}-${clean(id)}`;
   void (async () => {
     const who = [...new Set([OWNER_WHO, ...msgs.map((m) => m.who)])];
     // The workspace it's from, so a bank two workspaces share knows whose it is.
-    const s = await session(b, sid, who, { kind, ws, ...metadata });
+    const s = await session(b, sid, who, { kind, ws, ...(sc.bot ? { bot: sc.bot } : {}), ...metadata });
     const peers = await Promise.all(msgs.map((m) => peer(b, m.who)));
     await s.addMessages(msgs.map((m, i) => peers[i].message(m.text.slice(0, 8000), { metadata: { app: "bops", kind } })));
-    // Memory works out new facts from it in the background, minutes later: the categories look again then.
-    categoriesNudge(ws, "chat");
+    // Memory works out new facts from it in the background, minutes later: the categories look again then (the
+    // team's bank only: Knowledge is built from it).
+    if (!sc.bot) categoriesNudge(ws, "chat");
   })().catch((e: Error) => {
     // Set up again next time (the session may have been deleted in Honcho).
     bankFor(b).sessions.delete(sid);
@@ -323,7 +360,9 @@ const CARD = "card:";
  * one that replaces an older fact (their parents moved) says so in the chat, with a button to forget
  * the old one. The chat line has an Undo. Returns what happened, for the bot.
  */
-export function learn(ws: string, fact: string, chatId?: string, opts: { auto?: boolean } = {}): Promise<string> {
+export function learn(where: Where, fact: string, chatId?: string, opts: { auto?: boolean } = {}): Promise<string> {
+  const sc = scopeIn(where);
+  const ws = sc.ws;
   if (!on()) return Promise.resolve("Memory isn't set up.");
   const text = fact.trim().slice(0, 1000);
   if (!text) return Promise.resolve("Nothing to save.");
@@ -333,7 +372,7 @@ export function learn(ws: string, fact: string, chatId?: string, opts: { auto?: 
   const keptFrom = /\bnot (to )?(tell|share with|mention to)\b|\bwants? \w+ not to\b|\bkept? (it )?from\b/i;
   if (SECRET.test(text) || keptFrom.test(text) || isSecret(lastFromOwner?.id))
     return Promise.resolve(`Not saved: ${ownerName()} wants this kept from someone, and the memory is shared by the whole team. Keep it to yourself in this conversation.`);
-  const b = bindingOf(ws);
+  const b = bindingOf(sc);
   const x = bankFor(b);
   const ours = sameState();
   const run = x.queue.then(async () => {
@@ -351,17 +390,18 @@ export function learn(ws: string, fact: string, chatId?: string, opts: { auto?: 
     const same = ids.findIndex((_, i) => prob(i, "same") >= 0.6);
     if (same >= 0) return `Already known: ${known.get(ids[same])}`;
     if (!ours()) return "Not saved: another account signed in.";
-    // A workspace sharing another's bank saves into a session of its own: its Orbit, not the other's, shows it.
-    const notes = ownsBank(ws) ? undefined : await notesFor(b, ws);
+    // A workspace sharing another's bank saves into a session of its own: its Orbit, not the other's, shows it. (A
+    // bot's own bank is its alone.)
+    const notes = sc.bot || ownsBank(ws) ? undefined : await notesFor(b, ws);
     const [made] = await p.conclusions.create([{ content: text, ...(notes ? { sessionId: notes } : {}) }]);
     x.recent.push({ id: made.id, text, at: Date.now() });
     // A fact saved by hand or by a bot is sorted into the categories in seconds; one Bops noted on its
     // own from what the user said waits to be sorted with the next few (each sort is a model call).
-    categoriesNudge(ws, opts.auto ? "saved" : "learned");
+    if (!sc.bot) categoriesNudge(ws, opts.auto ? "saved" : "learned");
     let best = -1;
     ids.forEach((_, i) => prob(i, "replaces") >= 0.7 && (best < 0 || prob(i, "replaces") > prob(best, "replaces")) && (best = i));
     const old = best >= 0 ? { id: ids[best], text: known.get(ids[best])! } : undefined;
-    if (chatId && ours()) addMessage({ chatId, role: "system", text: `Remembered: ${text}`, memory: { ws, id: made.id, fact: text, old } });
+    if (chatId && ours()) addMessage({ chatId, role: "system", text: `Remembered: ${text}`, memory: { ws, ...(sc.bot ? { bot: sc.bot } : {}), id: made.id, fact: text, old } });
     return old ? `Saved. It may replace an older fact ("${old.text}"); ${ownerName()} was asked whether to forget that one.` : "Saved.";
   });
   x.queue = run.catch(() => {});
@@ -439,7 +479,7 @@ function markSecret(messageId: string) {
  * vegetarian now") is saved as a fact without their having to say "remember" (a small model writes
  * it; learn() checks it against what's known). Fire and forget.
  */
-export function rememberMessage(ws: string, chatId: string, messageId: string, said: string, metadata: Record<string, unknown> = {}, member?: { userId: string }) {
+export function rememberMessage(ws: Where, chatId: string, messageId: string, said: string, metadata: Record<string, unknown> = {}, member?: { userId: string }) {
   if (!said.trim()) return;
   // Marked with memory off too: a procedure's draft reads the chat whether or not there's a memory.
   if (SECRET.test(said)) {
@@ -497,7 +537,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
 export async function undoMemory(messageId: string, what: "undo" | "forget-old") {
   const m = getState().messages.find((x) => x.id === messageId);
   if (!m?.memory) throw new Error("not a memory note");
-  const b = bindingOf(m.memory.ws);
+  const b = bindingOf({ ws: m.memory.ws, ...(m.memory.bot ? { bot: m.memory.bot } : {}) });
   const target = what === "undo" ? m.memory.id : m.memory.old?.id;
   if (!target) throw new Error("nothing to forget");
   await forget(b, target);
@@ -526,13 +566,25 @@ async function forget(b: Binding, id: string) {
 }
 
 /** Ask the user's memory a question ("what's their shipping address?", "what did we decide about pricing?"). */
-export async function recall(ws: string, question: string) {
+export async function recall(where: Where, question: string) {
   if (!on()) return "Memory isn't set up.";
-  const b = bindingOf(ws);
+  const sc = scopeIn(where);
   // Medium: "low" got facts wrong in testing (gave the user's own address for their parents').
-  // Answers take 3 to 10 seconds (sometimes more); each one is billed, so no retries.
-  const res = await within((async () => (await peer(b)).chat(question.slice(0, 1000), { reasoningLevel: "medium" }))(), 45_000);
-  return res ? String(res).trim() || "Nothing on that." : "Memory took too long to answer.";
+  // Answers take 3 to 10 seconds (sometimes more); each one is billed, so no retries. A bot that keeps its memory to
+  // itself asks its own bank first, and the team's only when that said nothing and it still knows what the team knows.
+  const ask = async (b: Binding) => {
+    const res = await within((async () => (await peer(b)).chat(question.slice(0, 1000), { reasoningLevel: "medium" }))(), 45_000);
+    return res ? String(res).trim() || "Nothing on that." : "Memory took too long to answer.";
+  };
+  // (Memory with nothing to say answers with nothing, as a slow one does: for the fallback, the two are told apart.)
+  if (sc.bot) {
+    const said = await within((async () => ({ text: (await (await peer(bindingOf(sc))).chat(question.slice(0, 1000), { reasoningLevel: "medium" })) ?? "" }))(), 45_000);
+    if (!said) return "Memory took too long to answer.";
+    const text = String(said.text).trim();
+    if (text) return text;
+    return sc.readsTeam ? ask(bindingOf(sc.ws)) : "Nothing on that.";
+  }
+  return ask(bindingOf(sc.ws));
 }
 
 export const memoryOn = on;
@@ -835,8 +887,10 @@ function sessionsOf(botId: string) {
  * learned (from its chats and tasks). Memory is the workspace's: every bot on the team shares it.
  */
 export async function memoryFor(botId: string, opts: { q?: string; mine?: boolean } = {}) {
-  const ws = wsOf(botId);
-  const b = bindingOf(ws);
+  // Its scope: its own bank while it keeps its memory to itself (the tab says so), else its workspace's.
+  const sc = scopeOf(botId);
+  const ws = sc.ws;
+  const b = bindingOf(sc);
   const p = await peer(b);
   const mine = opts.mine ? new Set(sessionsOf(botId)) : null;
   type Raw = { id: string; content: string; sessionId: string | null; createdAt: string };
@@ -850,16 +904,17 @@ export async function memoryFor(botId: string, opts: { q?: string; mine?: boolea
   return {
     workspace: getState().workspaces?.find((w) => w.id === ws)?.name ?? "this workspace",
     ws,
+    ...(sc.bot ? { own: true } : {}),
     card: lines.map((l) => ({ id: CARD + l, text: l, private: !ok.has(l) })),
     facts: facts.map((f) => ({ ...f, private: !ok.has(f.text) })),
   };
 }
 
 /** Ask memory a question, with what it's based on: the closest facts and where each was learned. */
-export const askMemory = (botId: string, question: string) => askWorkspace(wsOf(botId), question);
+export const askMemory = (botId: string, question: string) => askWorkspace(scopeOf(botId), question);
 
 /** The same for a workspace's memory (the Knowledge page). */
-export async function askWorkspace(ws: string, question: string) {
+export async function askWorkspace(ws: Where, question: string) {
   const b = bindingOf(ws);
   const [answer, near] = await Promise.all([recall(ws, question), (async () => (await peer(b)).conclusions.query(question.slice(0, 300), 8))().catch(() => [])]);
   // Only facts that are about what was asked (the nearest ones can still be off topic).
@@ -877,8 +932,10 @@ export async function askWorkspace(ws: string, question: string) {
 }
 
 /** Correct a fact (a card line is changed in place; a learned fact is replaced). */
-export async function fixFact(ws: string, id: string, text: string) {
-  const b = bindingOf(ws);
+export async function fixFact(where: Where, id: string, text: string) {
+  const ws = wsIn(where);
+  const b = bindingOf(where);
+  const team = !scopeIn(where).bot;
   const p = await peer(b);
   const t = text.trim().slice(0, 1000);
   if (!t) throw new Error("Write the fact.");
@@ -887,29 +944,55 @@ export async function fixFact(ws: string, id: string, text: string) {
     await p.setCard(((await p.getCard()) ?? []).map((l) => (l === old ? t : l)));
     bankFor(b).card = undefined;
     categoriesDropped(b.bank, [id]);
-    categoriesNudge(ws, "card");
+    if (team) categoriesNudge(ws, "card");
     return;
   }
   await p.conclusions.delete(id);
   categoriesDropped(b.bank, [id]);
   await p.conclusions.create([{ content: t }]);
-  categoriesNudge(ws, "learned");
+  if (team) categoriesNudge(ws, "learned");
 }
 
 /** Put a fact on the card ("About you"), which every bot sees with every message. The card holds 40 lines. */
-export async function pinFact(ws: string, text: string) {
-  const b = bindingOf(ws);
+export async function pinFact(where: Where, text: string) {
+  const ws = wsIn(where);
+  const b = bindingOf(where);
   const p = await peer(b);
   const lines = (await p.getCard()) ?? [];
   if (lines.includes(text)) return;
   if (lines.length >= 40) throw new Error("About you is full (40 lines). Remove one first.");
   await p.setCard([...lines, text.trim().slice(0, 300)]);
   bankFor(b).card = undefined;
-  categoriesNudge(ws, "card");
+  if (!scopeIn(where).bot) categoriesNudge(ws, "card");
 }
 
 /** Delete a fact or a card line. */
-export const forgetFact = (ws: string, id: string) => forget(bindingOf(ws), id);
+export const forgetFact = (ws: Where, id: string) => forget(bindingOf(ws), id);
+
+/**
+ * A bot that kept its memory to itself, back with the team's ("Bring it in", from the team chart): every fact of its
+ * own bank saved into the team's (into the workspace's notes when the team's bank is shared with another workspace).
+ * How many came in. Its bank is deleted after, through the outbox (memory-deletes.ts bringInOwnBank). Memory off
+ * (signed out) throws: nothing is brought in, and the bank stays kept apart for the next try.
+ */
+export async function bringIn(botId: string): Promise<number> {
+  if (!on()) throw new Error("Memory isn't on right now, so nothing was brought in. Try again once Bops is signed in.");
+  const ws = wsOf(botId);
+  const own = ownBankOf(botId);
+  // (A list memory can't give throws, so a bank is never deleted with facts left in it.)
+  const facts = await allFacts(own, 3000).catch((e) => {
+    if (notFound(e)) return [] as { id: string; text: string }[];
+    throw e;
+  });
+  const team = bindingOf(ws);
+  if (facts.length) {
+    const notes = ownsBank(ws) ? undefined : await notesFor(team, ws);
+    const p = await peer(team);
+    for (let i = 0; i < facts.length; i += 50) await p.conclusions.create(facts.slice(i, i + 50).map((f) => ({ content: f.text, ...(notes ? { sessionId: notes } : {}) })));
+    categoriesNudge(ws, "learned");
+  }
+  return facts.length;
+}
 
 /*
  * For the categories (memory-categories.ts), which sort what's in memory into People, Tasks,

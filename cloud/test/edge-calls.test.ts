@@ -15,7 +15,7 @@ const users: string[] = [];
  * One user with Sam (the main bot, on the workspace's number) and Iris (her own number), and Alex's
  * verified mobile. `extra` adds to the state (accounts, channels); `samAccess` and `samVoice` are Sam's.
  */
-async function setUp(opts: { owner?: Record<string, unknown>[]; ownerName?: string | null; extra?: Record<string, unknown>; samAccess?: Record<string, string>; samVoice?: string } = {}) {
+async function setUp(opts: { owner?: Record<string, unknown>[]; ownerName?: string | null; extra?: Record<string, unknown>; samAccess?: Record<string, string>; samVoice?: string; botSettings?: Record<string, unknown> } = {}) {
   const userId = newUserId("calls");
   users.push(userId);
   const line = { phone: newNumber(), numberId: `num_${randomUUID()}`, agentId: `agt_${randomUUID()}`, type: "sms", scope: "sub", at: 1 };
@@ -29,7 +29,7 @@ async function setUp(opts: { owner?: Record<string, unknown>[]; ownerName?: stri
       { id: "sam", name: "Sam", role: "Chief of Staff", isMain: true, computerStatus: "none", ...(opts.samAccess ? { access: opts.samAccess } : {}), ...(opts.samVoice ? { voice: opts.samVoice } : {}) },
       { id: "iris", name: "Iris", role: "Inbox", isMain: false, phone: iris.phone, phoneLine: { numberId: iris.numberId, agentId: iris.agentId }, computerStatus: "none", access: { ca_iris: "act" } },
     ],
-    workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, line }],
+    workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, line, ...(opts.botSettings ? { botSettings: opts.botSettings } : {}) }],
     ownerPhones: owners,
     messages: [],
     ...opts.extra,
@@ -177,6 +177,23 @@ test("anyone but the owner is turned away before the call connects: no bot, no m
   assert.equal(openai.sidebands.length, 0, "never connected");
   assert.equal((await pending(userId)).length, 0);
   assert.equal(ap.sent.length, 0);
+});
+
+test("its settings page's call settings (the workspace's botSettings): calls off is busy before it connects; a picked voice is spoken", async () => {
+  const off = await setUp({ samVoice: "cedar", botSettings: { sam: { answersCalls: false } } });
+  const busy = `live_${randomUUID()}`;
+  await calls.answerInCloud(off.userId, incomingCallEvent(busy, off.mobile, off.line.phone));
+  assert.deepEqual(
+    openai.controls.filter((c) => c.sessionId === busy).map((c) => [c.action, c.body]),
+    [["reject", { status_code: 486 }]],
+    "the owner's call, turned away as busy",
+  );
+  assert.equal(openai.sidebands.filter((x) => x.sessionId === busy).length, 0, "never connected");
+  const picked = await setUp({ samVoice: "cedar", botSettings: { sam: { callVoice: "sage" } } });
+  const call = `live_${randomUUID()}`;
+  await calls.answerInCloud(picked.userId, incomingCallEvent(call, picked.mobile, picked.line.phone));
+  const session = (openai.controls.find((c) => c.action === "accept" && c.sessionId === call)?.body as { session: { audio: { output: { voice: string } } } }).session;
+  assert.equal(session.audio.output.voice, "sage", "the picked voice, over the one kept for its name (Bot.voice)");
 });
 
 test("an unverified number, or one another Orgo user verified, isn't the owner", async () => {

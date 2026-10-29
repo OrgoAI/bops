@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
-import { accessSummary, cleanAccess, cleanName, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
+import { accessSummary, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
 import { accessFor, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, watchable } from "../members.ts";
 import { MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, type MemberActPayload, type WsAccess } from "../protocol.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, handedByOthers, OWNER_VIEW, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
@@ -127,7 +127,7 @@ test("what a member is shown is one workspace, and only the fields named", () =>
   const blob = {
     workspaces: [
       { id: "ws_main", name: "Main", orbitKey: "orbit-secret", line: { numberId: "n1" } },
-      { id: "ws_acme", name: "Acme", createdAt: 5, orbitKey: "acme-orbit-secret", memory: { bank: "b" }, mailSlug: "acme", skills: [{ slug: "s" }], approvals: [{ sha: "x" }], memberAccess: { "kim@acme.com": { others: "read", bots: {} } } },
+      { id: "ws_acme", name: "Acme", createdAt: 5, orbitKey: "acme-orbit-secret", memory: { bank: "b" }, mailSlug: "acme", skills: [{ slug: "s" }], approvals: [{ sha: "x" }], memberAccess: { "kim@acme.com": { others: "read", bots: {} } }, chain: { sideways: "closed", bots: { juno: { lead: "max", memory: "own", for: "kim@acme.com", forName: "Kim" } }, pairs: { "juno>rex": true }, at: 7 } },
     ],
     bots: [
       { id: "boppy", name: "Boppy", isMain: true, appsKey: "main-apps-key" },
@@ -196,13 +196,15 @@ test("what a member is shown is one workspace, and only the fields named", () =>
   });
   // Nothing of any secret, the other workspace or the account is anywhere in it.
   const text = JSON.stringify(s);
-  for (const secret of ["orbit", "apps-key", "STRIPE", "100.1.1.1", "comp-1", "remoteUrl", "tok", "screen text", "codex --key", "resp_1", "+1555", "pairCode", "123456", "owner@x.com", "Boppy", "Main's", "kept text", "said", "x@y", "persona", "be nice", "cost", "memberAccess", "kim@acme.com"])
+  for (const secret of ["orbit", "apps-key", "STRIPE", "100.1.1.1", "comp-1", "remoteUrl", "tok", "screen text", "codex --key", "resp_1", "+1555", "pairCode", "123456", "owner@x.com", "Boppy", "Main's", "kept text", "said", "x@y", "persona", "be nice", "cost", "memberAccess", "kim@acme.com", "chain", "sideways", "juno", "pairs"])
     assert.ok(!text.includes(secret), `"${secret}" isn't shown`);
   // The member the owner gave every bot is held to the same allow list: what the owner is shown, the
   // teammate it's asking ("ana", not one of the workspace's bots) left out, and their level for each bot it shows.
   const kim = sharedSlice(blob, "ws_acme", { role: "member", id: "u-kim", email: "kim@acme.com" });
   assert.deepEqual(kim, { ...s, chats: [{ ...s.chats[0], asking: {} }, s.chats[1]], levels: { max: "read" } });
   assert.ok(!JSON.stringify(kim).includes("kim@acme.com"));
+  // Nor the team chart: who answers to whom, who keeps its memory and whom a bot works for are the owner's.
+  for (const word of ["chain", "sideways", "juno", "pairs", "Kim"]) assert.ok(!JSON.stringify(kim).includes(word), `"${word}" isn't shown to a member`);
   assert.equal(sharedHash(s), sharedHash(sharedSlice({ ...blob, usage: { events: [] }, vault: [] }, "ws_acme", OWNER_VIEW)), "the account's own parts don't move the fingerprint");
   assert.notEqual(sharedHash(s), sharedHash(sharedSlice({ ...blob, sessions: [] }, "ws_acme", OWNER_VIEW)));
   assert.deepEqual(sharedSlice(blob, "ws_nobody", OWNER_VIEW), { workspace: null, bots: [], chats: [], sessions: [], routines: [], watches: [] });
@@ -1266,4 +1268,143 @@ test("over HTTP: orgo-web's notice coming while an act is being queued takes it 
   assert.equal(r.status, 404);
   assert.ok(dropped.filter((x) => x === "proj-act act-sam").length >= 2, "dropped again once it was queued");
   resetMembers();
+});
+
+test("Your Apps as a level of its own: kept when it's a level, none when missing, Read for a new invite", () => {
+  assert.deepEqual(cleanAccess({ others: "none", bots: { sam: "read" }, apps: "write" }), { others: "none", bots: { sam: "read" }, apps: "write" });
+  for (const bad of ["admin", 2, null, { level: "write" }]) assert.equal("apps" in cleanAccess({ others: "none", bots: {}, apps: bad })!, false, `${JSON.stringify(bad)} left out`);
+  assert.equal(appsLevelOf({ others: "none", bots: {} } as MemberAccess), "none", "missing is none: an older Bops's entry gives nothing");
+  assert.equal(appsLevelOf({ apps: "admin" }), "none");
+  assert.equal(appsLevelOf(null), "none");
+  assert.deepEqual(inviteDefault(["sam", "max"]), { others: "none", bots: { sam: "read", max: "read" }, apps: "read" });
+  assert.equal(appsSummary({ apps: "read" }), "Your Apps, read", "worded as the bots' line is");
+  assert.equal(appsSummary({ apps: "write" }), "Your Apps, write");
+  assert.equal(appsSummary({ apps: "none" }), "", "nothing at None");
+  assert.equal(appsSummary({}), "Your Apps not set", "never None before a level is given");
+  assert.equal(accessSummary({ others: "none", bots: { sam: "read" }, apps: "write" }, ["sam"]), "Every bot, read", "the bots' line is the bots' alone");
+  // A Bops from before (v0.0.32) keeps an entry as its cleanAccess makes it: { others, bots } only, with its `at`.
+  const older: { others: string; bots: Record<string, string>; at: number; apps?: string } = { others: "none", bots: { sam: "read" }, at: 150 };
+  assert.equal(appsLevelOf(older), "none", "read as none: access lost, never gained");
+  const before = { ...older, apps: "write" };
+  assert.equal(currentFor(before, 200), false, "an entry set before they joined gives no apps either");
+});
+
+/* ---------------- Your Apps: what a member is shown of the apps, and what they may do to them ---------------- */
+
+const appsBlob = (apps: Record<string, unknown> | undefined, more: Record<string, unknown> = {}): Record<string, unknown> => ({
+  workspaces: [
+    {
+      id: "ws_apps",
+      name: "Apps",
+      memberAccess: { "tom@orgo.ai": { others: "none", bots: { max: "read" }, ...(apps ? apps : {}) }, "sam@example.com": { others: "none", bots: { max: "write" }, apps: "write" } },
+      hostedApps: {
+        shop: { botId: "max", computerId: "comp-1", projectId: "proj-1", url: "https://shop.orgo.dev", queuedAt: 5, behind: [{ site: "old", computerId: "comp-0", projectId: "proj-0" }], sites: [{ name: "admin", projectId: "proj-2", url: "https://admin.orgo.dev" }] },
+        notes: { botId: "zed", computerId: "comp-2", lost: 7 },
+      },
+      ingotTokens: { "comp-1": { id: "tok-1", sum: "sum-1", at: 1 } },
+      appsForMembers: {
+        at: 10,
+        apps: {
+          shop: {
+            head: { id: "cs-2", message: "Fix the cart", at: 9 },
+            sites: [{ name: "shop", url: "https://shop.orgo.dev", serving: "cs-2", live: { id: "dep-2", state: "succeeded", when: 9, error: "boom" }, domains: [{ domain: "shop.acme.example", status: "active" }] }],
+            commits: [{ id: "cs-2", message: "Fix the cart", author: "Max", at: 9, changes: { added: 1, modified: 2, deleted: 0 }, serving: true }],
+            deploys: [
+              { id: "dep-2", state: "succeeded", at: "cs-2", rollback: false, when: 9, live: true, canRollback: false, site: "shop", error: "never shown" },
+              { id: "dep-1", state: "succeeded", at: "cs-1", rollback: false, when: 8, live: false, canRollback: true, site: "shop" },
+            ],
+            settings: { shop: { port: 3000, install: "npm ci", build: "npm run build", start: "npm start", env: ["STRIPE_KEY"] } },
+            acts: [{ key: "k1", userId: "u-sam", name: "Sam", act: "deploy", ok: true, at: 9 }],
+          },
+        },
+        owned: [{ id: "zone-1", domain: "acme.example", inUse: [{ name: "x" }] }],
+      },
+      ...more,
+    },
+  ],
+  bots: [{ id: "max", name: "Max", workspaceId: "ws_apps" }, { id: "zed", name: "Zed", workspaceId: "ws_apps" }],
+  chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_apps" }],
+});
+const TOM_VIEW: SliceViewer = { role: "member", email: "tom@orgo.ai", id: "u-tom" };
+
+test("Your Apps at Read: the apps by name, their sites, history, deploys and members' acts; never ids, tokens, variables or error text", () => {
+  const s = sharedSlice(appsBlob({ apps: "read" }), "ws_apps", TOM_VIEW);
+  assert.equal(s.apps?.level, "read");
+  assert.equal(s.apps?.at, 10);
+  assert.deepEqual(s.apps?.list.map((a) => a.name), ["shop", "notes"]);
+  const shop = s.apps!.list[0];
+  assert.deepEqual(Object.keys(shop).sort(), ["acts", "botId", "commits", "deploys", "head", "name", "siteNames", "sites", "url"]);
+  assert.equal(shop.botId, "max", "a bot they see");
+  assert.equal(s.apps!.list[1].botId, undefined, "never a bot hidden from them");
+  assert.equal(s.apps!.list[1].lost, true);
+  assert.deepEqual(shop.siteNames, ["admin"]);
+  assert.deepEqual(shop.sites, [{ name: "shop", url: "https://shop.orgo.dev", serving: "cs-2", live: { id: "dep-2", state: "succeeded", when: 9 }, domains: [{ domain: "shop.acme.example", status: "active" }] }]);
+  assert.deepEqual(shop.commits, [{ id: "cs-2", message: "Fix the cart", author: "Max", at: 9, changes: { added: 1, modified: 2, deleted: 0 } }]);
+  assert.equal(shop.settings, undefined, "settings at Write only");
+  assert.equal(s.apps!.owned, undefined, "the workspace's domains at Write only");
+  const text = JSON.stringify(s);
+  for (const hidden of ["comp-", "proj-", "queuedAt", "behind", "tok-1", "sum-1", "ingot", "STRIPE_KEY", "never shown", "boom", "memberAccess", "appsForMembers", "inUse"]) assert.ok(!text.includes(hidden), `"${hidden}" isn't shown`);
+  assert.deepEqual(s.workspace, { id: "ws_apps", name: "Apps" }, "the workspace's own fields stay as they were");
+});
+
+test("Your Apps at Write adds each site's settings and the workspace's domains; nothing for None, an older entry, the owner, an email apps aren't open to, or no apps", () => {
+  const w = sharedSlice(appsBlob({ apps: "write" }), "ws_apps", TOM_VIEW);
+  assert.equal(w.apps?.level, "write");
+  assert.deepEqual(w.apps?.list[0].settings, { shop: { port: 3000, install: "npm ci", build: "npm run build", start: "npm start" } }, "never its variables");
+  assert.deepEqual(w.apps?.owned, [{ id: "zone-1", domain: "acme.example" }]);
+  for (const [why, blob, viewer] of [
+    ["None", appsBlob({ apps: "none" }), TOM_VIEW],
+    ["an entry an older Bops wrote (no level)", appsBlob(undefined), TOM_VIEW],
+    ["set before they joined", appsBlob({ apps: "write", at: 5 }), { ...TOM_VIEW, joinedAt: 10 }],
+    ["the owner", appsBlob({ apps: "write" }), OWNER_VIEW],
+    ["apps aren't open to their email", appsBlob({ apps: "write" }), { role: "member", email: "sam@example.com", id: "u-sam" }],
+    ["a workspace with no apps", appsBlob({ apps: "write" }, { hostedApps: undefined }), TOM_VIEW],
+  ] as const)
+    assert.equal("apps" in sharedSlice(blob as Record<string, unknown>, "ws_apps", viewer as SliceViewer), false, why);
+});
+
+test("Your Apps is in the member's fingerprint: what the owner's Mac reads again gives them a new one", () => {
+  const a = sharedHash(sharedSlice(appsBlob({ apps: "read" }), "ws_apps", TOM_VIEW));
+  const later = appsBlob({ apps: "read" });
+  ((later.workspaces as Record<string, Record<string, unknown>>[])[0].appsForMembers as Record<string, unknown>).at = 11;
+  assert.notEqual(sharedHash(sharedSlice(later, "ws_apps", TOM_VIEW)), a);
+});
+
+test("over HTTP: Your Apps at Write deploys, goes back, changes settings and uses a domain; Read, a missing app, a domain it doesn't own or a deploy that can't go back are refused", async () => {
+  const blob = appsBlob({ apps: "write" });
+  queued.length = 0;
+  resetMembers({
+    state: async () => blob,
+    queue: async (owner, kind, payload, dedupe, expires) => void queued.push({ owner, kind, payload: payload as MemberActPayload, dedupe, expires }),
+    isOn: () => true,
+    drop: async () => {},
+    count: async () => {},
+  });
+  roles["apps-tom proj-apps"] = { role: "member", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps" };
+  emails["apps-tom"] = "tom@orgo.ai";
+  const go = (a: unknown, key: string) => act("apps-tom", { key, act: a }, "proj-apps");
+  assert.equal((await go({ act: "deploy", app: "shop" }, "k_app_00001")).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "deploy", app: "shop" });
+  assert.equal((await go({ act: "deploy", app: "shop", site: "admin", at: "cs-1" }, "k_app_00002")).status, 202);
+  assert.equal((await go({ act: "rollback", app: "shop", deployment: "dep-1" }, "k_app_00003")).status, 202);
+  assert.equal((await go({ act: "settings", app: "shop", port: 8080, start: "npm run serve" }, "k_app_00004")).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "settings", app: "shop", port: 8080, start: "npm run serve" });
+  assert.equal((await go({ act: "domain", app: "shop", zone: "zone-1", subdomain: "store" }, "k_app_00005")).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "domain", app: "shop", zone: "zone-1", subdomain: "store" });
+  const n = queued.length;
+  const refused = async (a: unknown, status: number, code?: string) => {
+    const r = await go(a, `k_no_${String(Math.random()).slice(2, 10)}`);
+    assert.deepEqual([r.status, r.json.code], [status, code], JSON.stringify(a));
+  };
+  await refused({ act: "deploy", app: "nope" }, 404);
+  await refused({ act: "deploy", app: "shop", site: "blog" }, 404);
+  await refused({ act: "domain", app: "shop", zone: "zone-9" }, 404);
+  await refused({ act: "rollback", app: "shop", deployment: "dep-2" }, 409, "not_waiting");
+  await refused({ act: "buy", app: "shop", domain: "x.example" }, 400);
+  await refused({ act: "env", app: "shop", env: { A: "1" } }, 400);
+  await refused({ act: "settings", app: "shop" }, 400, undefined);
+  await refused({ act: "settings", app: "shop", port: 70000 }, 400);
+  ((blob.workspaces as Record<string, Record<string, unknown>>[])[0].memberAccess as Record<string, Record<string, unknown>>)["tom@orgo.ai"].apps = "read";
+  await refused({ act: "deploy", app: "shop" }, 403, "member_apps_read_only");
+  assert.equal(queued.length, n, "nothing refused was queued");
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, createElement, useEffect, useRef, useState } from "react";
+import { appsLine, appsName } from "@/lib/apps-access";
 import { GROUP_NAME } from "@/lib/memory-categories";
 import { live, type AppState } from "@/lib/types";
 import { computerOf } from "@/lib/screens";
@@ -179,7 +180,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
             : t.kind === "made-app"
               ? (state.madeApps?.find((a) => a.id === t.appId)?.title ?? "App")
               : t.kind === "made-apps"
-                ? "Apps"
+                ? appsName(state)
                 : hosted
                   ? hosted.title
                 : t.kind === "mac"
@@ -463,8 +464,8 @@ export function NewTab({
               <AppsIcon size={13} />
             </span>
             <span className="flex flex-col">
-              <span className="text-[14px] font-medium leading-[18px]">Apps</span>
-              <span className="text-[12px] leading-4 text-[#6B6B6B]">Tools your bots made for you</span>
+              <span className="text-[14px] font-medium leading-[18px]">{appsName(state)}</span>
+              <span className="text-[12px] leading-4 text-[#6B6B6B]">{state.shared ? appsLine(state) : "Tools your bots made for you"}</span>
             </span>
           </button>
         )}

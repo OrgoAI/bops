@@ -2,10 +2,10 @@
 # A thread a brain runs (lib/server/cli-agents.ts): one process per thread on this computer, started
 # detached and pinned to the thread's screen, that Bops talks to through files, since Bops reaches the
 # computer one command at a time (Orgo's bash) and has no stream back. For Claude Code it's Claude Code
-# itself, reading each message as it comes; for Codex, a small runner here that gives each message to a
-# `codex exec` of its own on the thread (resumed after the first), one after another. Each thread has a
-# folder, /root/.bops/agents/<thread>:
-#   in.jsonl   what Bops sends, one line per message (a stream-json user line for Claude Code; {"text"} for Codex)
+# itself, reading each message as it comes; for Codex and OpenCode, a small runner here that gives each
+# message to a `codex exec` (or `opencode run`) of its own on the thread (resumed after the first), one after
+# another. Each thread has a folder, /root/.bops/agents/<thread>:
+#   in.jsonl   what Bops sends, one line per message (a stream-json user line for Claude Code; {"text"} for Codex and OpenCode)
 #   out.jsonl  what the CLI says (Claude Code's stream-json events, Codex's exec --json ones), which Bops reads
 #              on from where it got to (read)
 #   mcp.json   its tools besides its own: Bops' screen and browser MCP servers, as a Bops agent thread has them
@@ -13,19 +13,26 @@
 #   key        a key brain's key, for a moment: bops-brain run reads it into the environment and deletes it
 #              (Codex's runner reads it once and hands each `codex exec` a file of its own the same way)
 #   closed     the run is over: Codex's runner exits once it has answered what came before
-#   term.pid   the thread's Claude Code open in a terminal for the user (terminal), when it is
+#   term.pid   the thread's CLI open in a terminal for the user (terminal), when it is
+#   oc.json    OpenCode's settings for this thread (its MCP servers, its briefing): nothing secret
+#   oc-session OpenCode's session for the thread, once a turn of it went through
 # The CLI runs through bops-brain run: from an empty environment, in the brain's own folder, with no
-# Anthropic or OpenAI key or token but the brain's own key, if it has one. Only one of the thread's process
-# and its terminal runs at a time: starting either closes the other.
+# Anthropic or OpenAI key or token but the brain's own key, if it has one. A thread of a bot's agent (the
+# --bot flags, lib/agents.ts) runs as that bot's agent: its own settings, its own commands, and on a key, a
+# run token for a gate that holds the key (bops-brain, "A bot's own settings"). Only one of the thread's
+# process and its terminal runs at a time: starting either closes the other.
 #
 # Usage:
 #   bops-agent put <thread> mcp.json|prompt.md|key
 #       write stdin to that file, readable by root only
-#   bops-agent start <thread> <brain> claude|codex <display> <computer> <session> [-- <more CLI args>...]
+#   bops-agent start <thread> <brain|-> claude|codex|opencode <display> <computer> <session>
+#                    [--bot <bot> --agent <agent> --model <m> [--effort <e>] [--route <r>] [--also <agents>] [--label <w>]]
+#                    [-- <more CLI args>...]
 #       stop the thread's process left from before, if there is one (and close its terminal), and start
 #       the CLI on that screen, in /workspace. It picks <session> back up when the brain's folder has it,
-#       else starts it fresh (Claude Code as <session>; Codex under an id of its own, which it says).
-#       Prints "started resumed" or "started fresh".
+#       else starts it fresh (Claude Code as <session>; Codex under an id of its own, which it says;
+#       OpenCode as <session>, an id that starts "ses_", in the bot's own OpenCode folder). OpenCode runs
+#       only as a bot's agent, with no brain ("-"). Prints "started resumed" or "started fresh".
 #   bops-agent send <thread>
 #       append stdin (one line) to in.jsonl while its process runs; "gone" and exit 3 when it doesn't
 #   bops-agent read <thread> <offset> [bytes]
@@ -34,13 +41,18 @@
 #       <offset>, each made small (no pictures, long text cut), about [bytes] of them at most
 #   bops-agent stop <thread>    Stop: SIGINT, then harder if it doesn't go
 #   bops-agent close <thread>   the end of a run: its input ends and it exits once it's done (SIGINT after a few seconds)
-#   bops-agent terminal <thread> <brain> <display> <computer> <session>
-#       the thread's process goes, and a terminal on that screen runs Claude Code's own --resume of <session>,
-#       with the thread's tools and briefing, for the user. Prints "terminal on :<display>".
-#   bops-agent unterm <thread>  close that terminal (its Claude Code first)
+#   bops-agent terminal <thread> <brain|-> <display> <computer> <session> [--kind claude|codex|opencode] [<bot flags>]
+#       the thread's process goes, and a terminal on that screen runs the CLI's own resume of <session>
+#       (Claude Code's --resume, with the thread's tools and briefing; Codex's resume; OpenCode on the
+#       session), for the user. A bot's agent's terminal goes on into the bot's own shell once the CLI
+#       closes. Prints "terminal on :<display>".
+#   bops-agent shell <bot> <brain|-> <kind> <display> <computer> [<bot flags>]
+#       the bot's own terminal with no thread: its shell, where claude, codex and opencode are the bot's.
+#   bops-agent unterm <thread>  close that terminal (its CLI first)
 set -euo pipefail
 AGENTS="${BOPS_AGENTS:-/root/.bops/agents}"
 BRAINS="${BOPS_BRAINS:-/root/.bops/brains}"
+BOTS="${BOPS_BOTS:-/root/.bops/bots}"
 WORK="${BOPS_WORKSPACE:-/workspace}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # What Claude Code may do without asking: what a Bops agent does on its own computer (the shell, files,
@@ -48,10 +60,30 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # an app's repo on this computer (a task on one has them). Anything else asks the user in Bops first (the
 # screen MCP's approve tool).
 ALLOWED="Bash,BashOutput,KillShell,Read,Edit,MultiEdit,Write,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite,Task,Agent,mcp__screen,mcp__browser,mcp__ingot"
-usage() { echo "usage: bops-agent put|start|send|read|stop|close|terminal|unterm <thread> ..." >&2; exit 2; }
+usage() { echo "usage: bops-agent put|start|send|read|stop|close|terminal|shell|unterm <thread> ..." >&2; exit 2; }
 CMD="${1:-}"; T="${2:-}"
 [[ "$T" =~ ^[A-Za-z0-9_-]+$ ]] || usage
+# A bot's own terminal (shell) has a folder of its own, for its term.pid and key.
+[ "$CMD" = shell ] && T="shell-$T"
 DIR="$AGENTS/$T"
+
+# The flags that make a run a bot's agent's (bops-brain run --bot ...): read into PROF, checked, and BOT,
+# MODEL and ROUTE kept for what this script needs of them. Shifts them off; ARGN is how many there were.
+PROF=(); BOT=""; MODEL=""; ROUTE=""; KINDF=""
+prof() {
+  ARGN=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bot|--agent|--model|--effort|--route|--also|--label)
+        [[ "${2:-}" =~ ^[A-Za-z0-9._:/,-]+$ && ${#2} -le 600 ]] || usage
+        PROF+=("$1" "$2")
+        case "$1" in --bot) BOT="$2" ;; --model) MODEL="$2" ;; --route) ROUTE="$2" ;; esac
+        shift 2; ARGN=$((ARGN + 2)) ;;
+      --kind) KINDF="${2:-}"; shift 2; ARGN=$((ARGN + 2)) ;;
+      *) break ;;
+    esac
+  done
+}
 
 # Its process is running (or with term.pid, its terminal): the one Bops started, as its pid file says, and
 # still that one (its arguments name this thread's folder), not another that took the number after a restart.
@@ -85,19 +117,47 @@ halt() {
   untail
   rm -f "$DIR/key"
 }
-# Close the thread's terminal: its Claude Code (the window's shell's child) first, harder if it doesn't go
-# (while it's still the shell's, so it's found), then the shell, so the window goes.
+# Every process under $1, deepest first.
+descendants() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do descendants "$c"; echo "$c"; done
+}
+# Close the thread's terminal: what runs in it (its CLI, and a bot's shell after it, which a run as a bot's agent
+# keeps as its child: bops-brain --shell-after) first, harder if it doesn't go (found while they're still the
+# window's), then the window's own process, so the window goes.
 unterm() {
-  local p i
+  local p i k kids left
   if alive term.pid; then
     p="$(cat "$DIR/term.pid")"
-    pkill -TERM -P "$p" 2>/dev/null || true
-    for i in $(seq 1 30); do pgrep -P "$p" > /dev/null 2>&1 || break; sleep 0.1; done
-    pkill -KILL -P "$p" 2>/dev/null || true
+    kids="$(descendants "$p")"
+    for k in $kids; do kill -TERM "$k" 2>/dev/null || true; done
+    for i in $(seq 1 30); do
+      left=""
+      for k in $kids; do kill -0 "$k" 2>/dev/null && left=1; done
+      [ -z "$left" ] && break
+      sleep 0.1
+    done
+    for k in $kids; do kill -KILL "$k" 2>/dev/null || true; done
     kill -TERM "$p" 2>/dev/null || true
     gone_within 20 term.pid || kill -KILL "$p" 2>/dev/null || true
   fi
   rm -f "$DIR/term.pid"
+}
+
+# A terminal window on screen $2 titled by $1 (the CLI's name, or the bot's shell), running this script's $3...
+# Prints "terminal on :<display>" once it's up.
+open_term() {
+  local title="$1" n="$2"; shift 2
+  case "$title" in claude) title="Claude Code" ;; codex) title="Codex" ;; opencode) title="OpenCode" ;; shell) title="Bot shell" ;; esac
+  local TERMINAL TARGS
+  TERMINAL="${BOPS_TERMINAL:-$(command -v xfce4-terminal || command -v xterm || true)}"
+  [ -n "$TERMINAL" ] || { rm -f "$DIR/key"; echo "no terminal on this computer" >&2; exit 1; }
+  if [ "${TERMINAL##*/}" = xfce4-terminal ]; then TARGS=(--disable-server --title "$title" --maximize -x)
+  else TARGS=(-T "$title" -geometry 160x50+0+0 -e); fi
+  DISPLAY=":$n" setsid nohup "$TERMINAL" "${TARGS[@]}" "$HERE/bops-agent" "$@" "$DIR/" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+  for _ in $(seq 1 50); do alive term.pid && break; sleep 0.1; done
+  alive term.pid || { rm -f "$DIR/key"; echo "it didn't open: $(tail -c 300 "$DIR/err.log" 2>/dev/null)" >&2; exit 1; }
+  echo "terminal on :$n"
 }
 
 case "$CMD" in
@@ -111,9 +171,15 @@ case "$CMD" in
     ;;
   start)
     B="${3:-}"; KIND="${4:-}"; N="${5:-}"; C="${6:-}"; SID="${7:-}"
-    [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ && "$SID" =~ ^[0-9a-f-]{36}$ ]] || usage
-    [ "$KIND" = claude ] || [ "$KIND" = codex ] || usage
+    [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ ]] || usage
+    case "$KIND" in
+      claude|codex) [[ "$SID" =~ ^[0-9a-f-]{36}$ && "$B" != - ]] || usage ;;
+      opencode) [[ "$SID" =~ ^ses_[A-Za-z0-9]{8,40}$ && "$B" = - ]] || usage ;;
+      *) usage ;;
+    esac
     shift 7
+    prof "$@"; shift "$ARGN"
+    [ "$KIND" != opencode ] || [[ -n "$BOT" && -n "$MODEL" && -n "$ROUTE" ]] || usage
     [ "${1:-}" = -- ] && shift
     [ -f "$DIR/mcp.json" ] && [ -f "$DIR/prompt.md" ] || { echo "its tools or briefing aren't there" >&2; exit 1; }
     # A key file that came with this start is kept for the new process; anything else from the last one goes.
@@ -129,11 +195,15 @@ case "$CMD" in
     if [ "$KIND" = claude ]; then
       # Claude Code keeps each session in its folder (projects/<the folder it ran in>/<session>.jsonl).
       if [ -d "$BRAINS/$B/projects" ] && [ -n "$(find "$BRAINS/$B/projects" -name "$SID.jsonl" -print -quit 2>/dev/null)" ]; then MODE=resumed; fi
-      DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _run "$T" "$B" "$C" "$MODE" "$SID" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+      DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _run "$T" "$B" "$C" "$MODE" "$SID" ${PROF[@]+"${PROF[@]}"} -- "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+    elif [ "$KIND" = opencode ]; then
+      # OpenCode keeps each session in the bot's own OpenCode folder; the thread knows it began it (oc-session).
+      if [ "$(cat "$DIR/oc-session" 2>/dev/null)" = "$SID" ] && [ -f "$BOTS/$BOT/opencode/data/opencode/opencode.db" ]; then MODE=resumed; fi
+      DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _opencode "$T" "$C" "$MODE" "$SID" "${PROF[*]:-}" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
     else
       # Codex keeps each thread in its folder (sessions/<date>/rollout-<time>-<thread>.jsonl).
       if [ -d "$BRAINS/$B/sessions" ] && [ -n "$(find "$BRAINS/$B/sessions" -name "rollout-*$SID*.jsonl" -print -quit 2>/dev/null)" ]; then MODE=resumed; fi
-      DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _codex "$T" "$B" "$C" "$MODE" "$SID" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+      DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _codex "$T" "$B" "$C" "$MODE" "$SID" "${PROF[*]:-}" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
     fi
     for _ in $(seq 1 50); do [ -s "$DIR/pid" ] && break; sleep 0.1; done
     [ -s "$DIR/pid" ] || { rm -f "$DIR/key"; echo "it didn't start: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
@@ -143,6 +213,8 @@ case "$CMD" in
     # Behind start, detached: Claude Code reading in.jsonl as it grows, through a pipe from a tail of it
     # (its input ends when the tail goes: close), then a last line in out.jsonl once it's gone.
     B="$3"; C="$4"; MODE="$5"; SID="$6"; shift 6
+    prof "$@"; shift "$ARGN"
+    [ "${1:-}" = -- ] && shift
     cd "$WORK"
     KEY=()
     [ -f "$DIR/key" ] && KEY=(--key-file "$DIR/key")
@@ -156,7 +228,7 @@ case "$CMD" in
     # What isn't allowed asks the user, through the screen MCP (none when it has no screen tools: it's turned down).
     if grep -q '"screen"' "$DIR/mcp.json"; then ARGS+=(--permission-prompt-tool mcp__screen__approve); fi
     if [ "$MODE" = resumed ]; then ARGS+=(--resume "$SID"); else ARGS+=(--session-id "$SID"); fi
-    "$HERE/bops-brain" run "$B" claude --computer "$C" ${KEY[@]+"${KEY[@]}"} -- "${ARGS[@]}" "$@" < <(exec tail -n +1 -F "$DIR/in.jsonl" 2>/dev/null) > "$DIR/out.jsonl" 2>> "$DIR/err.log" &
+    "$HERE/bops-brain" run "$B" claude --computer "$C" ${KEY[@]+"${KEY[@]}"} ${PROF[@]+"${PROF[@]}"} -- "${ARGS[@]}" "$@" < <(exec tail -n +1 -F "$DIR/in.jsonl" 2>/dev/null) > "$DIR/out.jsonl" 2>> "$DIR/err.log" &
     echo $! > "$DIR/pid"
     set +e; wait $!; CODE=$?; set -e
     untail
@@ -173,14 +245,47 @@ case "$CMD" in
     # MCP's app tools ask them about in Bops. Its own settings are in the brain's folder (bops-brain run);
     # this thread's (Bops' briefing, after Codex's own instructions, and Bops' MCP servers) go on each
     # one's command line, since one brain's threads run side by side on this computer's screens.
-    B="$3"; C="$4"; MODE="$5"; SID="$6"; shift 6
+    B="$3"; C="$4"; MODE="$5"; SID="$6"; P="$7"; shift 7
     cd "$WORK"
     echo $$ > "$DIR/pid"
-    exec python3 - "$DIR/" "$B" "$C" "$MODE" "$SID" "$HERE" "$@" <<'PY'
+    BOPS_BOTS_DIR="$BOTS" exec python3 - "$DIR/" "$B" "$C" "$MODE" "$SID" "$HERE" "$P" "$@" <<'PY'
 import json, os, re, signal, subprocess, sys, time
 
-d, brain, computer, mode, sid, here = sys.argv[1:7]
-more = sys.argv[7:]
+d, brain, computer, mode, sid, here, prof = sys.argv[1:8]
+# A bot's agent's flags for bops-brain run (its bot, agent, model, effort, its other agents), checked by bops-agent start.
+prof = prof.split()
+more = sys.argv[8:]
+
+# The bot's other agents for its wrappers, as its profile has them now: bops-brain rebin keeps them in the
+# bot's folder when its profile changes, and a message's run after that takes those, not the ones this runner
+# began with (a Claude plan the bot doesn't run anymore never comes back into its claude).
+ALSO_RE = re.compile(r"[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?(,[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?)*")
+began = time.time()
+
+
+def flags():
+    bot = prof[prof.index("--bot") + 1] if "--bot" in prof and prof.index("--bot") + 1 < len(prof) else ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", bot):
+        return prof
+    f = os.path.join(os.environ.get("BOPS_BOTS_DIR", "/root/.bops/bots"), bot, "also")
+    try:
+        if os.path.getmtime(f) <= began:
+            return prof
+        with open(f) as fh:
+            spec = fh.read().strip()
+    except OSError:
+        return prof
+    if spec and not ALSO_RE.fullmatch(spec):
+        return prof
+    out, i = [], 0
+    while i < len(prof):
+        if prof[i] == "--also":
+            i += 2
+            continue
+        out.append(prof[i])
+        i += 1
+    return out + (["--also", spec] if spec else [])
+
 inp, out_path, err_path = (os.path.join(d, f) for f in ("in.jsonl", "out.jsonl", "err.log"))
 # A key brain's key: read once and gone from its file; each exec gets it in a file of its own, read and deleted.
 key = None
@@ -295,7 +400,7 @@ def turn(text, out, err):
         os.write(fd, key.encode())
         os.close(fd)
     at = os.path.getsize(err_path) if os.path.exists(err_path) else 0
-    child = subprocess.Popen([os.path.join(here, "bops-brain"), "run", brain, "codex", "--computer", computer, *(["--key-file", kf] if kf else []), "--", *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
+    child = subprocess.Popen([os.path.join(here, "bops-brain"), "run", brain, "codex", "--computer", computer, *(["--key-file", kf] if kf else []), *flags(), "--", *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
     try:
         child.stdin.write(text.encode("utf-8", "replace"))
         child.stdin.close()
@@ -357,6 +462,190 @@ with open(out_path, "ab", buffering=0) as out, open(err_path, "ab", buffering=0)
     out.write((json.dumps({"type": "bops", "subtype": "exited", "code": 130 if stopping else code}) + "\n").encode())
 PY
     ;;
+  _opencode)
+    # Behind start, detached: OpenCode's runner, as Codex's. Each message in in.jsonl is an `opencode run` of
+    # its own on the thread's session (made by Bops, created by the first, picked up after), one after another,
+    # each on a private server of its own (--standalone, never the background service other bots would share),
+    # its message on stdin. Its events go to out.jsonl as they come, then a line of Bops' own saying how the
+    # turn ended (OpenCode ends its turn by exiting), with its error words when it failed. Its settings are the
+    # bot's agent's (bops-brain run); this thread's (Bops' MCP servers and briefing) are in oc.json, which
+    # bops-brain hands it as OPENCODE_CONFIG_CONTENT, since one bot's threads run side by side.
+    C="$3"; MODE="$4"; SID="$5"; P="$6"; shift 6
+    cd "$WORK"
+    echo $$ > "$DIR/pid"
+    BOPS_BOTS_DIR="$BOTS" exec python3 - "$DIR/" "$C" "$MODE" "$SID" "$HERE" "$P" "$@" <<'PY'
+import json, os, re, signal, subprocess, sys, time
+
+d, computer, mode, sid, here, prof = sys.argv[1:7]
+prof = prof.split()
+more = [a for a in sys.argv[7:] if re.fullmatch(r"[A-Za-z0-9=_.:/-]+", a)]
+model = prof[prof.index("--model") + 1] if "--model" in prof and prof.index("--model") + 1 < len(prof) else ""
+
+# The bot's other agents for its wrappers, as its profile has them now: bops-brain rebin keeps them in the
+# bot's folder when its profile changes, and a message's run after that takes those, not the ones this runner
+# began with (a Claude plan the bot doesn't run anymore never comes back into its claude).
+ALSO_RE = re.compile(r"[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?(,[a-z]+:[a-z]+(:[A-Za-z0-9_-]*(:[A-Za-z0-9._:/-]*)?)?)*")
+began = time.time()
+
+
+def flags():
+    bot = prof[prof.index("--bot") + 1] if "--bot" in prof and prof.index("--bot") + 1 < len(prof) else ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", bot):
+        return prof
+    f = os.path.join(os.environ.get("BOPS_BOTS_DIR", "/root/.bops/bots"), bot, "also")
+    try:
+        if os.path.getmtime(f) <= began:
+            return prof
+        with open(f) as fh:
+            spec = fh.read().strip()
+    except OSError:
+        return prof
+    if spec and not ALSO_RE.fullmatch(spec):
+        return prof
+    out, i = [], 0
+    while i < len(prof):
+        if prof[i] == "--also":
+            i += 2
+            continue
+        out.append(prof[i])
+        i += 1
+    return out + (["--also", spec] if spec else [])
+
+inp, out_path, err_path = (os.path.join(d, f) for f in ("in.jsonl", "out.jsonl", "err.log"))
+key = None
+if os.path.exists(os.path.join(d, "key")):
+    with open(os.path.join(d, "key")) as f:
+        key = f.read()
+    os.remove(os.path.join(d, "key"))
+child = None
+stopping = False
+
+
+def stop(sig, _frame):
+    global stopping
+    stopping = True
+    if child is not None and child.poll() is None:
+        try:
+            child.send_signal(sig)
+        except OSError:
+            pass
+
+
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+
+
+def config():
+    """This thread's settings for OpenCode: Bops' MCP servers and its briefing (a file OpenCode reads)."""
+    try:
+        with open(os.path.join(d, "mcp.json")) as f:
+            servers = json.load(f).get("mcpServers", {})
+    except (OSError, ValueError, AttributeError):
+        servers = {}
+    mcp = {}
+    for name, x in servers.items():
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name) or not isinstance(x, dict) or not isinstance(x.get("command"), str):
+            continue
+        args = [a for a in x.get("args", []) if isinstance(a, str)]
+        env = {k: v for k, v in (x.get("env") or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        mcp[name] = {"type": "local", "command": [x["command"], *args], "environment": env, "enabled": True, "timeout": 1260000 if name == "screen" else 300000}
+    body = json.dumps({"mcp": mcp, "instructions": [os.path.join(d, "prompt.md")]})
+    path = os.path.join(d, "oc.json")
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.write(fd, body.encode())
+    os.close(fd)
+    os.replace(path + ".tmp", path)
+    return path
+
+
+def last_words(at):
+    try:
+        with open(err_path, "rb") as f:
+            f.seek(at)
+            lines = [x.strip() for x in f.read().decode("utf-8", "replace").splitlines()]
+    except OSError:
+        return ""
+    lines = [x for x in lines if x]
+    return lines[-1][:300] if lines else ""
+
+
+def turn(text, out, err, conf):
+    """One message: an `opencode run` on the thread's session with it on stdin, its events into out.jsonl."""
+    global child
+    kf = None
+    if key is not None:
+        kf = os.path.join(d, "key.run")
+        fd = os.open(kf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, key.encode())
+        os.close(fd)
+    at = os.path.getsize(err_path) if os.path.exists(err_path) else 0
+    args = ["run", "--standalone", "--format", "json", "--auto", "--session", sid, *(["--model", model] if model else []), *more]
+    child = subprocess.Popen([os.path.join(here, "bops-brain"), "run", "-", "opencode", "--computer", computer, *(["--key-file", kf] if kf else []), *flags(), "--oc-config", conf, "--", *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
+    try:
+        child.stdin.write(text.encode("utf-8", "replace"))
+        child.stdin.close()
+    except OSError:
+        pass
+    said = ""
+    for raw in iter(child.stdout.readline, b""):
+        out.write(raw if raw.endswith(b"\n") else raw + b"\n")
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "error":
+            e = ev.get("error") if isinstance(ev.get("error"), dict) else {}
+            said = str(e.get("message") or e.get("type") or "it failed")[:300]
+    code = child.wait()
+    if kf and os.path.exists(kf):
+        os.remove(kf)
+    ok = code == 0 and not said
+    if ok:
+        with open(os.path.join(d, "oc-session"), "w") as f:
+            f.write(sid)
+    if not stopping:
+        line = {"type": "bops", "subtype": "turn", "ok": ok}
+        if not ok:
+            line["error"] = said or last_words(at) or f"it stopped (exit {code})"
+        out.write((json.dumps(line) + "\n").encode())
+    return code
+
+
+offset, code = 0, 0
+with open(out_path, "ab", buffering=0) as out, open(err_path, "ab", buffering=0) as err:
+    conf = config()
+    out.write((json.dumps({"type": "bops", "subtype": "started", "session": sid}) + "\n").encode())
+    while not stopping:
+        try:
+            with open(inp, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            if os.path.exists(os.path.join(d, "closed")):
+                break
+            time.sleep(0.2)
+            continue
+        offset += end + 1
+        for raw in chunk[: end + 1].splitlines():
+            if stopping:
+                break
+            try:
+                text = json.loads(raw).get("text")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(text, str) and text.strip():
+                code = turn(text, out, err, conf)
+    for f in ("key", "key.run"):
+        try:
+            os.remove(os.path.join(d, f))
+        except OSError:
+            pass
+    out.write((json.dumps({"type": "bops", "subtype": "exited", "code": 130 if stopping else code}) + "\n").encode())
+PY
+    ;;
   send)
     alive || { echo gone; exit 3; }
     cat >> "$DIR/in.jsonl"
@@ -404,6 +693,9 @@ def event(ev):
     item = ev.get("item")
     if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
         out["item"]["text"] = item["text"][:WHOLE]
+    part = ev.get("part")
+    if ev.get("type") == "text" and isinstance(part, dict) and isinstance(part.get("text"), str):
+        out["part"]["text"] = part["text"][:WHOLE]
     return out
 
 
@@ -461,40 +753,79 @@ PY
     echo closed
     ;;
   terminal)
-    # The thread's Claude Code for the user, in a terminal on its screen: its own process goes first.
+    # The thread's CLI for the user, in a terminal on its screen: its own process goes first.
     B="${3:-}"; N="${4:-}"; C="${5:-}"; SID="${6:-}"
-    [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ && "$SID" =~ ^[0-9a-f-]{36}$ ]] || usage
+    shift 6 2>/dev/null || usage
+    prof "$@"; shift "$ARGN"
+    KIND="${KINDF:-claude}"
+    [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ ]] || usage
+    case "$KIND" in
+      claude|codex) [[ "$SID" =~ ^[0-9a-f-]{36}$ && "$B" != - ]] || usage ;;
+      opencode) [[ "$SID" =~ ^ses_[A-Za-z0-9]{8,40}$ && "$B" = - && -n "$BOT" ]] || usage ;;
+      *) usage ;;
+    esac
+    [ "$KIND" = claude ] || [ -n "$BOT" ] || usage
     [ -f "$DIR/mcp.json" ] && [ -f "$DIR/prompt.md" ] || { echo "its tools or briefing aren't there" >&2; exit 1; }
     [ -f "$DIR/key" ] && mv -f "$DIR/key" "$DIR/key.next"
     halt
     unterm
     [ -f "$DIR/key.next" ] && mv -f "$DIR/key.next" "$DIR/key"
-    TERMINAL="$(command -v xfce4-terminal || command -v xterm || true)"
-    [ -n "$TERMINAL" ] || { rm -f "$DIR/key"; echo "no terminal on this computer" >&2; exit 1; }
-    if [ "${TERMINAL##*/}" = xfce4-terminal ]; then TARGS=(--disable-server --title "Claude Code" --maximize -x)
-    else TARGS=(-T "Claude Code" -geometry 160x50+0+0 -e); fi
-    DISPLAY=":$N" setsid nohup "$TERMINAL" "${TARGS[@]}" "$HERE/bops-agent" _term "$T" "$B" "$C" "$SID" "$DIR/" < /dev/null > /dev/null 2>> "$DIR/err.log" &
-    for _ in $(seq 1 50); do alive term.pid && break; sleep 0.1; done
-    alive term.pid || { rm -f "$DIR/key"; echo "it didn't open: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
-    echo "terminal on :$N"
+    open_term "$KIND" "$N" _term "$T" "$KIND" "$B" "$C" "$SID" ${PROF[@]+"${PROF[@]}"}
     ;;
   _term)
-    # In the terminal: Claude Code's own session, as the thread's process has it (its tools, its briefing,
-    # what it may do by itself, the brain's folder, no Anthropic key or token but the brain's own key). What
-    # else it would do, it asks the user right here. Once it's closed, the window says where to go on.
-    B="$3"; C="$4"; SID="$5"
+    # In the terminal: the CLI's own session, as the thread's process has it (its tools, its briefing, what it
+    # may do by itself, its account's folder, no key or token but its own). What else it would do, it asks the
+    # user right here. A bot's agent's goes on into the bot's own shell once it's closed (bops-brain
+    # --shell-after); else the window says where to go on.
+    KIND="$3"; B="$4"; C="$5"; SID="$6"; shift 6
+    prof "$@"
+    echo $$ > "$DIR/term.pid"
+    cd "$WORK"
+    KEY=()
+    [ -f "$DIR/key" ] && KEY=(--key-file "$DIR/key")
+    AFTER=()
+    [ -n "$BOT" ] && AFTER=(--shell-after)
+    case "$KIND" in
+      claude) ARGS=(--resume "$SID" --setting-sources user --mcp-config "$DIR/mcp.json" --strict-mcp-config --append-system-prompt "$(cat "$DIR/prompt.md")" --allowedTools "$ALLOWED") ;;
+      codex) ARGS=(resume "$SID") ;;
+      opencode) ARGS=(--standalone --session "$SID") ;;
+    esac
+    OC=()
+    if [ "$KIND" = opencode ] && [ -f "$DIR/oc.json" ]; then OC=(--oc-config "$DIR/oc.json"); fi
+    set +e
+    "$HERE/bops-brain" run "$B" "$KIND" --computer "$C" ${KEY[@]+"${KEY[@]}"} ${PROF[@]+"${PROF[@]}"} ${OC[@]+"${OC[@]}"} ${AFTER[@]+"${AFTER[@]}"} -- "${ARGS[@]}"
+    rm -f "$DIR/key"
+    if [ -z "$BOT" ]; then
+      echo
+      echo "Claude Code is closed. Reply in the thread in Bops and it carries on there."
+      read -r _
+    fi
+    rm -f "$DIR/term.pid"
+    ;;
+  shell)
+    # The bot's own terminal with no thread (its profile's Open its terminal): straight into its shell, as
+    # one of its agents (the Default, or its first CLI agent), so claude, codex and opencode there are its own.
+    B="${3:-}"; KIND="${4:-}"; N="${5:-}"; C="${6:-}"
+    shift 6 2>/dev/null || usage
+    prof "$@"; shift "$ARGN"
+    [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ && -n "$BOT" ]] || usage
+    case "$KIND" in claude|codex) [ "$B" != - ] || usage ;; opencode) [ "$B" = - ] || usage ;; *) usage ;; esac
+    mkdir -p "$DIR" && chmod 700 "$AGENTS" "$DIR"
+    [ -f "$DIR/key" ] && mv -f "$DIR/key" "$DIR/key.next"
+    unterm
+    [ -f "$DIR/key.next" ] && mv -f "$DIR/key.next" "$DIR/key"
+    open_term shell "$N" _shell "$T" "$KIND" "$B" "$C" ${PROF[@]+"${PROF[@]}"}
+    ;;
+  _shell)
+    KIND="$3"; B="$4"; C="$5"; shift 5
+    prof "$@"
     echo $$ > "$DIR/term.pid"
     cd "$WORK"
     KEY=()
     [ -f "$DIR/key" ] && KEY=(--key-file "$DIR/key")
     set +e
-    "$HERE/bops-brain" run "$B" claude --computer "$C" ${KEY[@]+"${KEY[@]}"} -- --resume "$SID" --setting-sources user \
-      --mcp-config "$DIR/mcp.json" --strict-mcp-config --append-system-prompt "$(cat "$DIR/prompt.md")" --allowedTools "$ALLOWED"
-    rm -f "$DIR/key"
-    echo
-    echo "Claude Code is closed. Reply in the thread in Bops and it carries on there."
-    read -r _
-    rm -f "$DIR/term.pid"
+    "$HERE/bops-brain" run "$B" "$KIND" --computer "$C" ${KEY[@]+"${KEY[@]}"} ${PROF[@]+"${PROF[@]}"} --shell-only
+    rm -f "$DIR/key" "$DIR/term.pid"
     ;;
   unterm)
     unterm

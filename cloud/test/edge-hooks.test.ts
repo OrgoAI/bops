@@ -203,7 +203,7 @@ test("a call's turn with the Mac away is answered in the cloud: the owner gets t
   assert.deepEqual(await turn(mobile), { text: "Hi Alex, it's Sam. What's up?" }, "spoken words only: no markdown");
   const [owner] = openai.responses;
   assert.equal(owner.authorization, "Bearer sk-test-not-a-real-key");
-  assert.match(String(owner.body.instructions), /You are Sam, an AI assistant, on a phone call with Alex, who you work for\. The computer you work on is offline/);
+  assert.match(String(owner.body.instructions), /You are Sam, Alex's chief of staff in Bops, on a phone call with Alex, who you work for\. The computer you work on is offline/);
   assert.deepEqual(owner.body.input, [{ role: "user", content: "Hello?" }]);
   assert.deepEqual((owner.body.reasoning as { effort: string }).effort, "low");
 

@@ -1,7 +1,7 @@
 "use client";
 
-import { useContext, useEffect, useState, type ReactNode } from "react";
-import { ENV_NAME, ENV_RESERVED, isAppName, isSiteName, MAX_SITES, REGISTRANT_FIELDS, typedAppName } from "@/lib/hosted-apps";
+import { useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { ENV_NAME, ENV_RESERVED, isAppName, isSiteName, MAX_SITES, offersInOrder, REGISTRANT_FIELDS, subdomainTyped, typedAppName } from "@/lib/hosted-apps";
 import type {
   AddAppAnswer,
   AddAppAsk,
@@ -12,19 +12,29 @@ import type {
   AppDomainAdded,
   AppDomainChecked,
   AppDomainOptions,
+  AppDomainRemoved,
   AppDomainsAnswer,
   AppEnvChange,
   AppRenewal,
   AppSettingsAnswer,
   AppSettingsChange,
+  CloudflareApplied,
+  CloudflareChange,
+  CloudflarePlan,
+  CloudflareZone,
   DomainOffer,
   DomainSearchAnswer,
   HostedApp,
+  OwnedDomain,
   Registrant,
   RegistrantField,
+  WorkspaceDomainBought,
+  WorkspaceDomainBuy,
+  WorkspaceDomainsAnswer,
+  WorkspaceZoneAnswer,
 } from "@/lib/hosted-apps";
 import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
-import { act, AppSite, CopyLink, isSending, PILL, QUIET, removeApp, short, siteQuery, STATES, UrlLink, useSending } from "./hosted-apps";
+import { act, AppEnvCtx, AppSite, CopyLink, envQuery, isSending, PILL, QUIET, removeApp, short, siteQuery, STATES, UrlLink, useSending } from "./hosted-apps";
 import { InlineConfirm, undash } from "./side-group";
 import { ago, post } from "./ui";
 
@@ -44,8 +54,12 @@ import { ago, post } from "./ui";
 const at = (name: string) => `/api/hosted-apps/${encodeURIComponent(name)}`;
 const wsQuery = (ws: string) => `ws=${encodeURIComponent(ws)}`;
 
-/** Why the server turned something down: its words (no dashes), the field to fix, and Orgo's code and facts (a new price, the credits there are). */
-export type Refused = { error: string; field?: string; code?: string; price?: number | null; renewal?: number | null; years?: number | null; available?: number | null };
+/**
+ * Why the server turned something down: its words (no dashes), the field to fix, and Orgo's code and facts
+ * (a new price, the credits there are, where to add credits). `code` is UNANSWERED when the server itself
+ * didn't answer (so whether it was done isn't known).
+ */
+export type Refused = { error: string; field?: string; code?: string; price?: number | null; renewal?: number | null; years?: number | null; available?: number | null; topUp?: string; cloudflare?: CloudflarePlan };
 
 /** What a call answered: the answer, or why not. */
 export type Answered<T> = { ok: T; no?: undefined } | { ok?: undefined; no: Refused };
@@ -56,21 +70,44 @@ const refusedOf = (j: Record<string, unknown>, fallback: string): Refused => {
   if (typeof j.field === "string") out.field = j.field;
   if (typeof j.code === "string") out.code = j.code;
   for (const k of ["price", "renewal", "years", "available"] as const) if (n(j[k]) !== undefined) out[k] = n(j[k]);
+  // Only a page of Orgo's, opened in the browser.
+  if (typeof j.topUp === "string" && /^https:\/\//.test(j.topUp)) out.topUp = j.topUp;
+  // What Bops would set in Cloudflare as it is now, when the one shown changed.
+  if (j.cloudflare && typeof j.cloudflare === "object" && Array.isArray((j.cloudflare as CloudflarePlan).changes)) out.cloudflare = j.cloudflare as CloudflarePlan;
   return out;
 };
 
-async function answered<T>(r: Response | null, fallback: string): Promise<Answered<T>> {
-  const j = ((await r?.json().catch(() => null)) ?? {}) as Record<string, unknown>;
-  return r?.ok ? { ok: j as T } : { no: refusedOf(j, fallback) };
+/** What a call answered, read: its JSON, or why not (UNANSWERED when nothing came back at all). */
+export async function answered<T>(r: Response | null, fallback: string): Promise<Answered<T>> {
+  if (!r) return { no: { error: undash(fallback), code: "UNANSWERED" } };
+  const j = ((await r.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  return r.ok ? { ok: j as T } : { no: refusedOf(j, fallback) };
 }
 
-const read = async <T,>(url: string, fallback: string) => answered<T>(await fetch(url, { cache: "no-store" }).catch(() => null), fallback);
-const write = async <T,>(url: string, body: unknown, method: string, fallback: string) => answered<T>(await post(url, body, method).catch(() => null), fallback);
+export const read = async <T,>(url: string, fallback: string) => answered<T>(await fetch(url, { cache: "no-store" }).catch(() => null), fallback);
+export const write = async <T,>(url: string, body: unknown, method: string, fallback: string) => answered<T>(await post(url, body, method).catch(() => null), fallback);
+
+/**
+ * What a buy that got no answer says: whether it went through isn't known (Orgo may have bought it), so
+ * never "try again", which could buy it twice.
+ */
+export const UNKNOWN_BUY = "It isn't known whether that went through. Look at your domains in a minute before you try again.";
+
+/**
+ * A buy sent: what it answered, where a 5xx without a code (the server itself fell over, or a page from
+ * in front of it) is as unknown as no answer at all (UNKNOWN_BUY, UNANSWERED), never its words.
+ */
+const sendBuy = async <T,>(url: string, body: unknown): Promise<Answered<T>> => {
+  const r = await post(url, body, "POST").catch(() => null);
+  const a = await answered<T>(r, UNKNOWN_BUY);
+  return a.no && r && r.status >= 500 && !a.no.code ? { no: { error: UNKNOWN_BUY, code: "UNANSWERED" } } : a;
+};
 
 /** Add app: the workspace's main bot builds it on its computer. */
 export const addApp = (ask: AddAppAsk) => write<AddAppAnswer>("/api/hosted-apps", ask, "POST", "Couldn't start it. Try again.");
 
-export const readSettings = (ws: string, name: string, site?: string) => read<AppSettingsAnswer>(`${at(name)}/settings?${wsQuery(ws)}${siteQuery(site)}`, "Couldn't read its settings just now.");
+export const readSettings = (ws: string, name: string, site?: string, env?: string) =>
+  read<AppSettingsAnswer>(`${at(name)}/settings?${wsQuery(ws)}${siteQuery(site)}${envQuery(env)}`, "Couldn't read its settings just now.");
 export const saveSettings = (name: string, c: AppSettingsChange) => write<AppSettingsAnswer>(`${at(name)}/settings`, c, "PATCH", "Couldn't save that. Try again.");
 /** Its variables set or removed: the values go in this one request, to the server and on to Orgo, and nowhere else. */
 export const saveEnv = (name: string, c: AppEnvChange) => write<{ env: string[] }>(`${at(name)}/env`, c, "PATCH", "Couldn't save the variables. Try again.");
@@ -79,7 +116,8 @@ export const readDomainOptions = (ws: string, name: string, site?: string) =>
   read<AppDomainOptions>(`${at(name)}/domains?${wsQuery(ws)}${siteQuery(site)}`, "Couldn't reach Orgo's domains just now.");
 export const searchDomains = (ws: string, name: string, q: string, page = 0, site?: string) =>
   read<DomainSearchAnswer>(`${at(name)}/domains/search?${wsQuery(ws)}&q=${encodeURIComponent(q)}&page=${page}${siteQuery(site)}`, "Couldn't search just now. Try again.");
-export const addDomain = (name: string, body: AppDomainAdd) => write<AppDomainAdded>(`${at(name)}/domains`, body, "POST", "Couldn't add the domain. Try again.");
+export const addDomain = (name: string, body: AppDomainAdd) =>
+  body.action === "buy" ? sendBuy<AppDomainAdded>(`${at(name)}/domains`, body) : write<AppDomainAdded>(`${at(name)}/domains`, body, "POST", "Couldn't add the domain. Try again.");
 /** Orgo asked to check a domain's DNS now (nothing else of the window's state changes, so it isn't read again). */
 export const checkDomain = async (ws: string, name: string, id: string, site?: string) =>
   answered<AppDomainChecked>(
@@ -87,26 +125,48 @@ export const checkDomain = async (ws: string, name: string, id: string, site?: s
     "Couldn't check it just now.",
   );
 export const removeDomain = (ws: string, name: string, id: string, site?: string) =>
-  write<AppDomainsAnswer>(`${at(name)}/domains/${encodeURIComponent(id)}`, site ? { ws, site } : { ws }, "DELETE", "Couldn't remove it. Try again.");
+  write<AppDomainRemoved>(`${at(name)}/domains/${encodeURIComponent(id)}`, site ? { ws, site } : { ws }, "DELETE", "Couldn't remove it. Try again.");
+/** What Bops would set in Cloudflare for one of its domains, read now (nothing is written). */
+export const readCloudflarePlan = (ws: string, name: string, id: string, site?: string) =>
+  read<CloudflarePlan>(`${at(name)}/domains/${encodeURIComponent(id)}/cloudflare?${wsQuery(ws)}${siteQuery(site)}`, "Couldn't read Cloudflare just now. Try again.");
+/** The plan the user saw written in Cloudflare (`replace`: their OK for records Bops didn't set), then the domain checked. */
+export const applyCloudflare = (ws: string, name: string, id: string, plan: string, replace: boolean, site?: string) =>
+  write<CloudflareApplied>(
+    `${at(name)}/domains/${encodeURIComponent(id)}/cloudflare`,
+    { ws, plan, ...(replace ? { replace: true } : {}), ...(site ? { site } : {}) },
+    "POST",
+    "It isn't known whether the records went in. Try again in a minute. Bops looks first, so nothing is set twice.",
+  );
 export const setAutoRenew = (ws: string, name: string, zone: string, on: boolean, site?: string) =>
   write<{ renewal: AppRenewal | null }>(`${at(name)}/domains`, { ws, zone, autoRenew: on, ...(site ? { site } : {}) }, "PATCH", "Couldn't change auto-renew. Try again.");
+
+/* The workspace's own domains, for Settings (app/api/domains: workspace-domains.tsx shows them). */
+export const readWorkspaceDomains = (ws: string) => read<WorkspaceDomainsAnswer>(`/api/domains?${wsQuery(ws)}`, "Couldn't read them just now.");
+export const searchForWorkspace = (ws: string, q: string, page = 0) =>
+  read<DomainSearchAnswer>(`/api/domains/search?${wsQuery(ws)}&q=${encodeURIComponent(q)}&page=${page}`, "Couldn't search just now. Try again.");
+/** A domain bought for the workspace at the price seen: the one request that charges anything. */
+export const buyForWorkspace = (b: WorkspaceDomainBuy) => sendBuy<WorkspaceDomainBought>("/api/domains", b);
+export const readWorkspaceZone = (ws: string, zone: string) => read<WorkspaceZoneAnswer>(`/api/domains/${encodeURIComponent(zone)}?${wsQuery(ws)}`, "Couldn't read its DNS records.");
+export const setWorkspaceAutoRenew = (ws: string, zone: string, on: boolean) =>
+  write<{ renewal: AppRenewal | null }>(`/api/domains/${encodeURIComponent(zone)}`, { ws, autoRenew: on }, "PATCH", "Couldn't change auto-renew. Try again.");
 
 /** Dollars of Orgo credits, from cents. */
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 /** A price for its term: "$12.00 a year", or "$140.00 for 2 years". */
 export const priceFor = (cents: number, years: number | null) => (years && years > 1 ? `${money(cents)} for ${years} years` : `${money(cents)} a year`);
-const day = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+/** A day as a renewal says it: Oct 7, 2027. */
+export const day = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
-const HEAD = "pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]";
+export const HEAD = "pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]";
 const HINT = "text-[12px] leading-4 text-[#9A9A98]";
 const ALERT = "min-w-0 text-[12px] leading-4 text-[#B42318]";
-const BOX = "flex flex-col gap-2 rounded-[12px] bg-[#FCFCFB] p-2.5 shadow-[0_0_0_1px_#ECECEA]";
+export const BOX = "flex flex-col gap-2 rounded-[12px] bg-[#FCFCFB] p-2.5 shadow-[0_0_0_1px_#ECECEA]";
 const field = (wrong: boolean, extra = "") =>
   `h-8 min-w-0 rounded-full bg-[#F7F7F6] px-3 text-[12px] outline-none ${wrong ? "shadow-[0_0_0_1.5px_#B42318]" : "shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]"} ${extra}`;
 const dark = () => `${PILL} bg-ink text-white disabled:opacity-40`;
 const light = () => `${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`;
 /** Esc closes what it's on, and only that (the app's Esc would close the panel), never while it saves. */
-const escCloses = (busy: boolean, close: () => void) => (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+export const escCloses = (busy: boolean, close: () => void) => (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
   if (e.key !== "Escape") return;
   e.preventDefault();
   e.stopPropagation();
@@ -220,13 +280,15 @@ export function AppAddress({ url }: { url: string | null }) {
 
 /* ---------------- A bought domain's renewal ---------------- */
 
+/** Turn a bought domain's auto-renew on or off, answering its renewal as it is then (the app's tab's route, or Settings'). */
+export type RenewalFlip = (on: boolean) => Promise<Answered<{ renewal: AppRenewal | null }>>;
+
 /**
  * A bought domain's renewal, under its DNS records' title: when it renews, for how much, from whose
- * credits, and Auto-renew to turn on (the user's credits pay from then on) or off. Why its last try failed,
- * while Orgo tries again.
+ * credits, and Auto-renew to turn on (the user's credits pay from then on) or off (`flip` sends it). Why
+ * its last try failed, while Orgo tries again.
  */
-export function RenewalLine({ ws, name, zone, onRenewal }: { ws: string; name: string; zone: AppDnsZone; onRenewal: (zone: string, r: AppRenewal) => void }) {
-  const site = useContext(AppSite);
+export function RenewalLine({ zone, flip: send, onRenewal }: { zone: AppDnsZone; flip: RenewalFlip; onRenewal: (zone: string, r: AppRenewal) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const r = zone.renewal;
@@ -244,7 +306,7 @@ export function RenewalLine({ ws, name, zone, onRenewal }: { ws: string; name: s
   const flip = () => {
     setBusy(true);
     setError(null);
-    void setAutoRenew(ws, name, zone.id, !r.on, site).then((x) => {
+    void send(!r.on).then((x) => {
       setBusy(false);
       if (x.ok?.renewal) onRenewal(zone.id, x.ok.renewal);
       else setError(x.no?.error ?? "Couldn't change auto-renew. Try again.");
@@ -281,7 +343,7 @@ export function RenewalLine({ ws, name, zone, onRenewal }: { ws: string; name: s
   );
 }
 
-/* ---------------- Adding a domain ---------------- */
+/* ---------------- Searching for a domain and buying it ---------------- */
 
 /** One name a search found, as its line says it: its price for its term and each year after, or why it can't be bought. */
 const offerWords = (o: DomainOffer) =>
@@ -293,80 +355,65 @@ const offerWords = (o: DomainOffer) =>
         ? "Not sold here"
         : "Couldn't tell";
 
+/** A buy's answer that leaves it unknown whether it went through (the registry hasn't said, Orgo or the server didn't answer). */
+const UNSURE = new Set(["REGISTRATION_UNKNOWN", "NO_ANSWER", "UNANSWERED"]);
+
 /**
- * Add a domain, under its domains: the workspace's bought domains nothing points at yet, to use as they are;
- * then two ways. Get a new domain: a search, a name picked from it with its price, who it's registered to (as
- * the registry requires it, filled from what Orgo has of the user's last one, else their email), then a last
- * step with the exact charge in Orgo credits and what it renews for, and Buy (which sends that price: Orgo
- * refuses it if the price changed, and the step shows the new one to buy at). Use a domain I own: typed, then
- * pointed here, with the records to set shown on its line. `onAdded`: the app's domains as they are now, and
- * the one added (null: bought but not pointed here, with why).
+ * Buying a domain, in an app's Add a domain and in Settings' Domains: a search (on Search or Enter only:
+ * Orgo allows a few a minute), a name picked from it with its price, who it's registered to (as the
+ * registry requires it, filled from what Orgo has of the user's last one, else their email), then a last
+ * step with the exact charge in Orgo credits and what it renews for, and Buy. Nothing that charges anything
+ * is sent before Buy, and Buy sends once: a press while one is out does nothing (and the server refuses a
+ * second one too). `buy` sends the price seen (Orgo refuses it if it changed, and the step shows the new one
+ * to buy at); `onBought` hears what it answered, and what it hands back (bought, with something to say) shows
+ * here, with the search again. A refusal stays with why: the field to fix, a name taken meanwhile greyed in
+ * the results, where to add credits; one whose answer was lost says so back at the search (no Buy at hand), and
+ * `onUnsure` reads again what was bought.
  */
-export function AddDomain({
-  ws,
-  name,
+export function DomainShop<T>({
+  open,
+  why: closed,
+  contact,
   email,
-  onAdded,
-  onClose,
+  search: find,
+  buy: send,
+  onBought,
+  onUnsure,
+  onBusy,
+  autoFocus = false,
 }: {
-  ws: string;
-  name: string;
-  /** The signed-in account's email, to fill who a domain is registered to when Orgo has nothing of theirs. */
+  open: boolean;
+  why?: string;
+  contact: Registrant | null;
   email?: string | null;
-  onAdded: (domains: AppDomainsAnswer, added: AppDomain | null) => void;
-  onClose: () => void;
+  search: (q: string, page: number) => Promise<Answered<DomainSearchAnswer>>;
+  buy: (domain: string, registrant: Registrant, price: number) => Promise<Answered<T>>;
+  onBought: (answer: T) => string | null | void;
+  onUnsure?: () => void;
+  onBusy?: (busy: boolean) => void;
+  /** Its search box takes focus as it shows (Settings, where the button that opened it goes). */
+  autoFocus?: boolean;
 }) {
-  const [options, setOptions] = useState<AppDomainOptions | null>(null);
-  const [optionsFailed, setOptionsFailed] = useState<string | null>(null);
-  const [mode, setMode] = useState<"buy" | "own" | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusyNow] = useState(false);
+  const [buying, setBuying] = useState(false);
   const [error, setError] = useState<Refused | null>(null);
   const [q, setQ] = useState("");
   const [found, setFound] = useState<(DomainSearchAnswer & { q: string }) | null>(null);
   const [offer, setOffer] = useState<DomainOffer | null>(null);
   const [who, setWho] = useState<Registrant>({});
   const [confirming, setConfirming] = useState(false);
-  const [typed, setTyped] = useState("");
-  const [reads, setReads] = useState(0);
-  const site = useContext(AppSite);
-  useEffect(() => {
-    let stop = false;
-    void readDomainOptions(ws, name, site).then((r) => {
-      if (stop) return;
-      if (r.ok) setOptions(r.ok);
-      else setOptionsFailed(r.no.error);
-    });
-    return () => {
-      stop = true;
-    };
-  }, [ws, name, site, reads]);
-  const buyOpen = !!options?.buy.open;
-  const shown = mode ?? (options && !buyOpen ? "own" : "buy");
-  const done = (r: AppDomainAdded) => {
-    onAdded(r.domains, r.domain);
-    if (r.domain) return onClose();
-    // Bought, but not pointed here: it's among the workspace's own now, to use from there.
-    setError({ error: undash(r.error ?? "Couldn't point it at this app just now.") });
-    setOffer(null);
-    setConfirming(false);
-    setReads((n) => n + 1);
-  };
-  const send = (body: AppDomainAdd, after?: (no: Refused) => void) => {
-    setBusy(true);
-    setError(null);
-    void addDomain(name, site ? { ...body, site } : body).then((r) => {
-      setBusy(false);
-      if (r.ok) return done(r.ok);
-      setError(r.no);
-      after?.(r.no);
-    });
+  // A buy out now: a second press (a double tap, before the button is off) sends nothing.
+  const sending = useRef(false);
+  const setBusy = (b: boolean) => {
+    setBusyNow(b);
+    onBusy?.(b);
   };
   const search = (page = 0) => {
     const words = q.trim();
     if (!words) return;
     setBusy(true);
     setError(null);
-    void searchDomains(ws, name, words, page, site).then((r) => {
+    void find(words, page).then((r) => {
       setBusy(false);
       if (!r.ok) return setError(r.no);
       setFound((was) => (page && was && was.q === words ? { ...r.ok, q: words, results: [...was.results, ...r.ok.results] } : { ...r.ok, q: words }));
@@ -377,77 +424,65 @@ export function AddDomain({
     setConfirming(false);
     setError(null);
     // Who it's registered to: what Orgo has of the last one, else the account's email. Never a guess.
-    setWho((w) => (Object.keys(w).length ? w : (options?.contact ?? (email ? { email } : {}))));
+    setWho((w) => (Object.keys(w).length ? w : (contact ?? (email ? { email } : {}))));
   };
   const missing = REGISTRANT_FIELDS.find((f) => !("optional" in f && f.optional) && !(who[f.key] ?? "").trim());
   const buy = () => {
-    if (!offer || offer.price === null) return;
-    send({ ws, action: "buy", domain: offer.domain, registrant: who, price: offer.price }, (no) => {
+    if (sending.current || !offer || offer.price === null) return;
+    sending.current = true;
+    const picked = offer;
+    setBusy(true);
+    setBuying(true);
+    setError(null);
+    void send(picked.domain, who, picked.price as number).then((r) => {
+      sending.current = false;
+      setBusy(false);
+      setBuying(false);
+      const no = r.no;
+      if (!no) {
+        const said = onBought(r.ok as T);
+        if (!said) return;
+        // Bought, with something to say (not pointed where it was asked): the search again, with it.
+        setError({ error: undash(said) });
+        setOffer(null);
+        setConfirming(false);
+        return;
+      }
+      setError(no);
+      if (UNSURE.has(no.code ?? "")) {
+        onUnsure?.();
+        // Whether it went through isn't known: back to the search with why, never Buy at hand beside "before you try again".
+        setOffer(null);
+        setConfirming(false);
+        return;
+      }
       // A new price: the step shows it, to buy at that one. Who it's registered to, wrong: back to that.
-      if (no.code === "PRICE_CHANGED" && typeof no.price === "number") setOffer({ ...offer, price: no.price, renewal: no.renewal ?? offer.renewal, years: no.years ?? offer.years });
+      if (no.code === "PRICE_CHANGED" && typeof no.price === "number") setOffer({ ...picked, price: no.price, renewal: no.renewal ?? picked.renewal, years: no.years ?? picked.years });
       else if (no.code === "INVALID_REGISTRANT") setConfirming(false);
       else if (no.code === "DOMAIN_TAKEN" || no.code === "DOMAIN_UNAVAILABLE") {
+        // Taken meanwhile: back to the results, its line greyed.
+        setFound((f) => f && { ...f, results: f.results.map((o) => (o.domain === picked.domain ? { ...o, status: "taken", price: null, renewal: null, years: null } : o)) });
         setOffer(null);
         setConfirming(false);
       }
     });
   };
-  const tab = (m: "buy" | "own", label: string) => (
-    <button
-      role="tab"
-      aria-selected={shown === m}
-      disabled={busy}
-      onClick={() => {
-        setMode(m);
-        setError(null);
-      }}
-      className={`${PILL} ${shown === m ? "bg-ink text-white" : "text-[#3A3A38] hover:bg-[#F2F2F0]"}`}
-    >
-      {label}
-    </button>
-  );
   const why = error && (
     <span role="alert" className={ALERT}>
       {error.error}
+      {error.topUp && (
+        <>
+          {" "}
+          <a data-top-up href={error.topUp} target="_blank" rel="noreferrer" className="font-medium text-ink underline underline-offset-2">
+            Add credits
+          </a>
+        </>
+      )}
     </span>
   );
-  let body: ReactNode;
-  if (shown === "own")
-    body = (
-      <form
-        data-own-domain
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!busy && typed.trim()) send({ ws, action: "connect", domain: typed.trim() });
-        }}
-        className="flex flex-col gap-2"
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            aria-label="Your domain"
-            aria-invalid={error?.field === "domain" || undefined}
-            value={typed}
-            onChange={(e) => {
-              setTyped(e.target.value);
-              setError(null);
-            }}
-            placeholder="app.example.com"
-            autoComplete="off"
-            spellCheck={false}
-            className={field(error?.field === "domain", "min-w-[160px] flex-1 font-mono")}
-          />
-          <button type="submit" disabled={busy || !typed.trim()} className={dark()}>
-            {busy ? "Connecting…" : "Connect"}
-          </button>
-        </div>
-        <span className={HINT}>You set its DNS records where the domain is kept. They show here once it&apos;s connected.</span>
-        {why}
-      </form>
-    );
-  else if (!options) body = <span className={QUIET}>{optionsFailed ?? "Reading…"}</span>;
-  else if (!buyOpen) body = <span className={QUIET}>{options.buy.why ?? "Buying domains isn't open here."}</span>;
-  else if (offer && offer.price !== null && confirming)
-    body = (
+  if (!open) return <span className={QUIET}>{closed ?? "Buying domains isn't open here."}</span>;
+  if (offer && offer.price !== null && confirming)
+    return (
       <div data-confirm={offer.domain} className="flex flex-col gap-2">
         <span className="text-[12.5px] leading-[18px] text-ink">
           Buy <span className="font-mono font-medium">{offer.domain}</span> for <b>{money(offer.price)}</b> from your Orgo credits
@@ -456,17 +491,18 @@ export function AddDomain({
         </span>
         <div className="flex flex-wrap items-center gap-2">
           <button data-buy onClick={buy} disabled={busy} className={dark()}>
-            {busy ? "Buying…" : `Buy for ${money(offer.price)}`}
+            {buying ? "Buying…" : `Buy for ${money(offer.price)}`}
           </button>
           <button disabled={busy} onClick={() => setConfirming(false)} className={light()}>
             Back
           </button>
+          {buying && <span className={HINT}>This can take a minute.</span>}
           {why}
         </div>
       </div>
     );
-  else if (offer && offer.price !== null)
-    body = (
+  if (offer && offer.price !== null)
+    return (
       <form
         data-registrant={offer.domain}
         onSubmit={(e) => {
@@ -510,76 +546,306 @@ export function AddDomain({
         </div>
       </form>
     );
-  else
+  return (
+    <div className="flex flex-col gap-2">
+      <form
+        data-domain-search
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy) search();
+        }}
+        className="flex flex-wrap items-center gap-2"
+      >
+        <input
+          aria-label="Search for a domain"
+          aria-invalid={error?.field === "q" || undefined}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="A name, like acme"
+          autoFocus={autoFocus}
+          autoComplete="off"
+          spellCheck={false}
+          className={field(error?.field === "q", "min-w-[160px] flex-1 font-mono")}
+        />
+        <button type="submit" disabled={busy || !q.trim()} className={dark()}>
+          {busy && !found ? "Searching…" : "Search"}
+        </button>
+      </form>
+      {found && (
+        <div className="-mx-1 flex flex-col">
+          {!found.results.length && <span className={QUIET}>Nothing found for that. Try another name.</span>}
+          {offersInOrder(found.results, found.q).map((o) => {
+            const can = o.status === "available" && o.price !== null;
+            return (
+              <div key={o.domain} data-offer={o.domain} className="flex min-h-8 min-w-0 items-center gap-2 rounded-lg px-1 py-1">
+                <span title={o.domain} className={`min-w-[72px] flex-1 truncate font-mono text-[12px] leading-4 ${can ? "text-ink" : "text-[#9A9A98]"}`}>
+                  {o.domain}
+                </span>
+                {/* Wraps under itself in a narrow panel, never past its edge. */}
+                <span className={`max-w-[60%] text-right text-[12px] leading-4 ${can ? "text-[#3A3A38]" : "text-[#9A9A98]"}`}>{offerWords(o)}</span>
+                {can && (
+                  <button onClick={() => pick(o)} disabled={busy} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white`}>
+                    Pick
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {found.partial && <span className={HINT}>Some endings didn&apos;t answer just now.</span>}
+          {found.next !== null && (
+            <button onClick={() => search(found.next ?? 0)} disabled={busy} className="mt-0.5 h-7 self-start rounded-lg px-1 text-[12px] leading-4 text-[#6B6B6B] hover:text-ink disabled:text-[#9A9A98]">
+              {busy ? "Reading…" : "Show more"}
+            </button>
+          )}
+        </div>
+      )}
+      {why}
+    </div>
+  );
+}
+
+/* ---------------- Adding a domain ---------------- */
+
+/**
+ * Add a domain, under its domains: Your domains, every one the workspace bought, each to use here in one tap
+ * (the domain itself, when nothing points at it yet; else a name typed under it, like www); then From
+ * Cloudflare, the user's own Cloudflare domains when their Orgo vault has a Cloudflare key, each used the
+ * same way, after which Bops says what it would set there for it (CloudflarePlanBox) and sets it on their
+ * word; then two ways. Get a new domain: DomainShop, which buys one for this app (then it's pointed here). Use a
+ * domain I own: typed, then pointed here, with the records to set shown on its line. `onAdded`: the app's
+ * domains as they are now, and the one added (null: bought but not pointed here, with why). `onSaid`: words
+ * for the line of one added (its records in Cloudflare couldn't be read); `onApplied`: its records were set
+ * in Cloudflare, and Orgo checked it. `onPlan`: the domain whose plan is open here (null: none), so its own
+ * line doesn't offer the same again; `onCantSet`: Bops couldn't set that one there, so its line offers its
+ * records to copy again.
+ */
+export function AddDomain({
+  ws,
+  name,
+  email,
+  onAdded,
+  onClose,
+  onSaid,
+  onApplied,
+  onPlan,
+  onCantSet,
+}: {
+  ws: string;
+  name: string;
+  /** The signed-in account's email, to fill who a domain is registered to when Orgo has nothing of theirs. */
+  email?: string | null;
+  onAdded: (domains: AppDomainsAnswer, added: AppDomain | null) => void;
+  onClose: () => void;
+  onSaid?: (id: string, text: string) => void;
+  onApplied?: (a: CloudflareApplied) => void;
+  onPlan?: (id: string | null) => void;
+  onCantSet?: (id: string) => void;
+}) {
+  const [options, setOptions] = useState<AppDomainOptions | null>(null);
+  const [optionsFailed, setOptionsFailed] = useState<string | null>(null);
+  const [mode, setMode] = useState<"buy" | "own" | null>(null);
+  const [sendingOwn, setSendingOwn] = useState(false);
+  const [shopping, setShopping] = useState(false);
+  const [error, setError] = useState<Refused | null>(null);
+  const [typed, setTyped] = useState("");
+  const [reads, setReads] = useState(0);
+  // Which of Your domains a Use went from, so why it was refused shows on its line.
+  const [using, setUsing] = useState<string | null>(null);
+  // A Cloudflare domain just used: what Bops would set there for it, in place of the rest.
+  const [cfPlan, setCfPlan] = useState<{ plan: CloudflarePlan; fresh: boolean } | null>(null);
+  // While it writes there (or takes the domain off again), Esc leaves the panel open.
+  const [cfBusy, setCfBusy] = useState(false);
+  const site = useContext(AppSite);
+  useEffect(() => {
+    let stop = false;
+    void readDomainOptions(ws, name, site).then((r) => {
+      if (stop) return;
+      if (r.ok) setOptions(r.ok);
+      else setOptionsFailed(r.no.error);
+    });
+    return () => {
+      stop = true;
+    };
+  }, [ws, name, site, reads]);
+  const planFor = cfPlan?.plan.domainId ?? null;
+  useEffect(() => {
+    onPlan?.(planFor);
+    return () => onPlan?.(null);
+  }, [planFor, onPlan]);
+  // Every button in the panel is off while anything is out (a buy most of all).
+  const busy = sendingOwn || shopping;
+  const buyOpen = !!options?.buy.open;
+  const shown = mode ?? (options && !buyOpen ? "own" : "buy");
+  /** What a buy or a Use answered: closed once it's pointed here; else why (it's among the workspace's own now, to use from there). */
+  const done = (r: AppDomainAdded) => {
+    onAdded(r.domains, r.domain);
+    // From Cloudflare: what Bops would set there, before anything is (blocked, or not read: its records to copy too).
+    if (r.domain && r.cloudflare) {
+      if (r.cloudflare.blocked) onCantSet?.(r.domain.id);
+      setCfPlan({ plan: r.cloudflare, fresh: !!r.fresh });
+      return null;
+    }
+    if (r.domain) {
+      if (r.error) onSaid?.(r.domain.id, undash(r.error));
+      if (r.error && r.domain.cloudflare) onCantSet?.(r.domain.id);
+      onClose();
+      return null;
+    }
+    setReads((n) => n + 1);
+    return r.error ?? "Couldn't point it at this app just now.";
+  };
+  const send = (body: AppDomainAdd, from: string | null = null) => {
+    setSendingOwn(true);
+    setUsing(from);
+    setError(null);
+    void addDomain(name, site ? { ...body, site } : body).then((r) => {
+      setSendingOwn(false);
+      if (!r.ok) return setError(r.no);
+      const said = done(r.ok);
+      if (said) setError({ error: undash(said) });
+    });
+  };
+  const tab = (m: "buy" | "own", label: string) => (
+    <button
+      role="tab"
+      aria-selected={shown === m}
+      disabled={busy}
+      onClick={() => {
+        setMode(m);
+        setError(null);
+      }}
+      className={`${PILL} ${shown === m ? "bg-ink text-white" : "text-[#3A3A38] hover:bg-[#F2F2F0]"}`}
+    >
+      {label}
+    </button>
+  );
+  const why = error && (
+    <span role="alert" className={ALERT}>
+      {error.error}
+    </span>
+  );
+  const owned = options?.owned ?? [];
+  const cf = options?.cloudflare;
+  let body: ReactNode;
+  if (shown === "own")
     body = (
-      <div className="flex flex-col gap-2">
-        <form
-          data-domain-search
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!busy) search();
-          }}
-          className="flex flex-wrap items-center gap-2"
-        >
+      <form
+        data-own-domain
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy && typed.trim()) send({ ws, action: "connect", domain: typed.trim() });
+        }}
+        className="flex flex-col gap-2"
+      >
+        <div className="flex flex-wrap items-center gap-2">
           <input
-            aria-label="Search for a domain"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="A name, like acme"
+            aria-label="Your domain"
+            aria-invalid={error?.field === "domain" || undefined}
+            value={typed}
+            onChange={(e) => {
+              setTyped(e.target.value);
+              setError(null);
+            }}
+            placeholder="app.example.com"
             autoComplete="off"
             spellCheck={false}
-            className={field(error?.field === "q", "min-w-[160px] flex-1 font-mono")}
+            className={field(error?.field === "domain", "min-w-[160px] flex-1 font-mono")}
           />
-          <button type="submit" disabled={busy || !q.trim()} className={dark()}>
-            {busy && !found ? "Searching…" : "Search"}
+          <button type="submit" disabled={busy || !typed.trim()} className={dark()}>
+            {sendingOwn ? "Connecting…" : "Connect"}
           </button>
-        </form>
-        {found && (
-          <div className="-mx-1 flex flex-col">
-            {!found.results.length && <span className={QUIET}>Nothing found for that. Try another name.</span>}
-            {found.results.map((o) => {
-              const can = o.status === "available" && o.price !== null;
-              return (
-                <div key={o.domain} data-offer={o.domain} className="flex min-h-8 min-w-0 items-center gap-2 rounded-lg px-1 py-1">
-                  <span title={o.domain} className={`min-w-[72px] flex-1 truncate font-mono text-[12px] leading-4 ${can ? "text-ink" : "text-[#9A9A98]"}`}>
-                    {o.domain}
-                  </span>
-                  {/* Wraps under itself in a narrow panel, never past its edge. */}
-                  <span className={`max-w-[60%] text-right text-[12px] leading-4 ${can ? "text-[#3A3A38]" : "text-[#9A9A98]"}`}>{offerWords(o)}</span>
-                  {can && (
-                    <button onClick={() => pick(o)} disabled={busy} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white`}>
-                      Pick
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-            {found.partial && <span className={HINT}>Some endings didn&apos;t answer just now.</span>}
-            {found.next !== null && (
-              <button onClick={() => search(found.next ?? 0)} disabled={busy} className="mt-0.5 h-7 self-start rounded-lg px-1 text-[12px] leading-4 text-[#6B6B6B] hover:text-ink disabled:text-[#9A9A98]">
-                {busy ? "Reading…" : "Show more"}
-              </button>
-            )}
-          </div>
-        )}
-        {why}
+        </div>
+        <span className={HINT}>{cf?.zones?.length ? "One in your Cloudflare is set there by Bops. Anywhere else, you set its DNS records where it's kept: they show here once it's connected." : "You set its DNS records where the domain is kept. They show here once it's connected."}</span>
+        {using === null && why}
+      </form>
+    );
+  else if (!options) body = <span className={QUIET}>{optionsFailed ?? "Reading…"}</span>;
+  else
+    body = (
+      <>
+        {using === null && why}
+        <DomainShop
+          open={buyOpen}
+          why={options.buy.why}
+          contact={options.contact}
+          email={email}
+          search={(q, page) => searchDomains(ws, name, q, page, site)}
+          buy={(domain, registrant, price) => addDomain(name, { ws, action: "buy", domain, registrant, price, ...(site ? { site } : {}) })}
+          onBought={done}
+          onUnsure={() => setReads((n) => n + 1)}
+          onBusy={setShopping}
+        />
+      </>
+    );
+  if (cfPlan)
+    return (
+      <div data-add-domain-panel onKeyDown={escCloses(busy || cfBusy, onClose)} className={`mt-1 ${BOX}`}>
+        <CloudflarePlanBox
+          onBusy={setCfBusy}
+          ws={ws}
+          name={name}
+          plan={cfPlan.plan}
+          fresh={cfPlan.fresh}
+          from="add"
+          onApplied={(a) => {
+            onApplied?.(a);
+            onClose();
+          }}
+          onRemoved={(a) => onAdded(a, null)}
+          onCancel={() => {
+            setCfPlan(null);
+            setReads((n) => n + 1);
+          }}
+          onCantSet={() => onCantSet?.(cfPlan.plan.domainId)}
+        />
       </div>
     );
   return (
     <div data-add-domain-panel onKeyDown={escCloses(busy, onClose)} className={`mt-1 ${BOX}`}>
-      {!!options?.owned.length && (
+      {/* Cloudflare first: Bops sets a domain there itself (DNS only), so it's offered above the rest. */}
+      {cf?.why && (
+        <span data-cloudflare className={HINT}>
+          {cf.why}
+        </span>
+      )}
+      {!!cf?.zones?.length && (
+        <div data-cloudflare className="flex flex-col">
+          <span className="text-[12px] leading-[18px] text-[#6B6B6B]">From Cloudflare:</span>
+          {cf.zones.map((z) => (
+            <OwnedLine
+              key={z.id}
+              o={z}
+              source="cloudflare"
+              busy={busy}
+              sending={sendingOwn && using === `cf:${z.id}`}
+              error={using === `cf:${z.id}` ? error : null}
+              onTyped={() => using === `cf:${z.id}` && setError(null)}
+              onUse={(subdomain) => send({ ws, action: "cloudflare", zone: z.id, ...(subdomain ? { subdomain } : {}) }, `cf:${z.id}`)}
+              onWrong={(no) => {
+                setUsing(`cf:${z.id}`);
+                setError(no);
+              }}
+            />
+          ))}
+          {cf.more && <span className={`${HINT} pb-1`}>Showing your first 200 Cloudflare domains.</span>}
+        </div>
+      )}
+      {!!owned.length && (
         <div data-owned className="flex flex-col">
-          <span className="text-[12px] leading-[18px] text-[#6B6B6B]">Your domains not in use:</span>
-          {options.owned.map((o) => (
-            <div key={o.id} data-owned-domain={o.domain} className="flex h-8 min-w-0 items-center gap-2">
-              <span title={o.domain} className="min-w-0 shrink truncate font-mono text-[12px] leading-4 text-ink">
-                {o.domain}
-              </span>
-              <span className="flex-1" />
-              <button onClick={() => send({ ws, action: "connect", zone: o.id })} disabled={busy} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white`}>
-                Use
-              </button>
-            </div>
+          <span className="text-[12px] leading-[18px] text-[#6B6B6B]">Your domains:</span>
+          {owned.map((o) => (
+            <OwnedLine
+              key={o.id}
+              o={o}
+              busy={busy}
+              error={using === o.id ? error : null}
+              onTyped={() => using === o.id && setError(null)}
+              onUse={(subdomain) => send({ ws, action: "connect", zone: o.id, ...(subdomain ? { subdomain } : {}) }, o.id)}
+              onWrong={(no) => {
+                setUsing(o.id);
+                setError(no);
+              }}
+            />
           ))}
         </div>
       )}
@@ -594,6 +860,250 @@ export function AddDomain({
         </button>
       </div>
       {body}
+    </div>
+  );
+}
+
+/** Who has a name of a bought domain already, in words: the app, else the computer. */
+const usedBy = (u: OwnedDomain["inUse"][number]) => u.app ?? u.where ?? "another computer";
+
+const BAD_NAME = "Type a name like www or shop.";
+
+/**
+ * One of Your domains (or, `source` cloudflare, one of the user's Cloudflare domains, with its account's name
+ * when there are more), one 32px line: the domain and Use, which points it here in one tap, when nothing
+ * points at the domain itself yet; else a name to type under it (www, shop), then Use, with what the domain
+ * is on said under it (seen, not only on hover). Why a Use was refused shows there instead, the name
+ * ringed when it's the name.
+ */
+function OwnedLine({
+  o,
+  source,
+  busy,
+  sending,
+  error,
+  onUse,
+  onTyped,
+  onWrong,
+}: {
+  o: OwnedDomain | CloudflareZone;
+  source?: "cloudflare";
+  busy: boolean;
+  sending?: boolean;
+  error: Refused | null;
+  onUse: (subdomain: string) => void;
+  onTyped: () => void;
+  onWrong: (no: Refused) => void;
+}) {
+  const [sub, setSub] = useState("");
+  const hint = useId();
+  const apex = o.inUse.find((u) => u.name === o.domain.toLowerCase());
+  const wrong = error?.field === "subdomain";
+  const use = () => {
+    if (!apex) return onUse("");
+    const typed = subdomainTyped(sub);
+    if (!typed) return onWrong({ error: BAD_NAME, field: "subdomain" });
+    onUse(typed);
+  };
+  const account = "account" in o ? o.account : undefined;
+  return (
+    <div data-owned-domain={source ? undefined : o.domain} data-cloudflare-domain={source ? o.domain : undefined} className="flex flex-col">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy) use();
+        }}
+        className="flex h-8 min-w-0 items-center gap-1"
+      >
+        {apex && (
+          <input
+            aria-label={`A name under ${o.domain}`}
+            aria-describedby={hint}
+            aria-invalid={wrong || undefined}
+            value={sub}
+            onChange={(e) => {
+              setSub(e.target.value);
+              onTyped();
+            }}
+            placeholder="www"
+            autoComplete="off"
+            spellCheck={false}
+            className={field(wrong, "w-24 shrink-0 text-right font-mono")}
+          />
+        )}
+        <span title={o.domain} className="min-w-0 shrink truncate font-mono text-[12px] leading-4 text-ink">
+          {apex ? `.${o.domain}` : o.domain}
+        </span>
+        <span className="flex-1" />
+        {account && <span className="min-w-0 shrink-[2] truncate text-[12px] leading-4 text-[#9A9A98]">{account}</span>}
+        <button type="submit" disabled={busy || (!!apex && !sub.trim())} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white`}>
+          {sending ? "Connecting…" : "Use"}
+        </button>
+      </form>
+      {error ? (
+        <span id={hint} role="alert" className={`${ALERT} pb-1`}>
+          {error.error}
+        </span>
+      ) : (
+        apex && (
+          <span id={hint} data-owned-hint className={`${HINT} pb-1`}>
+            {o.domain} is on {usedBy(apex)}. Type a name under it.
+          </span>
+        )
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Setting a domain's records in the user's Cloudflare ---------------- */
+
+/** A change's verb, as its line starts. */
+const cfVerb = (c: CloudflareChange) => (c.op === "add" ? "Add" : c.op === "change" ? (c.theirs ? "Replace" : "Change") : c.op === "remove" ? "Remove" : c.op === "same" ? "Already set" : "Stays");
+
+/** A record that goes where Orgo asks already, with Cloudflare's proxy on: the one change is turning the proxy off. */
+const proxyOnly = (c: CloudflareChange) => c.op === "change" && c.was === "proxied";
+
+/**
+ * What's said in grey at a change's end: one in the way, the proxy turned off (whoever set it: what it points at
+ * stays), a record Bops didn't set, one it set before for a domain that's gone.
+ */
+const cfNote = (c: CloudflareChange) =>
+  c.op === "blocked" ? "In the way" : proxyOnly(c) ? "Turns off Cloudflare's proxy" : c.theirs ? "Not set by Bops" : c.stale && c.op === "remove" ? "Bops set this before" : null;
+
+/** What a change makes of a record: what it was, then what it becomes (a proxied one keeps its value, said in its note). */
+const cfValue = (c: CloudflareChange) => (c.was && c.was !== "proxied" ? `${c.was} → ${c.value}` : c.value);
+
+/**
+ * What Bops would set in Cloudflare for one of the app's domains, before anything is written: one line a change
+ * (Add, Change, Replace, Remove, Already set; what it was, then what it becomes), what it means under them, and
+ * the one button that writes it all (Add 2 records, Make 3 changes; Replace and add, the only one that sends the
+ * user's OK for records Bops didn't set; Verify, when it's all set already). Blocked: why, and only Pick another
+ * name (from Add a domain) or Close. A plan that changed meanwhile comes back as it is now, said so. `fresh`: the
+ * domain was just pointed here from Add a domain, so Cancel (and Pick another name) takes it off again.
+ */
+export function CloudflarePlanBox({
+  ws,
+  name,
+  plan: first,
+  fresh,
+  from,
+  onApplied,
+  onCancel,
+  onRemoved,
+  onBusy,
+  onCantSet,
+}: {
+  ws: string;
+  name: string;
+  plan: CloudflarePlan;
+  fresh?: boolean;
+  from: "add" | "box";
+  onApplied: (a: CloudflareApplied) => void;
+  onCancel: () => void;
+  onRemoved?: (a: AppDomainRemoved) => void;
+  /** Whether it's writing (or taking the domain off), for what holds it open. */
+  onBusy?: (busy: boolean) => void;
+  /** Bops can't set it there now (the write refused or not answered, or the plan as it is now blocked): its records to copy again. */
+  onCantSet?: () => void;
+}) {
+  const site = useContext(AppSite);
+  const [plan, setPlan] = useState(first);
+  const [busy, setBusy] = useState<"set" | "cancel" | null>(null);
+  useEffect(() => onBusy?.(!!busy), [busy, onBusy]);
+  const [said, setSaid] = useState<{ text: string; alert: boolean } | null>(null);
+  const theirs = plan.changes.filter((c) => c.theirs);
+  const theirsSaid = theirs.length === 1 ? `the ${theirs[0].type} record at ${theirs[0].host}` : `${theirs.length} of these`;
+  const doing = plan.changes.filter((c) => c.op !== "same" && c.op !== "blocked");
+  const label = plan.blocked
+    ? null
+    : !doing.length
+      ? "Verify"
+      : theirs.length
+        ? "Replace and add"
+        : doing.every((c) => c.op === "add")
+          ? doing.length === 1
+            ? "Add 1 record"
+            : `Add ${doing.length} records`
+          : `Make ${doing.length} changes`;
+  const words = plan.blocked
+    ? plan.blocked
+    : !doing.length
+      ? "Everything is set in Cloudflare already."
+      : theirs.length
+        ? theirs.every(proxyOnly)
+          ? `Bops didn't set ${theirsSaid}. ${theirs.length === 1 ? "It goes" : "They go"} to Orgo already, so only Cloudflare's proxy turns off.`
+          : `Bops didn't set ${theirsSaid}. Replacing means ${plan.domain} stops going where it goes now.`
+        : `Nothing else in ${plan.zone} changes.`;
+  const set = () => {
+    setBusy("set");
+    setSaid(null);
+    void applyCloudflare(ws, name, plan.domainId, plan.fingerprint, theirs.length > 0, site).then((r) => {
+      setBusy(null);
+      if (r.ok) return onApplied(r.ok);
+      if (r.no.cloudflare) setPlan(r.no.cloudflare);
+      setSaid({ text: r.no.error, alert: r.no.code !== "STALE" });
+      if (r.no.code !== "STALE" || r.no.cloudflare?.blocked) onCantSet?.();
+    });
+  };
+  const cancel = () => {
+    if (!fresh) return onCancel();
+    setBusy("cancel");
+    setSaid(null);
+    void removeDomain(ws, name, plan.domainId, site).then((r) => {
+      setBusy(null);
+      if (!r.ok) return setSaid({ text: `Couldn't take ${plan.domain} off this app. Remove it from its line.`, alert: true });
+      onRemoved?.(r.ok);
+      onCancel();
+    });
+  };
+  return (
+    <div data-cloudflare-plan={plan.domain} className="flex min-w-0 flex-col gap-1.5">
+      <span className="text-[12px] font-semibold leading-4 text-[#3A3A38]">Set {plan.domain} in Cloudflare</span>
+      <div className="flex min-w-0 flex-col">
+        {plan.changes
+          .filter((c) => c.type)
+          .map((c, i) => {
+            const note = cfNote(c);
+            const same = c.op === "same";
+            return (
+              <div key={i} data-change={c.op} className={`flex h-7 min-w-0 items-center gap-2 ${same ? "text-[#9A9A98]" : ""}`}>
+                <span className={`w-[76px] shrink-0 whitespace-nowrap text-[12px] font-medium leading-4 ${same ? "" : "text-ink"}`}>{cfVerb(c)}</span>
+                <span className={`w-[46px] shrink-0 font-mono text-[11.5px] leading-4 ${same ? "" : "text-[#6B6B6B]"}`}>{c.type}</span>
+                <span title={c.name} className={`w-[124px] min-w-0 shrink truncate font-mono text-[11.5px] leading-4 ${same ? "" : "text-[#6B6B6B]"}`}>
+                  {c.host}
+                </span>
+                <span title={cfValue(c)} className={`min-w-0 flex-1 truncate font-mono text-[11.5px] leading-4 ${same ? "" : "text-ink"}`}>
+                  {cfValue(c)}
+                </span>
+                {note && <span className="shrink-0 whitespace-nowrap text-[12px] leading-4 text-[#9A9A98]">{note}</span>}
+              </div>
+            );
+          })}
+      </div>
+      <span data-cloudflare-words className={plan.blocked ? ALERT : "text-[12px] leading-[18px] text-[#6B6B6B]"}>
+        {words}
+      </span>
+      {said && (
+        <span role={said.alert ? "alert" : undefined} className={said.alert ? ALERT : "text-[12px] leading-[18px] text-[#6B6B6B]"}>
+          {undash(said.text)}
+        </span>
+      )}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {plan.blocked ? (
+          <button disabled={!!busy} onClick={cancel} className={dark()}>
+            {busy === "cancel" ? "Taking it off…" : from === "add" ? "Pick another name" : "Close"}
+          </button>
+        ) : (
+          <>
+            <button disabled={!!busy} onClick={cancel} className={light()}>
+              {busy === "cancel" ? "Taking it off…" : "Cancel"}
+            </button>
+            <button data-set-plan disabled={!!busy} onClick={set} className={dark()}>
+              {busy === "set" ? "Setting…" : label}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -625,6 +1135,7 @@ const formOf = (s: AppSettingsAnswer["settings"]) => ({
  */
 export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; name: string; answer: AppSettingsAnswer; onSaved: (a: AppSettingsAnswer) => void }) {
   const site = useContext(AppSite);
+  const env = useContext(AppEnvCtx);
   const s = answer.settings;
   const first = !s;
   const start = formOf(s);
@@ -645,7 +1156,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
     setBusy(true);
     setError(null);
     setSaid(null);
-    const c: AppSettingsChange = site ? { ws, site } : { ws };
+    const c: AppSettingsChange = { ws, ...(site ? { site } : {}), ...(env === "staging" ? { env } : {}) };
     for (const k of changed) c[k] = form[k].trim();
     void saveSettings(name, c).then((r) => {
       setBusy(false);
@@ -666,7 +1177,8 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
   return (
     <div data-settings data-first={first || undefined} className="flex flex-col">
       <span className={HEAD}>Settings</span>
-      {first && <span className={`pb-1 ${HINT}`}>Set them now and its first deploy has them. Orgo finds what&apos;s left empty, and keeps the variables&apos; values secret.</span>}
+      {first && env === "staging" && <span className={`pb-1 ${HINT}`}>The preview is built with the published app&apos;s commands the first time. Set its own here, and its variables below.</span>}
+      {first && env !== "staging" && <span className={`pb-1 ${HINT}`}>Set them now and its first deploy has them. Orgo finds what&apos;s left empty, and keeps the variables&apos; values secret.</span>}
       <form
         data-settings-form
         onSubmit={(e) => {
@@ -742,7 +1254,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
           )}
         </div>
       </form>
-      <Variables ws={ws} name={name} names={answer.env} onSaved={(env) => onSaved({ ...answer, env })} first={first} />
+      <Variables ws={ws} name={name} names={answer.env} onSaved={(names) => onSaved({ ...answer, env: names })} first={first} lacks={answer.prodEnv?.filter((x) => !answer.env.includes(x))} />
     </div>
   );
 }
@@ -776,8 +1288,9 @@ function SecretInput({ value, onChange, autoFocus }: { value: string; onChange: 
  * once more first). A value lives only in its form while it's typed, and goes once Save is pressed. `first`:
  * before its first deploy (the first one saved makes its deploy project with it).
  */
-function Variables({ ws, name, names, onSaved, first }: { ws: string; name: string; names: string[]; onSaved: (env: string[]) => void; first?: boolean }) {
+export function Variables({ ws, name, names, onSaved, first, lacks }: { ws: string; name: string; names: string[]; onSaved: (env: string[]) => void; first?: boolean; lacks?: string[] }) {
   const site = useContext(AppSite);
+  const where = useContext(AppEnvCtx);
   const [editing, setEditing] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
@@ -795,11 +1308,11 @@ function Variables({ ws, name, names, onSaved, first }: { ws: string; name: stri
   const send = (env: Record<string, string | null>) => {
     setBusy(true);
     setError(null);
-    void saveEnv(name, site ? { ws, site, env } : { ws, env }).then((r) => {
+    void saveEnv(name, { ws, ...(site ? { site } : {}), ...(where ? { where } : {}), env }).then((r) => {
       setBusy(false);
       if (!r.ok) return setError(r.no);
       close();
-      setSaid(first ? "Saved. Its first deploy has it." : "Saved. Variables apply from its next deploy.");
+      setSaid(where === "local" ? "Saved. Local has it the next time it starts." : first ? "Saved. Its first deploy has it." : "Saved. Variables apply from its next deploy.");
       onSaved(r.ok.env);
     });
   };
@@ -900,6 +1413,12 @@ function Variables({ ws, name, names, onSaved, first }: { ws: string; name: stri
           ),
         )}
       </div>
+      {!!lacks?.length && (
+        <span data-lacks className={`pt-0.5 ${HINT}`}>
+          The published app has {lacks.join(", ")}. The preview doesn&apos;t yet: add {lacks.length === 1 ? "it" : "them"} here if the preview needs {lacks.length === 1 ? "it" : "them"}.
+        </span>
+      )}
+      {where === "local" && <span data-local-vars className={`pt-0.5 ${HINT}`}>Local reads the preview&apos;s variables, with these on top. They stay on its computer.</span>}
       {editing === "new" ? (
         form(null)
       ) : (
@@ -949,13 +1468,14 @@ const deployDot = (d: AppDeploy) => (d.live ? "bg-[#2BB673]" : d.state === "succ
  */
 export function AppDeploys({ ws, app, deploys, onChanged, log }: { ws: string; app: HostedApp; deploys: AppDeploy[]; onChanged: (app: HostedApp) => void; log?: ReactNode }) {
   const site = useContext(AppSite);
+  const env = useContext(AppEnvCtx);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   if (!deploys.length && !log) return null;
   const back = (d: AppDeploy) => {
     setBusy(d.id);
     setError(null);
-    void act(app.name, site ? { ws, action: "rollback", deployment: d.id, site } : { ws, action: "rollback", deployment: d.id }).then((r) => {
+    void act(app.name, { ws, action: "rollback", deployment: d.id, ...(site ? { site } : {}), ...(env === "staging" ? { env } : {}) }).then((r) => {
       setBusy(null);
       if (r.app) onChanged(r.app);
       else setError(undash(r.error ?? "Couldn't roll back. Try again."));

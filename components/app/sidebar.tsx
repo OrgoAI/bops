@@ -2,26 +2,29 @@
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { MAIN_WORKSPACE, waitingAsks, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
-import { initialsOf, signOutOfOrgo } from "./account";
+import { initialsOf, useSignOut } from "./account";
 import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
-import { MembersButton } from "./members";
-import { FooterButton, footerPillOf, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
+import { TeamCount, teamWords, useMembersCount } from "./members";
+import { FooterButton, footerPillOf, useFooterHover, useLastPill, type FooterKey, type FooterPage } from "./sidebar-footer";
 import { AppsIcon } from "./made-apps";
 import { KnowledgeIcon, useKnowledgeNews, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
 import { BotMenu, type BotMenuActions } from "./bot-menu";
-import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
+import { RestartAsk, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou, useSetupWaiting } from "./setup";
 import { DeleteX, forgetShown, rememberShown, undash, usePop } from "./side-group";
 import { attentionOf, FavoritesSection, needsByBot, threadOrder, threadsByBot, threadsOf, ThreadRow, WithThreads } from "./sidebar-sections";
 import { useIssues } from "./orbit-issues";
 import { UpdateNotice } from "./update-notice";
+import { MailAddressStep } from "./mail-address";
+import { NoticeCard } from "./notice-popup";
 import { forgetWorkspaceHere } from "@/lib/workspace-local";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouDot, post, RoundButton, SideToggleIcon, useNow } from "./ui";
+import { ChartIcon } from "./team-chart";
 import { ownerWho, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
-import { appsShown } from "@/lib/apps-access";
+import { appsLine, appsName, appsShown } from "@/lib/apps-access";
 
 /** A chat's newest message, if it has one. */
 export const lastMessageOf = (state: AppState, c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
@@ -55,7 +58,8 @@ export function Sidebar({
   onSetup,
   onVault,
   onApps,
-  onMembers,
+  onTeam,
+  onTeamChart,
   onOpenWatch,
   onOpenMemory,
   onOpenAutopilot,
@@ -77,8 +81,10 @@ export function Sidebar({
   onVault: () => void;
   /** The apps the bots made (made-apps.tsx). */
   onApps: () => void;
-  /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
-  onMembers: () => void;
+  /** Team, in Settings: who sees the bots and their computers (members.tsx), from your initials' menu. */
+  onTeam: () => void;
+  /** The team chart of the open workspace (team-chart.tsx): from the workspace menu. */
+  onTeamChart?: () => void;
   /** Show a watched screen or Mac window (a watched page: its row on the Routines page). */
   onOpenWatch: (watch: Watch) => void;
   /** Open Knowledge on the right, on a kind, an item or a search (memory-categories.tsx). */
@@ -189,7 +195,7 @@ export function Sidebar({
     <aside className="flex min-h-0 w-[340px] shrink-0 flex-col px-2.5 pb-3 pt-3.5">
       <div className="flex items-center justify-between pb-3 pl-2.5 pr-2">
         {query === null ? (
-          <WorkspaceSwitcher state={state} opened={workspaces} />
+          <WorkspaceSwitcher state={state} opened={workspaces} onTeamChart={onTeamChart} />
         ) : (
           <input
             autoFocus
@@ -271,12 +277,15 @@ export function Sidebar({
       )}
       {/* A newer Bops: downloading, ready to Restart into, or out on bops.bot (the Mac app checks and downloads it). */}
       <UpdateNotice />
-      {/* You, then People, your logins (the Vault, with the apps you've connected), Routines, Knowledge and the apps your bots made (sidebar-footer.tsx). New bots are the + at the top. */}
+      {/* The first time a workspace gets email: "Pick your Bops address" (or an offer to change one Bops picked), a card here. */}
+      {!state.shared && <MailAddressStep state={state} />}
+      {/* A notice from Orgo, one at a time, a card here too (notice-popup.tsx). */}
+      <NoticeCard />
+      {/* You (Team is in your menu), then your logins (the Vault, with the apps you've connected), Routines, Knowledge and the apps your bots made (sidebar-footer.tsx). New bots are the + at the top. */}
       <SidebarFooter
         state={state}
         open={footer}
-        you={(expanded) => <YouMenuView state={state} expanded={expanded} needsYou={setup.length > 0} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />}
-        onMembers={onMembers}
+        you={(expanded) => <YouMenuView state={state} expanded={expanded} needsYou={setup.length > 0} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} onTeam={onTeam} />}
         onVault={onVault}
         onOpenAutopilot={onOpenAutopilot}
         onOpenMemory={onOpenMemory}
@@ -288,10 +297,11 @@ export function Sidebar({
 }
 
 /**
- * The footer's row: `you` (your account: the initials and their menu, given whether it's the pill), then
- * People, Logins, Routines, Knowledge and Apps (the apps your bots made). The pill (with its label) is
- * the one pointed at or tabbed to, else the one `open` names (sidebar-footer.tsx footerPageOf,
- * footerPillOf); the others are round.
+ * The footer's row: `you` (your account: the initials and their menu, Team in it, given whether it's the pill), then
+ * Logins, Routines, Knowledge and Apps (the apps your bots made). The pill (with its label) is the one pointed at or
+ * tabbed to, else the one expanded last (useLastPill), else the one `open` names (sidebar-footer.tsx footerPageOf,
+ * footerPillOf); the others are round. The room
+ * People's button had stays empty at the row's end, so the pill is as wide as it was (FOOTER_ROOM).
  * Picking one opens its page, and that one is the pill at rest. `hover` seeds the pointed-at one, and
  * `news` whether Knowledge has something new (tests).
  */
@@ -302,7 +312,6 @@ export function SidebarFooter({
   news,
   vertical = false,
   you,
-  onMembers,
   onVault,
   onOpenAutopilot,
   onOpenMemory,
@@ -319,7 +328,6 @@ export function SidebarFooter({
    */
   vertical?: boolean;
   you: (expanded: boolean) => ReactNode;
-  onMembers: () => void;
   onVault: () => void;
   onOpenAutopilot: (open: AutopilotOpen) => void;
   onOpenMemory: (open: MemoryOpen) => void;
@@ -327,14 +335,16 @@ export function SidebarFooter({
   onApps: () => void;
 }) {
   const knowledge = categoriesOpen(state);
-  // Apps only for an @orgo.ai account for now (lib/apps-access.ts), and never in a shared workspace (they're its owner's).
+  // Apps only for an @orgo.ai account for now (lib/apps-access.ts); in a shared workspace, its owner's, when they gave the user Your Apps.
   const apps = appsShown(state);
   const page = (open === "knowledge" && !knowledge) || (open === "apps" && !apps) ? "vault" : open;
   const { hover, row } = useFooterHover(initialHover);
-  const pill = vertical ? null : footerPillOf({ rest: page ?? "vault", hover: (hover === "knowledge" && !knowledge) || (hover === "apps" && !apps) ? null : hover });
+  const shown = (k: FooterKey | null) => ((k === "knowledge" && !knowledge) || (k === "apps" && !apps) ? null : k);
+  // The pill stays on the page button expanded last, not back on Logins, once the pointer leaves the row.
+  const last = shown(useLastPill()) as FooterPage | null;
+  const pill = vertical ? null : footerPillOf({ rest: page ?? "vault", hover: shown(hover), last });
   const pages = (
     <>
-      <MembersButton state={state} expanded={pill === "people"} pressed={page === "people"} onClick={onMembers} />
       <FooterButton
         name="vault"
         expanded={pill === "vault"}
@@ -346,7 +356,7 @@ export function SidebarFooter({
       />
       <AutopilotButton state={state} expanded={pill === "routines"} pressed={page === "routines"} onOpen={onOpenAutopilot} />
       {knowledge && <KnowledgeButton state={state} expanded={pill === "knowledge"} pressed={page === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
-      {apps && <FooterButton name="apps" expanded={pill === "apps"} pressed={page === "apps"} label="Apps" tip="Apps your bots made for you" onClick={onApps} icon={<AppsIcon size={16} />} />}
+      {apps && <FooterButton name="apps" expanded={pill === "apps"} pressed={page === "apps"} label={appsName(state)} tip={appsLine(state)} onClick={onApps} icon={<AppsIcon size={16} />} />}
     </>
   );
   if (vertical)
@@ -358,12 +368,15 @@ export function SidebarFooter({
       </div>
     );
   return (
-    <div {...row} data-footer-row className="flex items-center gap-1 pb-1 pt-3">
+    <div {...row} data-footer-row className={`flex items-center gap-1 pb-1 pt-3 ${FOOTER_ROOM}`}>
       {you(pill === "you")}
       {pages}
     </div>
   );
 }
+
+/** The room People's round button had (36px and the 4px gap before it), left empty at the end of the row so the rest keep their size. */
+export const FOOTER_ROOM = "pr-10";
 
 /**
  * Knowledge in the footer, with a blue dot on its corner while there's something new in it (what memory
@@ -432,14 +445,15 @@ function AppStack({ state }: { state: AppState }) {
 }
 
 /**
- * You, at the bottom of the sidebar: your initials, and a menu with your Orgo account (plan and
- * usage), Settings, this Mac's permissions, Restart Bops (in the Mac app; restart.tsx) and signing
- * out. Like the footer's other buttons it's a slot that grows into the pill while pointed at
- * (`expanded`), with your name (or email) after the initials. While something on this Mac still needs
- * you (and you haven't skipped it on the setup screen), a badge on your initials opens that screen and
- * the menu item carries the same mark.
+ * You, at the bottom of the sidebar: your initials, and a menu with Team (who sees your bots, in Settings), Settings,
+ * your plan and usage (Settings, Plan and credit), this Mac's permissions (Settings, This Mac), Restart Bops (in the Mac
+ * app; restart.tsx, asked in place) and signing out. A grey count on the initials' corner says how many people have
+ * access besides you (members.tsx TeamCount), as Team in the menu does. Like the footer's other buttons it's a slot
+ * that grows into the pill while pointed at (`expanded`), with your name (or email) after the initials. While something
+ * on this Mac still needs you (and you haven't skipped it there), a badge on your initials opens This Mac and the menu
+ * item carries the same mark. `team`: the count, given (tests), else read.
  */
-export function YouMenu(props: { state: AppState; expanded?: boolean; onAccount: () => void; onSettings: () => void; onSetup: () => void }) {
+export function YouMenu(props: { state: AppState; expanded?: boolean; team?: number | null; onAccount: () => void; onSettings: () => void; onSetup: () => void; onTeam?: () => void }) {
   return <YouMenuView {...props} needsYou={useSetupNeedsYou(props.state)} />;
 }
 
@@ -448,46 +462,64 @@ export function YouMenuView({
   state,
   expanded = false,
   needsYou,
+  team: given,
   onAccount,
   onSettings,
   onSetup,
+  onTeam,
 }: {
   state: AppState;
   expanded?: boolean;
   needsYou: boolean;
+  team?: number | null;
   onAccount: () => void;
   onSettings: () => void;
   onSetup: () => void;
+  onTeam?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Restart Bops, asked in place in the menu: the row turns into its question.
   const [restart, setRestart] = useState(false);
+  const read = useMembersCount(state);
+  const team = given === undefined ? read : given;
   const canRestart = useCanRestart();
+  const leaving = useSignOut();
   const box = useRef<HTMLDivElement>(null);
+  const shut = () => {
+    setOpen(false);
+    setRestart(false);
+  };
   useEffect(() => {
     if (!open) return;
-    const away = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    // Esc closes the menu, and only the menu (preventDefault keeps the Vault or a profile on the right open).
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && (e.preventDefault(), setOpen(false));
+    const away = (e: MouseEvent) => !box.current?.contains(e.target as Node) && shut();
+    // Esc closes the menu (its question first), and only the menu (preventDefault keeps the page under it open).
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      if (restart) setRestart(false);
+      else setOpen(false);
+    };
     document.addEventListener("mousedown", away);
     document.addEventListener("keydown", esc);
     return () => {
       document.removeEventListener("mousedown", away);
       document.removeEventListener("keydown", esc);
     };
-  }, [open]);
+  }, [open, restart]);
   const user = state.account?.user;
   const pick = (fn: () => void) => () => {
-    setOpen(false);
+    shut();
     fn();
   };
   const item = "flex h-9 items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]";
   const name = user?.name?.trim() || user?.email || state.owner?.name?.trim() || "You";
+  const others = teamWords(team);
   return (
     <div ref={box} data-footer-slot="You" data-footer-key="you" className={`motion-footer-slot relative flex h-9 min-w-9 basis-9 ${expanded ? "grow" : "grow-0"} shrink`}>
       <button
-        onClick={() => setOpen(!open)}
-        title={expanded ? undefined : user ? `${user.name ?? user.email ?? "Your account"}: account and settings` : "Account and settings"}
-        aria-label={`${name}: account and settings`}
+        onClick={() => (open ? shut() : setOpen(true))}
+        title={expanded ? undefined : user ? `${user.name ?? user.email ?? "Your account"}: team, account and settings` : "Team, account and settings"}
+        aria-label={`${name}: team, account and settings${others ? `, ${others}` : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
         className={`flex h-9 w-full min-w-0 items-center justify-center overflow-hidden rounded-full px-2.5 text-[13px] font-semibold outline-none transition-[background-color,color,transform] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
@@ -497,11 +529,13 @@ export function YouMenuView({
           {name}
         </span>
       </button>
+      {/* Who else has access: the count People's button had, now on your initials, where Team is. */}
+      {onTeam && <TeamCount count={team} />}
       {/* Pops as it appears: YouMenu stays mounted, so polls don't replay it (at launch it may pop once, as the permissions are first read). */}
       {needsYou && (
         <button
           onClick={() => {
-            setOpen(false);
+            shut();
             onSetup();
           }}
           title="Something on this Mac needs you"
@@ -513,21 +547,25 @@ export function YouMenuView({
       )}
       {open && (
         // Over the chat column's own sheets (z-40, z-50) when it opens from the rail, past the column's edge.
-        <div className="motion-menu-in absolute bottom-[calc(100%+8px)] left-0 z-[60] flex w-[248px] origin-bottom-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
+        <div role="menu" aria-label="Your account" className="motion-menu-in absolute bottom-[calc(100%+8px)] left-0 z-[60] flex w-[248px] origin-bottom-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
           <div className="flex flex-col gap-0.5 px-2.5 pb-2 pt-1.5">
             <span className="truncate text-[14px] font-semibold leading-[18px]">{user?.name || state.owner?.name || "You"}</span>
             <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{user ? (user.email ?? "Signed in with Orgo") : "Not signed in"}</span>
           </div>
           <div className="mx-2 mb-1 h-px bg-[#ECECEA]" />
-          <button onClick={pick(onAccount)} className={item}>
-            <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0">
-              <circle cx="8" cy="5.5" r="2.8" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
-              <path d="M2.8 13.5c.8-2.6 2.8-3.9 5.2-3.9s4.4 1.3 5.2 3.9" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
-            Account and usage
-          </button>
-          <button onClick={pick(onSettings)} className={item}>
-            <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0">
+          {onTeam && (
+            <button role="menuitem" data-menu-team onClick={pick(onTeam)} className={item}>
+              <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0" aria-hidden>
+                <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
+                <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+                <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+              </svg>
+              <span className="flex-1">Team</span>
+              {!!team && <span className="shrink-0 text-[12px] font-normal tabular-nums text-[#8A8A88]">{team}</span>}
+            </button>
+          )}
+          <button role="menuitem" onClick={pick(onSettings)} className={item}>
+            <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0" aria-hidden>
               <path d="M3 4.5h10M3 8h10M3 11.5h10" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
               <circle cx="6" cy="4.5" r="1.6" fill="#fff" stroke="#0A0A0A" strokeWidth="1.3" />
               <circle cx="10.5" cy="8" r="1.6" fill="#fff" stroke="#0A0A0A" strokeWidth="1.3" />
@@ -535,32 +573,44 @@ export function YouMenuView({
             </svg>
             Settings
           </button>
-          <button onClick={pick(onSetup)} className={item}>
-            <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0">
+          <button role="menuitem" onClick={pick(onAccount)} className={item}>
+            <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0" aria-hidden>
+              <circle cx="8" cy="5.5" r="2.8" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
+              <path d="M2.8 13.5c.8-2.6 2.8-3.9 5.2-3.9s4.4 1.3 5.2 3.9" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+            </svg>
+            Plan and usage
+          </button>
+          <button role="menuitem" onClick={pick(onSetup)} className={item}>
+            <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0" aria-hidden>
               <rect x="1.8" y="2.8" width="12.4" height="8.4" rx="1.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
               <path d="M5.8 13.6h4.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
             </svg>
             <span className="flex-1">Permissions on this Mac</span>
             {needsYou && <NeedsYouDot />}
           </button>
-          {canRestart && (
-            <button onClick={pick(() => setRestart(true))} className={item}>
-              <RestartIcon />
-              Restart Bops
-            </button>
-          )}
+          {canRestart &&
+            (restart ? (
+              <RestartAsk compact onCancel={() => setRestart(false)} />
+            ) : (
+              <button role="menuitem" onClick={() => setRestart(true)} className={item}>
+                <RestartIcon />
+                Restart Bops
+              </button>
+            ))}
           {user && (
             <>
               <div className="mx-2 my-1 h-px bg-[#ECECEA]" />
-              <button onClick={pick(() => void signOutOfOrgo())} className={`${item} text-[#6B6B6B] hover:text-[#B42318]`}>
-                <span className="w-[15px] shrink-0" />
-                Sign out
-              </button>
+              {/* Asked in place when changes haven't reached Bops Cloud; else the app goes to the sign in screen. */}
+              {leaving.ask ?? (
+                <button role="menuitem" disabled={leaving.busy} onClick={() => void leaving.signOut()} className={`${item} text-[#6B6B6B] hover:text-[#B42318] disabled:opacity-50`}>
+                  <span className="w-[15px] shrink-0" />
+                  Sign out
+                </button>
+              )}
             </>
           )}
         </div>
       )}
-      {restart && <RestartConfirm onClose={() => setRestart(false)} />}
     </div>
   );
 }
@@ -712,12 +762,15 @@ export function WorkspaceSwitcher({
   state,
   opened = false,
   sharedList,
+  onTeamChart,
 }: {
   state: AppState;
   /** Tests: open from the start. */
   opened?: boolean;
   /** Tests: the workspaces shared with the user, as if Orgo had listed them. */
   sharedList?: SharedWorkspace[];
+  /** The open workspace's team chart (team-chart.tsx): a row under the workspaces, the owner's own workspace only. */
+  onTeamChart?: () => void;
 }) {
   const [open, setOpen] = useState(opened);
   // Workspaces others shared with the user (lib/shared.ts), read each time the menu opens.
@@ -990,6 +1043,24 @@ export function WorkspaceSwitcher({
             </div>
           )}
           <div className="mx-2 my-1 h-px bg-[#ECECEA]" />
+          {/* The open workspace's org chart, below the list so it never reads as a workspace of its own; never one shared with the user. */}
+          {onTeamChart && !state.shared && current && (
+            <button
+              type="button"
+              data-team-chart-row
+              onClick={() => {
+                close();
+                onTeamChart();
+              }}
+              className="flex h-9 items-center gap-2 rounded-[10px] pl-2.5 pr-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]"
+            >
+              <span className="flex size-[18px] items-center justify-center text-[#3A3A38]">
+                <ChartIcon size={14} />
+              </span>
+              Org chart
+              <span className="ml-auto truncate pl-3 text-[12px] font-normal text-[#9A9A98]">{current.name}</span>
+            </button>
+          )}
           {naming && !naming.id ? (
             <>
               {problem && <span role="alert" className="px-2.5 pb-1 text-[12px] leading-4 text-[#B42318]">{problem}</span>}

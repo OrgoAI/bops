@@ -2,16 +2,30 @@
 # Start the OpenAI Agents API executor for one Bops session, pinned to one screen.
 # The backend writes the environment key to /root/.bops/executor-key-<display> (0600) first;
 # this script reads it into the process environment and deletes the file.
-# Usage: bops-exec <display-number> <environment-id> <remote-url>
+# Usage: bops-exec <display-number> <environment-id> <remote-url> [<bin folder>]
+# <bin folder>: for a bot whose AI profile has agents besides Bops agent, its own Bops agent's bin
+# (bops-brain bin), put first on the executor's PATH, so claude, codex and opencode in its commands are
+# that bot's. Without it, exactly as before.
 set -euo pipefail
-N="${1:?display}"; ENV_ID="${2:?environment id}"; REMOTE="${3:?remote url}"
-KEYFILE="/root/.bops/executor-key-$N"
+N="${1:?display}"; ENV_ID="${2:?environment id}"; REMOTE="${3:?remote url}"; BIN="${4:-}"
+# Tests only: where its key file, Codex and its log are.
+ROOT="${BOPS_EXEC_ROOT:-/root/.bops}"; CODEX="${BOPS_CODEX:-/usr/local/bin/codex}"; LOGS="${BOPS_LOGS:-/var/log/bops}"
+if [ -n "$BIN" ]; then
+  [[ "$BIN" =~ ^${BOPS_BOTS:-/root/.bops/bots}/[A-Za-z0-9_-]+/agents/bops/bin$ ]] && [ -d "$BIN" ] || { echo "that isn't a bot's bin folder" >&2; exit 2; }
+fi
+KEYFILE="$ROOT/executor-key-$N"
 [ -f "$KEYFILE" ] || { echo "missing $KEYFILE" >&2; exit 1; }
 KEY="$(cat "$KEYFILE")"; rm -f "$KEYFILE"
 pkill -f "codex exec-server.*$ENV_ID" 2>/dev/null || true
-DISPLAY=":$N" CODEX_API_KEY="$KEY" setsid nohup /usr/local/bin/codex exec-server \
-  --remote "$REMOTE" --environment-id "$ENV_ID" \
-  < /dev/null > "/var/log/bops/exec-$N.log" 2>&1 &
+if [ -n "$BIN" ]; then
+  PATH="$BIN:$PATH" DISPLAY=":$N" CODEX_API_KEY="$KEY" setsid nohup "$CODEX" exec-server \
+    --remote "$REMOTE" --environment-id "$ENV_ID" \
+    < /dev/null > "$LOGS/exec-$N.log" 2>&1 &
+else
+  DISPLAY=":$N" CODEX_API_KEY="$KEY" setsid nohup "$CODEX" exec-server \
+    --remote "$REMOTE" --environment-id "$ENV_ID" \
+    < /dev/null > "$LOGS/exec-$N.log" 2>&1 &
+fi
 sleep 2
-if grep -qi error "/var/log/bops/exec-$N.log"; then cat "/var/log/bops/exec-$N.log" >&2; exit 1; fi
+if grep -qi error "$LOGS/exec-$N.log"; then cat "$LOGS/exec-$N.log" >&2; exit 1; fi
 echo "executor on :$N for $ENV_ID"

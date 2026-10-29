@@ -1,4 +1,4 @@
-import { MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, type MemberAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
+import { isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
 import { ownerOnlyAsk } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
 import { ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
@@ -46,6 +46,8 @@ const LIVE = new Set(["running", "queued", "starting"]);
 
 /** The bots an act touches, as the copy has them: none when what it names is gone. */
 function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
+  // An app's act touches no bot: Your Apps' level says (refusal, settle).
+  if (isAppAct(act)) return [];
   const thread = (id: string) => d.state.sessions.find((x) => x.id === id);
   const ids = (xs: unknown[]) => xs.flatMap((x) => (typeof x === "string" ? [x] : []));
   if (act.act === "chat") {
@@ -76,6 +78,9 @@ function landed(d: SharedWsState, messages: Record<string, unknown>[], p: Pendin
       const t = thread(a.sessionId);
       return !t || t.dismissed === true || !LIVE.has(String(t.status));
     }
+    // An app's: the owner's Mac kept it on the app, done or refused (its `ok` and `said` show there).
+    default:
+      return !!d.state.apps?.list.find((x) => x.name === a.app)?.acts?.some((x) => x.key === p.key);
   }
 }
 type Copy = { open: SharedOpen; data: SharedWsState; older: Map<string, Older> };
@@ -99,7 +104,8 @@ function chatsOf(d: SharedWsState): Set<string> {
 /**
  * The older pages a new read of the newest (`now`) keeps, by chat, with nothing missing between them and
  * it: the messages that slid out of a chat's newest page since `was` (new ones came) join its older pages,
- * and for a chat whose first older page is on its way (`reading`), they wait for it there. A chat's go
+ * and for a chat whose first older page is on its way (`reading`), they wait for it there; what the owner
+ * deleted since (`now.gone`) goes from them. A chat's go
  * when the user may no longer see it, when its newest page is all of it now (nothing older is left there),
  * and when that page has none of the previous one's (more came than a page holds while the copy wasn't
  * reading): messages between may be missing, so "Show earlier messages" reads from the newest again.
@@ -107,7 +113,9 @@ function chatsOf(d: SharedWsState): Set<string> {
 function olderKept(was: Copy, now: SharedWsState, reading: Iterable<string>): Map<string, Older> {
   const chats = chatsOf(now);
   const out = new Map<string, Older>();
-  const kept = new Map(was.older);
+  // What the owner deleted since the copy's read (SharedWsState.gone) goes from the older pages too.
+  const gone = new Set(now.gone ?? []);
+  const kept = new Map([...was.older].map(([chat, o]) => [chat, gone.size ? { ...o, messages: o.messages.filter((m) => !gone.has(String(m.id))) } : o]));
   for (const chat of reading) if (!kept.has(chat)) kept.set(chat, { messages: [], more: true });
   for (const [chat, o] of kept) {
     if (!chats.has(chat) || !now.more.includes(chat)) continue;
@@ -119,7 +127,7 @@ function olderKept(was: Copy, now: SharedWsState, reading: Iterable<string>): Ma
     const seen = new Set(o.messages.map((m) => m.id));
     // Not in the new page and no newer than all of it: slid out. One in its oldest's millisecond came before
     // that one in Bops Cloud's order (cloud/state.ts recentMessages); one newer than it that's gone was removed.
-    const slid = had.filter((m) => !ids.has(m.id) && !seen.has(m.id) && Number(m.at) <= oldest);
+    const slid = had.filter((m) => !ids.has(m.id) && !seen.has(m.id) && !gone.has(String(m.id)) && Number(m.at) <= oldest);
     if (o.messages.length || slid.length) out.set(chat, { messages: [...o.messages, ...slid], more: o.more });
   }
   return out;
@@ -208,7 +216,8 @@ export class SharedCopy {
     const levels = c.data.state.levels ?? {};
     for (const [key, p] of this.pending) {
       if (p.state !== "failed" && landed(c.data, messages, p)) this.pending.delete(key);
-      else if (p.state !== "failed" && botsOfAct(c.data, p.act).some((id) => levels[id] !== "write")) this.pending.set(key, { ...p, state: "failed", error: ACT_ACCESS_CHANGED });
+      else if (p.state !== "failed" && (isAppAct(p.act) ? c.data.state.apps?.level !== "write" : botsOfAct(c.data, p.act).some((id) => levels[id] !== "write")))
+        this.pending.set(key, { ...p, state: "failed", error: ACT_ACCESS_CHANGED });
     }
   }
 
@@ -254,6 +263,13 @@ export class SharedCopy {
     const c = this.copy;
     if (!c) return { status: 409, error: "Open the workspace again." };
     if ((act.act === "chat" || act.act === "reply") && act.text.trim().length > MEMBER_MAX_TEXT) return { status: 400, error: ACT_TOO_LONG };
+    // An app's: Your Apps at Write, an app they're shown (cloud/members.ts appsTouched says the same, and more).
+    if (isAppAct(act)) {
+      const apps = c.data.state.apps;
+      if (!apps?.list.some((x) => x.name === act.app)) return { status: 404, error: "No such app." };
+      if (apps.level !== "write") return { status: 403, error: "You can see these apps. Ask the owner for Write to change them.", code: MEMBER_APPS_READ_ONLY };
+      return null;
+    }
     const bots = botsOfAct(c.data, act);
     if (!bots.length) return { status: 404, error: "That's gone from the workspace." };
     const levels = c.data.state.levels ?? {};
@@ -563,7 +579,16 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
     screens: undefined,
     screenLog: undefined,
     liveMoods: Object.keys(moods).some((id) => ids.has(id)) ? Object.fromEntries(Object.entries(moods).filter(([id]) => ids.has(id))) : undefined,
-    shared: { ...open, ownBots, more: data.more, levels: s.levels ?? {}, ...(data.you ? { you: data.you } : {}) },
+    shared: {
+      ...open,
+      ownBots,
+      more: data.more,
+      levels: s.levels ?? {},
+      ...(data.you ? { you: data.you } : {}),
+      // Your Apps, when the owner gave it (cloud/ws-slice.ts appsFor), and what the user did to them that hasn't landed.
+      ...(s.apps ? { apps: s.apps } : {}),
+      ...(s.apps && acts.some((x) => isAppAct(x.act)) ? { appActs: acts.filter((x) => isAppAct(x.act)).map((x) => ({ key: x.key, act: x.act as MemberAppAct, at: x.at, state: x.state, ...(x.error ? { error: x.error } : {}) })) } : {}),
+    },
     // What of the user's own is worth a chime meanwhile: their own news still reaches them (lib/pings.ts).
     ownPings: duePings(own),
   };
