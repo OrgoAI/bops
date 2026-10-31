@@ -260,20 +260,92 @@ export function AddAppForm({ ws, builder, onStarted, onCancel }: { ws: string; b
  * Its address on orgo.dev, to open and copy. Orgo names it after the app's deploy and it can't be renamed
  * (orgo-web keeps a deploy's name, and a public URL's, as they were made): said in its tooltip.
  */
-export function AppAddress({ url }: { url: string | null }) {
-  // None yet (never deployed, or no address yet): its title line says so already.
+export function AppAddress({ url, published }: { url: string | null; published?: boolean }) {
+  // Published: its domain, or that it lives on one only. The Preview: its fixed link, once it has one.
+  if (published)
+    return (
+      <div data-address-section="published" className="flex flex-col">
+        <span className={HEAD}>Address</span>
+        {url ? (
+          <div data-address className="-mx-2 flex h-8 min-w-0 items-center gap-2 rounded-lg px-2">
+            <UrlLink url={url} />
+            <CopyLink url={url} />
+          </div>
+        ) : (
+          <span data-address-none className={HINT}>
+            No domain yet. Published sites live only on their own domain.
+          </span>
+        )}
+      </div>
+    );
   if (!url) return null;
   return (
-    <div data-address-section className="flex flex-col">
-      <span className={HEAD}>Address</span>
+    <div data-address-section="preview" className="flex flex-col">
+      <span className={HEAD}>Its link</span>
       <div data-address className="-mx-2 flex h-8 min-w-0 items-center gap-2 rounded-lg px-2">
         <UrlLink url={url} />
-        <CopyLink url={url} />
-        <span className="flex-1" />
-        <span data-tip="Orgo names it after the app. It can't be renamed." className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
-          Its address on Orgo
-        </span>
+        <CopyLink url={url} label="Copy" />
       </div>
+      <span className={HINT}>This link stays the same. Add it to Google sign in once.</span>
+    </div>
+  );
+}
+
+/**
+ * An app's left overs on its computer (HostedApp.leftOver): projects of its repo that are no site's Published or
+ * Preview (made by an older Bops or a test), and Preview links no site has. Bops never deploys to them; Remove
+ * takes one off, asked once more inline.
+ */
+export function LeftOvers({ ws, app, onChanged }: { ws: string; app: HostedApp; onChanged: (app: HostedApp) => void }) {
+  const [asking, setAsking] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const list = app.leftOver ?? [];
+  if (!list.length) return null;
+  const remove = (id: string) => {
+    setBusy(true);
+    setError(null);
+    void act(app.name, { ws, action: "removeLeftOver", project: id }).then((r) => {
+      setBusy(false);
+      if (!r.app) return setError(undash(r.error ?? "Couldn't remove it. Try again."));
+      setAsking(null);
+      onChanged(r.app);
+    });
+  };
+  return (
+    <div data-left-overs className="flex flex-col">
+      <span className={HEAD}>Left over on its computer</span>
+      <span className={HINT}>Made by an older Bops or a test. Bops never deploys to these.</span>
+      <div className="-mx-2 flex flex-col">
+        {list.map((x) => (
+          <div key={x.id} data-left-over={x.name} className="flex flex-col gap-1 rounded-lg px-2 py-1">
+            <div className="flex min-h-7 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-4 text-[#3A3A38]">
+                {x.port !== null ? `${x.name}, port ${x.port}` : x.name}
+              </span>
+              <button data-left-over-remove disabled={busy} onClick={() => setAsking(x.id)} className={`${light()} disabled:opacity-50`}>
+                Remove
+              </button>
+            </div>
+            {asking === x.id && (
+              <InlineConfirm
+                text={x.id.startsWith("url:") ? `Remove ${x.name}? Its link stops working for good, so remove it from Google sign in too.` : `Remove ${x.name}? It stops serving for good.`}
+                action="Remove"
+                cancel="Keep"
+                doing="Removing…"
+                busy={busy}
+                onConfirm={() => remove(x.id)}
+                onCancel={() => setAsking(null)}
+              />
+            )}
+          </div>
+        ))}
+      </div>
+      {error && (
+        <span role="alert" className={ALERT}>
+          {error}
+        </span>
+      )}
     </div>
   );
 }
@@ -619,6 +691,16 @@ export function DomainShop<T>({
  * line doesn't offer the same again; `onCantSet`: Bops couldn't set that one there, so its line offers its
  * records to copy again.
  */
+/**
+ * Where a Published site's domain comes from (Add a domain): the user's own Cloudflare first (Bops sets its records
+ * there, DNS only), then one they own elsewhere (its records to copy). Buying one and Your domains (bought through
+ * Orgo) aren't offered there now; their code stays, and a domain already added from them keeps working.
+ */
+export const PROD_DOMAIN_SOURCES = ["cloudflare", "own"] as const;
+export type DomainSource = "cloudflare" | "own" | "buy" | "owned";
+/** What Add a domain offers now (Published's sources; every one where the kept code is looked at, in its UI test). */
+export const domainSources: { now: readonly DomainSource[] } = { now: PROD_DOMAIN_SOURCES };
+
 export function AddDomain({
   ws,
   name,
@@ -629,9 +711,12 @@ export function AddDomain({
   onApplied,
   onPlan,
   onCantSet,
+  sources = domainSources.now,
 }: {
   ws: string;
   name: string;
+  /** What it offers (PROD_DOMAIN_SOURCES for a Published site). */
+  sources?: readonly DomainSource[];
   /** The signed-in account's email, to fill who a domain is registered to when Orgo has nothing of theirs. */
   email?: string | null;
   onAdded: (domains: AppDomainsAnswer, added: AppDomain | null) => void;
@@ -674,8 +759,9 @@ export function AddDomain({
   }, [planFor, onPlan]);
   // Every button in the panel is off while anything is out (a buy most of all).
   const busy = sendingOwn || shopping;
-  const buyOpen = !!options?.buy.open;
-  const shown = mode ?? (options && !buyOpen ? "own" : "buy");
+  const buys = sources.includes("buy");
+  const buyOpen = buys && !!options?.buy.open;
+  const shown = buys ? (mode ?? (options && !buyOpen ? "own" : "buy")) : "own";
   /** What a buy or a Use answered: closed once it's pointed here; else why (it's among the workspace's own now, to use from there). */
   const done = (r: AppDomainAdded) => {
     onAdded(r.domains, r.domain);
@@ -724,8 +810,8 @@ export function AddDomain({
       {error.error}
     </span>
   );
-  const owned = options?.owned ?? [];
-  const cf = options?.cloudflare;
+  const owned = sources.includes("owned") ? (options?.owned ?? []) : [];
+  const cf = sources.includes("cloudflare") ? options?.cloudflare : undefined;
   let body: ReactNode;
   if (shown === "own")
     body = (
@@ -798,6 +884,65 @@ export function AddDomain({
           }}
           onCantSet={() => onCantSet?.(cfPlan.plan.domainId)}
         />
+      </div>
+    );
+  const closeButton = (
+    <button aria-label="Close" disabled={busy} onClick={onClose} className="flex size-6 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
+      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+        <path d="M2 2l6 6M8 2L2 8" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    </button>
+  );
+  // A Published site's: Its domain, From Cloudflare first, then Use a domain I own (a small link to its own form).
+  if (!buys)
+    return (
+      <div data-add-domain-panel data-domain-sources={sources.join(" ")} onKeyDown={escCloses(busy, onClose)} className={`mt-1 ${BOX}`}>
+        <div className="flex items-center gap-2">
+          <span className="text-[12.5px] font-semibold leading-4 text-ink">Its domain</span>
+          <span className="flex-1" />
+          {closeButton}
+        </div>
+        {!options ? (
+          <span className={QUIET}>{optionsFailed ?? "Reading…"}</span>
+        ) : (
+          <>
+            {cf?.why && (
+              <span data-cloudflare className={HINT}>
+                {cf.why}
+              </span>
+            )}
+            {!!cf?.zones?.length && (
+              <div data-cloudflare className="flex flex-col">
+                <span className="text-[12px] leading-[18px] text-[#6B6B6B]">From Cloudflare:</span>
+                {cf.zones.map((z) => (
+                  <OwnedLine
+                    key={z.id}
+                    o={z}
+                    source="cloudflare"
+                    busy={busy}
+                    sending={sendingOwn && using === `cf:${z.id}`}
+                    error={using === `cf:${z.id}` ? error : null}
+                    onTyped={() => using === `cf:${z.id}` && setError(null)}
+                    onUse={(subdomain) => send({ ws, action: "cloudflare", zone: z.id, ...(subdomain ? { subdomain } : {}) }, `cf:${z.id}`)}
+                    onWrong={(no) => {
+                      setUsing(`cf:${z.id}`);
+                      setError(no);
+                    }}
+                  />
+                ))}
+                {cf.more && <span className={`${HINT} pb-1`}>Showing your first 200 Cloudflare domains.</span>}
+                <span className={HINT}>Bops sets its records in Cloudflare as DNS only.</span>
+              </div>
+            )}
+          </>
+        )}
+        {mode === "own" || !cf?.zones?.length ? (
+          body
+        ) : (
+          <button data-own-link disabled={busy} onClick={() => setMode("own")} className="self-start text-[12px] leading-4 text-[#6B6B6B] underline decoration-[#C9C9C6] underline-offset-2 hover:text-ink">
+            Use a domain I own
+          </button>
+        )}
       </div>
     );
   return (
@@ -1156,7 +1301,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
     setBusy(true);
     setError(null);
     setSaid(null);
-    const c: AppSettingsChange = { ws, ...(site ? { site } : {}), ...(env === "staging" ? { env } : {}) };
+    const c: AppSettingsChange = { ws, ...(site ? { site } : {}), ...(env === "preview" ? { env } : {}) };
     for (const k of changed) c[k] = form[k].trim();
     void saveSettings(name, c).then((r) => {
       setBusy(false);
@@ -1177,8 +1322,8 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
   return (
     <div data-settings data-first={first || undefined} className="flex flex-col">
       <span className={HEAD}>Settings</span>
-      {first && env === "staging" && <span className={`pb-1 ${HINT}`}>The preview is built with the published app&apos;s commands the first time. Set its own here, and its variables below.</span>}
-      {first && env !== "staging" && <span className={`pb-1 ${HINT}`}>Set them now and its first deploy has them. Orgo finds what&apos;s left empty, and keeps the variables&apos; values secret.</span>}
+      {first && env === "preview" && <span className={`pb-1 ${HINT}`}>The preview is built with the published app&apos;s commands the first time. Set its own here, and its variables below.</span>}
+      {first && env !== "preview" && <span className={`pb-1 ${HINT}`}>Set them now and its first deploy has them. Orgo finds what&apos;s left empty, and keeps the variables&apos; values secret.</span>}
       <form
         data-settings-form
         onSubmit={(e) => {
@@ -1418,7 +1563,11 @@ export function Variables({ ws, name, names, onSaved, first, lacks }: { ws: stri
           The published app has {lacks.join(", ")}. The preview doesn&apos;t yet: add {lacks.length === 1 ? "it" : "them"} here if the preview needs {lacks.length === 1 ? "it" : "them"}.
         </span>
       )}
-      {where === "local" && <span data-local-vars className={`pt-0.5 ${HINT}`}>Local reads the preview&apos;s variables, with these on top. They stay on its computer.</span>}
+      {where === "local" && <span data-local-vars className={`pt-0.5 ${HINT}`}>Local reads the preview&apos;s variables, with these on top, and signs in at localhost. They stay on its computer.</span>}
+      {where === "preview" && <span data-preview-vars className={`pt-0.5 ${HINT}`}>Its own variables, not Published&apos;s. Give it a database of its own.</span>}
+      {where !== "preview" && where !== "local" && (names.includes("AUTH_URL") || names.includes("NEXTAUTH_URL")) && (
+        <span data-auth-hint className={`pt-0.5 ${HINT}`}>Signs in with Google? Set AUTH_URL to its domain and add it to Google sign in.</span>
+      )}
       {editing === "new" ? (
         form(null)
       ) : (
@@ -1475,7 +1624,7 @@ export function AppDeploys({ ws, app, deploys, onChanged, log }: { ws: string; a
   const back = (d: AppDeploy) => {
     setBusy(d.id);
     setError(null);
-    void act(app.name, { ws, action: "rollback", deployment: d.id, ...(site ? { site } : {}), ...(env === "staging" ? { env } : {}) }).then((r) => {
+    void act(app.name, { ws, action: "rollback", deployment: d.id, ...(site ? { site } : {}), ...(env === "preview" ? { env } : {}) }).then((r) => {
       setBusy(null);
       if (r.app) onChanged(r.app);
       else setError(undash(r.error ?? "Couldn't roll back. Try again."));
@@ -1629,7 +1778,7 @@ export function AppEnd({
           onKeyDown={escCloses(busy, close)}
           className={BOX}
         >
-          <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">Another site from the same code, on the same computer, with its own address, port and variables.</span>
+          <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">Another site from the same code, on the same computer, with its own preview link, domain, port and variables.</span>
           <div className="flex flex-wrap items-center gap-2">
             <input
               aria-label="Site name"
@@ -1658,13 +1807,13 @@ export function AppEnd({
                 ? "It has a site by that name."
                 : "Lowercase letters, numbers and single hyphens."
               : typed
-                ? `Its address is ${typed}.orgo.dev once it's live, if no one has it.`
-                : "Its name is its address on Orgo, so it can't be renamed."}
+                ? "It gets a preview link of its own on its first deploy, and lives on its own domain once published."
+                : "Its name can't be changed once it's added."}
           </span>
         </form>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
-          <span data-tip={full ? `An app can have ${MAX_SITES} sites at most.` : "Another site from the same code, with its own address, port and variables"} className="flex">
+          <span data-tip={full ? `An app can have ${MAX_SITES} sites at most.` : "Another site from the same code, with its own preview link, domain, port and variables"} className="flex">
             <button data-add-site disabled={busy || full} onClick={() => ask("add")} className={`${light()} disabled:opacity-50`}>
               Add a site
             </button>
@@ -1685,7 +1834,19 @@ export function AppEnd({
         </div>
       )}
       {open === "site" && site && (
-        <InlineConfirm text={`Remove ${site}? It comes off the web with its domains. The code stays the app's.`} action="Remove" doing="Removing…" busy={busy} onConfirm={dropSite} onCancel={close} />
+        <InlineConfirm
+          text={
+            app.sites?.find((x) => x.name === site)?.preview?.url
+              ? `Remove ${site}? Its preview link ${app.sites.find((x) => x.name === site)!.preview!.url} stops working for good, so remove it from Google sign in too.`
+              : `Remove ${site}? It comes off the web with its domains. The code stays the app's.`
+          }
+          action="Remove"
+          cancel="Keep"
+          doing="Removing…"
+          busy={busy}
+          onConfirm={dropSite}
+          onCancel={close}
+        />
       )}
       {open === "app" && (
         <InlineConfirm

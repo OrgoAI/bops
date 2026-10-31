@@ -6,6 +6,7 @@ import { botChatId, workspaceOf, type AppState, type Chat, type DeletedDays, typ
 import { framePath } from "./frames";
 import { dropPages, pagePath, pagesDir } from "./pages";
 import { getState, id, update, userDir } from "./store";
+import { refold } from "./chat-summary";
 import { dropUploads, uploadPath, uploadsDir } from "./uploads";
 
 /**
@@ -501,6 +502,8 @@ function putBack(e: Entry, messages: readonly Message[], threads: readonly { ses
       messages.filter((m) => !have.has(m.id) && (open.has(m.chatId) || pairOf(m.chatId))),
     );
   });
+  // Back in their chat's summary too, when it had moved past them (chat-summary.ts): written again with them.
+  refold(messages);
 }
 
 /**

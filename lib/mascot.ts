@@ -7,13 +7,13 @@
 
 /**
  * How a bot looks: idle (eyes closed, vibing) or awake (eyes open), the two the pictures use; and, in
- * the app, what it's doing at work (lib/bot-mood.ts picks it): thinking, writing, speaking or working,
- * or shy for a few seconds after it's thanked.
+ * the app, what it's doing at work (lib/bot-mood.ts picks it): thinking, writing, coding, speaking or
+ * working, or shy for a few seconds after it's thanked.
  */
 export type Mood = "idle" | "awake" | MovingMood;
 /** The moods a bot shows while it works, each a pose that app/globals.css sets moving (mascot-*). */
-export type MovingMood = "thinking" | "writing" | "speaking" | "working" | "shy";
-export const MOVING_MOODS: readonly MovingMood[] = ["thinking", "writing", "speaking", "working", "shy"];
+export type MovingMood = "thinking" | "writing" | "coding" | "speaking" | "working" | "shy";
+export const MOVING_MOODS: readonly MovingMood[] = ["thinking", "writing", "coding", "speaking", "working", "shy"];
 export const isMoving = (mood: Mood): mood is MovingMood => (MOVING_MOODS as readonly Mood[]).includes(mood);
 
 const BLOB =
@@ -92,6 +92,39 @@ const PENCIL =
   `</g></g>`;
 
 /**
+ * Coding: a small laptop at the bottom left, its screen toward you, where the pencil writes (left, clear of
+ * the main bot's star): a light lid outlined in `ink` (the main bot's in its cups' color), and on its dark
+ * screen three short lines of code (highlighter, white, pink, the second indented) that type in one after
+ * another, each in its turn, with a caret blinking after the last. Still, every line is there.
+ */
+const LID = "#E4E4DE";
+const CODE_LINES: [x: number, y: number, w: number, fill: string][] = [
+  [3.2, 29.4, 6.2, HIGHLIGHTER],
+  [5.1, 31.5, 7, "#fff"],
+  [3.2, 33.6, 3.8, "#FF8FB8"],
+];
+const laptop = (lid: string, ink: string) =>
+  `<g class="mascot-laptop">` +
+  `<rect x=".9" y="27" width="15" height="9.8" rx="1.3" fill="${lid}" stroke="${ink}" stroke-width=".7"/>` +
+  `<rect x="2.1" y="28.2" width="12.6" height="7.4" rx=".6" fill="${ink}"/>` +
+  CODE_LINES.map(([x, y, w, fill], i) => `<rect class="mascot-code-line" x="${x}" y="${y}" width="${w}" height="1.3" rx=".65" fill="${fill}" style="animation-delay:${(i * 0.6 - 1.8).toFixed(1)}s"/>`).join("") +
+  `<rect class="mascot-caret" x="7.8" y="33.2" width="1.1" height="2.1" fill="${HIGHLIGHTER}"/>` +
+  `<rect x=".4" y="36.6" width="16" height="2.1" rx="1.05" fill="${lid}" stroke="${ink}" stroke-width=".7"/>` +
+  `</g>`;
+
+/**
+ * A coder's mark (lib/bot-mood.ts codersOf: a bot that works on one of the workspace's apps), still, on top of
+ * every mood: a small ink pill with </> in highlighter at the top left of the box (the main bot's star sits at
+ * the bottom right of its card, the pencil and the laptop at the bottom left, the thought bubble and the sound
+ * at the top right), ringed in white so it stands off a black head. Too small to read below CODER_MIN_SIZE.
+ */
+const CODER =
+  `<g class="coder-mark"><rect x=".7" y=".7" width="17" height="10.6" rx="5.3" fill="${INK}" stroke="#fff"/>` +
+  `<path d="M6.5 3.4 4 6l2.5 2.6M11.9 3.4 14.4 6l-2.5 2.6M10.3 3l-2.2 6" fill="none" stroke="${HIGHLIGHTER}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g>`;
+/** The smallest mascot (in px) that shows the coder's mark: below it, the mark is a smudge. */
+export const CODER_MIN_SIZE = 18;
+
+/**
  * Shy: two flat cheeks below the eyes, glowing: pink on the main bot's black, a deeper rose on the
  * bots' colored bodies (so it shows on the pink and red ones too), where their pale blush is. Otto's
  * sit lower and wider, clear of its glasses.
@@ -135,8 +168,10 @@ const MAIN_CHEEKS = `<g class="mascot-blush" fill="${BLUSH}"><ellipse cx="13.9" 
  * highlighter headphones outlined in ink (a band arching clear of the head, behind it, into the
  * cups), a little smaller than the box so the band fits. Awake, it's the app icon's "ooh": its head
  * tilted a little, its eyes glancing up, a small round mouth; thinking and working keep that face.
- * Idle shuts its eyes, upright. Writing leans toward its pencil, looking down; speaking faces you,
- * its round mouth opening and closing; shy leans away, looking down, its cheeks pink.
+ * Idle shuts its eyes, upright. Writing leans toward its pencil, looking down; coding leans toward
+ * its laptop the same way (the laptop's lid in its cups' highlighter), its cups bouncing as they do
+ * at work; speaking faces you, its round mouth opening and closing; shy leans away, looking down,
+ * its cheeks pink.
  */
 function mainMarkup(mood: Mood, accent: boolean) {
   const fill = accent ? HIGHLIGHTER : "#3A3A38";
@@ -145,7 +180,7 @@ function mainMarkup(mood: Mood, accent: boolean) {
   let face: string;
   let tilt = 0;
   if (mood === "idle") face = mainEyes(false);
-  else if (mood === "writing") {
+  else if (mood === "writing" || mood === "coding") {
     tilt = -5;
     face = `<g transform="translate(-.6 .9)">${mainEyes(true)}</g>`;
   } else if (mood === "speaking") face = `${mainEyes(true)}<ellipse class="mascot-mouth" cx="20" cy="25.8" rx="1.6" ry="1.9" fill="#fff"/>`;
@@ -157,11 +192,11 @@ function mainMarkup(mood: Mood, accent: boolean) {
     tilt = -9;
     face = `<g${mood === "thinking" ? ` class="mascot-glance"` : ""} transform="translate(.6 -1.4)">${mainEyes(true)}</g><ellipse cx="20.8" cy="26.6" rx="1.35" ry="1.65" fill="#fff"/>`;
   }
-  const cups = mood === "working" ? `<g class="mascot-cup">${left}</g><g class="mascot-cup mascot-cup-r">${right}</g>` : left + right;
+  const cups = mood === "working" || mood === "coding" ? `<g class="mascot-cup">${left}</g><g class="mascot-cup mascot-cup-r">${right}</g>` : left + right;
   const head = `${mainBand(fill)}<path d="${MAIN_HEAD}" fill="#0A0A0A"/>${face}${cups}`;
   const drawn = `<g transform="translate(20 21.4) scale(.92) translate(-20 -20)">${tilt ? `<g transform="rotate(${tilt} 20 20)">${head}</g>` : head}</g>`;
   if (!isMoving(mood)) return drawn;
-  const extra = mood === "thinking" ? THOUGHT : mood === "writing" ? PENCIL : mood === "speaking" ? MAIN_SOUND : "";
+  const extra = mood === "thinking" ? THOUGHT : mood === "writing" ? PENCIL : mood === "coding" ? laptop(accent ? HIGHLIGHTER : LID, "#0A0A0A") : mood === "speaking" ? MAIN_SOUND : "";
   return `<g class="mascot-${mood}">${drawn}</g>${extra}`;
 }
 
@@ -170,12 +205,17 @@ function mainMarkup(mood: Mood, accent: boolean) {
  * (for spots where the highlighter would clash). Idle and awake are the pictures' still poses; each
  * moving mood is a still pose too (where nothing sets it moving, or motion is reduced), with classes
  * app/globals.css animates: thinking glances up under its thought bubble, writing looks down at its
- * pencil, speaking opens its mouth with sound off a cup, working bops along, its cups to the beat,
- * and shy looks away with its cheeks glowing pink.
+ * pencil, coding looks down at its laptop as code types in, its cups to the beat, speaking opens its
+ * mouth with sound off a cup, working bops along, its cups to the beat, and shy looks away with its
+ * cheeks glowing pink. `coder` adds the coder's mark on top, whatever the mood (the app passes it for
+ * a bot that works on an app, at CODER_MIN_SIZE and up; the pictures never have it).
  */
-export function mascotMarkup(botId: string, color: string, opts: { mood?: Mood; accent?: boolean } = {}) {
-  const mood = opts.mood ?? "idle";
-  const accent = opts.accent !== false;
+export function mascotMarkup(botId: string, color: string, opts: { mood?: Mood; accent?: boolean; coder?: boolean } = {}) {
+  const drawn = moodMarkup(botId, color, opts.mood ?? "idle", opts.accent !== false);
+  return opts.coder ? drawn + CODER : drawn;
+}
+
+function moodMarkup(botId: string, color: string, mood: Mood, accent: boolean) {
   if (isMainBotId(botId)) return mainMarkup(mood, accent);
   if (!isMoving(mood)) {
     const f = figure(botId, color, (c) => eyes(mood === "idle" ? "vibe" : faceOf(botId), c));
@@ -184,13 +224,13 @@ export function mascotMarkup(botId: string, color: string, opts: { mood?: Mood; 
   const face = (c: string) => {
     const open = eyes(faceOf(botId), c);
     if (mood === "thinking") return `<g class="mascot-glance" transform="translate(.6 -1.4)">${open}</g>`;
-    if (mood === "writing" || mood === "shy") return `<g transform="translate(-.6 .9)">${open}</g>`;
+    if (mood === "writing" || mood === "coding" || mood === "shy") return `<g transform="translate(-.6 .9)">${open}</g>`;
     if (mood === "speaking") return `${open}<path class="mascot-mouth" d="M17.8 26.6h4.4q0 2.8-2.2 2.8t-2.2-2.8z" fill="${c}"/>`;
     return open;
   };
   const f = figure(botId, color, face);
-  const phones = mood === "working" ? bouncingHeadphones(f.band, f.pad) : headphones(f.band, f.pad);
-  const extra = mood === "thinking" ? THOUGHT : mood === "writing" ? PENCIL : mood === "speaking" ? SOUND : "";
+  const phones = mood === "working" || mood === "coding" ? bouncingHeadphones(f.band, f.pad) : headphones(f.band, f.pad);
+  const extra = mood === "thinking" ? THOUGHT : mood === "writing" ? PENCIL : mood === "coding" ? laptop(LID, INK) : mood === "speaking" ? SOUND : "";
   return `<g class="mascot-${mood}">${body(f.inner)}${phones}${mood === "shy" ? cheeks(botId) : ""}</g>${extra}`;
 }
 

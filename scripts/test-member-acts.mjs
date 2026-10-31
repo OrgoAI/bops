@@ -20,9 +20,10 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const forward = (mod, names) => names.map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(mod)}].${n}(...a);`).join("\n");
 const FAKES = {
-  store: forward("store", ["bot", "chat", "getState", "session"]),
+  store: forward("store", ["bot", "chat", "getState", "ownerName", "session"]),
   chat: forward("chat", ["handleMessage"]),
-  sessions: forward("sessions", ["replyToSession", "stopSession", "dismissWaiting"]),
+  sessions: forward("sessions", ["replyToSession", "stopSession", "dismissWaiting", "compactThread"]),
+  "chat-summary": forward("chat-summary", ["compactChat"]),
   permission: forward("permission", ["replyToAsk"]),
   persist: forward("persist", ["onRunner"]),
   "hosted-apps": forward("hosted-apps", ["deployApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"]),
@@ -114,6 +115,7 @@ function fresh(o = {}) {
 let hosted;
 globalThis.__fake = {
   store: {
+    ownerName: () => "Alex",
     getState: () => state,
     bot: (id) => state.bots.find((b) => b.id === id),
     chat: (id) => state.chats.find((c) => c.id === id),
@@ -133,7 +135,9 @@ globalThis.__fake = {
     },
     stopSession: (id, reason) => did.push(["stop", id, reason]),
     dismissWaiting: (id, reason) => did.push(["dismiss", id, reason]),
+    compactThread: async (id, by) => (did.push(["compact thread", id, by]), compactSays),
   },
+  "chat-summary": { compactChat: async (id, by) => (did.push(["compact chat", id, by]), compactSays) },
   permission: { replyToAsk: (id, reply, message, member) => (did.push(["answer", id, reply, message, member]), undefined) },
   persist: { onRunner: () => runner },
   // The owner's page's own functions (hosted-apps.ts): each records what it was asked; `appFails` makes the next throw.
@@ -143,6 +147,8 @@ globalThis.__fake = {
       async (...a) => {
         did.push([n, ...a]);
         if (appFails) throw new Error(appFails);
+        // A deploy of Published's, which isn't one of the Preview's (hosted-apps.ts rollbackApp's 404).
+        if (n === "rollbackApp" && a[2] === "dep-prod") throw Object.assign(new Error("That isn't one of its recent deploys."), { status: 404 });
         return n === "connectDomain" ? { domains: {}, domain: { domain: "store.acme.example" } } : {};
       },
     ]),
@@ -153,6 +159,8 @@ globalThis.__fake = {
     seeApps: async () => void did.push(["seeApps"]),
   },
 };
+/** What the owner's Compact says (chat-summary.ts compactChat, sessions.ts compactThread). */
+let compactSays = { ok: true };
 /** What the owner's Mac kept on each app (noteMemberAct), and the next page function's error. */
 const kept = [];
 let appFails = null;
@@ -237,6 +245,31 @@ await check("an app thread's ask or thread: only Orgo's team with Write, and onl
   assert.deepEqual(did, [], "not for someone outside Orgo's team");
   await memberEvent(event({ act: "answer", askId: "ask-app", reply: "once" }, { member: TOM }), "e19");
   assert.deepEqual(did, [["answer", "ask-app", "once", undefined, TOM]]);
+});
+
+await check("Compact: a chat's with Write on every bot in it, a thread's as a reply takes, named as theirs; never a Read bot's, two bots' talk or a thread on the owner's Mac", async () => {
+  fresh();
+  await memberEvent(event({ act: "compact", chatId: "bot:max" }, { key: "key_compact_1" }), "c1");
+  await memberEvent(event({ act: "compact", chatId: "g-max" }, { key: "key_compact_2" }), "c2");
+  await memberEvent(event({ act: "compact", sessionId: "t-max" }, { key: "key_compact_3" }), "c3");
+  assert.deepEqual(did, [
+    ["compact chat", "bot:max", { ...SAM, ref: "key_compact_1" }],
+    ["compact chat", "g-max", { ...SAM, ref: "key_compact_2" }],
+    ["compact thread", "t-max", { ...SAM, ref: "key_compact_3" }],
+  ]);
+  did.length = 0;
+  const no = [{ chatId: "bot:ivy" }, { chatId: "g-both" }, { chatId: "pair:ivy:max" }, { chatId: "bot:boppy" }, { sessionId: "t-ivy" }, { sessionId: "t-onmac" }, { chatId: "bot:max", sessionId: "t-max" }, {}];
+  for (const [i, x] of no.entries()) await memberEvent(event({ act: "compact", ...x }, { key: `key_compact_no${i}` }), `c${10 + i}`);
+  fresh({ maxLevel: "read" });
+  await memberEvent(event({ act: "compact", chatId: "bot:max" }, { key: "key_compact_ro" }), "c20");
+  assert.deepEqual(did, [], "nothing done");
+  // Done, and the owner's Mac said no (a bot answering, nothing new): said in the log.
+  fresh();
+  compactSays = { ok: false, error: "Nothing new to compact.", status: 409 };
+  await memberEvent(event({ act: "compact", chatId: "bot:max" }, { key: "key_compact_4" }), "c21");
+  await new Promise((r) => setTimeout(r, 5));
+  compactSays = { ok: true };
+  assert.ok(warned.some((w) => /event c21: Nothing new to compact\./.test(w)));
 });
 
 await check("Stop says who stopped it, Nothing to add dismisses as theirs, and a stop with a Read bot's thread does nothing", async () => {
@@ -332,6 +365,16 @@ await check("the chart never widens what a member's own acts reach: Zed's chat a
 
 const TOM_EV = (act, o = {}) => event(act, { member: TOM, key: o.key ?? `key_app_${Math.random().toString(36).slice(2, 10)}`, ...o });
 const settleApps = () => new Promise((r) => setTimeout(r, 10));
+await check("A member's rollback of what's published is refused, in words: members roll back the preview only", async () => {
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  kept.length = 0;
+  await memberEvent(TOM_EV({ act: "rollback", app: "shop", deployment: "dep-prod" }), "e9");
+  await settleApps();
+  const k = kept.at(-1);
+  assert.equal(k[2].ok, false);
+  assert.match(k[2].said, /^Members roll back its preview only\. Ask .+ to roll back what's published\.$/);
+});
+
 await check("Your Apps at Write: deploy, go back, settings and a domain go through the page's own functions, kept as the member's", async () => {
   fresh({ ownerEmail: "owner@orgo.ai" });
   kept.length = 0;
@@ -342,10 +385,11 @@ await check("Your Apps at Write: deploy, go back, settings and a domain go throu
   await memberEvent(TOM_EV({ act: "domain", app: "shop", zone: "zone-1", subdomain: "store" }), "e5");
   await settleApps();
   assert.deepEqual(did.filter((d) => d[0] !== "seeApps"), [
-    ["deployApp", "ws_acme", "shop", {}],
-    ["deployApp", "ws_acme", "shop", { at: "cs-1", site: "admin" }],
-    ["rollbackApp", "ws_acme", "shop", "dep-1", undefined],
-    ["changeSettings", "ws_acme", "shop", { port: 8080, install: undefined, build: undefined, start: "npm run serve", health: undefined }, undefined],
+    // (A member's deploy, rollback and settings are the Preview's: publishing is the owner's alone.)
+    ["deployApp", "ws_acme", "shop", { env: "preview" }],
+    ["deployApp", "ws_acme", "shop", { at: "cs-1", site: "admin", env: "preview" }],
+    ["rollbackApp", "ws_acme", "shop", "dep-1", undefined, "preview"],
+    ["changeSettings", "ws_acme", "shop", { port: 8080, install: undefined, build: undefined, start: "npm run serve", health: undefined }, undefined, "preview"],
     ["connectDomain", "ws_acme", "shop", { zone: "zone-1", subdomain: "store" }, undefined],
   ]);
   assert.deepEqual(kept.map((k) => [k[1], k[2].act, k[2].ok, k[2].name, k[2].userId]), [

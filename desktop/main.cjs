@@ -14,6 +14,7 @@ const { pathToFileURL } = require("node:url");
 const { startRenderService } = require("./render.cjs");
 const { createUpdates } = require("./updates.cjs");
 const { installAppFrames } = require("./app-frames.cjs");
+const { installPreviewFrames } = require("./preview-frames.cjs");
 const { ownCall } = require("./own-call.cjs");
 
 const PORT = 3210;
@@ -739,12 +740,16 @@ function fenceTabSession(s) {
 
 /** The apps the bots make, on a session of their own and fenced in (desktop/app-frames.cjs); set up when the app is ready. */
 let appFrames;
+/** An app's Local beside its bot's chat, on a session of its own per app (desktop/preview-frames.cjs). */
+let previewFrames;
+// A Preview that asks for a password opens beside the chat without asking: its cookie in that preview's session (preview-frames.cjs checks all of it).
+ipcMain.handle("preview-sign-in", (_, ask) => previewFrames?.signIn(ask) ?? false);
 
 // A page in a tab that opens a new window opens it in your browser instead.
 app.on("web-contents-created", (_, contents) => {
   if (contents.getType() !== "webview") return;
-  // An app a bot made: app-frames.cjs fences it in, far tighter than a tab.
-  if (appFrames?.isApps(contents.session)) return;
+  // An app a bot made: app-frames.cjs fences it in, far tighter than a tab. An app's preview: preview-frames.cjs (Google's sign in popup stays in it).
+  if (appFrames?.isApps(contents.session) || previewFrames?.isPreview(contents.session)) return;
   fenceTabSession(contents.session);
   contents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -1362,6 +1367,7 @@ app.whenReady().then(() => {
   }
   // The apps the bots make: their own session, where nothing but their pages loads (before any window can show one).
   appFrames = installAppFrames({ app, session, server: URL, preload: path.join(__dirname, "app-frame-preload.cjs"), log: mainLog });
+  previewFrames = installPreviewFrames({ app, session, fence: fenceTabSession, external: (url) => shell.openExternal(url), preload: path.join(__dirname, "preview-frame-preload.cjs"), log: mainLog });
   // Pages the server can't read with a plain fetch (one that draws itself, one that checks for a human), read in a hidden window.
   try {
     renderService = startRenderService({ socketPath: renderSocket(), token: windowToken(), log: mainLog });

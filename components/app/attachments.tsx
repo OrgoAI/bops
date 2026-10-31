@@ -62,11 +62,14 @@ export function useAttachments() {
     live.current = items;
   });
   useEffect(() => () => live.current.forEach((a) => URL.revokeObjectURL(a.preview)), []);
+  /** Adds them (images only, ten in all at most); answers the keys of the ones added. */
   const add = useCallback((files: Iterable<File>) => {
     // Ten at most: one past that is not added, or uploaded.
     const fresh = [...files].filter((f) => f.type.startsWith("image/")).slice(0, Math.max(0, 10 - live.current.length));
+    const keys: string[] = [];
     for (const file of fresh) {
       const key = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      keys.push(key);
       const preview = URL.createObjectURL(file);
       const done = (async (): Promise<Pic | null> => {
         try {
@@ -84,6 +87,7 @@ export function useAttachments() {
       })();
       setItems((xs) => [...xs, { key, preview, status: "uploading" as const, done }].slice(0, 10));
     }
+    return keys;
   }, []);
   const remove = useCallback((key: string) => {
     const gone = live.current.find((x) => x.key === key);

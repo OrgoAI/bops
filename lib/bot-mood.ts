@@ -1,20 +1,28 @@
+import { appsShown } from "@/lib/apps-access";
+import { siteLabel } from "@/lib/bot-groups";
 import type { Mood } from "@/lib/mascot";
-import { live, waitsForOk, type AppState } from "@/lib/types";
+import { live, waitsForOk, type AppState, type Session } from "@/lib/types";
 
 /**
  * What each bot is doing right now, as the app knows it, gathered once at the top of the app (BotMoods
  * in components/app/mascot.tsx) so every mascot picks its mood the same way (moodOf). Only real
  * signals: a reply comes in whole (lib/server/chat.ts), so composing one is thinking, never writing;
  * writing is a live thread whose caption says it's writing (Session.activity, sessions.ts captionSoon);
+ * coding is a thread at work on one of the workspace's apps (Session.app, codingThread), never a guess;
  * speaking is the bot's voice coming through on a call (CallBar's meter); shy is the user thanking or
  * praising it, for a few seconds after. A bot at work on another of the user's devices shows what it's
  * doing there (AppState.liveMoods, from Bops Cloud's live stream) while nothing here says otherwise.
+ * And which bots are coders at all (codersOf), for the mark every mascot of theirs wears.
  */
 export type MoodSignals = {
   /** Bots with a live thread (not one waiting to be told where to run). */
   working: ReadonlySet<string>;
   /** Bots with a live thread that's writing or editing text: a message, a document, a note. */
   writing: ReadonlySet<string>;
+  /** Bots with a thread running on one of the workspace's apps (codingThread). */
+  coding: ReadonlySet<string>;
+  /** Bots that work on one of the workspace's apps (codersOf), whatever they're doing now. */
+  coders: ReadonlySet<string>;
   /** Bots composing a reply, by chat (Chat.typing). */
   typing: ReadonlyMap<string, readonly string[]>;
   /** Bots composing a reply in any chat. */
@@ -29,7 +37,30 @@ export type MoodSignals = {
   elsewhere?: ReadonlyMap<string, NonNullable<AppState["liveMoods"]>[string]>;
 };
 
-export const NO_SIGNALS: MoodSignals = { working: new Set(), writing: new Set(), typing: new Map(), typingAnywhere: new Set(), shy: new Set() };
+export const NO_SIGNALS: MoodSignals = { working: new Set(), writing: new Set(), coding: new Set(), coders: new Set(), typing: new Map(), typingAnywhere: new Set(), shy: new Set() };
+
+/**
+ * The bots that are coders: only where the window shows apps (lib/apps-access.ts appsShown), a bot whose Works on
+ * (lib/types.ts siteOf) names a site of an app that's there (lib/bot-groups.ts siteLabel says it, in a workspace
+ * shared with the user too), or the bot an app's hosting record names (Workspace.hostedApps[name].botId: its
+ * computer holds the app's folder), while that app still has its home (not `lost`). Their mascots wear the coder's
+ * mark (lib/mascot.ts) and the sidebar says their site in code's own type.
+ */
+export function codersOf(state: Pick<AppState, "account" | "shared" | "workspace" | "workspaces"> & { bots?: AppState["bots"] }): Set<string> {
+  if (!appsShown(state)) return new Set();
+  const hosts = new Set((state.workspaces ?? []).flatMap((w) => Object.values(w.hostedApps ?? {}).flatMap((h) => (h && !h.lost && typeof h.botId === "string" ? [h.botId] : []))));
+  return new Set((state.bots ?? []).filter((b) => hosts.has(b.id) || siteLabel(state, b) !== undefined).map((b) => b.id));
+}
+
+/**
+ * Whether thread `s` is coding: running (not queued or starting, not stopped at something only the user can get
+ * past, not waiting to be told where to run or for the user's OK) on one of the workspace's apps (Session.app,
+ * work_on_app's), the user's own ask (never a routine's run or one someone outside Bops started), where the window
+ * shows apps (appsShown). Bops Cloud has no such mood: lib/server/live-core.ts localMoods says it's working there.
+ */
+export function codingThread(s: Session, state: Pick<AppState, "account" | "shared"> & { appApprovals?: AppState["appApprovals"] }): boolean {
+  return s.status === "running" && !s.blocker && !s.askWhere && !waitsForOk(s, { appApprovals: state.appApprovals }) && !!s.app && !s.routineId && !s.fromOutside && appsShown(state);
+}
 
 /** How long a bot stays shy after a thanks. */
 export const SHY_MS = 6000;
@@ -63,7 +94,8 @@ export function isPraise(text: string) {
  * talking), at `now`: a thanks from SHY_MS ago no longer counts.
  */
 export function moodSignals(
-  state: Pick<AppState, "sessions" | "chats"> & { messages?: AppState["messages"]; liveMoods?: AppState["liveMoods"]; appApprovals?: AppState["appApprovals"] },
+  state: Pick<AppState, "sessions" | "chats"> &
+    Partial<Pick<AppState, "bots" | "account" | "shared" | "workspace" | "workspaces">> & { messages?: AppState["messages"]; liveMoods?: AppState["liveMoods"]; appApprovals?: AppState["appApprovals"] },
   call?: { botId: string; speaking: boolean } | null,
   now = Date.now(),
 ): MoodSignals {
@@ -84,6 +116,8 @@ export function moodSignals(
   return {
     working: new Set(running.map((s) => s.botId)),
     writing: new Set(running.filter((s) => s.activity === "writing").map((s) => s.botId)),
+    coding: new Set(running.filter((s) => codingThread(s, state)).map((s) => s.botId)),
+    coders: codersOf(state),
     typing,
     typingAnywhere: new Set([...typing.values()].flat()),
     ...(call ? { call } : {}),
@@ -94,14 +128,15 @@ export function moodSignals(
 }
 
 /**
- * A bot's mood, first that fits: speaking on a call, writing in a thread, shy just after a thanks,
- * thinking over a reply (in `chatId` when given: the mascot in that chat's row, header or typing
- * line; anywhere otherwise), working (a live thread, a reply in another chat, or on a call and
- * listening), else what it's doing on another of the user's devices (thinking there over a reply in
- * another chat is working here), else idle.
+ * A bot's mood, first that fits: speaking on a call, coding on an app, writing in a thread, shy just
+ * after a thanks, thinking over a reply (in `chatId` when given: the mascot in that chat's row, header
+ * or typing line; anywhere otherwise), working (a live thread, a reply in another chat, or on a call
+ * and listening), else what it's doing on another of the user's devices (thinking there over a reply
+ * in another chat is working here), else idle.
  */
 export function moodOf(signals: MoodSignals, botId: string, chatId?: string): Mood {
   if (signals.call?.botId === botId && signals.call.speaking) return "speaking";
+  if (signals.coding.has(botId)) return "coding";
   if (signals.writing.has(botId)) return "writing";
   if (signals.shy.has(botId)) return "shy";
   if (chatId ? signals.typing.get(chatId)?.includes(botId) : signals.typingAnywhere.has(botId)) return "thinking";

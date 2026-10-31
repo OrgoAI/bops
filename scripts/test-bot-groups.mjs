@@ -11,7 +11,8 @@
 //   hidden one waits; Needs your attention opens it; a search lists everything flat; the rail keeps them together.
 // - A bot's site (Workspace.botSites): the sidebar says its domain (a live one first, else one waiting for its DNS),
 //   else the site's name, in place of the role, the name first; a gone app or site falls back to the role. Set on its
-//   settings page's Works on row (None too), read only in a workspace shared with the user.
+//   settings page's Works on row (None too), read only in a workspace shared with the user. A coder's (lib/bot-mood.ts
+//   codersOf) in code's own type after a </>, and its mascots with the coder's mark.
 // - On the Mac: only a computer of the workspace is named, only a site of its apps linked, and the domains read once
 //   a computer however many sites are on it, kept a few minutes.
 // - For a member: only the bots shown, keys never a computer's id, the owner's names, and sites only with Your Apps.
@@ -114,6 +115,7 @@ const G = await import(pathToFileURL(`${root}/lib/bot-groups.ts`).href);
 const BG = await import(pathToFileURL(`${root}/components/app/bot-groups.tsx`).href);
 const { Sidebar } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
 const { SidebarRail } = await import(pathToFileURL(`${root}/components/app/sidebar-rail.tsx`).href);
+const { BotMoodsFrom } = await import(pathToFileURL(`${root}/components/app/mascot.tsx`).href);
 const Server = await import(pathToFileURL(`${root}/lib/server/bot-groups.ts`).href);
 const Slice = await import(pathToFileURL(`${root}/cloud/ws-slice.ts`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
@@ -479,8 +481,9 @@ await test("Its domain under its name in place of the role: a live one first, el
 await test("In the sidebar: the name first, then its site where the role was; a bot without one keeps its role", async () => {
   bops.domains = { ada: "shop.example.com", bo: null, cy: "docs.example.com" };
   const html = render(linked());
-  assert.match(html, />Ada<\/span><span data-row-line="site" title="Runs the shop website. Works on shop"[^>]*>shop</, "before Bops has read the domains: the site's name");
-  assert.match(html, />Bo<\/span><span data-row-line="site"[^>]*>blog</);
+  // Each a coder's (lib/bot-mood.ts codersOf): its site after a </> (test-bot-moods.mjs has the rest of that).
+  assert.match(html, />Ada<\/span><span data-row-line="site" title="Runs the shop website. Works on shop"[^>]*><span aria-hidden="true" data-code-mark="true"[^>]*>&lt;\/&gt;<\/span>shop</, "before Bops has read the domains: the site's name");
+  assert.match(html, />Bo<\/span><span data-row-line="site"[^>]*><span aria-hidden="true" data-code-mark="true"[^>]*>&lt;\/&gt;<\/span>blog</);
   assert.match(html, />Lex<\/span><span data-row-line="role"[^>]*>Sales</);
   assert.match(html, /class="truncate text-\[15px\] font-semibold leading-\[18px\] shrink-0 max-w-\[65%\]">Ada</, "the name keeps its room");
   assert.match(html, /data-row-line="site"[^>]*class="min-w-0 truncate/, "the line beside it gives way");
@@ -489,7 +492,7 @@ await test("In the sidebar: the name first, then its site where the role was; a 
   const m = await mount(h(Sidebar, sidebarProps(linked())));
   assert.equal(bops.sent.filter((x) => x.url.startsWith("/api/bots/sites")).length, 1, "read once");
   assert.equal(bops.sent.find((x) => x.url.startsWith("/api/bots/sites")).url, "/api/bots/sites?ws=ws_main");
-  const sites = () => [...m.box.querySelectorAll('[data-row-line="site"]')].map((x) => x.textContent);
+  const sites = () => [...m.box.querySelectorAll('[data-row-line="site"]')].map((x) => x.textContent.replace(/^<\/>/, ""));
   assert.deepEqual(sites(), ["docs.example.com", "shop.example.com", "blog"], "Cy, Ada and Bo, in the group's order: the domains once read, else the site's name");
   assert.equal(m.box.querySelector('[data-row-line="site"]').getAttribute("title"), "Writes the docs. Works on docs.example.com", "the role still there on hover");
   // The rail mounted beside it asks nothing more.
@@ -605,6 +608,27 @@ await test("Bops Cloud sends a member the groups of the bots they see: a key tha
   const plain = world();
   plain.bots = plain.bots.filter((b) => b.id !== "bo" && b.id !== "cy");
   assert.equal(Slice.sharedSlice(plain, "ws_main", { role: "owner" }).groups, undefined);
+});
+
+await test("A coder's site in code's own type after a </>, and every mascot of a coder with its mark; a role line as it was", () => {
+  const html = render(linked());
+  // Ada, Bo and Cy work on the shop's sites (their domains, as this window read them above, or their names): coders.
+  const lines = html.match(/<span data-row-line="site"[^>]*class="[^"]*font-mono[^"]*"><span aria-hidden="true" data-code-mark="true" class="mr-1 font-semibold text-ink">&lt;\/&gt;<\/span>[a-z.]+</g) ?? [];
+  assert.deepEqual(lines.map((x) => x.match(/>([a-z.]+)<$/)[1]), ["docs.example.com", "shop.example.com", "blog"]);
+  assert.equal(html.match(/data-code-mark/g).length, 3);
+  // Lex keeps the ledger on its computer (a coder too) but works on no site: its role, as it was.
+  assert.match(html, /<span data-row-line="role" title="Sales" class="(?![^"]*font-mono)[^"]*">Sales<\/span>/);
+  // Apps not open to the account: no coders, so no </> (and the window gets no apps then: appsForWindow).
+  const outside = render({ ...linked(), account: { user: { id: "u1", email: "tess@example.com" } } });
+  assert.ok(!outside.includes("data-code-mark"));
+  assert.doesNotMatch(outside, /data-row-line="site"[^>]*font-mono/);
+  // In the app (BotMoodsFrom), each mascot of a coder wears the mark, the rows' and a group's alike: Sam holds the
+  // shop, Lex the ledger, Ada, Bo and Cy work on its sites. Far is another workspace's, and not one.
+  const inApp = (state) => renderToStaticMarkup(h(BotMoodsFrom, { state, call: null }, h(Sidebar, sidebarProps(state))));
+  const marked = inApp(linked());
+  assert.ok(marked.match(/class="coder-mark"/g).length >= 6, "Sam, Ada, Bo, Cy, Lex, and both in the group's");
+  assert.equal(marked.match(/class="coder-mark"/g).length, marked.match(/<svg viewBox="0 0 40 40"/g).length, "every mascot here is a coder's");
+  assert.ok(!inApp({ ...linked(), account: { user: { id: "u1", email: "tess@example.com" } } }).includes("coder-mark"), "none without apps");
 });
 
 await test("A member's window: the groups read only (no rename), their default named for what they see, and sites with domains from Your Apps", () => {

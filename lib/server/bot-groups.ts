@@ -53,7 +53,10 @@ export function linkFrom(v: unknown): BotSite | null | undefined {
   return { app, site: typeof site === "string" && site ? site : app };
 }
 
-/** Bot `botId` works on site `link` of one of its workspace's apps, or (null) on none. */
+/**
+ * Bot `botId` works on site `link` of one of its workspace's apps, or (null) on none. One that worked on another app
+ * before stops working on it, in its copy there too.
+ */
 export function setBotSite(botId: string, link: BotSite | null) {
   const b = bot(botId);
   if (!b) throw new GroupError("no such bot", 404);
@@ -65,6 +68,7 @@ export function setBotSite(botId: string, link: BotSite | null) {
     if (link) throw new GroupError("That workspace is gone.", 404);
     return;
   }
+  const was = siteOf(s, b);
   update((st) => {
     const x = st.workspaces?.find((y) => y.id === wsId);
     if (!x) return;
@@ -74,6 +78,8 @@ export function setBotSite(botId: string, link: BotSite | null) {
     if (Object.keys(all).length) x.botSites = all;
     else delete x.botSites;
   });
+  // It works on another app now, or none: its copy of the one before has its Locals stopped and forgotten (hosted-apps.ts botLeftApp).
+  if (was && was.app !== link?.app) void import("./hosted-apps").then(({ botLeftApp }) => botLeftApp(botId, wsId, was.app)).catch((e: Error) => console.warn(`[bot-groups] ${b.name} left ${was.app}: ${e.message}`));
 }
 
 /** A deleted bot's site goes with it (called inside update()). */

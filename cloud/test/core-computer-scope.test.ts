@@ -646,6 +646,61 @@ test("a computer's socket ends with its token, and its socket or long answer as 
   }
 });
 
+test("a computer never reads the Preview passwords kept for members, and its writes keep them", T, async () => {
+  clearAuthCache();
+  const u = await seeded("pass");
+  const PASS = "Kq7mZ3x";
+  // The owner's Mac keeps what members see of an app, its Preview's password for those at Write (apps-for-members.ts).
+  const was = await stateNow(u);
+  const withPass = structuredClone(was.state) as Record<string, unknown> & ReturnType<typeof stateOf>;
+  const sites = [
+    { name: "web", url: null, preview: "https://web.example", previewProtected: true, previewPassword: PASS, serving: null, live: null },
+    { name: "docs", url: null, preview: null, serving: null, live: null },
+  ];
+  (withPass.workspaces[0] as Record<string, unknown>).appsForMembers = { at: 1, apps: { shop: { head: null, sites, commits: [], deploys: [] } } };
+  assert.equal((await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: was.version, state: withPass } })).status, 200);
+  const sitesOf = (s: { workspaces: Record<string, unknown>[] }) => (s.workspaces[0].appsForMembers as { apps: { shop: { sites: Record<string, unknown>[] } } }).apps.shop.sites;
+
+  // What its computer reads: all of it but the password.
+  const read = await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) });
+  assert.equal(read.status, 200, read.text);
+  assert.ok(!read.text.includes(PASS), "no password");
+  assert.deepEqual(sitesOf(read.json.state)[0], { name: "web", url: null, preview: "https://web.example", previewProtected: true, serving: null, live: null });
+  assert.deepEqual(sitesOf(read.json.state)[1], sites[1]);
+  assert.equal((await stateNow(u)).state.workspaces.length, 2, "the owner reads it all");
+  assert.equal(sitesOf((await stateNow(u)).state)[0].previewPassword, PASS);
+
+  // Its runner's write over what it read, the workspaces as it read them: taken, with the password as it was.
+  const mine = structuredClone(read.json.state) as ReturnType<typeof stateOf>;
+  mine.sessions.push({ id: "s-pass", botId: "main", by: deviceIdOf(u, D1), goal: "a run", status: "running" });
+  const put = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read.json.version, state: mine } });
+  assert.equal(put.status, 200, put.text);
+  const after = (await stateNow(u)).state;
+  assert.equal(sitesOf(after)[0].previewPassword, PASS, "kept");
+  assert.equal(after.sessions.at(-1)!.id, "s-pass");
+
+  // Still refused: a password of its own, even the right one (so it can't guess), or another change to a workspace.
+  const read2 = (await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) })).json;
+  for (const change of [
+    (s: ReturnType<typeof stateOf>) => (sitesOf(s)[0].previewPassword = "mine123"),
+    (s: ReturnType<typeof stateOf>) => (sitesOf(s)[0].previewPassword = PASS),
+    (s: ReturnType<typeof stateOf>) => (s.workspaces[0].name = "Mine"),
+  ]) {
+    const next = structuredClone(read2.state) as ReturnType<typeof stateOf>;
+    change(next);
+    const r = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read2.version, state: next } });
+    assert.equal(r.status, 403, r.text);
+    assert.deepEqual(r.json.paths, ["workspaces"]);
+  }
+  assert.equal(sitesOf((await stateNow(u)).state)[0].previewPassword, PASS);
+
+  // A write over an older version: the state it's handed back has no password either.
+  const stale = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read.json.version, state: mine } });
+  assert.equal(stale.status, 409, stale.text);
+  assert.ok(!stale.text.includes(PASS), "no password in the conflict");
+  assert.equal(sitesOf(stale.json.state)[0].previewProtected, true);
+});
+
 test("what was sent on never carries a computer's credential", T, () => {
   const all: Got[] = [...mail.got, ...phone.got, ...composio.got, ...honcho.got];
   assert.ok(all.length > 10);

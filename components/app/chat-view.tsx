@@ -4,19 +4,23 @@ import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { alwaysScope, toDo } from "@/lib/permission";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, BRAINS_ON, live, ownerSent, pairChatId, routineSent, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
+import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
-import { OpenLink } from "./panel-tabs";
+import { OpenBotLocal, OpenLink, OpenPreview } from "./panel-tabs";
+import { appCoders } from "@/lib/hosted-apps";
+import { appsShown } from "@/lib/apps-access";
 import { appsOwnShown } from "@/lib/apps-access";
 import { crmOpen } from "@/lib/crm-access";
 import { answersAsk, canAct, isViewerOwn, OWNER_ONLY_LINE, ownerWho, readOnly, saidBy, saidName, writesThread } from "@/lib/shared";
 import { memberAct } from "./shared-act";
 import { MEMBER_STOP_MAX } from "@/cloud/protocol";
 import { CrmNote } from "./crm";
+import { AppChangeCard } from "./app-change";
 import { LookingAt, MadeAppLine } from "./made-apps";
 import { MacIcon } from "./mac-tab";
 import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
+import { useComposerListen, withLine, type ComposerReceiver } from "./composer-bridge";
 import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
 import { Fold } from "./fold";
@@ -24,6 +28,7 @@ import { SaveSkillDialog } from "./skill-dialog";
 import { undash } from "./side-group";
 import { SelectIcon, TickBar, TickRow, TrashIcon, UndoLine, useMessageDeletes, type Gone } from "./message-deletes";
 import { num, privacyOf } from "@/lib/privacy";
+import { compactBlocked } from "@/lib/chat-summary";
 import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
 import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { AGENTS, aiOf, hasProfile, isCli, threadAgent, upper } from "@/lib/agents";
@@ -180,6 +185,7 @@ function Inline({ text }: { text: string }) {
   // Links open as a tab on the right; ⌘-click still opens your browser. A page a bot made opens there too.
   // So does a file it linked: Bops fetches it from the bot's computer (or this Mac) first, as the link itself goes nowhere.
   const openLink = useContext(OpenLink);
+  const openLocal = useContext(OpenBotLocal);
   const botId = useContext(LinkedBy);
   // A file that couldn't be opened says why right after the text, in place (never a browser alert), until the next try.
   const [failed, setFailed] = useState<string | null>(null);
@@ -214,6 +220,12 @@ function Inline({ text }: { text: string }) {
                 if (botId && isFileLink(link[2])) {
                   e.preventDefault();
                   void openFile(link[2], link[1], e.metaKey || e.ctrlKey || e.shiftKey);
+                  return;
+                }
+                // A bot's localhost link is its app's Local: its preview beside the chat (else its screen), never this Mac's own localhost.
+                if (botId && openLocal && /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(link[2])) {
+                  e.preventDefault();
+                  openLocal(botId, link[2]);
                   return;
                 }
                 if (!openLink || e.metaKey || e.ctrlKey || e.shiftKey || !(page || /^https?:/.test(link[2]))) return;
@@ -416,6 +428,18 @@ export function ChatView({
   const askingClear = clearing === c.id && !state.shared && messages.length > 0;
   const keptDays = privacyOf(state).deletedDays;
   const repliedAfterUser = messages.slice(lastUserIdx + 1).some((m) => m.role === "bot");
+  // Compact (the chat's menu): every message up to now into the chat's summary, and its bots read it afresh from here
+  // (lib/server/chat-summary.ts). The owner's, and in a shared workspace a member's with Write on every bot in it, as
+  // saying something there takes (through the owner's Bops: shared-act.ts). Off while a bot answers, or with nothing new.
+  const mayCompact = !readOnly(state, c.botIds);
+  const [compacting, setCompacting] = useState<{ chat: string; error?: string } | null>(null);
+  const compactingHere = compacting?.chat === c.id ? compacting : null;
+  const compactOff = compactingHere && !compactingHere.error ? "Compacting" : compactBlocked(c, messages, (id) => state.bots.find((x) => x.id === id)?.name);
+  const compact = async () => {
+    setCompacting({ chat: c.id });
+    const r = state.shared ? await memberAct({ act: "compact", chatId: c.id }) : await answered(post(`/api/chats/${encodeURIComponent(c.id)}/compact`));
+    setCompacting(r.ok ? null : { chat: c.id, error: r.error || DIDNT_COMPACT });
+  };
 
   // Opening a chat lands on its latest message; only new messages in the open chat glide in.
   const shownChat = useRef<string | null>(null);
@@ -439,6 +463,31 @@ export function ChatView({
   const [sent, setSent] = useState<{ chatId: string; text: string; at: number }[]>([]);
   // Images about to go with the next message (the + button, pasting, or dropping them on the chat).
   const attach = useAttachments();
+  // What the Preview tab's Select and Draw put in the box (composer-bridge.tsx), never sent by themselves: its
+  // pictures' keys in the tray and its lines in the draft (each with where it is in the page's code, never shown), so
+  // the message that goes with any of them still there is tagged appNote, and carries those lines' code for the bot.
+  const fromApp = useRef({ keys: new Set<string>(), lines: new Map<string, string[]>() });
+  const listen = useComposerListen();
+  const receive = useRef<ComposerReceiver>(() => {});
+  useLayoutEffect(() => {
+    receive.current = (files, line, code) => {
+      for (const k of attach.add(files)) fromApp.current.keys.add(k);
+      if (line) {
+        const ours = fromApp.current.lines;
+        const before = new Set(ours.keys());
+        ours.set(line, [...(ours.get(line) ?? []), ...(code ? [code] : [])]);
+        setDraft((d) => withLine(d, line, before));
+      }
+      requestAnimationFrame(() => {
+        const box = document.getElementById("composer");
+        if (!(box instanceof HTMLTextAreaElement)) return;
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+      });
+    };
+  });
+  // (Not in a workspace shared with the user: pictures stay on this Mac there.)
+  useEffect(() => (listen && !state.shared ? listen(c.id, (files, line, code) => receive.current(files, line, code)) : undefined), [listen, c.id, state.shared]);
   const filePicker = useRef<HTMLInputElement>(null);
   const [dropping, setDropping] = useState(false);
   // What went wrong with the mic, shown under the composer for a few seconds.
@@ -467,6 +516,11 @@ export function ChatView({
       return;
     }
     const items = attaching;
+    // Anything Select or Draw put here, still in it: the message is about the app (and Select's lines still in it
+    // take their code along, lib/app-preview.ts picksOf).
+    const picks = [...fromApp.current.lines].filter(([l]) => text.includes(l)).flatMap(([line, codes]) => codes.map((code) => ({ line, code })));
+    const aboutApp = items.some((a) => fromApp.current.keys.has(a.key)) || [...fromApp.current.lines.keys()].some((l) => text.includes(l));
+    fromApp.current = { keys: new Set(), lines: new Map() };
     // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
     const previews = attach.items.map((a) => a.preview);
     setDraft("");
@@ -485,7 +539,7 @@ export function ChatView({
     // Only a pick the bot can run now goes; one that can't anymore is let go (boxAgents).
     const pick = solo && agentPicks[c.id] ? boxAgents(state, solo, agentPicks[c.id], boxKeys).picked?.id : undefined;
     if (agentPicks[c.id] && !pick) dropPick();
-    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined, lookingAt: looking?.id, ...(pick ? { agent: pick } : {}) }).finally(drop);
+    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined, lookingAt: looking?.id, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) }).finally(drop);
   };
   const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => f.type.startsWith("image/"));
   // Sent messages the server's state doesn't have yet.
@@ -562,15 +616,16 @@ export function ChatView({
       <div className="absolute right-5 top-[18px] z-10 flex items-center gap-2">
         {/* The chat's own menu (a bot's chat, like Call): Save as skill rereads this chat for how the bot did a job.
             Neither in a shared workspace: its bots are the owner's to call and teach. */}
-        {/* A group's has Select messages and Delete all messages only. */}
-        {(solo ? !call : messages.length > 0) && !state.shared && (
+        {/* A group's has Compact, Select messages and Delete all messages only. A shared workspace's, Compact alone, for a member with Write. */}
+        {(solo ? !call : messages.length > 0) && (!state.shared || mayCompact) && (
           <MoreMenu
             key={c.id}
             label="More"
             size="chat"
             items={[
-              ...(solo ? [{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving({ botId: solo.id, chatId: c.id }) }] : []),
-              ...(messages.length
+              ...(solo && !state.shared ? [{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving({ botId: solo.id, chatId: c.id }) }] : []),
+              ...(mayCompact ? [{ label: "Compact", icon: <CompactIcon />, off: compactOff ?? undefined, onClick: () => void compact() }] : []),
+              ...(messages.length && !state.shared
                 ? [
                     { label: "Select messages", icon: <SelectIcon />, onClick: () => (setClearing(null), setSelecting({ chat: c.id, ids: [] })) },
                     { label: "Delete all messages", icon: <TrashIcon />, danger: true, onClick: () => (setSelecting(null), setClearing(c.id)) },
@@ -613,6 +668,7 @@ export function ChatView({
                 <span className="text-[14px] font-semibold leading-[18px]">{chatName(c, state.bots)}</span>
                 <span className="text-[12px] leading-[15px] text-[#9A9A98]">{status}</span>
               </div>
+              {solo && !state.shared && <PreviewButton state={state} botId={solo.id} />}
             </>
           )}
         </header>
@@ -671,6 +727,14 @@ export function ChatView({
           {deletedHere.after.map((g) => (
             <UndoLine key={g.key} g={g} onUndo={() => void deletes.undo(g.key)} className={g.mine ? "self-end" : "self-start"} />
           ))}
+          {compactingHere &&
+            (compactingHere.error ? (
+              <span role="alert" className="self-center py-1 text-[12px] leading-4 text-[#B42318]">
+                {compactingHere.error}
+              </span>
+            ) : (
+              <CompactRule label="Compacting…" />
+            ))}
           {waiting.map((p) => (
             // Up from the composer as you send it (not again when you come back to the chat before it lands).
             <div key={p.id} className={`flex max-w-[86%] flex-col items-end gap-1 self-end ${seen.has(p.id) ? "" : "motion-send-in"}`}>
@@ -1064,7 +1128,7 @@ const MENU_ITEM = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 tex
  * Call) and a thread's (next to Stop). A click outside or Esc closes it; Esc closes only it, not the
  * sheet or page under it.
  */
-function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet"; items: { label: string; icon: React.ReactNode; onClick: () => void; danger?: boolean }[] }) {
+function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet"; items: { label: string; icon: React.ReactNode; onClick: () => void; danger?: boolean; /** Why it can't go now: shown off, with this as its tip. */ off?: string }[] }) {
   const [open, setOpen] = useState(false);
   useEffect(() => {
     if (!open) return;
@@ -1105,11 +1169,13 @@ function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet
               <button
                 key={x.label}
                 role="menuitem"
+                disabled={!!x.off}
+                title={x.off}
                 onClick={() => {
                   setOpen(false);
                   x.onClick();
                 }}
-                className={x.danger ? `${MENU_ITEM} text-[#B42318] hover:bg-[#FEF3F2]` : MENU_ITEM}
+                className={`${x.danger ? `${MENU_ITEM} text-[#B42318] hover:bg-[#FEF3F2]` : MENU_ITEM} disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent`}
               >
                 {x.icon}
                 {x.label}
@@ -1117,6 +1183,65 @@ function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet
             ))}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/** "Compact": lines drawn together. */
+function CompactIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]" aria-hidden>
+      <path d="M2.5 8h11M5.5 2.5L8 5l2.5-2.5M5.5 13.5L8 11l2.5 2.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** What a Compact that didn't go says, when Bops said nothing more. */
+const DIDNT_COMPACT = "That didn't compact. Try again.";
+
+/** A Compact's answer from the app's own route: ok, or what it said went wrong. */
+async function answered(res: Promise<Response>): Promise<{ ok: boolean; error?: string }> {
+  const r = await res.catch(() => null);
+  if (!r) return { ok: false, error: "Couldn't reach Bops. Try again." };
+  if (r.ok) return { ok: true };
+  return { ok: false, error: ((await r.json().catch(() => ({}))) as { error?: string }).error || DIDNT_COMPACT };
+}
+
+/** A quiet rule across the chat with a few words in its middle (Compact's line, and while one is on its way). */
+function CompactRule({ label, children }: { label: string; children?: React.ReactNode }) {
+  return (
+    <div className="flex w-full items-center gap-3 py-1.5">
+      <span aria-hidden className="h-px flex-1 bg-[#ECECEA]" />
+      {children ?? <span className="text-[12px] leading-4 text-[#9A9A98]">{label}</span>}
+      <span aria-hidden className="h-px flex-1 bg-[#ECECEA]" />
+    </div>
+  );
+}
+
+/**
+ * Compact's line in a chat (Message.compacted): "Compacted" and when, on a quiet rule. The chat's bots read it afresh
+ * from here, after its summary (Chat.summary), which pressing the line shows as it is now. Only the owner's window has
+ * the summary: a shared workspace's member sees the line alone (cloud/ws-slice.ts).
+ */
+function CompactedLine({ m, state, className = "" }: { m: Message; state: AppState; className?: string }) {
+  const [open, setOpen] = useState(false);
+  const summary = state.shared ? undefined : state.chats.find((c) => c.id === m.chatId)?.summary;
+  const by = m.member ? ` by ${state.shared?.you === m.member.userId ? "you" : m.member.name}` : "";
+  const label = `Compacted${by} · ${dayTime(m.at)}`;
+  return (
+    <div className={`flex w-full flex-col items-center gap-1.5 ${className}`}>
+      <CompactRule label={label}>
+        {summary && (
+          <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} title={open ? "Hide the summary" : "Show the summary"} className="text-[12px] leading-4 text-[#9A9A98] hover:text-ink">
+            {label}
+          </button>
+        )}
+      </CompactRule>
+      {open && summary && (
+        <div className="w-full max-w-[520px] whitespace-pre-wrap rounded-[14px] bg-[#F7F7F6] px-3.5 py-2.5 text-[13px] leading-[19px] text-[#3A3A38] [overflow-wrap:anywhere]">
+          {summary.text || (summary.rebuild ? "Writing the summary again." : "Nothing in it now.")}
+        </div>
       )}
     </div>
   );
@@ -1631,6 +1756,9 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
 
   if (m.role === "system" && m.email) return <EmailCard m={m} state={state} className={enterClass} />;
 
+  // Compact's line: where the chat's bots read it afresh from, after its summary.
+  if (m.role === "system" && m.compacted) return <CompactedLine m={m} state={state} className={enterClass} />;
+
   // Something just remembered rises in with the soft wash Orbit gives what it learns.
   // In a workspace shared with the user it's the owner's memory: shown, nothing to undo or forget (readOnly).
   if (m.role === "system" && m.memory) return <MemoryNote m={m} readOnly={ro} className={enter ? "motion-new-item" : ""} />;
@@ -1692,10 +1820,15 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             <div className="flex flex-col items-start gap-1">
               {/* Pictures the bot made (make_image). */}
               {!!m.images?.length && <MessageImages images={m.images} align="start" />}
-              {(m.text || !m.images?.length) && (
-                <div className="whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere]">
-                  <Rich text={withoutBriefing(m.text)} botId={m.botId} />
-                </div>
+              {/* What a task changed in one of the owner's apps (app-change.tsx), in place of its words, which an older Bops shows. */}
+              {m.appChange && appsOwnShown(state) ? (
+                <AppChangeCard m={m} state={state} />
+              ) : (
+                (m.text || !m.images?.length) && (
+                  <div className="whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere]">
+                    <Rich text={withoutBriefing(m.text)} botId={m.botId} />
+                  </div>
+                )
               )}
             </div>
           </div>
@@ -2112,7 +2245,9 @@ function timeline(s: Session): Line[] {
   const lines: Line[] = [];
   for (const st of s.steps) {
     if (st.tool === "setup") continue;
-    if (st.tool === "note") lines.push({ kind: "note", at: st.at, text: st.who ? `${st.who}: ${st.detail}` : st.detail });
+    // Compact's line (sessions.ts compactThread): quiet, with when.
+    if (st.tool === COMPACTED) lines.push({ kind: "event", at: st.at, text: `${st.detail} · ${dayTime(st.at)}` });
+    else if (st.tool === "note") lines.push({ kind: "note", at: st.at, text: st.who ? `${st.who}: ${st.detail}` : st.detail });
     else {
       const last = lines[lines.length - 1];
       if (last?.kind === "steps") last.steps.push(st);
@@ -2207,6 +2342,14 @@ export function ThreadSheet({
 
   // In a shared workspace (the viewer has Write on its bot), through Bops Cloud to the owner's Bops (shared-act.ts).
   const writes = canAct(state, [s.botId]);
+  // Compact (its menu): its brain folds what it has so far, now, where it takes the ask (lib/types.ts threadCompacts), as
+  // replying in it takes. Off while it runs, or with nothing said since the last one.
+  const compacts = threadCompacts(s) && writesThread(state, s);
+  const [compactError, setCompactError] = useState<{ id: string; text: string } | null>(null);
+  const compact = async () => {
+    const r = state.shared ? await memberAct({ act: "compact", sessionId: s.id }) : await answered(post(`/api/sessions/${s.id}/compact`));
+    setCompactError(r.ok ? null : { id: s.id, text: r.error || DIDNT_COMPACT });
+  };
   // Why a Stop from a shared workspace didn't go (it shows Stop again, with this under the header).
   const [stopError, setStopError] = useState<string | null>(null);
   const send = async () => {
@@ -2284,7 +2427,18 @@ export function ThreadSheet({
             </button>
           )}
           {/* Save as skill: the bot rereads this thread for how it did the job. Keyed by thread, so another one's sheet starts it shut. */}
-          {!state.shared && <MoreMenu key={s.id} label="More" size="sheet" items={[{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving(s.id) }]} />}
+          {/* Compact, where its brain takes it: a shared workspace's member with Write sees that alone. */}
+          {(!state.shared || compacts) && (
+            <MoreMenu
+              key={s.id}
+              label="More"
+              size="sheet"
+              items={[
+                ...(state.shared ? [] : [{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving(s.id) }]),
+                ...(compacts ? [{ label: "Compact", icon: <CompactIcon />, off: threadCompactBlocked(s) ?? undefined, onClick: () => void compact() }] : []),
+              ]}
+            />
+          )}
           <button onClick={onClose} aria-label="Close thread" className="flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
             <svg width="12" height="12" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
@@ -2294,6 +2448,11 @@ export function ThreadSheet({
         {stopError && (
           <span role="alert" className="border-b border-[#F0F0EE] px-4 py-2 text-[12px] leading-4 text-[#B42318]">
             {stopError}
+          </span>
+        )}
+        {compactError?.id === s.id && (
+          <span role="alert" className="border-b border-[#F0F0EE] px-4 py-2 text-[12px] leading-4 text-[#B42318]">
+            {compactError.text}
           </span>
         )}
 
@@ -3073,6 +3232,55 @@ function LeftOff({ state, session: s, onShow }: { state: AppState; session: Sess
         {s.lastPage ? (s.lastPage.title ?? s.lastPage.url) : ""}
         {taken ? `${s.lastPage ? " · " : ""}screen ${screenNo(s.lastDisplay)} is in use by ${taken} now` : ""}
       </span>
+    </div>
+  );
+}
+
+/**
+ * Preview, under a bot's name at the top of its chat, when it works on an app on the web (Your Apps, lib/hosted-apps.ts
+ * appCoders): that app's Local beside the chat (OpenPreview), its own copy's when it works on it in one. With more
+ * than one, a short list of them inline. Nothing is added to messages.
+ */
+function PreviewButton({ state, botId }: { state: AppState; botId: string }) {
+  const open = useContext(OpenPreview);
+  const [list, setList] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  // (Only where apps on the web are shown: lib/apps-access.ts.)
+  const apps = !appsShown(state) ? [] : (state.workspaces ?? []).flatMap((w) =>
+    Object.keys(w.hostedApps ?? {})
+      .filter((name) => appCoders(state, w.id, name).includes(botId))
+      .map((name) => ({ ws: w.id, name })),
+  );
+  if (!open || !apps.length) return null;
+  const go = async (a: { ws: string; name: string }) => {
+    setList(false);
+    setBusy(a.name);
+    setSaid(null);
+    const r = await open(a.ws, a.name, undefined, botId);
+    setBusy(null);
+    setSaid(r.error ?? r.said ?? null);
+  };
+  return (
+    <div data-chat-preview className="relative mt-1.5 flex flex-col items-center gap-1">
+      <button
+        data-chat-preview-button
+        disabled={!!busy}
+        onClick={() => (apps.length > 1 ? setList(!list) : void go(apps[0]))}
+        className="rounded-full bg-white px-2.5 py-0.5 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6] disabled:text-[#9A9A98]"
+      >
+        {busy ? "Opening…" : "Preview"}
+      </button>
+      {list && (
+        <div className="flex flex-wrap justify-center gap-1">
+          {apps.map((a) => (
+            <button key={`${a.ws}/${a.name}`} data-chat-preview-app={a.name} onClick={() => void go(a)} className="rounded-full px-2 py-0.5 text-[12px] leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA] hover:bg-[#F7F7F6]">
+              {a.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {said && <span className="max-w-[320px] text-center text-[11.5px] leading-4 text-[#6B6B6B]">{said}</span>}
     </div>
   );
 }

@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld("bopsMac", {
   relaunch: () => ipcRenderer.invoke("relaunch"),
   // Copy a key from the Vault, kept out of clipboard managers and other devices, and cleared after a minute.
   copySecret: (value) => ipcRenderer.invoke("copy-secret", value),
+  // A Preview that asks for a password, beside a bot's chat: its cookie put in that app's preview session ({ partition, url, name, value }).
+  previewSignIn: (ask) => ipcRenderer.invoke("preview-sign-in", ask),
   // Skills: pick a folder in Finder to import (its path only), and show a skill's folder in Finder.
   pickFolder: () => ipcRenderer.invoke("pick-folder"),
   revealFolder: (dir) => ipcRenderer.invoke("reveal-folder", dir),

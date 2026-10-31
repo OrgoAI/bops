@@ -1087,6 +1087,20 @@ export const projectComputers = async (projectId: string) => (await call<{ deskt
  */
 export const computerAsleepError = (e: unknown) => e instanceof OrgoError && e.status === 409 && e.code === "computer_asleep";
 
+/** A computer's SSH as orgo-web says it: on or off, and where it's reached (`ipv4_host`:`ipv4_port`, null until it's on). */
+export type OrgoSsh = { enabled: boolean; authorized_key_set: boolean; ipv4_host: string | null; ipv4_port: number | null; ssh_user?: string | null; ssh_command: string | null; ipv6_address?: string | null };
+
+/**
+ * orgo-web's SSH of a computer (app/api/computers/[id]/ssh): sshd there takes keys only, on a port of its host's
+ * own. Turning it on with a key (`on`) writes the computer's authorized_keys whole with that key alone, there and on
+ * its every start, so computer-ssh.ts sends it only while SSH is off. Neither wakes the computer.
+ */
+export const computerSsh = {
+  get: (computerId: string) => call<OrgoSsh>("GET", `/computers/${encodeURIComponent(computerId)}/ssh`, undefined, { wait: false }),
+  on: (computerId: string, publicKey: string) =>
+    call<{ enabled?: boolean; ssh_host_port?: number | null; pending?: boolean }>("POST", `/computers/${encodeURIComponent(computerId)}/ssh`, { public_key: publicKey }, { wait: false }),
+};
+
 /** A device paired to route computers' browsing through it (Orgo's personal-device egress). */
 export type OrgoEgressDevice = { id: string; name: string; online: boolean | null; computers?: unknown };
 
@@ -1207,7 +1221,7 @@ export const deploys = {
    * deploy queues that. `env`: its variables, saved with it (Orgo keeps them encrypted), so its first build
    * has them; sent only when there are some.
    */
-  create: (computerId: string, app: { repo: string; name: string; port: number; env?: Record<string, string> }) =>
+  create: (computerId: string, app: { repo: string; name: string; port: number; env?: Record<string, string>; publicUrl?: false }) =>
     hostingCall<OrgoDeployProject>("POST", `/computers/${encodeURIComponent(computerId)}/deploy-projects`, {
       source: "ingot",
       repo: app.repo,
@@ -1215,6 +1229,8 @@ export const deploys = {
       port: app.port,
       deploy: false,
       ...(app.env && Object.keys(app.env).length ? { env: app.env } : {}),
+      // (No public URL of its own: a Published site lives on its domains only. An orgo-web without the flag ignores it.)
+      ...(app.publicUrl === false ? { public_url: false } : {}),
     }),
   /** Queue a deploy of one changeset (none: the newest on main). A newer deploy replaces one still queued. */
   deploy: (computerId: string, projectId: string, at?: string) =>
@@ -1245,6 +1261,44 @@ export const deploys = {
   /** A deploy's build log after the line `after` (0: from the start). */
   logs: (computerId: string, deploymentId: string, after = 0) =>
     hostingCall<OrgoDeployLog>("GET", `/computers/${encodeURIComponent(computerId)}/deployments/${encodeURIComponent(deploymentId)}/logs?after=${Math.max(0, Math.floor(after))}`),
+};
+
+/**
+ * A computer's public URL (orgo-web presentPublicUrl): https://<label>.<base domain> to one port in it. `protected`:
+ * a browser gets a password page first (absent: an orgo-web from before passwords, which can't tell).
+ */
+export type OrgoPublicUrl = { id: string; url: string; hostname: string; label: string; port: number; created_at: string; disabled?: boolean; protected?: boolean };
+
+/**
+ * A public URL's password as orgo-web keeps it (null: it has none), and the cookie a browser that typed it gets
+ * (__Host-orgo_pass, 30 days), so Bops' own view of it opens without the password page.
+ */
+export type OrgoUrlPassword = { password: string | null; cookie: { name: string; value: string } | null };
+
+/** A computer's public URLs as orgo-web lists them, with the caps (`account_used`: the owner's across their computers). */
+export type OrgoPublicUrls = { enabled: boolean; base_domain?: string; limit?: number; account_limit?: number; account_used?: number; public_urls?: OrgoPublicUrl[] };
+
+/**
+ * orgo-web's public URLs (lib/public-urls): a computer's https://<label>.orgo.dev, each to one port. Bops makes
+ * an app's Preview link with one (its label chosen by Bops, so it stays the same: app-labels.ts), before its
+ * deploy project's first deploy, so the project adopts it and never owns it. A list never wakes the computer.
+ * A write orgo-web answers 404 without a code (public URLs not open here) is HOSTING_CLOSED.
+ */
+export const publicUrls = {
+  list: (computerId: string) => hostingCall<OrgoPublicUrls>("GET", `/computers/${encodeURIComponent(computerId)}/public-urls`),
+  create: (computerId: string, port: number, label: string) =>
+    hostingCall<OrgoPublicUrl>("POST", `/computers/${encodeURIComponent(computerId)}/public-urls`, { port, label }).catch((e: unknown) =>
+      e instanceof OrgoError && e.status === 404 && !e.code ? ({ enabled: false, why: HOSTING_CLOSED } as const) : Promise.reject(e),
+    ),
+  remove: (computerId: string, urlId: string) => hostingCall<unknown>("DELETE", `/computers/${encodeURIComponent(computerId)}/public-urls/${encodeURIComponent(urlId)}`),
+  port: (computerId: string, urlId: string, port: number) =>
+    hostingCall<OrgoPublicUrl>("PATCH", `/computers/${encodeURIComponent(computerId)}/public-urls/${encodeURIComponent(urlId)}`, { port }),
+  /** Put a password on it (4 to 64 printable characters), a new one in place of the one it had, or none (null): a browser with an older cookie asks again. */
+  setPassword: (computerId: string, urlId: string, password: string | null) =>
+    hostingCall<OrgoPublicUrl>("PATCH", `/computers/${encodeURIComponent(computerId)}/public-urls/${encodeURIComponent(urlId)}`, { password }),
+  /** Its password now, and the cookie that opens it (both null when it has none). */
+  password: (computerId: string, urlId: string) =>
+    hostingCall<OrgoUrlPassword>("GET", `/computers/${encodeURIComponent(computerId)}/public-urls/${encodeURIComponent(urlId)}/password`),
 };
 
 /** A record Orgo says to set for a custom domain (dns_records): `name` in full, `host` as a DNS provider's Host field takes it. */

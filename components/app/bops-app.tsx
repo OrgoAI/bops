@@ -4,12 +4,14 @@ import { appsName, appsOwnShown, appsShown } from "@/lib/apps-access";
 import { screenMap } from "@/lib/screens";
 import { chatAsks } from "@/lib/asks";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { accountIn, botChatId, BRAINS_ON, isScreenWatch, live, sharesComputer, siteLoginIn, workBot, workspaceOf, type AppState, type Host, type Session, type Watch } from "@/lib/types";
+import { accountIn, botChatId, BRAINS_ON, isScreenWatch, live, sharesComputer, siteBotOf, siteLoginIn, workBot, workspaceOf, type AppState, type Host, type Session, type Watch } from "@/lib/types";
+import { appCoders, copyBotOf } from "@/lib/hosted-apps";
 import { initialsOf, PlanAndCredit, UsageSection } from "./account";
 import { AutopilotPage, type AutopilotOpen, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
 import { TeamChart } from "./team-chart";
 import { BotPanel, type Section } from "./bot-panel";
+import { ChatEdge, gridColumns, storedChatWidth } from "./chat-edge";
 import { BotComputers } from "./bot-computers";
 import { BrainSettings } from "./brains";
 import { CallBar } from "./call-bar";
@@ -21,9 +23,11 @@ import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BotMoodsFrom, CallTalking, Mascot, talkingStore } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
-import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
+import { CHAT_TAB, electron, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenBotLocal, OpenLink, OpenPreview, TabBar, WebTab, type PanelTab, type PreviewOpened } from "./panel-tabs";
+import { PreviewTab } from "./preview-tab";
 import { MadeAppsHome, MadeAppTab, OpenMadeApp } from "./made-apps";
-import { HostedAppTab, OpenAppTask, OpenHostedApp, OpenSettings } from "./hosted-apps";
+import { appsStamp, HostedAppTab, OpenAppTask, OpenHostedApp, OpenSettings } from "./hosted-apps";
+import { ComposerBridgeProvider, useComposerBridgeHost } from "./composer-bridge";
 import { OpenBotComputer } from "./app-envs";
 import { WorkspaceDomains } from "./workspace-domains";
 import { BotSettingsPage } from "./bot-settings";
@@ -147,6 +151,10 @@ function Bops({ state }: { state: AppState | null }) {
       return !was;
     });
   };
+  // The chat's column beside the side panel, as wide as its edge was dragged (chat-edge.tsx; this Mac remembers). While it's
+  // dragged the columns don't slide, so the edge stays under the pointer.
+  const [chatWidth, setChatWidth] = useState(storedChatWidth);
+  const [edgeDragged, setEdgeDragged] = useState(false);
   const [focus, setFocus] = useState(false);
   // Full width shows your Mac instead of a bot's computer.
   const [macFocus, setMacFocus] = useState(false);
@@ -155,6 +163,11 @@ function Bops({ state }: { state: AppState | null }) {
   // The right side's tabs (the chat's own computer is always first; see panel-tabs.tsx).
   // Only the computer is open from the start; the rest open as you need them.
   const [openTabs, setTabs] = useState<PanelTab[]>([]);
+  // The tabs as they are now, for what an answer that came later opens (Open preview).
+  const tabsNow = useRef<PanelTab[]>([]);
+  useEffect(() => {
+    tabsNow.current = openTabs;
+  }, [openTabs]);
   // The work the panel last followed ("thread:where"), so it switches between your Mac and the bot's
   // computer only when that changes, and a tab you picked stays until it does.
   const [followed, setFollowed] = useState("");
@@ -286,6 +299,15 @@ function Bops({ state }: { state: AppState | null }) {
   const [call, setCall] = useState<string | null>(null);
   // New thread, for a bot with more than one agent ready (new-thread.tsx): its bot. Over its chat's message box, in place.
   const [newThreadFor, setNewThreadFor] = useState<string | null>(null);
+  // What the Preview tab's Select and Draw put in a bot's message box, unsent (composer-bridge.tsx): its chat comes
+  // up with its box in view (no thread over it, nothing full width), the side panel left as it is.
+  const composerBridge = useComposerBridgeHost((id) => {
+    setChatId(id);
+    setThreadId(null);
+    setComposing(false);
+    setNewThreadFor(null);
+    setFocus(false);
+  });
   // Whether the bot's voice is coming through on that call right now (its mascot talks while it does):
   // a store of its own (CallTalking), so a word starting or ending doesn't redraw the whole app.
   const [callTalking] = useState(talkingStore);
@@ -615,6 +637,56 @@ function Bops({ state }: { state: AppState | null }) {
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
   const openWeb = (url: string, title?: string) => openTab((t) => t.kind === "web" && t.url === url, () => ({ id: tabId(), kind: "web", url, title }));
+  /** A bot's computer in the panel, at screen `screen` when one is named (Local on its screen is 99). */
+  const openBotComputer = (id: string, screen?: number) => (screen === undefined ? openComputer(id) : showScreen(id, screen));
+  /**
+   * Open preview (Your Apps, the app's tab, the chat's header, a localhost link): the chat goes to the app's bot,
+   * its Local is started when it isn't, and it shows in the panel at its own localhost:<port>, this Mac forwarding
+   * that same port to its computer (one app per port: another app's preview on it closes); in a plain browser, in a tab of
+   * the browser's own. When this Mac can't reach its computer (or that port of the Mac is in use), it opens on
+   * its bot's screen instead, which the panel shows.
+   */
+  const openPreview = async (ws: string, name: string, site?: string, botId?: string): Promise<PreviewOpened> => {
+    const h = state.workspaces?.find((w) => w.id === ws)?.hostedApps?.[name];
+    // (A bot's copy of it: that bot's chat, and its copy's Local.)
+    const copy = copyBotOf(state, ws, name, botId);
+    const who = copy ?? h?.botId;
+    if (who) openChat(botChatId(who));
+    const at = `/api/hosted-apps/${encodeURIComponent(name)}/local`;
+    const r = await post(at, { ws, action: "preview", start: true, ...(site ? { site } : {}), ...(copy ? { bot: copy } : {}) }).catch(() => null);
+    const j = ((await r?.json().catch(() => null)) ?? {}) as { preview?: string; fallback?: string; error?: string };
+    if (r?.ok && j.preview) {
+      const url = j.preview;
+      if (!electron()) {
+        window.open(url, "_blank", "noopener");
+        return {};
+      }
+      // One app a Mac port: another app's preview on the same address closes.
+      const keep = tabsNow.current.filter((t) => !(t.kind === "preview" && t.url === url && !(t.ws === ws && t.name === name)));
+      const open = keep.find((t): t is Extract<PanelTab, { kind: "preview" }> => t.kind === "preview" && t.ws === ws && t.name === name && (t.site ?? "") === (site ?? "") && (t.bot ?? "") === (copy ?? ""));
+      const t: PanelTab = open ? { ...open, url } : { id: tabId(), kind: "preview", ws, name, ...(site ? { site } : {}), ...(copy ? { bot: copy } : {}), url };
+      setTabs(open ? keep.map((x) => (x === open ? t : x)) : [...keep, t]);
+      setActive(t.id);
+      setPanelOpen(true);
+      setFocus(false);
+      return {};
+    }
+    if (j.fallback === "screen" && h?.botId) {
+      // (On the screen it opened on: its bot's task's on the app, else a free one.)
+      const o = await post(at, { ws, action: "open", ...(site ? { site } : {}), ...(copy ? { bot: copy } : {}) }).catch(() => null);
+      const on = ((await o?.json().catch(() => null)) ?? {}) as { display?: number };
+      showScreen(copy ?? h.botId, on.display ?? 99);
+      return { screen: true, said: j.error };
+    }
+    return { error: j.error ?? "Couldn't reach its computer. Try again." };
+  };
+  /** A bot's localhost link in its chat: the preview of an app it works on (its copy's, when it has one), or its screen when it works on none. */
+  const openBotLocal = (id: string) => {
+    for (const w of state.workspaces ?? [])
+      for (const name of Object.keys(w.hostedApps ?? {}))
+        if (appCoders(state, w.id, name).includes(id)) return void openPreview(w.id, name, undefined, id);
+    openComputer(id);
+  };
   /**
    * Leave the tab you're on for where you were: the tab you had open before it (else `fallback`), and the
    * side panel the way it was if this tab opened it.
@@ -638,6 +710,8 @@ function Bops({ state }: { state: AppState | null }) {
     const rest = tabs.filter((t) => t.id !== id);
     setTabs(rest);
     forgetTab(id);
+    // An app's preview closed: this Mac's port for it closes too.
+    if (gone?.kind === "preview") void post(`/api/hosted-apps/${encodeURIComponent(gone.name)}/local`, { ws: gone.ws, action: "unpreview", ...(gone.site ? { site: gone.site } : {}), ...(gone.bot ? { bot: gone.bot } : {}) }).catch(() => null);
     setRecent(recent.filter((r) => r !== id));
     if (active === id) leave(id, rest, rest[i - 1]?.id ?? rest[i]?.id ?? CHAT_TAB);
   };
@@ -845,19 +919,14 @@ function Bops({ state }: { state: AppState | null }) {
   const callHere = !!callBot && !composing && !focus && !!callSlot && chat.kind === "bot" && chat.botIds[0] === callBot.id;
   // The sidebar collapsed to its rail, the chat (and panel) take the rest; the title bar's corner over the
   // rail still clears the window's buttons. The title bar's columns are the same, sliding together.
-  // (Whole class names, so Tailwind sees each one.)
   const wide = focus || !panelOpen;
   // A page in the main area (Settings, a bot's settings page): it covers the columns past the sidebar, as wide as the
   // sidebar is now (its rail, or itself), sliding with it.
   const covered = !!settings || !!pageBot;
   const sidebarWidth = sidebarOpen ? 340 : 72;
-  const columns = sidebarOpen
-    ? wide
-      ? "grid-cols-[340px_minmax(0,1fr)]"
-      : "grid-cols-[340px_440px_minmax(0,1fr)]"
-    : wide
-      ? "grid-cols-[72px_minmax(0,1fr)]"
-      : "grid-cols-[72px_440px_minmax(0,1fr)]";
+  // The chat's column, when the panel is beside it, as wide as its edge was dragged (chat-edge.tsx).
+  const columns = { gridTemplateColumns: gridColumns(sidebarWidth, wide ? null : chatWidth) };
+  const slide = edgeDragged ? "" : SLIDE;
   // What a bot's right-click menu does, in the sidebar and on its rail (bot-menu.tsx).
   const botMenuActions: BotMenuActions = {
     onChat: (id) => openChat(botChatId(id)),
@@ -912,14 +981,18 @@ function Bops({ state }: { state: AppState | null }) {
     <OpenHostedApp.Provider value={openHostedApp}>
     <OpenSettings.Provider value={(at) => openSettings(at)}>
     <OpenAppTask.Provider value={openAppTask}>
-    <OpenBotComputer.Provider value={openComputer}>
+    <OpenBotComputer.Provider value={openBotComputer}>
+    <OpenPreview.Provider value={openPreview}>
+    <OpenBotLocal.Provider value={openBotLocal}>
+    <ComposerBridgeProvider value={composerBridge}>
       <TooltipLayer />
       {/* A shared workspace's chats aren't the user's own: nothing of them is said as what they're looking at. */}
       <ViewReporter chatId={state.shared ? "" : chat.id} threadId={state.shared ? null : (thread?.id ?? null)} />
       <div className="flex h-screen flex-col overflow-clip bg-white font-sans text-ink antialiased">
         <TitleBar
           bare={!!pageBot || !!settings}
-          columns={`${columns} ${SLIDE}`}
+          columns={columns}
+          slide={slide}
           wide={focus || !panelOpen}
           tabs={tabBar}
           panelOpen={panelOpen && !focus}
@@ -935,7 +1008,7 @@ function Bops({ state }: { state: AppState | null }) {
           stay as they were underneath (the chat, its draft, a live computer); the sidebar stays beside them, to go anywhere.
         */}
         <div className="relative flex min-h-0 flex-1 flex-col">
-        <div className={`grid min-h-0 flex-1 ${columns} ${SLIDE}`}>
+        <div className={`grid min-h-0 flex-1 ${slide}`} style={columns}>
           {/* The sidebar's column, its color and edge whichever it shows (an inset edge, so the sidebar's 340px fit). */}
           <div className={`flex min-h-0 min-w-0 bg-[#F9F9F8] shadow-[inset_-1px_0_0_#ECECEA] ${sliding ? "overflow-clip" : ""}`}>
           {!sidebarOpen ? (
@@ -1027,6 +1100,7 @@ function Bops({ state }: { state: AppState | null }) {
               {chatColumn}
               {panelOpen && (
                 <section ref={panelRef} className="relative flex min-h-0 min-w-0 flex-col bg-white">
+                  <ChatEdge from={sidebarWidth} width={chatWidth} onWidth={setChatWidth} onDragging={setEdgeDragged} />
                   {cutBack && (
                     <div className="absolute left-1/2 top-3 z-40 flex -translate-x-1/2 animate-[screen-in_300ms_ease-out] items-center gap-2 rounded-full bg-ink py-1 pl-3 pr-1 text-[12.5px] leading-4 text-white shadow-[0_10px_24px_-10px_#00000080]">
                       <span className="max-w-[260px] truncate">New from {cutBack.name}</span>
@@ -1041,6 +1115,34 @@ function Bops({ state }: { state: AppState | null }) {
                       </button>
                     </div>
                   )}
+                  {/* An app's preview stays loaded too, so its page and sign in are there when you come back. */}
+                  {tabs.map((t) => {
+                    if (t.kind !== "preview") return null;
+                    const h = state.workspaces?.find((w) => w.id === t.ws)?.hostedApps?.[t.name];
+                    // A bot's copy's: that bot. Else its site's bot (the one whose Works on is it, with no copy of its own), else the app's own: Fix it, Select and Draw ask there.
+                    const siteBot = siteBotOf(state, t.ws, t.name, t.site ?? t.name);
+                    const ownBot = t.bot ?? (siteBot && !copyBotOf(state, t.ws, t.name, siteBot.id) ? siteBot.id : h?.botId);
+                    const appBot = h && !h.lost ? state.bots.find((b) => b.id === ownBot) : undefined;
+                    const appChat = appBot && state.chats.some((c) => c.id === botChatId(appBot.id)) ? botChatId(appBot.id) : undefined;
+                    return (
+                      <PreviewTab
+                        key={t.id}
+                        ws={t.ws}
+                        name={t.name}
+                        site={t.site}
+                        url={t.url}
+                        user={state.account?.user.id}
+                        hidden={t.id !== active}
+                        stamp={taskStamp(state, t.ws, t.name)}
+                        apps={appsStamp(state, t.ws)}
+                        bot={appBot && appChat ? { name: appBot.name, chatId: appChat } : undefined}
+                        copy={t.bot}
+                        own={!state.shared}
+                        // (Local on its screen was 99 before the server said which.)
+                        onScreen={(display) => h?.botId && showScreen(t.bot ?? h.botId, display ?? 99)}
+                      />
+                    );
+                  })}
                   {/* Web pages stay loaded while you look at other tabs. */}
                   {tabs.map(
                     (t) =>
@@ -1297,6 +1399,9 @@ function Bops({ state }: { state: AppState | null }) {
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
         {!(tab?.kind === "mac" && panelOpen) && !state.shared && <MacPreviews state={state} onOpen={openMac} />}
       </div>
+    </ComposerBridgeProvider>
+    </OpenBotLocal.Provider>
+    </OpenPreview.Provider>
     </OpenBotComputer.Provider>
     </OpenAppTask.Provider>
     </OpenSettings.Provider>
@@ -1324,6 +1429,7 @@ const PAGE_SLIDE = "transition-[left] duration-200 ease-out motion-reduce:transi
 function TitleBar({
   bare,
   columns,
+  slide,
   wide,
   tabs,
   panelOpen,
@@ -1331,7 +1437,8 @@ function TitleBar({
 }: {
   /** A bot's settings page over the window: the drag region and room for the window's buttons only (tabs would change what's under it). */
   bare?: boolean;
-  columns: string;
+  columns: React.CSSProperties;
+  slide: string;
   wide: boolean;
   tabs: React.ReactNode;
   panelOpen: boolean;
@@ -1339,7 +1446,7 @@ function TitleBar({
 }) {
   const desktop = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
   return (
-    <div className={`grid h-11 shrink-0 border-b border-[#ECECEA] bg-[#F7F7F6] [-webkit-app-region:drag] ${columns}`}>
+    <div className={`grid h-11 shrink-0 border-b border-[#ECECEA] bg-[#F7F7F6] [-webkit-app-region:drag] ${slide}`} style={columns}>
       <div className="flex items-center gap-3 px-3.5">
         {/* Room for the window's buttons (the sidebar's toggle is in its header, or at the top of its rail). */}
         {desktop && <div className="w-[56px] shrink-0" />}
@@ -2178,3 +2285,9 @@ function ViewReporter({ chatId, threadId }: { chatId: string; threadId: string |
   }, [chatId, threadId]);
   return null;
 }
+
+/** The newest ended task on an app (its id and how it ended): its preview reloads once when this changes. */
+const taskStamp = (state: AppState, ws: string, name: string) => {
+  const s = state.sessions.findLast((x) => x.app?.wsId === ws && x.app.name === name && !live(x));
+  return s ? `${s.id}:${s.status}` : "";
+};

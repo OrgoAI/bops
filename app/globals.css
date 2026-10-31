@@ -868,7 +868,8 @@
 /*
  * A bot's mood while it works (lib/mascot.ts draws each pose, lib/bot-mood.ts picks it): thinking
  * glances up, its head tilting with it, while its thought bubble's dots pulse; writing scribbles with
- * its pencil, nodding with each stroke; speaking moves its mouth, its head with it, with sound off a
+ * its pencil, nodding with each stroke; coding nods over its laptop while lines of code type in on its
+ * screen, its cups to the beat; speaking moves its mouth, its head with it, with sound off a
  * cup; working bops along, leaning one way then the other, with its cups to the beat; shy sways,
  * looking away, its cheeks glowing. Slow loops of transform and opacity only, in the mascot's own 40
  * unit box (a px here is a unit there; each head turns about its own chin). With reduced motion each
@@ -963,6 +964,49 @@
 .mascot-writing {
   transform-origin: 20px 32px;
   animation: mascot-jot 0.8s ease-in-out infinite;
+}
+
+/*
+ * Coding on an app: the same nod as writing, slower, over its laptop, its cups bouncing as at work. On the
+ * screen each line of code types in from the left in its turn (a third of the loop apart: lib/mascot.ts gives
+ * each its delay), stays, and goes just before it's typed again; the caret blinks after the last.
+ */
+.mascot-coding {
+  transform-origin: 20px 32px;
+  animation: mascot-jot 1.4s ease-in-out infinite;
+}
+@keyframes mascot-type {
+  0% {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  20%,
+  82% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  90%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}
+.mascot-code-line {
+  transform-box: fill-box;
+  transform-origin: 0 50%;
+  animation: mascot-type 1.8s linear infinite;
+}
+@keyframes mascot-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.mascot-caret {
+  animation: mascot-caret 1s step-end infinite;
 }
 
 /* Talking: the mouth opens and closes from its top edge, and the sound arcs pulse out, inner first. */
@@ -1086,6 +1130,9 @@
   .mascot-pencil,
   .mascot-scribble,
   .mascot-writing,
+  .mascot-coding,
+  .mascot-code-line,
+  .mascot-caret,
   .mascot-mouth,
   .mascot-sound path,
   .mascot-speaking,

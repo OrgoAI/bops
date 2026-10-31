@@ -122,8 +122,10 @@ await check("in a workspace shared with the user, nothing is deleted: no Delete 
   };
   const html = renderToStaticMarkup(h(ChatView, props(shared, shared.chats[0])));
   assert.ok(!/aria-label="Delete"/.test(html), "the owner's messages are theirs");
-  assert.ok(!/aria-label="More"/.test(html));
+  // The chat's menu is there for Write, with Compact alone (test-chat-compact-ui.mjs); at Read, not at all.
   assert.ok(!html.includes("Select messages") && !html.includes("Delete all messages"));
+  const read = { ...shared, shared: { ...shared.shared, levels: { boppy: "read", otto: "read" } } };
+  assert.ok(!/aria-label="More"/.test(renderToStaticMarkup(h(ChatView, props(read, read.chats[0])))));
 });
 
 await check("the line a delete leaves: what went, Undo while it can come back, how many were kept between us, or why it didn't go", () => {

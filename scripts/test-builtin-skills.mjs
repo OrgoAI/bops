@@ -218,16 +218,24 @@ check("A skill a body points to is another of them", () => {
 check("No local Ingot server: no 127.0.0.1:7979 or /etc/ingot, git only by ingot git-url, and only the app's own addresses", () => {
   for (const [where, text] of everyText()) {
     for (const m of text.matchAll(/:7979|\/etc\/ingot|\blocal Ingot\b/gi)) assert.fail(`${where}: ${m[0]} (${lineOf(text, m.index)})`);
-    // 127.0.0.1 is only the app's own: checked on its port 3000, or in "never 127.0.0.1 or localhost alone".
-    for (const m of text.matchAll(/127\.0\.0\.1(\S*)/g)) assert.ok(m[1] === "" || /^:3000\/`?[.,]?$/.test(m[1]), `${where}: 127.0.0.1${m[1]} (${lineOf(text, m.index)})`);
+    // 127.0.0.1 is only the app's own: checked on its Local's port, on a spare port (3999), or in "never 127.0.0.1 or localhost alone".
+    for (const m of text.matchAll(/127\.0\.0\.1(\S*)/g)) assert.ok(m[1] === "" || /^:(?:3999|<that)\/?`?[.,]?$/.test(m[1]), `${where}: 127.0.0.1${m[1]} (${lineOf(text, m.index)})`);
     // A repo's git address comes from ingot git-url, never written out, and git signs in with no token in sight.
     for (const m of text.matchAll(/`git clone[^`]*`/g)) assert.equal(m[0], '`git clone "$(ingot git-url <workspace>/<name>)" /workspace/apps/<name>-git`', `${where} (${lineOf(text, m.index)})`);
     for (const m of text.matchAll(/\/git\/|[a-z>]\.git\b|credential\.|password=/g)) assert.fail(`${where}: ${m[0]} (${lineOf(text, m.index)})`);
   }
-  // Where an app's folder is (ingot.ts APPS_DIR), and its address (orgo-web's public URLs).
+  // Where an app's folder is (ingot.ts APPS_DIR; a bot's copy of it beside it), and its address (orgo-web's public URLs).
   const all = BUILTIN_SKILLS.map((s) => s.body).join("\n");
-  for (const m of all.matchAll(/\/workspace\/[a-z]+\/\S*/g)) assert.match(m[0], /^\/workspace\/apps\/<name>(-git)?`?[.,:]?$/, m[0]);
-  for (const m of all.matchAll(/https?:\/\/\S+/g)) assert.match(m[0], /^(https:\/\/<name>\.orgo\.dev\)?[.,]?|http:\/\/127\.0\.0\.1:3000\/`?[.,]?|http:\/\/localhost:3000(\/api\/auth\/callback\/google)?\/?`?[.,]?)$/, m[0]);
+  for (const m of all.matchAll(/\/workspace\/[a-z]+\/\S*/g)) assert.match(m[0], /^\/workspace\/apps\/<name>(-git|\.<you>)?`?[.,:]?$/, m[0]);
+  assert.match(all, /a copy of its own beside it, \/workspace\/apps\/<name>\.<you>, its own clone with its own Local/, "a bot's copy, when more bots work on one app");
+  assert.match(all, /in a copy, `bops-local start <name>\.<you> <site>`/);
+  // Its addresses: a preview link (never named after the app), localhost for its Local (its own port, as bops-local prints it, or 3000
+  // for an app that isn't the workspace's; Google's redirect there), a spare port to check a build.
+  for (const m of all.matchAll(/https?:\/\/\S+/g))
+    assert.match(m[0], /^(https:\/\/<12|http:\/\/127\.0\.0\.1:(?:3999|<that)\/?`?[.,]?|http:\/\/localhost:(?:3000|3001|<its|<that)(\/api\/auth\/callback\/google)?\/?`?[.,:]?)$/, m[0]);
+  assert.ok(!/<name>\.orgo\.dev/.test(all), "no app is named on orgo.dev");
+  assert.match(all, /## Sign in with Google/);
+  assert.match(all, /Publish \(deploy_app where prod\) only when the user's own words say publish/);
 });
 
 check("Every repo a command takes is named in full, and no commit is said to be from an author Ingot doesn't keep", () => {
@@ -268,6 +276,23 @@ check("The commands' own words, as Ingot prints them (ingot/internal/workdir ops
   const order = ["compose.yaml", "Dockerfile", "package.json", "requirements.txt", "index.html"].map((f) => web.indexOf(f));
   assert.ok(order.every((i, n) => i > 0 && (n === 0 || i > order[n - 1])), `detection in order: ${order}`);
   for (const words of ["$PORT", "0.0.0.0", "orgo.json", '"framework"', '"install"', '"build"', '"start"', "30 minutes", "DATABASE_URL", "60 seconds"]) assert.ok(web.includes(words), words);
+});
+
+check("The four places, in one set of words (Screen 1 to 4, Local, Preview, Published); a workspace app's Local is always bops-local's, at the address its BOPS_LOCAL line says, AUTH_URL set by it, its dev command on $PORT (a mismatch said how to fix), never another site's touched; a screen's Chrome shares localhost cookies between sites", () => {
+  const launch = BUILTIN_SKILLS.find((s) => s.slug === "bops-launch-app-locally").body;
+  for (const words of ["## The four places", "1. Screen 1 to 4:", "2. Local:", "3. Preview:", "4. Published:", "Open pages only in your own screen's Chrome."]) assert.ok(launch.includes(words), words);
+  for (const words of ["## An app of your workspace: always bops-local", "never start a server of your own, on 3000 or anywhere", "`bops-local start <name> <site>`", "Read its address from the BOPS_LOCAL line it prints", "It sets AUTH_URL", "Never start, stop or restart another site's Local, and never kill a process on a port that isn't your site's.", "sign out of one site before you sign in on another there"])
+    assert.ok(launch.includes(words), words);
+  assert.ok(launch.indexOf("always bops-local") < launch.indexOf("## 1. The package manager"), "before the steps for any other app");
+  // Its dev command on $PORT (a dev server that keeps a port of its own never comes up at its address: a mismatch).
+  const own = launch.slice(launch.indexOf("always bops-local"), launch.indexOf("## 1. The package manager"));
+  for (const words of ["listen on the port in $PORT", "`vite --port $PORT --strictPort`", "`next dev -p $PORT`", "mismatch=<that port>", "make its dev script use $PORT, then start it again"]) assert.ok(own.includes(words), words);
+  const preview = BUILTIN_SKILLS.find((s) => s.slug === "bops-preview-on-a-public-url").body;
+  assert.match(preview, /one of a site's four places \(Screen, Local, Preview, Published: the skill "Launch an app locally" says each\)/);
+  const work = BUILTIN_SKILLS.find((s) => s.slug === "bops-work-on-an-app").body;
+  assert.ok(work.includes("`bops-local start <name> <site>`") && !/localhost:3000/.test(work), "its own site's Local, at its own address");
+  const web = BUILTIN_SKILLS.find((s) => s.slug === "bops-web-app-that-deploys").body;
+  assert.ok(web.includes("Its addresses are its Local's, http://localhost:<its port>") && !/localhost:3000/.test(web));
 });
 
 console.log(`builtin skills: ${passed} passed, ${failures} failed`);

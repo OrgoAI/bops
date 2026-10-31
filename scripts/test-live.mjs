@@ -29,6 +29,8 @@ registerHooks({
 });
 
 const { LivePublisher, LiveSubscriber, RemoteMoods, localMoods, localSessions, liveRoutine, onLiveRoutine, MOOD_REFRESH_MS, NO_LIVE_MS, PULL_MIN_MS, REFUSED_MS, SILENT_MS } = await import(`${root}/lib/server/live-core.ts`);
+const { LIVE_MOODS } = await import(`${root}/cloud/protocol.ts`);
+const { moodOf, moodSignals } = await import(`${root}/lib/bot-mood.ts`);
 
 let failures = 0;
 let passed = 0;
@@ -117,6 +119,37 @@ await check("typing and asking are thinking, a thread this Mac runs is working, 
   assert.deepEqual(call.get("max"), { ws: "ws_acme", mood: "speaking" });
   assert.deepEqual(localMoods(state(), { runs: new Set(), callBot: "gone" }).size, 0, "a call with a bot that isn't there says nothing");
   assert.deepEqual(Object.fromEntries(localSessions(s, new Set(["s_here"]))), { s_here: { ws: "ws_acme", botId: "max", status: "running" } });
+});
+
+await check("a bot coding on an app here is working on the user's other devices: Bops Cloud knows no coding", () => {
+  // The cloud turns down a mood it doesn't know (cloud/live.ts), and coding isn't one.
+  assert.ok(!LIVE_MOODS.includes("coding"));
+  const s = state();
+  s.account = { user: { id: "u1", email: "tess@orgo.ai" }, signedInAt: 1 };
+  const app = { wsId: "ws_main", name: "recipe-box" };
+  // Otto codes on Recipe Box (its caption says writing), writes a note in another thread, and has a reply on the way.
+  s.sessions = [
+    { id: "s_code", botId: "otto", status: "running", app, activity: "writing" },
+    { id: "s_note", botId: "otto", status: "running", activity: "writing" },
+  ];
+  s.chats[1].typing = ["otto"];
+  const runs = new Set(["s_code", "s_note"]);
+  assert.equal(moodOf(moodSignals(s), "otto"), "coding", "coding in the app here");
+  assert.deepEqual(localMoods(s, { runs, callBot: null }).get("otto"), { ws: "ws_main", mood: "working" }, "working there, whatever else it does");
+  // A call still says speaking, as in the app.
+  assert.deepEqual(localMoods(s, { runs, callBot: "otto" }).get("otto"), { ws: "ws_main", mood: "speaking" });
+  // Not coding (apps not open to the account, a routine's run, not running yet): as before.
+  for (const [why, edit] of [
+    ["no apps", (x) => (x.account.user.email = "sam@example.com")],
+    ["a routine's run", (x) => (x.sessions[0].routineId = "r1")],
+    ["queued", (x) => (x.sessions[0].status = "queued")],
+  ]) {
+    const t = structuredClone(s);
+    edit(t);
+    assert.equal(localMoods(t, { runs, callBot: null }).get("otto").mood, "writing", why);
+  }
+  // Every mood this Mac says is one the cloud takes.
+  for (const call of [null, "otto", "boppy"]) for (const m of localMoods(s, { runs, callBot: call }).values()) assert.ok(LIVE_MOODS.includes(m.mood), m.mood);
 });
 
 /* ---------------- Publishing ---------------- */

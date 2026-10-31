@@ -172,9 +172,12 @@ export function InlineConfirm({
   onConfirm,
   onCancel,
   extra,
+  cancel: cancelWord = "Cancel",
 }: {
   text: string;
   action: string;
+  /** The safe choice's word (Cancel, or Keep). */
+  cancel?: string;
   doing: string;
   busy: boolean;
   onConfirm: () => void;
@@ -216,7 +219,7 @@ export function InlineConfirm({
           disabled={busy}
           className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-white focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-40"
         >
-          Cancel
+          {cancelWord}
         </button>
       </span>
       {extra && <span className="basis-full">{extra}</span>}

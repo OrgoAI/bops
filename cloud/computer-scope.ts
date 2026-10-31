@@ -529,3 +529,51 @@ export function keepAllowed(base: Blob, mine: Blob, scope: Scope, force: Iterabl
   const r = keepAll(base, mine, scope, new Set([...force].map((p) => p.split(".").slice(0, 2).join("."))));
   return { blob: r.blob, held: r.denied };
 }
+
+/* ---------------- What a computer never reads ---------------- */
+
+/** A workspace without the Preview passwords kept for its members (null: it keeps none). */
+function withoutPasswords(w: unknown): Blob | null {
+  const seen = isObject(w) && isObject(w.appsForMembers) ? w.appsForMembers : undefined;
+  if (!isObject(seen?.apps)) return null;
+  let held = false;
+  const apps = Object.fromEntries(
+    Object.entries(seen.apps).map(([name, app]) => {
+      if (!isObject(app) || !Array.isArray(app.sites) || !app.sites.some((s) => isObject(s) && "previewPassword" in s)) return [name, app];
+      held = true;
+      const sites = app.sites.map((s) => {
+        if (!isObject(s) || !("previewPassword" in s)) return s;
+        const rest = { ...s };
+        delete rest.previewPassword;
+        return rest;
+      });
+      return [name, { ...app, sites }];
+    }),
+  );
+  return held ? { ...(w as Blob), appsForMembers: { ...seen, apps } } : null;
+}
+
+/**
+ * The state as a computer reads it (cloud/state.ts: GET /v1/state, and a write's 409): without each site's Preview
+ * password the owner's Mac keeps for members at Your Apps Write (Workspace.appsForMembers, lib/hosted-apps.ts
+ * AppForMembers). A bot runs as root on its computer and a web page can steer it, and a runner never needs them
+ * (lib/server/apps-for-members.ts seeApps is the owner's Mac's alone).
+ */
+export function forComputer(state: Blob): Blob {
+  const list = state.workspaces;
+  if (!Array.isArray(list) || !list.some((w) => withoutPasswords(w))) return state;
+  return { ...state, workspaces: list.map((w) => withoutPasswords(w) ?? w) };
+}
+
+/** Whether a computer's write carries a Preview password: refused, never compared, so a right guess isn't told from a wrong one. */
+export const carriesPasswords = (state: Blob): boolean => forComputer(state) !== state;
+
+/**
+ * A computer's write with what forComputer left out put back from `stored`, the blob it was written over: it may
+ * not change workspaces, and sends them as it read them, so when they match the stored ones without the passwords
+ * they're the stored ones. Otherwise as sent, and writeDenials refuses "workspaces" as ever.
+ */
+export function withHeldBack(stored: Blob, next: Blob): Blob {
+  if (!Array.isArray(stored.workspaces) || !Array.isArray(next.workspaces)) return next;
+  return same(forComputer({ workspaces: stored.workspaces }).workspaces, next.workspaces) ? { ...next, workspaces: stored.workspaces } : next;
+}

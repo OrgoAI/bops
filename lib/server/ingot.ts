@@ -1,5 +1,5 @@
 import "server-only";
-import { isAppName } from "@/lib/hosted-apps";
+import { isAppName, isCopyName } from "@/lib/hosted-apps";
 import { constants, createHash, createPublicKey, publicEncrypt, randomBytes, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -65,8 +65,8 @@ export function repoNameFor(words: string): string {
   return all.slice(0, 64).replace(/-+$/, "") || "app";
 }
 
-/** An app's working folder on its computer. */
-export const appFolder = (name: string) => `${APPS_DIR}/${name}`;
+/** An app's working folder on its computer, or a bot's copy of it (`copy`: hosted-apps.ts copyFor), /workspace/apps/<name>.<copy>. */
+export const appFolder = (name: string, copy?: string) => `${APPS_DIR}/${name}${copy ? `.${copy}` : ""}`;
 
 /**
  * Ingot couldn't do it, in plain words. `offline`: Ingot can't be reached. `refused`: the computer's ingot
@@ -138,6 +138,25 @@ export function authorOf(botId: string | undefined): string {
   const b = botId ? bot(botId) : undefined;
   const name = (b?.name ?? "Bops").replace(/[\u0000-\u001f\u007f;]+/g, " ").trim() || "Bops";
   return `${b?.id ?? "bops"}; ${name}`;
+}
+
+/**
+ * Whether Ingot names changeset `c` as one of these bots' (by id): this Mac's writes for one, which Ingot names
+ * "<bot> via <user>" from X-Ingot-Author (authorOf; in Ingot's local mode its author is the bot's own id), or a
+ * computer's, which Ingot names after its token, "<bot> on <computer> via <user>" (tokenName: the bot whose computer
+ * it is, so a bot working on another's computer commits under that one's name, and the caller names both). Ingot
+ * keeps the name only, cut to fit, so it's told by how it starts; a person's own commits ("<user>") are no bot's.
+ */
+export function byBots(c: Pick<IngotChangeset, "author">, botIds: string[]): boolean {
+  const name = typeof c.author?.name === "string" ? c.author.name : "";
+  if (typeof c.author?.id === "string" && botIds.includes(c.author.id)) return true;
+  return botIds.some((id) => {
+    const b = bot(id);
+    if (!b?.name) return false;
+    // As authorOf writes it, and as tokenName does (its spaces made one, cut to 30).
+    const said = [b.name.replace(/[\u0000-\u001f\u007f;]+/g, " ").trim(), Array.from(b.name.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim()).slice(0, 30).join("").trim()];
+    return said.some((n) => !!n && (name.startsWith(`${n} via `) || name.startsWith(`${n} on `)));
+  });
 }
 
 /* ---------------- The ingot binary, from this Bops ---------------- */
@@ -631,6 +650,40 @@ export function msOf(v: unknown): number | null {
   return null;
 }
 
+/** One file of a changeset as Ingot lists it (GET /repos/{name}/tree): where it is, its blob (the sha256 of its bytes), and whether it runs. */
+export type IngotFile = { path: string; blob: string; size: number; executable: boolean };
+
+/**
+ * One change of a commit Ingot makes on its own (POST /repos/{name}/commit), with no bytes sent: a file set to a
+ * blob the repo has already, its executable bit said (unsaid, Ingot keeps the one the file had), or a file deleted.
+ */
+export type IngotChange = { path: string; blob: string; executable: boolean } | { path: string; delete: true };
+
+/**
+ * The changes that make a changeset's files (`now`) the files of another (`want`), in path order: each file `want`
+ * has that `now` hasn't, or has with other bytes or another executable bit, set to `want`'s blob and bit; each file
+ * only `now` has, deleted. None when they're the same files already. A pure function: what Restore commits.
+ */
+export function changesTo(now: IngotFile[], want: IngotFile[]): IngotChange[] {
+  const had = new Map(now.map((f) => [f.path, f]));
+  const keep = new Set(want.map((f) => f.path));
+  const out: IngotChange[] = [];
+  for (const f of want) {
+    const x = had.get(f.path);
+    if (!x || x.blob !== f.blob || x.executable !== f.executable) out.push({ path: f.path, blob: f.blob, executable: f.executable });
+  }
+  for (const f of now) if (!keep.has(f.path)) out.push({ path: f.path, delete: true });
+  return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/** A file as Ingot lists it, or null when it isn't one (a tree read with anything else in it isn't trusted). */
+const fileOf = (v: unknown): IngotFile | null => {
+  const f = v as Partial<IngotFile> | null;
+  return f && typeof f.path === "string" && f.path && typeof f.blob === "string" && /^[0-9a-f]{64}$/.test(f.blob)
+    ? { path: f.path, blob: f.blob, size: typeof f.size === "number" ? f.size : 0, executable: f.executable === true }
+    : null;
+};
+
 /** Typed calls to the central Ingot (hosted-api.md), for a Bops workspace's repos. None needs a computer. */
 export const ingot = {
   /** Every repo of the workspace, with its newest changeset on main. */
@@ -673,6 +726,37 @@ export const ingot = {
     if (r.status !== 200) throw refusal(`Couldn't read ${name}`, r);
     return r.json.refs?.find((x) => x.name === "main")?.target ?? null;
   },
+  /** Every file of a repo's changeset `at` (GET /repos/{name}/tree?at=), in path order, or null when there's no such repo or changeset. */
+  tree: async (wsId: string, name: string, at: string, signal?: AbortSignal): Promise<IngotFile[] | null> => {
+    if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
+    const r = await api<{ files?: unknown }>(wsId, "GET", `/repos/${name}/tree?${new URLSearchParams({ at })}`, { signal });
+    if (r.status === 404) return null;
+    if (r.status !== 200 || !Array.isArray(r.json.files)) throw refusal(`Couldn't read ${name}'s files`, r);
+    const files = r.json.files.map(fileOf);
+    if (files.some((f) => !f)) throw new IngotError(`Ingot listed ${name}'s files in a way this Bops doesn't know.`);
+    return files as IngotFile[];
+  },
+  /**
+   * A changeset Ingot makes on main itself (POST /repos/{name}/commit), on top of `base`, main's newest as it was
+   * read, by `author` (X-Ingot-Author), from `changes` that name blobs the repo has already: no bytes go. Answers
+   * its id; `stale` with where main is now when someone committed since (Ingot writes nothing then); `empty` when
+   * the changes leave every file as it is (nothing written either). Anything else Ingot turns down is an IngotError
+   * in its words.
+   */
+  commit: async (
+    wsId: string,
+    name: string,
+    c: { base: string; message: string; changes: IngotChange[] },
+    author: string,
+    signal?: AbortSignal,
+  ): Promise<{ id: string } | { stale: string | null } | { empty: true }> => {
+    if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
+    const r = await api<{ changeset?: { id?: unknown }; head?: unknown }>(wsId, "POST", `/repos/${name}/commit`, { body: { ref: "main", base: c.base, message: c.message, changes: c.changes }, author, signal });
+    if ((r.status === 200 || r.status === 201) && typeof r.json.changeset?.id === "string") return { id: r.json.changeset.id };
+    if (r.status === 409 && r.json.error === "stale") return { stale: typeof r.json.head === "string" && r.json.head ? r.json.head : null };
+    if (r.status === 400 && r.json.error === "empty") return { empty: true };
+    throw refusal(`Couldn't commit to ${name}`, r);
+  },
   /**
    * A new agent token that writes the workspace's repos, for one computer, named `name` (one line, at most
    * 64 characters): its id, and its secret, which Ingot gives this once ({ token, secret }). Kept in memory
@@ -712,25 +796,27 @@ const idOf = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) &
 const TURNED_AWAY = /^ingot: .*(?:does not know this agent token|this agent token (?:was revoked|has expired)|the Ingot server refused the key|send an Orgo API key as Authorization)/im;
 
 /**
- * An app's working folder on the computer (appFolder): cloned from its repo ("<project>/<name>") when it
- * isn't there, else brought to the newest main with `ingot pull` (which merges the folder's own changes; a
- * conflict leaves markers for the task to fix). A folder there that isn't an Ingot working folder (or is
- * one of the computer's old local Ingot, of no workspace) is moved aside first, never deleted. One of
+ * An app's working folder on the computer (appFolder: a bot's copy of it with `copy`): cloned from its repo
+ * ("<project>/<name>") when it isn't there, else brought to the newest main with `ingot pull` (which merges the
+ * folder's own changes; a conflict leaves markers for the task to fix). A folder there that isn't an Ingot working
+ * folder (or is one of the computer's old local Ingot, of no workspace) is moved aside first, never deleted. One of
  * another workspace's repo (the computer works for both, and each has an app by that name) is left as it
  * is, and refused: that workspace's tasks work in it. Says what was done, in words for the task's steps.
  * IngotError `refused` when Ingot turned the computer's token away.
  */
-export async function readyFolder(computerId: string, wsId: string, name: string, signal?: AbortSignal): Promise<string> {
+export async function readyFolder(computerId: string, wsId: string, name: string, signal?: AbortSignal, copy?: string): Promise<string> {
   if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
+  if (copy !== undefined && !isCopyName(copy)) throw new IngotError(`"${copy}" can't be a copy's name.`);
   const repo = `${ingotWorkspace(wsId)}/${name}`;
-  const dir = appFolder(name);
+  const dir = appFolder(name, copy);
+  const folder = dir.slice(APPS_DIR.length + 1);
   const state = `${dir}/.ingot/state.json`;
   // A field of the folder's state, which Ingot writes one a line (a repo's name and a workspace are plain).
   const field = (k: string) => `$(sed -n 's/^ *"${k}": "\\([a-z0-9-]*\\)".*/\\1/p' ${state} | head -n 1)`;
   const r = await orgo.bash(
     computerId,
     [
-      `# bops-ingot folder ${name}`,
+      `# bops-ingot folder ${folder}`,
       "export HOME=~root",
       `mkdir -p ${APPS_DIR}`,
       `there=""; [ ! -f ${state} ] || there="${field("workspace")}/${field("repo")}"`,
@@ -742,7 +828,7 @@ export async function readyFolder(computerId: string, wsId: string, name: string
       '  echo "INGOT_OTHER=$there"',
       "  exit 1",
       "else",
-      `  if [ -e ${dir} ]; then old=${APPS_DIR}/.${name}.before-ingot-$(date +%s); mv ${dir} "$old"; echo "INGOT_MOVED=$old"; fi`,
+      `  if [ -e ${dir} ]; then old=${APPS_DIR}/.${folder}.before-ingot-$(date +%s); mv ${dir} "$old"; echo "INGOT_MOVED=$old"; fi`,
       `  ${INGOT_BIN} clone ${q(repo)} ${dir} 2>&1 || { echo INGOT_FAIL=clone; exit 1; }`,
       "  echo INGOT_FOLDER=clone",
       "fi",
@@ -759,4 +845,53 @@ export async function readyFolder(computerId: string, wsId: string, name: string
   const moved = m.get("INGOT_MOVED");
   if (m.get("INGOT_FOLDER") === "clone") return `Cloned the Ingot repo ${name} into ${dir}${moved ? ` (what was there before is in ${moved})` : ""}`;
   return m.has("INGOT_PULL_EXIT") ? `Pulled the newest ${name} into ${dir}: ${tail(r.output)}` : `Pulled the newest ${name} into ${dir}`;
+}
+
+/** What `ingot status` says of a folder that matches its base (crates/ingot-workdir Status). */
+const CLEAN = "nothing to commit, the folder matches its base";
+
+/**
+ * Whether an app's working folder on the computer (appFolder) has changes nobody committed, by `ingot status` there
+ * (which reads the folder alone: nothing is asked of Ingot, and no token is needed): `there` false when there's no
+ * working folder of the app's repo there (never cloned, or another workspace's of that name, which isn't touched);
+ * else `changed`, the files it lists as changed and any it lists as a conflict still to fix (none: it matches its
+ * base). IngotError when the computer couldn't say.
+ */
+export async function folderChanges(computerId: string, wsId: string, name: string, signal?: AbortSignal): Promise<{ there: false } | { there: true; changed: string[] }> {
+  if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
+  const repo = `${ingotWorkspace(wsId)}/${name}`;
+  const dir = appFolder(name);
+  const state = `${dir}/.ingot/state.json`;
+  const field = (k: string) => `$(sed -n 's/^ *"${k}": "\\([a-z0-9-]*\\)".*/\\1/p' ${state} | head -n 1)`;
+  const r = await orgo.bash(
+    computerId,
+    [
+      `# bops-ingot status ${name}`,
+      "export HOME=~root",
+      `there=""; [ ! -f ${state} ] || there="${field("workspace")}/${field("repo")}"`,
+      `if [ "$there" != ${q(repo)} ]; then echo INGOT_FOLDER=none; exit 0; fi`,
+      `cd ${dir} || { echo "INGOT_FAIL=its folder can't be opened"; exit 1; }`,
+      `${INGOT_BIN} status 2>&1 || { echo "INGOT_FAIL=ingot status"; exit 1; }`,
+      "echo INGOT_FOLDER=status",
+    ].join("\n"),
+    30,
+    { signal },
+  );
+  const m = marks(r.output);
+  if (m.get("INGOT_FOLDER") === "none") return { there: false };
+  if (r.exit_code !== 0 || m.get("INGOT_FOLDER") !== "status") throw new IngotError(`Couldn't read ${dir} on its computer: ${tail(r.output)}`);
+  // Its lines: "<repo> at <base>", then each change ("  modified  <path>"), then a heading for the conflicts to fix
+  // and one for files it doesn't track (links), each with its paths under it. Those it doesn't track aren't changes.
+  const lines = r.output.split("\n");
+  const changed: string[] = [];
+  let part: "changes" | "conflicts" | "other" = "changes";
+  for (const l of lines) {
+    if (/^conflicts to resolve/.test(l)) part = "conflicts";
+    else if (/^not tracked/.test(l)) part = "other";
+    const c = part === "changes" && /^ {2}(?:added|modified|deleted|now executable|no longer executable) +(\S.*)$/.exec(l);
+    if (c) changed.push(c[1]);
+    else if (part === "conflicts" && /^ {2}\S/.test(l)) changed.push(l.trim());
+  }
+  if (!changed.length && !lines.some((l) => l.trim() === CLEAN)) throw new IngotError(`Couldn't tell whether ${dir} on its computer has changes: ${tail(r.output)}`);
+  return { there: true, changed: [...new Set(changed)] };
 }

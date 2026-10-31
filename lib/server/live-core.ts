@@ -1,4 +1,5 @@
 import { LIVE_MOOD_TTL, type LiveEventIn, type LiveMood, type LiveRoutineChange, type LiveSnapshot } from "@/cloud/protocol";
+import { codingThread } from "@/lib/bot-mood";
 import { workspaceOf, type AppState } from "@/lib/types";
 
 /**
@@ -31,15 +32,19 @@ const running = (status: string) => status === "queued" || status === "starting"
  * the app), typing or asking a teammate in a chat (thinking), and the call the user is on (speaking,
  * which wins). Only the bots that aren't idle. Typing is this Mac's alone (never synced), and so are
  * `runs` (the threads this server runs: one another Mac runs is in the state too, and is that Mac's to say).
+ * Bops Cloud knows no coding (cloud/protocol.ts LIVE_MOODS: it turns an unknown mood down), so a bot coding
+ * here (codingThread) is working there, as it is whatever its caption says and whatever else it does but talk.
  */
 export function localMoods(state: AppState, here: { runs: ReadonlySet<string>; callBot: string | null }): Map<string, HereMood> {
   const out = new Map<string, HereMood>();
   const wsOf = (botId: string) => workspaceOf(state.bots.find((b) => b.id === botId));
-  const writing = (botId: string) => out.get(botId)?.mood === "writing";
+  const coding = new Set(state.sessions.filter((s) => here.runs.has(s.id) && codingThread(s, state)).map((s) => s.botId));
+  // Writing, or coding (which wins over writing and thinking in the app): what a reply on the way doesn't change.
+  const writesOrCodes = (botId: string) => coding.has(botId) || out.get(botId)?.mood === "writing";
   for (const s of state.sessions)
-    if (here.runs.has(s.id) && running(s.status) && !s.askWhere && (!out.has(s.botId) || (s.activity === "writing" && !writing(s.botId))))
-      out.set(s.botId, { ws: wsOf(s.botId), mood: s.activity === "writing" ? "writing" : "working" });
-  for (const c of state.chats) for (const b of [...(c.typing ?? []), ...Object.keys(c.asking ?? {})]) if (!writing(b)) out.set(b, { ws: wsOf(b), mood: "thinking", chatId: c.id });
+    if (here.runs.has(s.id) && running(s.status) && !s.askWhere && (!out.has(s.botId) || (s.activity === "writing" && !writesOrCodes(s.botId))))
+      out.set(s.botId, { ws: wsOf(s.botId), mood: s.activity === "writing" && !coding.has(s.botId) ? "writing" : "working" });
+  for (const c of state.chats) for (const b of [...(c.typing ?? []), ...Object.keys(c.asking ?? {})]) if (!writesOrCodes(b)) out.set(b, { ws: wsOf(b), mood: "thinking", chatId: c.id });
   if (here.callBot && state.bots.some((b) => b.id === here.callBot)) out.set(here.callBot, { ws: wsOf(here.callBot), mood: "speaking" });
   return out;
 }

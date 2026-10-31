@@ -88,6 +88,12 @@ export type ComputerTurn = {
    * on from the response it paused in.
    */
   resume?: AppApproval;
+  /**
+   * Compact (sessions.ts compactThread): no message, and the one step asks the model to compact the conversation so
+   * far (the Responses API's compaction_trigger, last in its input, after the outputs of any calls it owed). The turn
+   * ends with that step.
+   */
+  compact?: true;
   signal: AbortSignal;
   /** How long the turn may run at all, and how long one step (the model's answer) may take before it counts as stuck. */
   timeoutMs: number;
@@ -156,7 +162,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // A turn that was stopped mid-step, or paused at a call that needed the user's OK, owes OpenAI the outputs of the
   // calls it was answering: the paused call's is what the user's reply made of it.
   const paused = t.resume?.resume?.engine === "responses" ? t.resume.resume : undefined;
-  let input: unknown[] = [...(await settle(t, s.owed ?? [], guard)), ...(t.input ? [{ role: "user", content: [{ type: "input_text", text: t.input }] }] : [])];
+  let input: unknown[] = [...(await settle(t, s.owed ?? [], guard)), ...(t.input ? [{ role: "user", content: [{ type: "input_text", text: t.input }] }] : []), ...(t.compact ? [{ type: "compaction_trigger" }] : [])];
   let prev = paused?.responseId ?? s.responseId;
 
   for (let calls = 0; ; calls++) {
@@ -210,6 +216,11 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
       owed: asks.map((o) => ({ id: o.call_id!, type: o.type === "computer_call" ? "computer" : "function", ...(o.pending_safety_checks?.length ? { checks: o.pending_safety_checks } : {}) })),
     });
     for (const o of r.output) record(t, o, asks.length > 0);
+    if (t.compact) {
+      // Compacted: what it owed after that (nothing, as a rule) waits for the next turn.
+      if (!asks.length) patchSession(t.sessionId, { owed: undefined });
+      return "Compacted";
+    }
     if (!asks.length) {
       patchSession(t.sessionId, { owed: undefined });
       return answerIn(r.output) || "Done.";

@@ -119,7 +119,10 @@ globalThis.fetch = async (input, init) => {
       if (cmd === "# bops-ingot git") return json({ output: "INGOT_GIT=ok", exit_code: 0 });
       return json({ output: "INGOT_FOLDER=pull", exit_code: 0 });
     }
-    if (url.pathname === "/api/computers/c_a/deploy-projects" && req.method === "GET") return json({ projects: [] });
+    // Its computer's projects: the shop's Published (its record names it, as Bops 0.0.32 made it); its public URLs: none yet.
+    if (url.pathname === "/api/computers/c_a/deploy-projects" && req.method === "GET") return json({ projects: [{ id: "dp_live", name: "shop", port: 3000, source: "ingot", ingot_repo: `${PA}/shop`, url: "https://shop.orgo.dev", deployments: [] }] });
+    if (url.pathname === "/api/computers/c_a/public-urls" && req.method === "GET") return json({ enabled: true, public_urls: [] });
+    if (url.pathname === "/api/computers/c_a/public-urls" && req.method === "POST") return json({ id: "pu_1", url: `https://${body.label}.orgo.dev`, hostname: `${body.label}.orgo.dev`, label: body.label, port: body.port, created_at: new Date().toISOString() }, 201);
     if (url.pathname === "/api/computers/c_a/deploy-projects" && req.method === "POST") return json({ id: "dp_new", name: body.name, port: body.port, source: "ingot", ingot_repo: body.repo });
     if (url.pathname === "/api/computers/c_a/deploy-projects/dp_new/deployments" && req.method === "POST") return json({ id: "dep_1", project_id: "dp_new", state: "queued", created_at: new Date().toISOString() }, 202);
     if (url.pathname === "/api/computers/c_a/deploy-projects/dp_live")
@@ -278,7 +281,7 @@ await check("a task's deploy once it committed, with no sign-in meanwhile: deplo
   await H.deployAfterTask("ses_app");
   assert.ok(calls.slice(from).some((c) => c.as === "alex" && c.what === "POST /api/computers/c_a/deploy-projects/dp_new/deployments"));
   assert.deepEqual(bobsCalls(from), []);
-  assert.match(deploySaid(S.getState()).at(-1)?.text ?? "", /^Deploying (a preview of )?the newest commit of todo/);
+  assert.match(deploySaid(S.getState()).at(-1)?.text ?? "", /^Deploying a preview of the newest commit of todo/);
   assert.equal(S.getState().sessions[0].app.deployAfter, undefined);
 });
 

@@ -1,38 +1,93 @@
 #!/usr/bin/env bash
-# bops-local: an app's Local on this computer (Bops, Your Apps: Local, Staging, Prod). Its working folder
-# (/workspace/apps/<app>) run as a dev server on a port of its own, not public: it opens on this screen, or
-# from the owner's Mac over the tailnet. Bops runs it (from the Mac, through Orgo's bash), and so can the bot.
+# bops-local: an app's Local on this computer (Bops, Your Apps: Local, Preview, Published). Its working folder
+# (/workspace/apps/<app>) run as a dev server with hot reload, not public, at http://localhost:<its port>: the
+# same address on this computer (a screen's Chrome) and on the owner's Mac, which forwards that same port of
+# its own here over the tailnet, or through this computer's SSH. Bops runs it (from the Mac, through Orgo's
+# bash), and so can the bot.
 #
-#   bops-local start <app> <site> [<command, base64, or ->] [<its command when it has none, base64, or ->] [<Staging's project name, or ->]
+# An app several bots work on at once has a copy of its working folder for each bot but its own one
+# (/workspace/apps/<app>.<copy>), and each copy's sites have Locals of their own: every command takes <app>.<copy>
+# where it takes <app> for one of them (<app> alone is the app's own folder, as it always was).
+#
+#   bops-local start <app> <site> [<command b64>|-] [<fallback b64>|-] [<preview project>|-] [<preview url b64>|-] [<port>|auto|-]
 #   bops-local stop <app> <site>
-#   bops-local status [<app>]
-#   bops-local open <app> <site>
-#   bops-local env <app> <site>     (the changes on stdin: base64 JSON {NAME: "value" | null})
+#   bops-local status [<app>]                    (an app's: its own folder's and every copy's; <app>.<copy>: that copy's)
+#   bops-local open <app> <site> [<display>]     (in that screen's Chrome: X display 99 when unsaid)
+#   bops-local env <app> <site>                  (the changes on stdin: base64 JSON {NAME: "value" | null})
+#   bops-local mark <app> <site> good <changeset> (it answered, its folder clean at that changeset)
+#   bops-local mark <app> <site> fix              (Fix it pressed once more since its last good run)
+#   bops-local forget <app> [only]               (its app removed: each of its Locals stopped and its files gone, every
+#                                                 copy's too; only: its own folder's alone; <app>.<copy>: that copy's)
 #
-# Its variables: Staging's (its live release's app.env, when there is one), then its own (<app>--<site>.env)
-# on top. What it keeps is in /root/.bops/local, root's alone: <app>--<site>.conf (port, command, when),
-# .env (its own variables, 0600), .run.sh, .log. Every answer is BOPS_LOCAL lines:
-#   BOPS_LOCAL <app>--<site> <state> <port> <since> <command, base64> <last words, base64> <its own variables' names, comma separated>
+# Its port: one a site, the same every time, never another Local's here. A port given is that one, unless
+# another Local here has it (port-taken). Else the one it had; else (its first start, or auto) the lowest from
+# 3000 to 3099 that no Local here has, running or stopped, and nothing listens on (deploy projects take 3100
+# and up). It never moves by itself: when something listens there, a process started from the app's own folder
+# that's no other Local's (a dev server left over) is stopped first, and anything else fails it as port-held. A
+# start refused (port-taken, no-port, port-held) is refused before anything is stopped: a running Local runs on.
+# Two Locals here with one port (from before each had its own) are settled first: the one running on it keeps it
+# (never pushed aside), else the app's own site, else the one made first, and each other one gets the port it
+# listens on now when that's no one's, else the lowest free. It's picked, and every conf written, under one lock,
+# so two starts at once never take one port.
+# Its variables: its Preview's (that project's live release's app.env, when there is one), with every value
+# naming the Preview's link made http://localhost:<its port>; then AUTH_URL, NEXTAUTH_URL and BETTER_AUTH_URL as
+# http://localhost:<its port> and AUTH_TRUST_HOST=true (so sign in comes back to where it's looked at); then its
+# own (<app>--<site>.env; a copy's, the app's own site's first, then its own) on top of all. It installs first when
+# node_modules is missing, or package.json or its lockfile changed since its last install; when another folder of the
+# app here (its own, or a copy) has node_modules from the same ones, it links them file by file instead (cp -al, both
+# then marked .bops-linked, so an install in either takes its own away first rather than writing into the other's),
+# else installs. What it keeps is in /root/.bops/local, root's alone, by its key (<app>--<site>, a copy's
+# <app>.<copy>--<site>): <key>.conf (its port, command, when, and keys only a newer bops-local knows, kept as they are),
+# .env (its own variables, 0600), .run.sh, .log. Every answer is lines, two a Local:
+#   BOPS_LOCAL <key> <state> <port> <since> <command, base64> <last words, base64> <its own variables' names, comma separated>
+#   BOPS_LOCAL_MORE <key> [dev=<its port>] [good=<changeset>:<when>] [fixes=<n>] [auth=<0|1>] [mismatch=<port>]
 # state: running (its port answers), starting (its process runs, its port doesn't answer yet), failed (it
-# stopped by itself), stopped.
+# stopped by itself; its last words: the last 6 lines of its log that aren't empty), stopped. The first line is
+# word for word what older Bops read, seven words after BOPS_LOCAL and never an eighth (a copy's key is no app's to
+# them, so they pass it over); what's new is on the second, which they skip. dev: its own port (3000 for one from
+# before ports were said), <port> once it started there; good: the changeset its folder was last seen good at (its
+# / answered below 500, its folder clean) and when (seconds); fixes: Fix it presses since; auth: it signs in
+# (next-auth, @auth/* or better-auth in its package.json); mismatch: a port its dev server listens on instead of
+# its own (one that ignores $PORT), said and never taken for its port.
 set -uo pipefail
 umask 077
-D=/root/.bops/local
+# Which bops-local this is: a Bops puts its own on a computer only when it's newer (lib/server/hosted-apps.ts localTool).
+BOPS_LOCAL_VERSION=5
+# (Overridable only for scripts/test-bops-local.sh: Bops never sets them.)
+D=${BOPS_LOCAL_HOME:-/root/.bops/local}
+APPS=${BOPS_APPS_DIR:-/workspace/apps}
+ORGO_APPS=${BOPS_ORGO_APPS_DIR:-/opt/orgo-apps}
 mkdir -p "$D" && chmod 700 "$D"
 NAME_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+# An app's folder: its name, or <app>.<copy> for a bot's copy of it (each a name).
+APP_RE='^[a-z0-9]+(-[a-z0-9]+)*([.][a-z0-9]+(-[a-z0-9]+)*)?$'
+# The port a Local had when nothing said (before each had its own), and the ones Locals get, lowest first.
+DEV_DEFAULT=3000
+FIRST=3000
+LAST=3099
+# This script, for its Locals' run files to say an install is done.
+SELF=$(readlink -f "$0" 2> /dev/null || echo "$0")
 die() { echo "BOPS_LOCAL_FAIL=$1"; exit 1; }
 b64() { printf %s "$1" | base64 -w0; }
 
-# The Local of <app> <site>: its key, in K.
+# The Local of <app> <site> (<app>.<copy> <site> for a copy's): its key, in K.
 need_key() {
-  [[ "${1:-}" =~ $NAME_RE ]] && [[ "${2:-}" =~ $NAME_RE ]] || die "bad-name"
+  [[ "${1:-}" =~ $APP_RE ]] && [[ "${2:-}" =~ $NAME_RE ]] || die "bad-name"
   K="$1--$2"
 }
 
-# One Local's conf, read without running it (only the lines Bops writes, each checked).
+# Whether Local `k` is of `app`: an app's own folder's and every copy's of it, or a copy's (<app>.<copy>) alone.
+of() { [[ "$1" == "$2--"* ]] || { [[ "$2" != *.* ]] && [[ "$1" == "$2."*"--"* ]]; }; }
+
+# One at a time: picking a port and writing a conf hold this lock (fd 9, which no Local's process keeps).
+lock() { exec 9> "$D/.lock" && flock -w "${1:-30}" 9; }
+unlock() { exec 9>&-; }
+
+# One Local's conf, read without running it (only the lines Bops writes, each checked). A key this bops-local
+# doesn't know (a newer one's) is kept in EXTRA as it is, for write_conf to write back.
 read_conf() {
-  PORT= PID= CMD_B64= SINCE= STOPPED= ENVFROM=
-  local f="$D/$1.conf" k v
+  PORT= PID= CMD_B64= SINCE= STOPPED= ENVFROM= DEVPORT= ENVURL_B64= MADE= GOOD= FIXES= PKGHASH= EXTRA=
+  local f="$D/$1.conf" k v seen=" "
   [ -f "$f" ] || return 1
   while IFS='=' read -r k v; do
     case "$k" in
@@ -42,18 +97,37 @@ read_conf() {
       SINCE) [[ "$v" =~ ^[0-9]{1,12}$ ]] && SINCE=$v ;;
       STOPPED) [[ "$v" =~ ^[01]$ ]] && STOPPED=$v ;;
       ENVFROM) [[ "$v" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] && ENVFROM=$v ;;
+      DEVPORT) good_devport "$v" && DEVPORT=$v ;;
+      ENVURL_B64) [[ "$v" =~ ^[A-Za-z0-9+/=]*$ ]] && ENVURL_B64=$v ;;
+      MADE) [[ "$v" =~ ^[0-9]{1,12}$ ]] && MADE=$v ;;
+      GOOD) [[ "$v" =~ ^[0-9a-f]{4,64}:[0-9]{1,12}$ ]] && GOOD=$v ;;
+      FIXES) [[ "$v" =~ ^[0-9]{1,6}$ ]] && FIXES=$v ;;
+      PKGHASH) [[ "$v" =~ ^[0-9a-f]{40}$ ]] && PKGHASH=$v ;;
+      *)
+        if [[ "$k" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] && [[ "$seen" != *" $k "* ]]; then
+          EXTRA+="$k=$v"$'\n'
+          seen+="$k "
+        fi
+        ;;
     esac
   done < "$f"
   return 0
 }
 
 write_conf() {
-  printf 'PORT=%s\nPID=%s\nCMD_B64=%s\nSINCE=%s\nSTOPPED=%s\nENVFROM=%s\n' "$PORT" "$PID" "$CMD_B64" "$SINCE" "$STOPPED" "$ENVFROM" > "$D/$1.conf.new" && mv -f "$D/$1.conf.new" "$D/$1.conf"
+  {
+    printf 'PORT=%s\nPID=%s\nCMD_B64=%s\nSINCE=%s\nSTOPPED=%s\nENVFROM=%s\nDEVPORT=%s\nENVURL_B64=%s\n' "$PORT" "$PID" "$CMD_B64" "$SINCE" "$STOPPED" "$ENVFROM" "$DEVPORT" "$ENVURL_B64"
+    printf 'MADE=%s\nGOOD=%s\nFIXES=%s\nPKGHASH=%s\n' "$MADE" "$GOOD" "$FIXES" "$PKGHASH"
+    printf %s "$EXTRA"
+  } > "$D/$1.conf.new" && mv -f "$D/$1.conf.new" "$D/$1.conf"
 }
 
-alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
+# A dev port: 1024 to 65535, never 3210 (Bops' own on the owner's Mac, where it's seen).
+good_devport() { [[ "${1:-}" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ] && [ "$1" != 3210 ]; }
+
+alive() { [ -n "$1" ] && kill -0 "$1" 2> /dev/null; }
 # Something listens on the port (a dev server still compiling its first page counts).
-answers() { [ -n "$1" ] && (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+answers() { [ -n "$1" ] && (exec 3<> "/dev/tcp/127.0.0.1/$1") 2> /dev/null; }
 
 env_names() {
   local f="$D/$1.env"
@@ -63,41 +137,217 @@ env_names() {
   echo "${names:--}"
 }
 
+# Something listens on the port here (ss, else a connect).
+listening() {
+  if command -v ss > /dev/null 2>&1; then ss -Hltn 2> /dev/null | awk '{print $4}' | grep -qE "[:.]$1\$" && return 0; fi
+  answers "$1"
+}
+
+# The processes listening on a port here, one pid a line (none known without ss).
+holders() {
+  command -v ss > /dev/null 2>&1 || return 0
+  ss -Hltnp 2> /dev/null | awk -v p="$1" '{ n = split($4, a, ":"); if (a[n] == p) print }' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+}
+
+# A process's working folder (lsof where there's no /proc: the tests on a Mac), and its process group.
+cwd_of() { readlink "/proc/$1/cwd" 2> /dev/null || lsof -a -p "$1" -d cwd -Fn 2> /dev/null | sed -n 's/^n//p' | head -n 1; }
+group_of() { ps -o pgid= -p "$1" 2> /dev/null | tr -d ' '; }
+
+# The first port its session (its process and what it started) listens on, when its own doesn't answer: a dev
+# server that keeps a port of its own (5173, 3000) whatever $PORT says.
+session_port() {
+  local sid=$1 pids p
+  command -v ss > /dev/null 2>&1 && command -v pgrep > /dev/null 2>&1 || return 0
+  pids=" $(pgrep -s "$sid" 2> /dev/null | tr '\n' ' ') "
+  [ "$pids" = "  " ] && return 0
+  ss -Hltnp 2> /dev/null | while read -r _ _ _ local _ users; do
+    for p in $(printf '%s' "$users" | grep -oE 'pid=[0-9]+' | cut -d= -f2); do
+      case "$pids" in *" $p "*) printf '%s\n' "${local##*:}"; break ;; esac
+    done
+  done | grep -E '^[0-9]{1,5}$' | sort -n | head -n 1
+}
+
+# Whether the app signs in (next-auth, @auth/... or better-auth in its package.json, or in the one of the folder
+# its command first cd's into): 1 or 0.
+signs_in() {
+  python3 - "$1" "$(printf %s "${2:-}" | base64 -d 2> /dev/null)" << 'PY' 2> /dev/null || echo 0
+import json, os, re, sys
+top, cmd = sys.argv[1], sys.argv[2]
+dirs = [top]
+m = re.match(r"\s*cd\s+([^\s;&|]+)\s*(?:&&|;)", cmd)
+if m:
+    dirs.append(os.path.join(top, m.group(1)))
+names = []
+for d in dirs:
+    try:
+        j = json.load(open(os.path.join(d, "package.json")))
+    except Exception:
+        continue
+    for k in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        if isinstance(j.get(k), dict):
+            names += list(j[k])
+print(1 if any(n in ("next-auth", "better-auth") or n.startswith("@auth/") for n in names) else 0)
+PY
+}
+
 say() {
-  local k=$1 state=stopped err=
+  local k=$1 state=stopped err= found= more=
   read_conf "$k" || return 0
   if alive "$PID"; then
+    # Its port doesn't answer: a port its session listens on instead is said, never taken for its own.
+    if ! answers "$PORT"; then
+      found=$(session_port "$PID")
+      { [ -n "$found" ] && [ "$found" != "$PORT" ] && answers "$found"; } || found=
+    fi
     if answers "$PORT"; then state=running; else state=starting; fi
   elif [ "$STOPPED" = 0 ]; then
     state=failed
-    err=$(tail -n 5 "$D/$k.log" 2>/dev/null | tr -d '\r' | tail -c 600)
+    err=$(tail -n 40 "$D/$k.log" 2> /dev/null | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n 6 | tail -c 1500)
   fi
-  echo "BOPS_LOCAL $k $state ${PORT:--} ${SINCE:--} ${CMD_B64:--} $( [ -n "$err" ] && b64 "$err" || echo -) $(env_names "$k")"
+  echo "BOPS_LOCAL $k $state ${PORT:--} ${SINCE:--} ${CMD_B64:--} $([ -n "$err" ] && b64 "$err" || echo -) $(env_names "$k")"
+  more+=" dev=${DEVPORT:-$DEV_DEFAULT}"
+  [ -n "$GOOD" ] && more+=" good=$GOOD"
+  [ -n "$FIXES" ] && more+=" fixes=$FIXES"
+  more+=" auth=$(signs_in "$APPS/${k%%--*}" "$CMD_B64")"
+  [ -n "$found" ] && more+=" mismatch=$found"
+  echo "BOPS_LOCAL_MORE $k$more"
 }
 
-# A port for a Local: the one it had, else the first from 4100 that no other Local has and nothing listens on.
-pick_port() {
-  local k=$1 p f taken
-  if read_conf "$k" && [ -n "$PORT" ]; then echo "$PORT"; return; fi
-  taken=" $(for f in "$D"/*.conf; do [ -f "$f" ] && grep -oE '^PORT=[0-9]+' "$f" | cut -d= -f2; done | tr '\n' ' ') "
-  for p in $(seq 4100 4199); do
-    case "$taken" in *" $p "*) continue ;; esac
-    if command -v ss >/dev/null 2>&1 && ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$p\$"; then continue; fi
+# Every Local's key here, one a line.
+keys() {
+  local f
+  for f in "$D"/*.conf; do [ -f "$f" ] && basename "$f" .conf; done
+}
+
+# The ports every other Local here has: its own (running or stopped; one from before ports were said has
+# 3000), and the one it listens on while it runs.
+taken_ports() {
+  local o
+  for o in $(keys); do
+    [ "$o" = "$1" ] && continue
+    (
+      read_conf "$o" || exit 0
+      echo "${DEVPORT:-$DEV_DEFAULT}"
+      alive "$PID" && [ -n "$PORT" ] && echo "$PORT"
+    )
+  done
+}
+
+# The other Local here whose own port is `port`, if any.
+who_has() {
+  local o
+  for o in $(keys); do
+    [ "$o" = "$1" ] && continue
+    (read_conf "$o" && [ "${DEVPORT:-$DEV_DEFAULT}" = "$2" ] && echo "$o")
+  done | head -n 1
+}
+
+# The lowest port from 3000 to 3099 that isn't in `taken` (" 3000 3001 ") and nothing listens on but `mine` (the
+# port the Local being started runs on now, if any: its own).
+first_free() {
+  local p
+  for p in $(seq "$FIRST" "$LAST"); do
+    [[ "$1" == *" $p "* ]] && continue
+    [ "$p" != "${2:-}" ] && listening "$p" && continue
     echo "$p"
     return
   done
+}
+
+# Two Locals here with one port (from before each had its own): the one running on it keeps it, else the app's own
+# site, else the one made first (else started first), and each other one gets the port it listens on now when it
+# runs and no other has that, else the lowest free (none free: left as it is, so its start says no-port). Its new
+# port is its own from then on; a stopped one's last port goes with it. Under the lock.
+settle() {
+  local k dp p all=" "
+  local -a order
+  local -A kept=()
+  mapfile -t order < <(for k in $(keys); do (
+    read_conf "$k"
+    printf '%s %s %s %s\n' "$(alive "$PID" && [ "$PORT" = "${DEVPORT:-$DEV_DEFAULT}" ] && echo 0 || echo 1)" "$([ "${k%%--*}" = "${k#*--}" ] && echo 0 || echo 1)" "${MADE:-${SINCE:-9999999999}}" "$k"
+  ); done | sort -k1,1n -k2,2n -k3,3n -k4,4 | awk '{print $4}')
+  [ "${#order[@]}" -gt 1 ] || return 0
+  for k in "${order[@]}"; do all+="$(read_conf "$k" && echo "${DEVPORT:-$DEV_DEFAULT}") "; done
+  for k in "${order[@]}"; do
+    read_conf "$k" || continue
+    dp=${DEVPORT:-$DEV_DEFAULT}
+    if [ -z "${kept[$dp]:-}" ]; then
+      kept[$dp]=$k
+      continue
+    fi
+    p=
+    if alive "$PID" && [ -n "$PORT" ] && [ "$PORT" -ge "$FIRST" ] && [ "$PORT" -le "$LAST" ] && [[ "$all" != *" $PORT "* ]]; then p=$PORT; fi
+    [ -n "$p" ] || p=$(first_free "$all")
+    [ -n "$p" ] || continue
+    DEVPORT=$p
+    alive "$PID" || PORT=$p
+    write_conf "$k"
+    kept[$p]=$k
+    all+="$p "
+  done
+}
+
+# Its port free for it: nothing listens there, or what does is a process started from the app's own folder
+# (a dev server left over, the bot's own or one an older Local left) that's no other Local's here, stopped now.
+# Fails when something else still holds it.
+clear_port() {
+  local p=$1 dir=$2 k=$3 pid cwd others stale= n
+  listening "$p" || return 0
+  others=" $(for o in $(keys); do [ "$o" != "$k" ] && (read_conf "$o" && alive "$PID" && echo "$PID"); done | tr '\n' ' ') "
+  for pid in $(holders "$p"); do
+    cwd=$(cwd_of "$pid")
+    [ -n "$cwd" ] && { [ "$cwd" = "$dir" ] || [[ "$cwd" == "$dir/"* ]]; } || continue
+    [[ "$others" == *" $(group_of "$pid") "* ]] && continue
+    stale+=" $pid"
+  done
+  [ -n "$stale" ] || return 1
+  for pid in $stale; do kill -TERM "$pid" 2> /dev/null; done
+  for n in 1 2 3 4 5 6; do listening "$p" || return 0; sleep 0.5; done
+  for pid in $stale; do kill -KILL "$pid" 2> /dev/null; done
+  for n in 1 2 3 4; do listening "$p" || return 0; sleep 0.5; done
+  return 1
 }
 
 stop_one() {
   local k=$1 n
   read_conf "$k" || return 0
   if alive "$PID"; then
-    kill -TERM -- "-$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null
+    kill -TERM -- "-$PID" 2> /dev/null || kill -TERM "$PID" 2> /dev/null
     for n in 1 2 3 4 5 6; do alive "$PID" || break; sleep 0.5; done
-    alive "$PID" && { kill -KILL -- "-$PID" 2>/dev/null || kill -KILL "$PID" 2>/dev/null; }
+    alive "$PID" && { kill -KILL -- "-$PID" 2> /dev/null || kill -KILL "$PID" 2> /dev/null; }
   fi
   STOPPED=1
   write_conf "$k"
+}
+
+# What its install comes from (package.json and its lockfile), as one sha1; nothing for a folder with no package.json.
+pkg_hash() {
+  [ -f "$1/package.json" ] || return 0
+  python3 - "$1" << 'PY' 2> /dev/null
+import hashlib, os, sys
+h = hashlib.sha1()
+for n in ("package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"):
+    p = os.path.join(sys.argv[1], n)
+    if os.path.isfile(p):
+        h.update(n.encode() + b"\0" + open(p, "rb").read() + b"\0")
+print(h.hexdigest())
+PY
+}
+
+# Another working folder of the same app here (its own, or a bot's copy) whose node_modules came from the same
+# package.json and lockfile (an install one of its Locals said done at this hash, and its files still at it): what an
+# install links from, file by file (cp -al), so a copy isn't installed again. Nothing when there's none.
+share_from() {
+  local hash=$1 dir=$2 app=${3%%.*} k f
+  [ -n "$hash" ] || return 0
+  for k in $(keys); do
+    f=${k%%--*}
+    { [ "$f" = "$app" ] || [[ "$f" == "$app."* ]]; } && [ "$APPS/$f" != "$dir" ] && [ -d "$APPS/$f/node_modules" ] || continue
+    (read_conf "$k" && [ "$PKGHASH" = "$hash" ]) || continue
+    [ "$(pkg_hash "$APPS/$f")" = "$hash" ] || continue
+    echo "$APPS/$f"
+    return
+  done
 }
 
 # What its folder says to run, when it wasn't given a command: package.json's dev script, else its start
@@ -105,7 +355,7 @@ stop_one() {
 detect() {
   if [ -f package.json ]; then
     local s
-    s=$(python3 -c 'import json,sys;s=json.load(open("package.json")).get("scripts") or {};print("dev" if "dev" in s else "start" if "start" in s else "")' 2>/dev/null || true)
+    s=$(python3 -c 'import json,sys;s=json.load(open("package.json")).get("scripts") or {};print("dev" if "dev" in s else "start" if "start" in s else "")' 2> /dev/null || true)
     [ "$s" = dev ] && { echo "npm run dev"; return; }
     [ "$s" = start ] && { echo "npm start"; return; }
   fi
@@ -119,61 +369,134 @@ case "$cmd" in
     need_key "${2:-}" "${3:-}"
     k=$K
     APP=$2
-    DIR=/workspace/apps/$APP
+    SITE=$3
+    DIR=$APPS/$APP
     [ -d "$DIR" ] || die "no-folder"
     GIVEN=${4:--}
     FALLBACK=${5:--}
     FROM=${6:--}
+    URL_B64=${7:--}
+    DEV=${8:--}
     [ "$GIVEN" = - ] && GIVEN=
     [ "$FALLBACK" = - ] && FALLBACK=
     [ "$FROM" = - ] && FROM=
-    [[ "$GIVEN" =~ ^[A-Za-z0-9+/=]*$ ]] && [[ "$FALLBACK" =~ ^[A-Za-z0-9+/=]*$ ]] || die "bad-command"
+    [ "$URL_B64" = - ] && URL_B64=
+    [ "$DEV" = - ] && DEV=
+    [[ "$GIVEN" =~ ^[A-Za-z0-9+/=]*$ ]] && [[ "$FALLBACK" =~ ^[A-Za-z0-9+/=]*$ ]] && [[ "$URL_B64" =~ ^[A-Za-z0-9+/=]*$ ]] || die "bad-command"
     [ -z "$FROM" ] || [[ "$FROM" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die "bad-name"
+    [ -z "$DEV" ] || [ "$DEV" = auto ] || good_devport "$DEV" || die "bad-port"
+    lock || die "busy"
+    settle
+    if read_conf "$k"; then had=1; else had=0; fi
+    # The port it runs on now, when it runs.
+    RUNS=
+    alive "$PID" && RUNS=$PORT
+    # Its port: the one given (no other Local's here), else the one it had, else the lowest free (the one it runs on
+    # now counts as free: it's its own). All of it before it's stopped, so a start refused (port-taken, no-port,
+    # port-held) leaves a running Local running: a port it doesn't run on is cleared while it still runs, and the
+    # one it runs on once it's stopped.
+    if [ -n "$DEV" ] && [ "$DEV" != auto ]; then
+      other=$(who_has "$k" "$DEV")
+      [ -z "$other" ] || { echo "BOPS_LOCAL_HELD=$DEV $other"; die "port-taken"; }
+      P=$DEV
+    elif [ -z "$DEV" ] && [ "$had" = 1 ]; then
+      P=${DEVPORT:-$DEV_DEFAULT}
+    else
+      P=$(first_free " $(taken_ports "$k" | tr '\n' ' ') " "$RUNS")
+      [ -n "$P" ] || die "no-port"
+    fi
+    if [ "$P" != "$RUNS" ]; then clear_port "$P" "$DIR" "$k" || { echo "BOPS_LOCAL_HELD=$P"; die "port-held"; }; fi
     stop_one "$k"
-    P=$(pick_port "$k")
-    [ -n "$P" ] || die "no-port"
-    read_conf "$k" || true
+    read_conf "$k"
+    [ -n "$MADE" ] || MADE=$(date +%s)
+    if [ "$P" = "$RUNS" ]; then clear_port "$P" "$DIR" "$k" || { echo "BOPS_LOCAL_HELD=$P"; die "port-held"; }; fi
     # The command given, else the one it ran last, else the one Bops says (its site's start command), else what its folder says.
     if [ -n "$GIVEN" ]; then CMD=$(printf %s "$GIVEN" | base64 -d)
     elif [ -n "$CMD_B64" ]; then CMD=$(printf %s "$CMD_B64" | base64 -d)
     elif [ -n "$FALLBACK" ]; then CMD=$(printf %s "$FALLBACK" | base64 -d)
     else CMD=$(cd "$DIR" && detect); fi
     [ -n "$CMD" ] || die "no-command"
-    NODE_DIR=$(ls -d /opt/orgo/runtimes/node-v*-linux-* 2>/dev/null | sort -V | tail -n 1)
+    NODE_DIR=$(ls -d /opt/orgo/runtimes/node-v*-linux-* 2> /dev/null | sort -V | tail -n 1)
+    LOCAL_URL="http://localhost:$P"
+    PREVIEW_ENV="$ORGO_APPS/$FROM/current/app.env"
+    # An install first when node_modules is missing, or what it comes from changed since the last one.
+    HASH=$(pkg_hash "$DIR")
+    FRESH=0
+    [ -n "$HASH" ] && [ "$HASH" != "$PKGHASH" ] && FRESH=1
+    SHARE=
+    if [ -n "$HASH" ] && { [ ! -d "$DIR/node_modules" ] || [ "$FRESH" = 1 ]; }; then SHARE=$(share_from "$HASH" "$DIR" "$APP"); fi
     {
       echo '#!/bin/bash'
       echo '# bops-local: what this Local runs. Bops writes this file.'
-      echo 'set -a'
-      [ -n "$FROM" ] && printf '[ -r %q ] && . %q\n' "/opt/orgo-apps/$FROM/current/app.env" "/opt/orgo-apps/$FROM/current/app.env"
-      printf '[ -r %q ] && . %q\n' "$D/$k.env" "$D/$k.env"
-      echo 'set +a'
+      if [ -n "$FROM" ]; then
+        # 1. Its Preview's variables.
+        printf 'if [ -r %q ]; then set -a; . %q; set +a; fi\n' "$PREVIEW_ENV" "$PREVIEW_ENV"
+        # 2. Every one naming the Preview's link names its Local instead (values never printed).
+        if [ -n "$URL_B64" ]; then
+          printf 'BOPS_FROM_URL=%q BOPS_TO_URL=%q\n' "$(printf %s "$URL_B64" | base64 -d)" "$LOCAL_URL"
+          printf 'if [ -r %q ] && [ -n "$BOPS_FROM_URL" ]; then eval "$(BOPS_FROM_URL="$BOPS_FROM_URL" BOPS_TO_URL="$BOPS_TO_URL" python3 -c %q %q 2>/dev/null)"; fi\n' "$PREVIEW_ENV" '
+import os, re, shlex, sys
+f = os.environ["BOPS_FROM_URL"].rstrip("/")
+t = os.environ["BOPS_TO_URL"]
+for line in open(sys.argv[1]):
+    m = re.match(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", line)
+    v = os.environ.get(m.group(1)) if m else None
+    if v and f and f in v:
+        print("export %s=%s" % (m.group(1), shlex.quote(v.replace(f, t))))
+' "$PREVIEW_ENV"
+          echo 'unset BOPS_FROM_URL BOPS_TO_URL'
+        fi
+      fi
+      # 3. Sign in comes back to its own address.
+      printf 'export AUTH_URL=%q NEXTAUTH_URL=%q BETTER_AUTH_URL=%q AUTH_TRUST_HOST=true\n' "$LOCAL_URL" "$LOCAL_URL" "$LOCAL_URL"
+      # 4. Its own, on top of all (a copy's: the app's own folder's for that site first, set there from Bops).
+      [ "$APP" = "${APP%%.*}" ] || printf 'if [ -r %q ]; then set -a; . %q; set +a; fi\n' "$D/${APP%%.*}--$SITE.env" "$D/${APP%%.*}--$SITE.env"
+      printf 'if [ -r %q ]; then set -a; . %q; set +a; fi\n' "$D/$k.env" "$D/$k.env"
+      # 5. Its port, Node, its folder, what it needs (said done once it is), then its command.
       printf 'export PORT=%q HOST=0.0.0.0\n' "$P"
       [ -n "$NODE_DIR" ] && printf 'export PATH=%q:"$PATH"\n' "$NODE_DIR/bin"
       printf 'cd %q || exit 1\n' "$DIR"
-      echo 'if [ -f package.json ] && [ ! -d node_modules ]; then echo "$ npm install"; npm install || exit 1; fi'
+      if [ -n "$HASH" ]; then
+        printf 'if [ ! -d node_modules ] || [ %s = 1 ]; then\n' "$FRESH"
+        # A node_modules linked to another folder's (either way: .bops-linked) goes rather than being installed over,
+        # as their files are one; one with the same package.json and lockfile elsewhere is linked (caches left out),
+        # else installed.
+        echo '  [ ! -e node_modules/.bops-linked ] || rm -rf node_modules'
+        if [ -n "$SHARE" ]; then
+          printf '  if [ ! -d node_modules ] && cp -al %q node_modules.bops-new 2> /dev/null && mv node_modules.bops-new node_modules; then rm -rf node_modules/.vite node_modules/.cache; touch node_modules/.bops-linked %q; echo %q\n' "$SHARE/node_modules" "$SHARE/node_modules/.bops-linked" "\$ linked node_modules from $SHARE"
+          echo '  else rm -rf node_modules.bops-new; echo "$ npm install"; npm install || exit 1; fi'
+        else
+          echo '  echo "$ npm install"; npm install || exit 1'
+        fi
+        printf '  %q installed %q %q %q > /dev/null 2>&1\nfi\n' "$SELF" "$APP" "$SITE" "$HASH"
+      fi
       printf 'echo %q\n' "\$ $CMD"
       printf 'exec /bin/bash -c %q\n' "$CMD"
     } > "$D/$k.run.sh" && chmod 700 "$D/$k.run.sh" || die "write"
     : > "$D/$k.log"
-    setsid nohup /bin/bash "$D/$k.run.sh" >> "$D/$k.log" 2>&1 < /dev/null &
-    PORT=$P PID=$! CMD_B64=$(b64 "$CMD") SINCE=$(date +%s) STOPPED=0 ENVFROM=$FROM
+    setsid nohup /bin/bash "$D/$k.run.sh" >> "$D/$k.log" 2>&1 < /dev/null 9>&- &
+    PORT=$P DEVPORT=$P PID=$! CMD_B64=$(b64 "$CMD") SINCE=$(date +%s) STOPPED=0 ENVFROM=$FROM ENVURL_B64=$URL_B64
     write_conf "$k" || die "write"
+    unlock
     for _ in $(seq 1 12); do answers "$P" && break; alive "$PID" || break; sleep 0.5; done
     say "$k"
     ;;
   stop)
     need_key "${2:-}" "${3:-}"
     k=$K
+    lock || die "busy"
     stop_one "$k"
+    unlock
     say "$k"
     ;;
   status)
     APP=${2:-}
-    [ -z "$APP" ] || [[ "$APP" =~ $NAME_RE ]] || die "bad-name"
-    for f in "$D"/*.conf; do
-      [ -f "$f" ] || continue
-      k=$(basename "$f" .conf)
-      [ -z "$APP" ] || [[ "$k" == "$APP--"* ]] || continue
+    [ -z "$APP" ] || [[ "$APP" =~ $APP_RE ]] || die "bad-name"
+    # (Settled first, when the lock comes soon: a read never waits long on a start.)
+    if lock 5; then settle; fi
+    unlock
+    for k in $(keys); do
+      [ -z "$APP" ] || of "$k" "$APP" || continue
       say "$k"
     done
     echo "BOPS_LOCAL_DONE=1"
@@ -181,14 +504,50 @@ case "$cmd" in
   open)
     need_key "${2:-}" "${3:-}"
     k=$K
+    SCREEN=${4:-99}
+    [[ "$SCREEN" =~ ^[0-9]{1,3}$ ]] && [ "$SCREEN" -ge 1 ] || die "bad-screen"
     read_conf "$k" && [ -n "$PORT" ] || die "not-started"
     URL="http://localhost:$PORT/"
-    if ! curl -sf -X PUT --max-time 3 "http://127.0.0.1:9299/json/new?$URL" > /dev/null 2>&1; then
+    # A new tab in that screen's Chrome (its DevTools port, as bops-chrome starts it), else its Chrome started there.
+    if ! curl -sf -X PUT --max-time 3 "http://127.0.0.1:$((9200 + SCREEN))/json/new?$URL" > /dev/null 2>&1; then
       command -v bops-chrome > /dev/null 2>&1 || die "no-browser"
-      bops-chrome 99 "$URL" > /dev/null 2>&1 || die "no-browser"
+      bops-chrome "$SCREEN" "$URL" > /dev/null 2>&1 || die "no-browser"
     fi
     echo "BOPS_LOCAL_OPENED=1"
     say "$k"
+    ;;
+  mark)
+    need_key "${2:-}" "${3:-}"
+    k=$K
+    case "${4:-}" in
+      good) [[ "${5:-}" =~ ^[0-9a-f]{4,64}$ ]] || die "bad-changeset" ;;
+      fix) ;;
+      *) die "usage" ;;
+    esac
+    lock || die "busy"
+    read_conf "$k" || die "not-started"
+    # A good run (at that changeset, now) starts the count of Fix it presses again.
+    if [ "$4" = good ]; then
+      GOOD="$5:$(date +%s)"
+      FIXES=0
+    else
+      FIXES=$((${FIXES:-0} + 1))
+    fi
+    write_conf "$k" || die "write"
+    unlock
+    echo "BOPS_LOCAL_MARKED=1"
+    say "$k"
+    ;;
+  installed)
+    # (Its run file's, once an install it started went through: what that install came from.)
+    need_key "${2:-}" "${3:-}"
+    k=$K
+    [[ "${4:-}" =~ ^[0-9a-f]{40}$ ]] || die "usage"
+    lock || die "busy"
+    read_conf "$k" || die "not-started"
+    PKGHASH=$4
+    write_conf "$k" || die "write"
+    echo "BOPS_LOCAL_INSTALLED=1"
     ;;
   env)
     need_key "${2:-}" "${3:-}"
@@ -220,6 +579,24 @@ with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
 os.replace(tmp, path)
 ' "$D/$k.env" || die "bad-env"
     echo "BOPS_LOCAL_ENV=$(env_names "$k")"
+    ;;
+  forget)
+    # Its app removed: every Local of it stopped and its files gone (conf, run file, log, its own variables), every
+    # copy's too, so their ports are no one's again; `only`: its own folder's alone; <app>.<copy>: that copy's alone
+    # (its bot gone, or working on another app). Under the lock.
+    APP=${2:-}
+    [[ "$APP" =~ $APP_RE ]] || die "bad-name"
+    case "${3:-}" in "" | only) ;; *) die "usage" ;; esac
+    lock || die "busy"
+    n=0
+    for k in $(keys); do
+      if [ -n "${3:-}" ]; then [[ "$k" == "$APP--"* ]] || continue; else of "$k" "$APP" || continue; fi
+      stop_one "$k"
+      rm -f "$D/$k.conf" "$D/$k.run.sh" "$D/$k.log" "$D/$k.env"
+      n=$((n + 1))
+    done
+    unlock
+    echo "BOPS_LOCAL_FORGOT=$n"
     ;;
   *)
     die "usage"

@@ -26,7 +26,8 @@ import { ChartIcon } from "./team-chart";
 import { ownerWho, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
 import { appsLine, appsName, appsShown } from "@/lib/apps-access";
 import { botGroups, groupedList, siteLabel } from "@/lib/bot-groups";
-import { BotGroupBlock, renameComputer, useGroupFolds, useSiteDomains } from "./bot-groups";
+import { codersOf } from "@/lib/bot-mood";
+import { BotGroupBlock, CodeMark, renameComputer, useGroupFolds, useSiteDomains } from "./bot-groups";
 
 /** A chat's newest message, if it has one. */
 export const lastMessageOf = (state: AppState, c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
@@ -177,6 +178,7 @@ export function Sidebar({
   // The groups of bots on one computer (lib/bot-groups.ts), folded as the user left them in this window.
   const folds = useGroupFolds(user, ws);
   const domains = useSiteDomains(state);
+  const coders = codersOf(state);
   const openAttention = () => {
     setOpened({ at: (opened?.at ?? 0) + 1, bots: attention.bots });
     // A folded group with one of them in it opens too.
@@ -231,6 +233,7 @@ export function Sidebar({
         last={lastMessage(c)}
         trail={space}
         site={b ? siteLabel(state, { id: b, workspaceId: state.bots.find((x) => x.id === b)?.workspaceId }, domains) : undefined}
+        coder={!!b && coders.has(b)}
       />
     );
     return q ? row(null) : withThreads(c, row);
@@ -708,6 +711,7 @@ function ChatRow({
   last,
   trail,
   site,
+  coder = false,
 }: {
   chat: Chat;
   state: AppState;
@@ -721,6 +725,8 @@ function ChatRow({
   trail?: ReactNode;
   /** The site its bot works on, said in place of its role (lib/bot-groups.ts siteLabel). */
   site?: string;
+  /** Its bot is a coder (lib/bot-mood.ts codersOf): its site in code's own type, after a </>. */
+  coder?: boolean;
 }) {
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
@@ -769,8 +775,9 @@ function ChatRow({
             <span
               data-row-line={site ? "site" : "role"}
               title={site ? (solo.role ? `${solo.role}. Works on ${site}` : `Works on ${site}`) : solo.role}
-              className={`min-w-0 truncate rounded-[5px] px-1.5 py-px text-[11px] leading-[14px] text-[#6B6B6B] ${selected ? "bg-white" : "bg-[#EEEEEC]"}`}
+              className={`min-w-0 truncate rounded-[5px] px-1.5 py-px text-[11px] leading-[14px] text-[#6B6B6B] ${site && coder ? "font-mono " : ""}${selected ? "bg-white" : "bg-[#EEEEEC]"}`}
             >
+              {site && coder && <CodeMark />}
               {site ?? solo.role}
             </span>
           )}
