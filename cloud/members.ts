@@ -365,6 +365,10 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
     }
     case "dismiss":
       return anId(x.sessionId) ? { key, act: { act: "dismiss", sessionId: x.sessionId } } : null;
+    // A chat's or a thread's: one of them, never both.
+    case "compact":
+      if (anId(x.chatId) === anId(x.sessionId)) return null;
+      return anId(x.chatId) ? { key, act: { act: "compact", chatId: x.chatId } } : { key, act: { act: "compact", sessionId: x.sessionId as string } };
     case "deploy":
     case "rollback":
     case "settings":
@@ -451,6 +455,9 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       if (!c) throw new HttpError(404, "No such chat");
       return Array.isArray(c.botIds) && c.botIds.every((id) => typeof id === "string") ? (c.botIds as string[]) : [];
     }
+    case "compact":
+      // A chat's, as saying something there; a thread's, as replying in it.
+      return "chatId" in act ? botsTouched(blob, slice, { act: "chat", chatId: act.chatId, text: "" }) : botsTouched(blob, slice, { act: "reply", sessionId: act.sessionId, text: "" });
     case "reply":
     case "dismiss": {
       const t = thread(act.sessionId);
@@ -572,7 +579,8 @@ const actIn: Route = {
     else {
       const bots = botsTouched(blob, slice, body.act);
       // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.
-      const may = body.act.act === "chat" ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
+      const inChat = body.act.act === "chat" || (body.act.act === "compact" && "chatId" in body.act);
+      const may = inChat ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
       if (!may) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
     }
     const payload: MemberActPayload = { projectId, wsId: target.ws, member: whoOf(user!), ...(role.joinedAt !== undefined ? { joinedAt: role.joinedAt } : {}), key: body.key, at: Date.now(), act: body.act };

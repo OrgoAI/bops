@@ -13,7 +13,7 @@ const answer = (e: unknown) =>
 /**
  * An app's settings (AppSettingsAnswer in lib/hosted-apps.ts): its address, its port and commands, its
  * variables' names and its recent deploys, from its deploy project at orgo-web (the computer is never asked):
- * Prod's, or Staging's with env=staging (with Prod's variables' names too).
+ * Published's, or the Preview's with env=preview (with Published's variables' names too).
  */
 export async function GET(request: Request, ctx: { params: Promise<{ name: string }> }) {
   const unready = notReady();

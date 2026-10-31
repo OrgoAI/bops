@@ -134,7 +134,15 @@ assert.match(told, /Screen 1: this thread \(you\) · now: reading Gmail/);
 assert.match(told, /Screen 2: CCLC is working there on "Brochure"; it's not yours, don't touch it\./);
 assert.match(told, /Screen 3: kept for your thread "Ask about dates" while it waits on Alex; don't use it for other work/);
 assert.match(told, /Screen 4: free · your home screen is open, left by CCLC's thread "Logo" 5 min ago\./);
+// The screen rule: the thread's own screen, its Chrome only; another site's Local and another's port, only where apps are open.
+assert.match(told, /\nYou are on screen 1\. Open pages only in your own screen's Chrome, never in another screen's\.\n/);
+assert.doesNotMatch(told, /another site's Local/, "no Local where apps aren't open");
+const was = S.getState().account;
+S.update((s) => (s.account = { user: { id: "u_alex", email: "alex@orgo.ai", name: "Alex" }, signedInAt: 1 }));
+assert.match(await B.computerBriefing(main.id, { thread: "ses_a" }), /\nYou are on screen 1\. Open pages only in your own screen's Chrome, never in another screen's\. Never start, stop or restart another site's Local, and never kill a process on a port that isn't your site's\.\n/);
+S.update((s) => (s.account = was));
 const toldCclc = await B.computerBriefing("cclc");
+assert.doesNotMatch(toldCclc, /You are on screen/, "a chat turn holds no screen");
 assert.match(toldCclc, /^The computer you share with /);
 assert.match(toldCclc, /Screen 4: free · your home screen is open, left by your thread "Logo" 5 min ago\./);
 const teamTold = B.teamBriefing(main.id);

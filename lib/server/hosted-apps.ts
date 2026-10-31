@@ -1,10 +1,11 @@
 import "server-only";
-import { createHash } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appsOpen } from "@/lib/apps-access";
-import { botChatId, live as isLive, routineSent, workBot, workspaceOf, type Session, type Workspace } from "@/lib/types";
-import { DNS_TYPES, dnsNeeds, ENV_NAME, ENV_RESERVED, isSiteName, MAX_SITES, offersInOrder, REGISTRANT_FIELDS, subdomainTyped } from "@/lib/hosted-apps";
+import { botChatId, live as isLive, routineSent, siteBotOf, siteOf, workBot, workspaceOf, type Session, type Workspace } from "@/lib/types";
+import { appCoders, appEnvOf, copyBotOf, DEV_PORT, DNS_TYPES, dnsNeeds, ENV_NAME, ENV_RESERVED, isCopyName, isSiteName, localAddress, localsOf, localWords, LOG_LINE, LOG_LINES, MAX_SITES, offersInOrder, PASS_COOKIE, REGISTRANT_FIELDS, subdomainTyped } from "@/lib/hosted-apps";
+import { screenMap } from "@/lib/screens";
 import type {
   AddAppAnswer,
   AppCommit,
@@ -23,6 +24,7 @@ import type {
   AppHosting,
   AppProjectBehind,
   AppRenewal,
+  AppRestoreConfirm,
   AppSettingsAnswer,
   CloudflareApplied,
   CloudflareOptions,
@@ -34,12 +36,16 @@ import type {
   HostedAppsAnswer,
   HostedSite,
   LocalAnswer,
+  LocalCopy,
   LocalSite,
   OwnedDomain,
+  PasswordSet,
+  PreviewPassword,
   Registrant,
   RemoveAppAnswer,
+  LeftOver,
+  PreviewSite,
   SiteDomain,
-  StagingSite,
 } from "@/lib/hosted-apps";
 import {
   computerAsleepError,
@@ -49,6 +55,9 @@ import {
   orgo,
   OrgoError,
   OrgoTimeout,
+  publicUrls,
+  type OrgoPublicUrl,
+  type OrgoPublicUrls,
   type OrgoBoughtDomain,
   type OrgoBoughtList,
   type OrgoCustomDomain,
@@ -78,10 +87,14 @@ import {
   type CloudflareScope,
   type Wanted,
 } from "./cloudflare";
-import { selfHosted } from "./persist";
-import { appFolder, authorOf, dropToken, ensureIngotCli, hasToken, ingot, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotRepo } from "./ingot";
+import { onRunner, selfHosted } from "./persist";
+import { isLabelOf, labelGiven, newLabel } from "./app-labels";
+import { appFolder, authorOf, byBots, changesTo, dropToken, ensureIngotCli, folderChanges, hasToken, ingot, INGOT_BIN, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotChange, type IngotChangeset, type IngotRepo } from "./ingot";
 import { addMessage, bot, flushState, getState, ownerName, sameState, session, update } from "./store";
 import { tailnetUp } from "./tailnet";
+import { closeForward, ForwardError, forwardOf, macPortBusy, openForward, type Carrier } from "./local-preview";
+import { SshError, sshTunnel } from "./computer-ssh";
+import { sharedOpen } from "./shared";
 
 /**
  * Apps a workspace builds and runs on the web (lib/hosted-apps.ts). Each one is an Ingot repo in the
@@ -112,6 +125,15 @@ import { tailnetUp } from "./tailnet";
  * An app can be removed (its sites and their domains off its computer, its record dropped, its repo
  * deleted too only when asked); one whose computer is gone (appsComputerGone) keeps its record, marked lost,
  * until a deploy or a bot's work on it gives it a new home.
+ *
+ * Several bots of the workspace that work on its computer can work on one app at once (lib/hosted-apps.ts
+ * appCoders), each in its own chat: its own bot in its working folder, as it always was, and each other one in a
+ * copy of its own beside it, /workspace/apps/<name>.<copy> (copyFor; AppHosting.copies), made ready for its task
+ * as the folder is (cloned the first time, else pulled: main merged into what it hasn't committed). Each commits to
+ * main with `ingot commit`; one refused as stale pulls and commits again, and a conflict is that bot's to fix in its
+ * own copy, so nothing uncommitted in one copy ever touches another. Each copy's sites have Locals of their own on
+ * ports of their own (bops-local's <name>.<copy>--<site>), seen beside that bot's chat. The app keeps one home
+ * computer and one Preview and one Published a site, deployed from main as ever.
  */
 
 /**
@@ -145,6 +167,10 @@ const g = globalThis as unknown as {
   bopsIngotListed?: Map<string, { at: number; repos: IngotRepo[] }>;
   /** Domains being bought now ("<project>/<domain>"), from the app's tab or Settings: a second buy of one waits for none, it's refused (buyingOnce). */
   bopsDomainBuys?: Set<string>;
+  /** Preview passwords being set now, by "<computer>/<public URL>" (passwordNow): a second ask waits for the first. */
+  bopsPasswordsSetting?: Map<string, Promise<boolean | undefined>>;
+  /** Until when a link Orgo turned a password down for isn't asked again, by the same key (passwordNow). */
+  bopsPasswordRefused?: Map<string, number>;
 };
 
 /** A changeset's id: the sha256 of its canonical JSON. */
@@ -175,7 +201,7 @@ function keepHosting(wsId: string, name: string, fn: (h: AppHosting | undefined)
     const prev = w.hostedApps?.[name];
     const was = prev?.computerId;
     const next = fn(w.hostedApps?.[name]);
-    // Moved off a computer that's still there: its Staging projects there are kept with its Prod ones (stagingLeft).
+    // Moved off a computer that's still there: its Preview projects there are kept with its Published ones (previewLeft).
     if (prev && next && !prev.lost && !next.lost && prev.computerId !== next.computerId) moved = prev;
     if (next) w.hostedApps = { ...(w.hostedApps ?? {}), [name]: next };
     else if (w.hostedApps?.[name]) {
@@ -186,7 +212,7 @@ function keepHosting(wsId: string, name: string, fn: (h: AppHosting | undefined)
     if (was && !Object.values(w.hostedApps ?? {}).some((h) => h.computerId === was)) left = was;
   });
   if (left) void dropToken(wsId, left);
-  if (moved) void stagingLeft(wsId, name, moved).catch(() => {});
+  if (moved) void previewLeft(wsId, name, moved).catch(() => {});
 }
 
 /* ---------------- Work on one app, one at a time ---------------- */
@@ -239,7 +265,7 @@ const NO_SITE = "There's no site by that name in this app.";
 
 /**
  * One site of an app as the rest of this file works with it: the app's record with that site's deploy
- * project and URL in place of its own, and the site's name (the app's, for its own).
+ * project, URL and Preview label copy in place of its own, and the site's name (the app's, for its own).
  */
 type SiteHosting = AppHosting & { site: string };
 
@@ -248,10 +274,13 @@ function siteIn(h: AppHosting, name: string, site?: unknown): SiteHosting {
   if (site === undefined || site === null || site === "" || site === name) return { ...h, site: name };
   const s = typeof site === "string" ? h.sites?.find((x) => x.name === site) : undefined;
   if (!s) throw new HostedAppError(NO_SITE, 404);
-  const { projectId: _project, url: _url, ...rest } = h;
+  const { projectId: _project, url: _url, preview: _preview, passwordOff: _off, passwordSet: _set, ...rest } = h;
   void _project;
   void _url;
-  return { ...rest, ...(s.projectId ? { projectId: s.projectId } : {}), ...(s.url ? { url: s.url } : {}), site: s.name };
+  void _preview;
+  void _off;
+  void _set;
+  return { ...rest, ...keptOf(s), site: s.name };
 }
 
 /** An app's record for one of its sites (undefined: no such app). */
@@ -263,32 +292,52 @@ const hostingAt = (wsId: string, name: string, site?: unknown): SiteHosting | un
 /** Every site of an app, its own first, then the others in the order they were added. */
 const sitesOf = (h: AppHosting, name: string): SiteHosting[] => [siteIn(h, name), ...(h.sites ?? []).map((s) => siteIn(h, name, s.name))];
 
-/** A site's deploy project and URL, as one change keeps them. */
-type SiteKept = { projectId?: string; url?: string };
-const keptOf = (x: SiteKept): SiteKept => ({ ...(x.projectId ? { projectId: x.projectId } : {}), ...(x.url ? { url: x.url } : {}) });
+/**
+ * A site's Published deploy project, the URL an older Bops kept of it (never written now: Published lives on its
+ * domains), its Preview label's copy, and its Preview password's choice and when it was set, as one change keeps them.
+ */
+type SiteKept = { projectId?: string; url?: string; preview?: string; passwordOff?: true; passwordSet?: PasswordSet };
+const keptOf = (x: SiteKept): SiteKept => ({
+  ...(x.projectId ? { projectId: x.projectId } : {}),
+  ...(x.url ? { url: x.url } : {}),
+  ...(x.preview ? { preview: x.preview } : {}),
+  ...(x.passwordOff ? { passwordOff: true as const } : {}),
+  ...(x.passwordSet ? { passwordSet: x.passwordSet } : {}),
+});
+/**
+ * What a site's record keeps of its Local (heardLocals): its port there (only while it stays on that computer:
+ * `port`) and the addresses told for Google sign in (Google's list doesn't change with the computer).
+ */
+const localKept = (x: { localPort?: number; toldGoogle?: string[] }, port = true) => ({
+  ...(port && x.localPort ? { localPort: x.localPort } : {}),
+  ...(x.toldGoogle?.length ? { toldGoogle: x.toldGoogle } : {}),
+});
 
 /**
- * Keep what of one site changed: its deploy project and URL, as `fn` answers them from what's kept now. A
- * site removed meanwhile (or the app) stays removed.
+ * Keep what of one site changed: its deploy project, URL, Preview label and password's, as `fn` answers them from
+ * what's kept now. A site removed meanwhile (or the app) stays removed.
  */
 function keepSite(wsId: string, name: string, site: string, fn: (s: SiteKept) => SiteKept) {
   keepHosting(wsId, name, (h) => {
     if (!h) return h;
     if (site === name) {
-      const { projectId, url, ...rest } = h;
-      return { ...rest, ...keptOf(fn({ projectId, url })) };
+      const { projectId, url, preview, passwordOff, passwordSet, ...rest } = h;
+      return { ...rest, ...keptOf(fn({ projectId, url, preview, passwordOff, passwordSet })) };
     }
     if (!h.sites?.some((x) => x.name === site)) return h;
-    return { ...h, sites: h.sites.map((x) => (x.name === site ? { name: x.name, ...keptOf(fn(x)) } : x)) };
+    return { ...h, sites: h.sites.map((x) => (x.name === site ? { name: x.name, ...localKept(x), ...keptOf(fn(x)) } : x)) };
   });
 }
 
 /**
  * The app's record as it moves to `botId` and its computer: on the computer it's on already (not lost),
- * all it has stays, the bot changed; on another one, only its sites' names come along (their deploy
- * projects, variables and domains are the old computer's). The deploy projects it leaves on a computer
- * that's still there serve on as they were, so they're kept (behind) for Remove app to take down; the
- * ones on the computer it moves to are its again (makeProject finds them by name), so they aren't.
+ * all it has stays, the bot changed (its other bots' copies too: one that had a copy keeps working in it); on
+ * another one, only its sites' names, their Preview labels and whether the
+ * owner turned their Preview password off come along (their deploy projects, variables and domains are the old
+ * computer's; the Preview's link moves with its next deploy, with a password of its own: ensurePreview). The
+ * deploy projects it leaves on a computer that's still there serve on as they were, so they're kept (behind) for
+ * Remove app to take down; the ones on the computer it moves to are its again (prodIn and previewIn find them),
+ * so they aren't.
  */
 function movedTo(h: AppHosting | undefined, name: string, botId: string, computerId: string): AppHosting {
   const left: AppProjectBehind[] = [...(h?.behind ?? [])];
@@ -297,8 +346,16 @@ function movedTo(h: AppHosting | undefined, name: string, botId: string, compute
     for (const s of sitesOf(h, name)) if (s.projectId) left.push({ site: s.site, computerId: h.computerId, projectId: s.projectId });
   const behind = left.filter((x, i) => x.computerId !== computerId && left.findIndex((y) => y.projectId === x.projectId) === i);
   const more = behind.length ? { behind } : {};
-  if (stays) return { botId, computerId, ...keptOf(h), ...(h.sites?.length ? { sites: h.sites } : {}), ...more };
-  return { botId, computerId, ...(h?.sites?.length ? { sites: h.sites.map((x) => ({ name: x.name })) } : {}), ...more };
+  if (stays) return { botId, computerId, ...keptOf(h), ...localKept(h), ...(h.sites?.length ? { sites: h.sites } : {}), ...(h.copies?.length ? { copies: h.copies } : {}), ...more };
+  return {
+    botId,
+    computerId,
+    ...(h?.preview ? { preview: h.preview } : {}),
+    ...(h?.passwordOff ? { passwordOff: true as const } : {}),
+    ...(h ? localKept(h, false) : {}),
+    ...(h?.sites?.length ? { sites: h.sites.map((x) => ({ name: x.name, ...(x.preview ? { preview: x.preview } : {}), ...(x.passwordOff ? { passwordOff: true as const } : {}), ...localKept(x, false) })) } : {}),
+    ...more,
+  };
 }
 
 /**
@@ -328,6 +385,97 @@ export function appsComputerGone(computerId: string) {
   });
 }
 
+/* ---------------- The bots that work on it, each in a copy of its own ---------------- */
+
+/**
+ * A bot's copy's name (its folder /workspace/apps/<name>.<copy>, its Locals bops-local's <name>.<copy>--<site>): its
+ * id when that can be one (lib/hosted-apps.ts isCopyName: bots.ts freeBotId makes them so), else "b" and 12 hex
+ * digits of its id's sha256.
+ */
+export const copyName = (botId: string) => (isCopyName(botId) ? botId : `b${createHash("sha256").update(botId).digest("hex").slice(0, 12)}`);
+
+/**
+ * Whether bot `botId` works on an app in a copy of its own rather than in its working folder: every bot but the app's
+ * own (AppHosting.botId), and that one too when it had a copy before the app passed to it (AppHosting.copies).
+ */
+const ownCopy = (h: AppHosting, botId: string) => botId !== h.botId || !!h.copies?.includes(botId);
+
+/**
+ * The copy of an app a bot's Locals are in (copyName), or undefined for the app's own working folder: its own bot's,
+ * and the one a bot that doesn't work on it (lib/hosted-apps.ts appCoders, copyBotOf) acts on, as before there were
+ * copies.
+ */
+function copyFor(wsId: string, name: string, botId: string | undefined): string | undefined {
+  return copyBotOf(getState(), wsId, name, botId) ? copyName(botId!) : undefined;
+}
+
+/** What bops-local takes for an app's working folder (its Locals' keys start with it): its name, or <name>.<copy>. */
+const localWord = (name: string, copy?: string) => (copy ? `${name}.${copy}` : name);
+
+/** The key of a site's Local's forward on this Mac (local-preview.ts): of the app's own folder, or of `copyBot`'s copy. */
+const fwdKey = (wsId: string, name: string, site: string, copyBot?: string) => `${wsId}/${name}/${site}${copyBot ? `/${copyBot}` : ""}`;
+
+/** A bot's task on an app works in a copy of its own from now on (AppHosting.copies), once its first one starts there. */
+function keepCopy(wsId: string, name: string, botId: string) {
+  keepHosting(wsId, name, (h) => (h && !h.lost && !h.copies?.includes(botId) ? { ...h, copies: [...(h.copies ?? []), botId] } : h));
+}
+
+/** A bot taken off an app's copies (gone, or working on another app now). */
+function dropCopy(wsId: string, name: string, botId: string) {
+  keepHosting(wsId, name, (h) => {
+    if (!h?.copies?.includes(botId)) return h;
+    const { copies, ...rest } = h;
+    const left = copies.filter((x) => x !== botId);
+    return left.length ? { ...rest, copies: left } : rest;
+  });
+}
+
+/**
+ * Locals of an app forgotten on its computer (bops-local forget: stopped, their files gone, their ports free): bot
+ * `botId`'s copy's, or (none) its own folder's alone, and their previews on this Mac closed; best effort, never waking
+ * a computer that sleeps. Folders stay: one may hold work nobody committed.
+ */
+async function forgetCopy(wsId: string, name: string, h: AppHosting, botId: string | undefined, ours: () => boolean) {
+  for (const s of sitesOf(h, name)) closeForward(fwdKey(wsId, name, s.site, botId));
+  if (await asleepNow(h.computerId).catch(() => true)) return;
+  held(ours);
+  await localTool(h.computerId, ours);
+  await localBash(h.computerId, `${LOCAL_BIN} forget ${botId ? localWord(name, copyName(botId)) : `${name} only`}`, 60, ours);
+  localRead.delete(`${wsId}/${name}`);
+}
+
+/**
+ * A bot being deleted (remove.ts deleteBot), while it's still here: each app of its workspace it works on, on a
+ * computer that stays (not its own, which goes with it), has the Locals of its folder (its copy, or the app's own
+ * folder for the app's own bot) forgotten there, best effort; the folder stays, as it may hold work nobody committed.
+ * It's taken off the app's copies, and the app stays with the bots that work on it still.
+ */
+export async function appsBotGone(botId: string): Promise<void> {
+  const b = bot(botId);
+  if (!b) return;
+  const wsId = workspaceOf(b);
+  const ours = sameState();
+  for (const [name, h] of Object.entries(workspace(wsId)?.hostedApps ?? {})) {
+    if (!isRepoName(name) || h.lost || h.computerId === b.computerId || !appCoders(getState(), wsId, name).includes(botId)) continue;
+    const copy = ownCopy(h, botId);
+    dropCopy(wsId, name, botId);
+    await forgetCopy(wsId, name, h, copy ? botId : undefined, ours).catch((e: Error) => console.warn(`[hosted-apps] ${name}: ${b.name}'s Locals: ${e.message}`));
+  }
+}
+
+/**
+ * A bot that stopped working on an app (bot-groups.ts setBotSite: its Works on now another app's site, or none), not
+ * the app's own bot (its folder is the app's): its copy's Locals there stopped and forgotten, best effort (its folder
+ * stays), and it's taken off the app's copies. A task asked of it on the app later makes its copy ready again.
+ */
+export async function botLeftApp(botId: string, wsId: string, name: string): Promise<void> {
+  const h = hostingOf(wsId, name);
+  if (!h || h.lost || !isRepoName(name) || botId === h.botId) return;
+  const ours = sameState();
+  dropCopy(wsId, name, botId);
+  await forgetCopy(wsId, name, h, botId, ours);
+}
+
 /* ---------------- Reading Ingot ---------------- */
 
 const LIST_MS = 5000;
@@ -340,6 +488,30 @@ async function reposOf(wsId: string): Promise<IngotRepo[] | null> {
   const repos = await ingot.repos(wsId).catch(() => null);
   if (repos) listed.set(wsId, { at: Date.now(), repos });
   return repos;
+}
+
+/** How old a list of the workspace's repos can be and still be said to a bot (reposAtHand). */
+const AT_HAND_MS = 30 * 60_000;
+
+/**
+ * The workspace's repos as Bops last read them (reposOf), when that was in the last half hour, without asking Ingot:
+ * what a bot's note says of them (hostedAppsLine) and what work_on_app takes by name (appWork), neither of which
+ * waits on Ingot. Undefined when there's no such list at hand.
+ */
+function reposAtHand(wsId: string): IngotRepo[] | undefined {
+  const kept = listed.get(wsId);
+  return kept && Date.now() - kept.at < AT_HAND_MS ? kept.repos : undefined;
+}
+
+/**
+ * As a bot's turn starts (chat.ts), the workspace's repos are read again from Ingot in the background when the list
+ * kept is older than a few seconds, so the turn's note (hostedAppsLine) has them by the time it's written. Never
+ * waited on: Ingot slow or down only means the note says nothing of them. Nothing for a workspace not on Orgo yet.
+ */
+export function readReposAhead(botId: string) {
+  const b = bot(botId);
+  const wsId = b ? workspaceOf(b) : undefined;
+  if (wsId && workspace(wsId)?.orgoProjectId) void reposOf(wsId);
 }
 
 /* ---------------- Whether deploying can work ---------------- */
@@ -435,13 +607,21 @@ function domainsReader(): DomainsOn {
 const siteDomains = (all: OrgoCustomDomain[], port: unknown): SiteDomain[] =>
   typeof port === "number" ? all.filter((d) => d.target_port === port).map((d) => ({ domain: d.domain, status: d.status })) : [];
 
+/** The app's record as the window gets it: without the addresses an older Bops kept (Published shows its domains only). */
+const shownHosting = (h: AppHosting): AppHosting => {
+  const { url: _url, sites, ...rest } = h;
+  void _url;
+  return { ...rest, ...(sites ? { sites: sites.map(({ url: _u, ...x }) => (void _u, x)) } : {}) };
+};
+
 /**
  * One app as the Apps page shows it: its newest changeset as Ingot says (`on`: the workspace's repos, null
- * when Ingot can't say now), and each site's newest deploy and what it serves, as orgo-web says (a URL
- * Orgo gives that isn't kept yet is kept). Orgo isn't asked when deploying can't work here (`why`), nor of
- * a site never made there; `closed` hears why Orgo says hosting isn't open. An app with more sites has each
- * one's domains too (the ones on its port), from its computer's custom domains read once (`domainsOn`),
- * so its tab shows every site's at a glance; one with one site asks nothing more, as before.
+ * when Ingot can't say now), and each site's Published (found on its computer: prodIn, its record rewritten
+ * when it names another) with its newest deploy, what it serves and its domains (its address is its first
+ * active domain, never an orgo.dev name), and each site's Preview (its fixed link, what it serves), as orgo-web
+ * says, with the app's left overs. Orgo isn't asked when deploying can't work here (`why`); `closed` hears why
+ * Orgo says hosting isn't open. The computer's lists (projects, public URLs, custom domains) are read once for
+ * one read of the page, however many apps and sites are on it.
  */
 async function appView(
   wsId: string,
@@ -452,44 +632,49 @@ async function appView(
   ours: () => boolean,
   closed: (why: string) => void,
   domainsOn: DomainsOn,
-  stagingOn: ProjectsOn = projectsReader(),
+  projectsOn: ProjectsOn = projectsReader(),
+  urlsOn: UrlsOn = urlsReader(),
 ): Promise<HostedApp> {
   const repo = on?.find((r) => r.name === name);
-  const base: HostedApp = { name, head: repo?.head ?? null, updatedAt: msOf(repo?.updated_at), hosting: h, serving: null, live: null, ...(on ? {} : { offline: true as const }) };
+  const base: HostedApp = { name, head: repo?.head ?? null, updatedAt: msOf(repo?.updated_at), hosting: shownHosting(h), serving: null, live: null, ...(on ? {} : { offline: true as const }) };
   let read = false;
   const all = sitesOf(h, name);
-  // (Read alongside the sites' projects, not after them; a list that can't be read leaves their domains unsaid.)
-  const custom = !why && all.length > 1 && all.some((s) => s.projectId) ? domainsOn(h.computerId) : Promise.resolve(null);
-  // Every site's Staging, found on its computer alongside (unsaid when Orgo can't say).
-  const stagings = why ? Promise.resolve(null) : stagingsOf(wsId, name, h, stagingOn).catch(() => null);
+  // (Read alongside, not after; a list that can't be read leaves what it says unsaid.)
+  const custom = why || h.lost ? Promise.resolve(null) : domainsOn(h.computerId);
+  const found = why ? null : await previewsOf(wsId, name, h, projectsOn, urlsOn, ours).catch(() => null);
+  held(ours);
   const views = await Promise.all(
     all.map(async (s): Promise<HostedSite> => {
-      if (why || !s.projectId) return siteBase(s);
-      const [got, list] = await Promise.all([deploys.project(s.computerId, s.projectId).catch(() => null), custom]);
+      // (Its lists read: Published is what prodIn finds there, never a Preview its record may name. Unread: its record's.)
+      const id = found ? found.places.get(s.site)?.prod?.id : s.projectId;
+      const none = { ...siteBase(s), url: null, domain: null };
+      if (why || !id || s.lost) return none;
+      const [got, list] = await Promise.all([deploys.project(s.computerId, id).catch(() => null), custom]);
       held(ours);
       if (!got?.enabled) {
         if (got) closed(got.why);
-        return siteBase(s);
+        return none;
       }
       read = true;
-      const url = got.value.url;
-      if (url && url !== s.url) keepSite(wsId, name, s.site, (x) => ({ ...x, url }));
+      // (Found on its computer under another id than its record's: the record follows, so every Mac deploys the same one.)
+      if (id !== s.projectId && ours()) keepSite(wsId, name, s.site, (x) => ({ ...x, projectId: id }));
+      const domain = list ? firstDomain(list, got.value.port) : null;
       const d = newest(got.value);
-      const at = url ?? s.url ?? null;
-      return { name: s.site, projectId: s.projectId, url: at, live: d ? liveOf(d, at) : null, serving: servingOf(got.value), ...(list ? { domains: siteDomains(list, got.value.port) } : {}) };
+      return { name: s.site, projectId: id, url: null, live: d ? liveOf(d, domain) : null, serving: servingOf(got.value), domain, ...(list ? { domains: siteDomains(list, got.value.port) } : {}) };
     }),
   );
-  const st = await stagings;
-  held(ours);
-  const withStaging = st ? views.map((v) => ({ ...v, staging: st.get(v.name) ?? stagingView(null) })) : views;
-  // (Its record read again once Orgo was: a URL may have been kept meanwhile.)
+  const withPreview = found ? views.map((v) => ({ ...v, preview: found.previews.get(v.name) ?? previewView(undefined) })) : views;
+  // (Its record read again once Orgo was: a project or a label may have been kept meanwhile.)
   return {
     ...base,
-    hosting: read ? (hostingOf(wsId, name) ?? h) : h,
+    hosting: shownHosting(read || found ? (hostingOf(wsId, name) ?? h) : h),
     live: views[0].live,
     serving: views[0].serving,
-    ...(withStaging.length > 1 ? { sites: withStaging } : {}),
-    ...(withStaging[0].staging ? { staging: withStaging[0].staging } : {}),
+    domain: views[0].domain ?? null,
+    ...(views[0].domains ? { domains: views[0].domains } : {}),
+    ...(withPreview.length > 1 ? { sites: withPreview } : {}),
+    ...(withPreview[0].preview ? { preview: withPreview[0].preview } : {}),
+    ...(found?.leftOver.length ? { leftOver: found.leftOver } : {}),
   };
 }
 
@@ -510,8 +695,9 @@ export async function listApps(wsId: string): Promise<HostedAppsAnswer> {
   held(ours);
   let closed: string | undefined;
   const domainsOn = domainsReader();
-  const stagingOn = projectsReader();
-  const apps = await Promise.all(kept.map(([name, h]) => appView(wsId, name, h, on, why, ours, (w) => (closed = w), domainsOn, stagingOn)));
+  const projectsOn = projectsReader();
+  const urlsOn = urlsReader();
+  const apps = await Promise.all(kept.map(([name, h]) => appView(wsId, name, h, on, why, ours, (w) => (closed = w), domainsOn, projectsOn, urlsOn)));
   apps.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.name.localeCompare(b.name));
   if (why) return { enabled: false, why, apps };
   held(ours);
@@ -587,8 +773,25 @@ function deployName(name: string, n = 1): string {
   return `${name.slice(0, 32 - tail.length).replace(/-+$/, "") || "app"}${tail}`;
 }
 
-/** The first port an app's project listens on; each project on a computer takes the next one free. */
-const FIRST_PORT = 3000;
+/** The first port a new deploy project takes (Published's and Preview's): 3000 to 3099 are Local's (vm/bin/bops-local). */
+const FIRST_PORT = 3100;
+
+/** Ports a computer keeps for itself (orgo-web checkDeployPort), and Bops' own on the Mac: never one an app's project takes. */
+const keptPort = (p: number) => p === 22 || p === 3210 || p === 3389 || p === 8080 || p === 9000 || (p >= 5900 && p <= 5999) || (p >= 6080 && p <= 6099);
+
+/**
+ * The first port from 3100 that no deploy project and no public URL on the computer has (a project on a
+ * URL's port would take that URL as its own), nor any of `skip`.
+ */
+function freePort(projects: OrgoDeployProject[], urls: OrgoPublicUrl[], skip: Iterable<number> = []): number {
+  const used = new Set<number>([...projects.flatMap((p) => (typeof p.port === "number" ? [p.port] : [])), ...urls.map((u) => u.port), ...skip]);
+  let port = FIRST_PORT;
+  while (used.has(port) || keptPort(port)) port++;
+  return port;
+}
+
+/** The ports the computer's custom domains point at (best effort): a new project there would serve another app's domain. */
+const domainPorts = (computerId: string) => domains.ofComputer(computerId).then((l) => (l.domains ?? []).map((d) => d.target_port).filter((x): x is number => typeof x === "number"), () => [] as number[]);
 
 /** An app's Ingot repo as orgo-web's deploy runner takes it: "<project>/<name>" (409 when the workspace isn't on Orgo yet). */
 function ingotRepo(wsId: string, name: string): string {
@@ -599,64 +802,113 @@ function ingotRepo(wsId: string, name: string): string {
   }
 }
 
+/** A deploy project that builds the app's repo. */
+const ofRepo = (p: OrgoDeployProject, repo: string) => p.source === "ingot" && p.ingot_repo?.toLowerCase() === repo;
+
+/* ---------------- Published (Prod): each site's own project, on its domains only ---------------- */
+
 /**
- * Make a site's deploy project on the computer the app is worked on (source "ingot", the repo as
- * "<project>/<name>"), and keep it. It names no changeset: one there would be built by every deploy that
- * names none after it, and those build the newest on main. A project already there for this repo that's
- * this site's (orgo-web's ingot_repo and its name: a deploy sent twice, or one this Mac lost track of) is
- * the one, never one another site of it keeps; the app's own site, when it has no others, takes any of the
- * repo's, as before there were more. A new one gets a name and a port no other project there has; one Orgo
- * still finds taken (an app on the computer itself has it) moves on to the next. `env`: variables to make
- * it with, so its first build has them (changeEnv; one found there gets them on their own).
+ * The names a site's Staging project had in the builds before this one (<site>-staging, then -2 to -9 when
+ * taken): such a project is a left over now (leftOversOf), never a site's Published.
  */
-async function makeProject(wsId: string, name: string, h: SiteHosting, ours: () => boolean, env?: Record<string, string>): Promise<SiteHosting> {
-  const keep = (p: OrgoDeployProject): SiteHosting => {
-    keepSite(wsId, name, h.site, () => ({ projectId: p.id, ...(p.url ? { url: p.url } : {}) }));
-    const { projectId: _project, url: _url, ...rest } = h;
-    void _project;
-    void _url;
-    return { ...rest, projectId: p.id, ...(p.url ? { url: p.url } : {}) };
-  };
-  const repo = ingotRepo(wsId, name);
-  const there = await deploys.projects(h.computerId).catch((e: unknown) => Promise.reject(refused(e)));
+export function stagingName(site: string, n = 1): string {
+  const base = site.length <= 22 ? site : `${site.slice(0, 17).replace(/-+$/, "")}-${createHash("sha256").update(site).digest("hex").slice(0, 4)}`;
+  return `${base}-staging${n > 1 ? `-${n}` : ""}`;
+}
+export const isOldStaging = (project: string, site: string) => Array.from({ length: 9 }, (_, k) => stagingName(site, k + 1)).includes(project);
+
+/** A name no site can have: one that ends as an old Staging project's does, so a legacy Published is never taken for one. */
+const STAGING_LIKE = /-staging(-[2-9])?$/;
+
+/** Whether a name is one of the app's sites' Preview labels (sealed for any site, or a site's own copy). */
+const previewLike = (h: AppHosting, name: string, repo: string, label: string) =>
+  sitesOf(h, name).some((x) => isLabelOf("preview", label, repo, x.site) || (!!x.preview && x.preview === label));
+
+/**
+ * A site's Published project among its computer's (`projects`, oldest first as orgo-web lists them), found the
+ * same from any Mac: the oldest of the repo named with a Published label sealed for this site; else the one its
+ * record names (Bops 0.0.32's and before: the live sites keep theirs), or one named as 0.0.32 named them
+ * (deployName), when it's no site's Preview, no old Staging, and no other site's Published. Never the repo's
+ * first project as such (that may be a Preview or a left over). Undefined: none, so ensureProd makes one.
+ */
+function prodIn(projects: OrgoDeployProject[], h: AppHosting, name: string, site: string, repo: string): OrgoDeployProject | undefined {
+  const mine = projects.filter((p) => ofRepo(p, repo));
+  const marked = mine.find((p) => isLabelOf("prod", p.name, repo, site));
+  if (marked) return marked;
+  const sites = sitesOf(h, name).map((x) => x.site);
+  const fits = (p: OrgoDeployProject) =>
+    !previewLike(h, name, repo, p.name) && !sites.some((x) => isOldStaging(p.name, x)) && !sites.some((x) => x !== site && isLabelOf("prod", p.name, repo, x));
+  const record = siteIn(h, name, site).projectId;
+  const byRecord = record ? mine.find((p) => p.id === record && fits(p)) : undefined;
+  if (byRecord) return byRecord;
+  const names = Array.from({ length: 9 }, (_, k) => deployName(site, k + 1));
+  return mine.find((p) => names.includes(p.name) && fits(p));
+}
+
+/** The computer's deploy projects now, for a change (Orgo's refusals in words). */
+async function projectsNow(computerId: string, ours: () => boolean): Promise<OrgoDeployProject[]> {
+  const there = await deploys.projects(computerId).catch((e: unknown) => Promise.reject(refused(e)));
   held(ours);
   if (!there.enabled) throw new HostedAppError(there.why, 403);
-  const projects = there.value.projects ?? [];
-  const all = hostingOf(wsId, name) ?? h;
-  const others = new Set(sitesOf(all, name).flatMap((x) => (x.site !== h.site && x.projectId ? [x.projectId] : [])));
-  // (Never one of its sites' Staging projects, named as Staging is: Prod's is its own.)
-  const staging = (p: OrgoDeployProject) => sitesOf(all, name).some((x) => isStagingOf(p.name, x.site));
-  const ofRepo = projects.filter((p) => p.source === "ingot" && p.ingot_repo?.toLowerCase() === repo && !others.has(p.id) && !staging(p));
-  // Its name, or its name with the number a taken one got (deployName).
-  const names9 = Array.from({ length: 9 }, (_, k) => deployName(h.site, k + 1));
-  const named = (p: OrgoDeployProject) => names9.includes(p.name);
-  const mine = ofRepo.find(named) ?? (h.site === name && !all.sites?.length ? ofRepo[0] : undefined);
-  if (mine) {
+  return there.value.projects ?? [];
+}
+
+/** The computer's public URLs now (none when public URLs aren't open there: a Preview's link then can't be made, said when it's tried). */
+async function urlsNow(computerId: string, ours: () => boolean): Promise<{ urls: OrgoPublicUrl[]; list: OrgoPublicUrls | null }> {
+  const r = await publicUrls.list(computerId).catch((e: unknown) => Promise.reject(refused(e)));
+  held(ours);
+  if (!r.enabled) throw new HostedAppError(r.why, 403);
+  return { urls: r.value.enabled ? (r.value.public_urls ?? []) : [], list: r.value };
+}
+
+/**
+ * A site's Published project on the app's computer (prodIn), its record rewritten to it when it names another,
+ * or made now when there's none (nothing deployed): named with a random Published label sealed for the site,
+ * on the first port free from 3100, and with no public URL of its own (a Published site lives on its domains;
+ * an orgo-web that doesn't know that flag gives it a random one, never shown). Made before a site's Preview is,
+ * before a domain is connected, and on its first Local start, so a Bops 0.0.32 deploying it (which takes the
+ * repo's oldest project when its record names none) always finds Published's. `env`: variables to make it
+ * with, or to set on the one found.
+ */
+async function ensureProd(wsId: string, name: string, s: SiteHosting, ours: () => boolean, env?: Record<string, string>): Promise<SiteHosting & { projectId: string }> {
+  const repo = ingotRepo(wsId, name);
+  const projects = await projectsNow(s.computerId, ours);
+  const all = hostingOf(wsId, name) ?? s;
+  const found = prodIn(projects, all, name, s.site, repo);
+  const keep = (id: string): SiteHosting & { projectId: string } => {
+    if (id !== siteIn(all, name, s.site).projectId) keepSite(wsId, name, s.site, (x) => ({ ...x, projectId: id }));
+    return { ...s, projectId: id };
+  };
+  if (found) {
     if (env && Object.keys(env).length) {
-      const r = await deploys.env(h.computerId, mine.id, env).catch((e: unknown) => Promise.reject(settingsRefused(e)));
+      const r = await deploys.env(s.computerId, found.id, env).catch((e: unknown) => Promise.reject(settingsRefused(e)));
       held(ours);
       if (!r.enabled) throw new HostedAppError(r.why, 403);
     }
-    return keep(mine);
+    return keep(found.id);
   }
+  const [urls, taken] = await Promise.all([urlsNow(s.computerId, ours).then((x) => x.urls, () => [] as OrgoPublicUrl[]), domainPorts(s.computerId)]);
+  held(ours);
   const names = new Set(projects.map((p) => p.name));
-  const ports = new Set(projects.map((p) => p.port));
-  let n = 1;
-  let port = FIRST_PORT;
+  const ports: number[] = [...taken];
   for (let tries = 0; ; tries++) {
-    while (names.has(deployName(h.site, n))) n++;
-    while (ports.has(port)) port++;
-    const project = deployName(h.site, n);
-    const made = await deploys.create(h.computerId, { repo, name: project, port, ...(env ? { env } : {}) }).catch((e: unknown) => e as Error);
+    let label = newLabel("prod", repo, s.site);
+    while (names.has(label)) label = newLabel("prod", repo, s.site);
+    const port = freePort(projects, urls, ports);
+    const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(env && Object.keys(env).length ? { env } : {}) }).catch((e: unknown) => e as Error);
     held(ours);
-    if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(project);
-    else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.add(port);
+    if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(label);
+    else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.push(port);
     else if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT"))
-      throw new HostedAppError(`${bot(h.botId)?.name ?? "That bot"}'s computer already runs as many apps as one computer can.`, 409);
+      throw new HostedAppError(`${bot(s.botId)?.name ?? "That bot"}'s computer already runs as many apps as one computer can. Remove a site or a left over first.`, 409);
     else if (made instanceof OrgoError && made.code === "INVALID_ENV") throw settingsRefused(made);
     else if (made instanceof Error) throw refused(made);
     else if (!made.enabled) throw new HostedAppError(made.why, 403);
-    else return keep(made.value);
+    else {
+      // The window reads the app again: it has a deploy project now.
+      keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
+      return keep(made.value.id);
+    }
   }
 }
 
@@ -677,8 +929,8 @@ const gone = (e: unknown) => e instanceof OrgoError && e.status === 404 && (!e.c
 export async function deployApp(
   wsId: string,
   name: string,
-  opts: { at?: string; botId?: string; site?: unknown; ours?: () => boolean; env?: "staging" | "prod" } = {},
-): Promise<{ app: HostedApp; deployment: OrgoDeployment; deployed: { site: string; deployment: OrgoDeployment; url: string | null }[] }> {
+  opts: { at?: string; botId?: string; site?: unknown; ours?: () => boolean; env?: "preview" | "prod" } = {},
+): Promise<{ app: HostedApp; deployment: OrgoDeployment; deployed: { site: string; deployment: OrgoDeployment; url: string | null }[]; said?: string }> {
   const ours = opts.ours ?? sameState();
   held(ours);
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
@@ -686,7 +938,8 @@ export async function deployApp(
   if (opts.at !== undefined && !CHANGESET.test(opts.at)) throw new HostedAppError("That isn't a changeset of it.", 400);
   const was = hostingOf(wsId, name);
   if (was && opts.site !== undefined) siteIn(was, name, opts.site);
-  return withApp(wsId, name, "deploy", () => (opts.env === "staging" ? sendStaging(wsId, name, opts, ours) : sendDeploys(wsId, name, opts, ours)));
+  // (Published only through Publish and Apply variables, which name what it builds: promoteApp, reapplyApp.)
+  return withApp(wsId, name, "deploy", () => (opts.env === "prod" ? sendDeploys(wsId, name, opts, ours) : sendPreview(wsId, name, opts, ours)));
 }
 
 const MOVED = "It moved to another computer as this was sent. Deploy it again.";
@@ -765,19 +1018,19 @@ async function sendDeploys(
       const now = still();
       if (one.site !== name && !now.sites?.some((x) => x.name === one.site)) continue;
       const cur = siteIn(now, name, one.site);
-      let s = cur.projectId ? cur : await makeProject(wsId, name, cur, ours);
+      let s: SiteHosting = await ensureProd(wsId, name, cur, ours);
       still();
       let got = await queue(s);
       held(ours);
       if (gone(got)) {
-        // The project is gone on Orgo: made again on the same computer.
-        s = await makeProject(wsId, name, { ...s, projectId: undefined }, ours);
+        // The project is gone on Orgo: found again, or made again, on the same computer.
+        s = await ensureProd(wsId, name, { ...s, projectId: undefined }, ours);
         got = await queue(s);
         held(ours);
       }
       if (got instanceof Error) throw refused(got);
       if (!got.enabled) throw new HostedAppError(got.why, 403);
-      deployed.push({ site: s.site, deployment: got.value, url: s.url ?? null });
+      deployed.push({ site: s.site, deployment: got.value, url: null });
     } catch (e) {
       // The ones that went are deploying, whatever stopped the rest: the window reads the app again.
       if (deployed.length && ours()) keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
@@ -786,89 +1039,31 @@ async function sendDeploys(
   }
   if (!deployed.length) throw new HostedAppError(NO_SITE, 404);
   const app = await queued(wsId, name, kept, new Map(deployed.map((d) => [d.site, d.deployment])), opts.at);
-  return { app, deployment: deployed[0].deployment, deployed: deployed.map((d) => ({ ...d, url: app.sites?.find((x) => x.name === d.site)?.url ?? (d.site === name ? (app.hosting?.url ?? null) : d.url) })) };
+  // (Published's address: its first active domain, never an orgo.dev name.)
+  return { app, deployment: deployed[0].deployment, deployed: deployed.map((d) => ({ ...d, url: (d.site === name ? app.domain : app.sites?.find((x) => x.name === d.site)?.domain) ?? null })) };
 }
 
 /**
- * The app as it is once this Mac queued a deploy of it (`done`: each site's, of changeset `at` when one was
- * named): a window showing it reads it again (a bot's deploy changes nothing else it watches). What a site
- * deployed now serves meanwhile isn't in this answer: the window keeps what it read last (null here). Of
- * an app with more sites, the ones not deployed now are as Orgo says.
+ * The app as it is once this Mac queued a deploy of it on Published (`done`: each site's, of changeset `at`):
+ * a window showing it reads it again. What a site deployed now serves meanwhile isn't in this answer: the
+ * window keeps what it read last (null here). Of an app with more sites, the ones not deployed now are as
+ * Orgo says, and every site's Preview too.
  */
 async function queued(wsId: string, name: string, h: AppHosting, done: Map<string, OrgoDeployment>, at?: string): Promise<HostedApp> {
   keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
   const now = hostingOf(wsId, name) ?? h;
-  const repo = (await reposOf(wsId))?.find((r) => r.name === name);
-  const head = repo?.head ?? null;
-  const views = await Promise.all(
-    sitesOf(now, name).map(async (s): Promise<HostedSite> => {
-      const d = done.get(s.site);
-      if (d) return { ...siteBase(s), live: { ...liveOf(d, s.url ?? null), at: deployedAt(d) ?? at ?? head, state: d.state ?? "queued", when: msOf(d.created_at) ?? Date.now() } };
-      const p = s.projectId ? await deploys.project(s.computerId, s.projectId).catch(() => null) : null;
-      if (!p?.enabled) return siteBase(s);
-      const url = p.value.url ?? s.url ?? null;
-      const n = newest(p.value);
-      return { ...siteBase(s), url, serving: servingOf(p.value), live: n ? liveOf(n, url) : null };
-    }),
-  );
-  const st = await stagingsOf(wsId, name, now, projectsReader()).catch(() => null);
-  const withStaging = st ? views.map((v) => ({ ...v, staging: st.get(v.name) ?? stagingView(null) })) : views;
-  return {
-    name,
-    head,
-    updatedAt: msOf(repo?.updated_at),
-    hosting: now,
-    serving: views[0].serving,
-    live: views[0].live,
-    ...(withStaging.length > 1 ? { sites: withStaging } : {}),
-    ...(withStaging[0].staging ? { staging: withStaging[0].staging } : {}),
+  const ours = sameState();
+  const app = await appView(wsId, name, now, await reposOf(wsId), undefined, ours, () => {}, domainsReader());
+  const head = app.head;
+  const mark = (v: HostedSite): HostedSite => {
+    const d = done.get(v.name);
+    return d ? { ...v, live: { ...liveOf(d, v.domain ?? null), at: deployedAt(d) ?? at ?? head, state: d.state ?? "queued", when: msOf(d.created_at) ?? Date.now() } } : v;
   };
+  const own = mark({ name, projectId: app.hosting?.projectId ?? null, url: null, serving: app.serving, live: app.live, domain: app.domain ?? null });
+  return { ...app, live: own.live, ...(app.sites ? { sites: app.sites.map(mark) } : {}) };
 }
 
-/* ---------------- Staging: a second deploy project of each site, on the same computer ---------------- */
-
-/** How many of a site's Staging names there are: its own, then with a number after it (2 to 9) when another app on the computer has it. */
-const STAGING_NAMES = 9;
-
-/**
- * A site's Staging project's name on Orgo, which its public address takes (<name>.orgo.dev): the site's
- * name with -staging after it, and a number after that (`n` from 2) when the name is taken on the computer.
- * A site's name longer than 22 characters is cut, with 4 characters of its sha256 so two long ones that
- * start alike never share one, to fit the 32 Orgo takes.
- */
-export function stagingName(site: string, n = 1): string {
-  const base = site.length <= 22 ? site : `${site.slice(0, 17).replace(/-+$/, "")}-${createHash("sha256").update(site).digest("hex").slice(0, 4)}`;
-  return `${base}-staging${n > 1 ? `-${n}` : ""}`;
-}
-
-/** Whether a deploy project's name is one of a site's Staging names. */
-export const isStagingOf = (project: string, site: string) => Array.from({ length: STAGING_NAMES }, (_, k) => stagingName(site, k + 1)).includes(project);
-
-/** A name no site can have: one that ends as a Staging project's does, so one is never taken for another's. */
-const STAGING_LIKE = /-staging(-[2-9])?$/;
-
-/** The app's own deploy projects: every site's Prod, and the ones it left on another computer. Never anyone's Staging. */
-const prodIds = (h: AppHosting, name: string) => new Set([...sitesOf(h, name).flatMap((x) => (x.projectId ? [x.projectId] : [])), ...(h.behind ?? []).map((b) => b.projectId)]);
-
-/**
- * A site's Staging project among its computer's deploy projects (`projects`): of the app's repo, named as that
- * site's Staging, and no site's Prod (the first made, when there's more than one). Nothing of it is kept in
- * Bops' state, so it's found the same from any Mac, and a Bops from before Staging, which knows only the app's
- * record (AppHosting), never loses or changes it.
- */
-function stagingIn(projects: OrgoDeployProject[], h: AppHosting, name: string, site: string, repo: string): OrgoDeployProject | undefined {
-  const own = prodIds(h, name);
-  return projects
-    .filter((p) => p.source === "ingot" && p.ingot_repo?.toLowerCase() === repo && !own.has(p.id) && isStagingOf(p.name, site))
-    .sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name))[0];
-}
-
-/** A site's Staging as the window shows it, from its project as Orgo has it (none yet: nothing). */
-const stagingView = (p: OrgoDeployProject | null | undefined): StagingSite => {
-  if (!p) return { projectId: null, url: null, serving: null, live: null };
-  const d = newest(p);
-  return { projectId: p.id, url: p.url ?? null, serving: servingOf(p), live: d ? liveOf(d, p.url ?? null) : null };
-};
+/* ---------------- Preview: one deploy project of each site, at a fixed link of its own ---------------- */
 
 /** The app's Ingot repo as its projects name it, or null when the workspace isn't on Orgo yet (nothing of it can be on one). */
 const repoOrNull = (wsId: string, name: string) => {
@@ -879,8 +1074,8 @@ const repoOrNull = (wsId: string, name: string) => {
   }
 };
 
-/** How long one read of the Apps page waits for a computer's list of deploy projects (for its Staging): past it, Staging is unsaid. */
-const STAGING_MS = 5000;
+/** How long one read of the Apps page waits for a computer's lists (projects, public URLs): past it, Previews are unsaid. */
+const READ_MS = 5000;
 
 /** Each computer's deploy projects, read once for one read of the Apps page however many apps and sites are on it (null: Orgo couldn't say in time). */
 type ProjectsOn = (computerId: string) => Promise<OrgoDeployProject[] | null>;
@@ -888,130 +1083,423 @@ function projectsReader(): ProjectsOn {
   const read = new Map<string, Promise<OrgoDeployProject[] | null>>();
   return (computerId) => {
     let list = read.get(computerId);
-    if (!list) read.set(computerId, (list = within(deploys.projects(computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : null), () => null), STAGING_MS)));
+    if (!list) read.set(computerId, (list = within(deploys.projects(computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : null), () => null), READ_MS)));
+    return list;
+  };
+}
+
+/** Each computer's public URLs, read once for one read of the Apps page (null: Orgo couldn't say in time; none when they aren't open there). */
+type UrlsOn = (computerId: string) => Promise<OrgoPublicUrl[] | null>;
+function urlsReader(): UrlsOn {
+  const read = new Map<string, Promise<OrgoPublicUrl[] | null>>();
+  return (computerId) => {
+    let list = read.get(computerId);
+    if (!list) read.set(computerId, (list = within(publicUrls.list(computerId).then((r) => (r.enabled ? (r.value.enabled ? (r.value.public_urls ?? []) : []) : null), () => null), READ_MS)));
     return list;
   };
 }
 
 /**
- * Every site's Staging of an app, by site, as the Apps page shows it: found in its computer's list, then each
- * read on its own (the list carries only the computer's newest few deploys, so what one serves is read from
- * its own). Null when Orgo couldn't say.
+ * The label a site's Preview is known by besides its seal: its state copy (one sealed for it, or a name the owner
+ * chose ahead, which has no seal); or, that copy lost (a Bops 0.0.32 kept its whole record), for an app with one
+ * site, the one project of its repo named like a chosen name (12 letters and digits, the first a letter) that's
+ * no Published, with a public URL of the same name: found again, so its link never changes.
  */
-async function stagingsOf(wsId: string, name: string, h: AppHosting, on: ProjectsOn): Promise<Map<string, StagingSite> | null> {
-  const repo = repoOrNull(wsId, name);
-  if (!repo || h.lost) return null;
-  const list = await on(h.computerId);
-  if (!list) return null;
-  const out = new Map<string, StagingSite>();
-  await Promise.all(
-    sitesOf(h, name).map(async (s) => {
-      const p = stagingIn(list, h, name, s.site, repo);
-      const got = p ? await within(deploys.project(h.computerId, p.id).then((r) => (r.enabled ? r.value : null), () => null), STAGING_MS) : null;
-      out.set(s.site, stagingView(got ?? p));
-    }),
-  );
+function knownLabel(s: SiteHosting, all: AppHosting, name: string, repo: string, projects: OrgoDeployProject[], urls: OrgoPublicUrl[]): string | undefined {
+  const copy = s.preview;
+  if (copy && (isLabelOf("preview", copy, repo, s.site) || labelGiven(copy) === copy)) return copy;
+  if (sitesOf(all, name).length !== 1) return undefined;
+  const legacy = Array.from({ length: 9 }, (_, k) => deployName(s.site, k + 1));
+  return projects.find(
+    (p) =>
+      ofRepo(p, repo) &&
+      labelGiven(p.name) === p.name &&
+      p.id !== s.projectId &&
+      !legacy.includes(p.name) &&
+      !isLabelOf("prod", p.name, repo, s.site) &&
+      urls.some((u) => u.label === p.name),
+  )?.name;
+}
+
+/** A site's Preview as found on its computer: its public URL (the link), its deploy project, and its label. */
+type PreviewFound = { url?: OrgoPublicUrl; project?: OrgoDeployProject; label: string };
+
+/**
+ * A site's Preview among its computer's projects and public URLs, found by its label's seal (or `known`):
+ * the oldest marked URL, with the project named as it (maybe none: made again); else the oldest marked project
+ * (its link made again). Any other marked one (two Macs at once) is a left over; nothing is deleted on its own.
+ */
+function previewIn(projects: OrgoDeployProject[], urls: OrgoPublicUrl[], repo: string, site: string, known?: string): PreviewFound | undefined {
+  const is = (label: string) => isLabelOf("preview", label, repo, site) || (!!known && label === known);
+  const us = urls.filter((u) => is(u.label)).sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
+  const ps = projects.filter((p) => ofRepo(p, repo) && is(p.name));
+  if (us[0]) return { url: us[0], project: ps.find((p) => p.name === us[0].label), label: us[0].label };
+  if (ps[0]) return { project: ps[0], label: ps[0].name };
+  return undefined;
+}
+
+/**
+ * A site's Preview as the window shows it (`p`: its project as read on its own, with its deploys; `pass`: whether its
+ * link asks for a password now, and when Bops set it last).
+ */
+const previewView = (f: PreviewFound | undefined, p?: OrgoDeployProject | null, pass?: { on?: boolean; at?: number }): PreviewSite => {
+  const project = p ?? f?.project;
+  if (!f) return { projectId: null, url: null, label: null, serving: null, live: null };
+  const url = f.url?.url ?? null;
+  const d = project ? newest(project) : undefined;
+  return {
+    projectId: project?.id ?? null,
+    url,
+    label: f.label,
+    serving: project ? servingOf(project) : null,
+    live: d ? liveOf(d, url) : null,
+    ...(f.url?.disabled ? { off: true as const } : {}),
+    ...(typeof pass?.on === "boolean" ? { protected: pass.on } : {}),
+    ...(pass?.at ? { passwordAt: pass.at } : {}),
+  };
+};
+
+/** What a site's Preview and Published are on its computer, read from its lists once. */
+type SitePlaces = { prod?: OrgoDeployProject; preview?: PreviewFound };
+
+/** Every site's Published and Preview of an app on its computer, from its lists (prodIn, previewIn). */
+function placesOf(h: AppHosting, name: string, repo: string, projects: OrgoDeployProject[], urls: OrgoPublicUrl[]): Map<string, SitePlaces> {
+  const out = new Map<string, SitePlaces>();
+  for (const s of sitesOf(h, name)) out.set(s.site, { prod: prodIn(projects, h, name, s.site, repo), preview: previewIn(projects, urls, repo, s.site, knownLabel(s, h, name, repo, projects, urls)) });
   return out;
 }
 
-/** The computer's deploy projects now, for a change (Orgo's refusals in words). */
-async function projectsNow(computerId: string, ours: () => boolean): Promise<OrgoDeployProject[]> {
-  const there = await deploys.projects(computerId).catch((e: unknown) => Promise.reject(refused(e)));
-  held(ours);
-  if (!there.enabled) throw new HostedAppError(there.why, 403);
-  return there.value.projects ?? [];
+/**
+ * The app's left overs on its computer (HostedApp.leftOver): projects of its repo that are no site's Published or
+ * Preview and not ones it left on another computer, and marked Preview URLs that are no site's. They come from an
+ * older Bops (a <site>-staging, a <site> made when its record lost Published's id) or two Macs at once. Bops never
+ * deploys to them, and removes one only when the user says so (removeLeftOver).
+ */
+function leftOversOf(h: AppHosting, name: string, repo: string, projects: OrgoDeployProject[], urls: OrgoPublicUrl[], places: Map<string, SitePlaces>): LeftOver[] {
+  const used = new Set<string>();
+  const usedUrls = new Set<string>();
+  for (const x of places.values()) {
+    if (x.prod) used.add(x.prod.id);
+    if (x.preview?.project) used.add(x.preview.project.id);
+    if (x.preview?.url) usedUrls.add(x.preview.url.id);
+  }
+  for (const b of h.behind ?? []) used.add(b.projectId);
+  const out: LeftOver[] = [];
+  for (const p of projects) {
+    if (!ofRepo(p, repo) || used.has(p.id)) continue;
+    const own = urls.find((u) => u.port === p.port);
+    if (own) usedUrls.add(own.id);
+    out.push({ id: p.id, name: p.name, port: typeof p.port === "number" ? p.port : null, url: own?.url ?? p.url ?? null });
+  }
+  for (const u of urls) if (!usedUrls.has(u.id) && previewLike(h, name, repo, u.label)) out.push({ id: `url:${u.id}`, name: u.label, port: u.port, url: u.url });
+  return out;
 }
 
 /**
- * Make a site's Staging project on the app's computer, beside its Prod one (`prod`, made already): the same
- * repo, one of the site's Staging names and a port no project there has, built as Prod builds (its install,
- * build and start commands and health check, copied once; each is changed on its own after), nothing
- * deployed. `env`: variables to make it with (its own: Prod's are never copied). A computer with as many
- * projects as Orgo takes says so.
+ * Every site's Preview of an app, by site, as the Apps page shows it, and its left overs: found in its computer's
+ * lists, then each Preview project read on its own (the list carries only the computer's newest few deploys, so
+ * what one serves is read from its own), and its password as it should be (passwordNow: one set when its link has
+ * none, a new one once another deploy went live there). Null when Orgo couldn't say.
  */
-async function makeStaging(wsId: string, name: string, prod: SiteHosting, projects: OrgoDeployProject[], ours: () => boolean, env?: Record<string, string>): Promise<OrgoDeployProject> {
+async function previewsOf(
+  wsId: string,
+  name: string,
+  h: AppHosting,
+  on: ProjectsOn,
+  urlsOn: UrlsOn,
+  ours: () => boolean = () => true,
+): Promise<{ previews: Map<string, PreviewSite>; places: Map<string, SitePlaces>; leftOver: LeftOver[] } | null> {
+  const repo = repoOrNull(wsId, name);
+  if (!repo || h.lost) return null;
+  const [list, urls] = await Promise.all([on(h.computerId), urlsOn(h.computerId)]);
+  if (!list) return null;
+  const places = placesOf(h, name, repo, list, urls ?? []);
+  const previews = new Map<string, PreviewSite>();
+  await Promise.all(
+    sitesOf(h, name).map(async (s) => {
+      const f = places.get(s.site)?.preview;
+      const got = f?.project ? await within(deploys.project(h.computerId, f.project.id).then((r) => (r.enabled ? r.value : null), () => null), READ_MS) : null;
+      const live = (got ?? f?.project)?.current?.id ?? null;
+      const on = f?.url && ours() ? await within(passwordNow(wsId, name, s.site, h.computerId, f.url, live, ours), READ_MS) : undefined;
+      previews.set(s.site, previewView(f, got, { on: on ?? f?.url?.protected, at: passwordAtOf(wsId, name, s.site) }));
+    }),
+  );
+  // (Its own label kept as a copy, once, when Orgo says one its record doesn't have.)
+  for (const s of sitesOf(h, name)) {
+    const label = places.get(s.site)?.preview?.label;
+    if (label && label !== s.preview && urls && ours()) keepSite(wsId, name, s.site, (x) => ({ ...x, preview: label }));
+  }
+  return { previews, places, leftOver: urls ? leftOversOf(h, name, repo, list, urls, places) : [] };
+}
+
+/** The variables a new Preview project starts with, so its sign in is at its own link (each the user's to change after). */
+const seedsFor = (url: string, given?: Record<string, string>): Record<string, string> => ({
+  AUTH_URL: url,
+  NEXTAUTH_URL: url,
+  BETTER_AUTH_URL: url,
+  AUTH_TRUST_HOST: "true",
+  ...(given ?? {}),
+});
+
+/** The sign in variables a project has none of yet (AUTH_URL, NEXTAUTH_URL, BETTER_AUTH_URL), set to `url`; never one the user set. */
+async function seedAuth(computerId: string, p: OrgoDeployProject, url: string, ours: () => boolean) {
+  const has = new Set(p.env_keys ?? []);
+  if (has.has("AUTH_URL") || has.has("NEXTAUTH_URL") || has.has("BETTER_AUTH_URL")) return;
+  const r = await deploys.env(computerId, p.id, seedsFor(url)).catch(() => null);
+  held(ours);
+  void r;
+}
+
+const PREVIEW_WORDS = {
+  urlLimit: "Its computer has as many public links as Orgo allows. Remove a site or a left over first.",
+  accountLimit: (n: unknown) => `Your Orgo account has as many public links as it allows${typeof n === "number" ? ` (${n})` : ""}.`,
+  noLink: "Couldn't get a link for its preview. Try again in a minute.",
+  changed: (url: string) => `Its preview link changed to ${url}, as the old one was taken. Add it to Google sign in.`,
+  noRoom: (bot: string, site: string) => `${bot}'s computer has no room for ${site}'s preview: it runs as many deploys as Orgo allows. Remove a site or a left over first.`,
+};
+
+/** A public URL create Orgo turned down for good (caps, not open here), in words; undefined for one to try again with another name or port. */
+function linkRefused(e: unknown): HostedAppError | undefined {
+  if (!(e instanceof OrgoError)) return undefined;
+  if (e.code === "PUBLIC_URL_LIMIT") return new HostedAppError(PREVIEW_WORDS.urlLimit, 409, { code: e.code });
+  if (e.code === "PUBLIC_URL_ACCOUNT_LIMIT") return new HostedAppError(PREVIEW_WORDS.accountLimit(e.answer?.limit), 409, { code: e.code });
+  if (e.code === "LABEL_TAKEN" || e.code === "INVALID_LABEL" || e.code === "PORT_TAKEN") return undefined;
+  return refused(e) as HostedAppError;
+}
+
+/**
+ * A site's Preview on the app's computer, made when it has none (with nothing else under way on the app:
+ * withApp), after its Published project (`prod`, made first: ensureProd). Its link comes first: a public URL
+ * with its label (made before the project, so orgo-web's first deploy adopts it and never owns it: removing
+ * the project leaves it), then the project, named with the same label, on the URL's port. Found again by its
+ * seal, so one half gone heals: a URL with no project gets the project again on its port; a project with no URL
+ * gets its URL again with its name. One on another computer of the workspace (the app moved) moves here with its
+ * label; else its state copy's label is used again; else a new one. A label someone took meanwhile gets a new one,
+ * said in `said` (the user adds the new link to Google sign in). `given`: a name the owner chose ahead, used when
+ * the site has no Preview yet (once it has one, its name never changes). `env`: the user's variables to make it
+ * with, on top of the sign in seeds (seedsFor). Its link has a password once it's there (passwordNow), unless the
+ * owner turned it off.
+ */
+async function ensurePreview(
+  wsId: string,
+  name: string,
+  prod: SiteHosting & { projectId: string },
+  ours: () => boolean,
+  opts: { env?: Record<string, string>; given?: string } = {},
+): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl; said?: string; made: boolean }> {
   const repo = ingotRepo(wsId, name);
-  const names = new Set(projects.map((p) => p.name));
-  const ports = new Set(projects.map((p) => p.port));
-  const from = projects.find((p) => p.id === prod.projectId);
-  let n = 1;
-  let port = FIRST_PORT;
-  for (let tries = 0; ; tries++) {
-    while (names.has(stagingName(prod.site, n)) && n < STAGING_NAMES) n++;
-    while (ports.has(port)) port++;
-    const project = stagingName(prod.site, n);
-    const made = await deploys.create(prod.computerId, { repo, name: project, port, ...(env && Object.keys(env).length ? { env } : {}) }).catch((e: unknown) => e as Error);
+  const c = prod.computerId;
+  const projects = await projectsNow(c, ours);
+  const { urls } = await urlsNow(c, ours);
+  const all = hostingOf(wsId, name) ?? prod;
+  const s = siteIn(all, name, prod.site);
+  const found = previewIn(projects, urls, repo, prod.site, knownLabel(s, all, name, repo, projects, urls));
+  const prodPort = projects.find((p) => p.id === prod.projectId)?.port;
+  // (Never Published's port, nor one a custom domain points at: a project there would serve that domain.)
+  const skip = [...(typeof prodPort === "number" ? [prodPort] : []), ...(await domainPorts(c))];
+  held(ours);
+  const fromProd = projects.find((p) => p.id === prod.projectId);
+  const keepLabel = (label: string) => {
+    if (siteIn(hostingOf(wsId, name) ?? all, name, prod.site).preview !== label) keepSite(wsId, name, prod.site, (x) => ({ ...x, preview: label }));
+  };
+  if (opts.given && found && found.label !== opts.given)
+    throw new HostedAppError(`Its preview is at ${found.url?.url ?? found.label} already, and its link never changes.`, 409, { code: "PREVIEW_NAMED" });
+  /** What it answers, its link's password set first when it has none (best effort). */
+  const locked = async <T extends { project: OrgoDeployProject; url: OrgoPublicUrl }>(r: T): Promise<T> => {
+    await passwordNow(wsId, name, prod.site, c, r.url, r.project.current?.id ?? null, ours);
+    return r;
+  };
+  /** Its project made on `port` with `label`, seeded, built as Published builds (a legacy Published's commands copied once). */
+  const makeProject = async (label: string, url: OrgoPublicUrl): Promise<OrgoDeployProject | "name" | "port"> => {
+    const env = seedsFor(url.url, opts.env);
+    const made = await deploys.create(c, { repo, name: label, port: url.port, env }).catch((e: unknown) => e as Error);
     held(ours);
-    if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(project);
-    else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.add(port);
-    else if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT"))
-      throw new HostedAppError(`${bot(prod.botId)?.name ?? "That bot"}'s computer has no room for ${prod.site}'s preview: it runs as many deploys as Orgo takes on one computer.`, 409);
-    else if (made instanceof OrgoError && made.code === "INVALID_ENV") throw settingsRefused(made);
-    else if (made instanceof Error) throw refused(made);
-    else if (!made.enabled) throw new HostedAppError(made.why, 403);
-    else {
+    if (made instanceof OrgoError && made.code === "NAME_TAKEN") return "name";
+    if (made instanceof OrgoError && made.code === "PORT_TAKEN") return "port";
+    if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT")) throw new HostedAppError(PREVIEW_WORDS.noRoom(bot(prod.botId)?.name ?? "That bot", prod.site), 409, { code: made.code });
+    if (made instanceof OrgoError && made.code === "INVALID_ENV") throw settingsRefused(made);
+    if (made instanceof Error) throw refused(made);
+    if (!made.enabled) throw new HostedAppError(made.why, 403);
+    // Published's commands set by hand (a legacy one's, or ones saved before its first deploy): its Preview builds the same way to start with.
+    if (fromProd) {
       const patch: Parameters<typeof deploys.change>[2] = {};
-      if (from?.install_cmd) patch.install_cmd = from.install_cmd;
-      if (from?.build_cmd) patch.build_cmd = from.build_cmd;
-      if (from?.start_cmd) patch.start_cmd = from.start_cmd;
-      if (typeof from?.health_path === "string" && from.health_path !== "/") patch.health_path = from.health_path;
-      if (!Object.keys(patch).length) return made.value;
-      const r = await deploys.change(prod.computerId, made.value.id, patch).catch(() => null);
+      if (fromProd.install_cmd) patch.install_cmd = fromProd.install_cmd;
+      if (fromProd.build_cmd) patch.build_cmd = fromProd.build_cmd;
+      if (fromProd.start_cmd) patch.start_cmd = fromProd.start_cmd;
+      if (typeof fromProd.health_path === "string" && fromProd.health_path !== "/") patch.health_path = fromProd.health_path;
+      if (Object.keys(patch).length) {
+        const r = await deploys.change(c, made.value.id, patch).catch(() => null);
+        held(ours);
+        if (r?.enabled) return r.value;
+      }
+    }
+    return made.value;
+  };
+  /** Its project made on its URL's port, the URL moved to a free port when an app on the computer holds that one. */
+  const projectOn = async (label: string, url: OrgoPublicUrl): Promise<OrgoDeployProject> => {
+    let u = url;
+    const used = [...skip];
+    for (let tries = 0; tries < 5; tries++) {
+      const p = await makeProject(label, u);
+      if (p === "name") {
+        // Only its own, from a try that stopped halfway: read again and taken as it is.
+        const again = (await projectsNow(c, ours)).find((x) => x.name === label && ofRepo(x, repo));
+        if (again) return again;
+        throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
+      }
+      if (p !== "port") return p;
+      used.push(u.port);
+      const port = freePort(projects, urls, used);
+      const moved = await publicUrls.port(c, u.id, port).catch((e: unknown) => Promise.reject(refused(e)));
       held(ours);
-      return r?.enabled ? r.value : made.value;
+      if (!moved.enabled) throw new HostedAppError(moved.why, 403);
+      u = moved.value;
+    }
+    throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
+  };
+  // Both there: it's made.
+  if (found?.url && found.project) {
+    keepLabel(found.label);
+    return locked({ project: found.project, url: found.url, made: false });
+  }
+  // Its link there, its project gone (removed on Orgo's own pages): made again on the link's port.
+  if (found?.url) {
+    const project = await projectOn(found.label, found.url);
+    keepLabel(found.label);
+    return locked({ project, url: found.url, made: true });
+  }
+  let said: string | undefined;
+  // Its project there, its link gone: made again with the project's name.
+  if (found?.project) {
+    const p = found.project;
+    const r = await publicUrls.create(c, typeof p.port === "number" ? p.port : freePort(projects, urls, skip), p.name).catch((e: unknown) => e as Error);
+    held(ours);
+    if (!(r instanceof Error) && r.enabled) {
+      keepLabel(p.name);
+      return locked({ project: p, url: r.value, made: true });
+    }
+    if (!(r instanceof Error)) throw new HostedAppError(r.why, 403);
+    const no = linkRefused(r);
+    if (no) throw no;
+    // Its name taken meanwhile: that project is a left over now, and a new pair is made below with a new label.
+    said = "changed";
+  }
+  // None on this computer: its label chosen, then its link and its project made.
+  let label: string | undefined = opts.given;
+  let fromOld = false;
+  if (!label && !said) {
+    const moved = await previewElsewhere(wsId, name, all, prod.site, repo, c, ours);
+    if (moved) {
+      label = moved.label;
+      fromOld = true;
     }
   }
+  if (!label && !said && s.preview && (isLabelOf("preview", s.preview, repo, prod.site) || labelGiven(s.preview) === s.preview)) {
+    label = s.preview;
+    fromOld = true;
+  }
+  const ports = [...skip];
+  for (let tries = 0; tries < 6; tries++) {
+    const l = label ?? newLabel("preview", repo, prod.site);
+    const port = freePort(projects, urls, ports);
+    const r = await publicUrls.create(c, port, l).catch((e: unknown) => e as Error);
+    held(ours);
+    if (!(r instanceof Error) && !r.enabled) throw new HostedAppError(r.why, 403);
+    if (r instanceof Error) {
+      const no = linkRefused(r);
+      if (no) throw no;
+      if (r instanceof OrgoError && r.code === "PORT_TAKEN") {
+        // (The same label on the next port: a name is spent only once it's taken.)
+        ports.push(port);
+        label = l;
+      } else {
+        // Taken, or a name Orgo keeps: a new one (a name chosen ahead is said, as its link isn't that one).
+        if (label && (fromOld || opts.given)) said = "changed";
+        if (opts.given && r instanceof OrgoError && r.code === "LABEL_TAKEN") throw new HostedAppError(`The name ${opts.given} is taken on Orgo. Pick another.`, 409, { code: "LABEL_TAKEN" });
+        if (opts.given) throw new HostedAppError(`Orgo can't take ${opts.given} as a link's name. Pick another.`, 400, { code: "INVALID_LABEL" });
+        label = undefined;
+      }
+      continue;
+    }
+    const url = r.value;
+    const project = await projectOn(l, url).catch(async (e: unknown) => {
+      // (Its link, new and never shown, isn't left behind for a project that couldn't be made.)
+      if (!(e instanceof HostedAppError && e.message === SWAPPED)) await publicUrls.remove(c, url.id).catch(() => null);
+      throw e;
+    });
+    keepLabel(l);
+    return locked({ project, url, made: true, ...(said ? { said: PREVIEW_WORDS.changed(url.url) } : {}) });
+  }
+  throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
 }
 
 /**
- * A site's Prod project, made now when it has none (nothing deployed), before its Staging one is: so a Bops
- * from before Staging, deploying Prod, always has Prod's own and never takes Staging's (its makeProject takes
- * any of the repo's projects for an app with one site whose record names none).
+ * A site's Preview link left on another computer of the workspace (the app moved: the computers it left first,
+ * then every other one its bots use), moved here with its label: removed there, then made here at once. If this
+ * computer can't take it, it's put back there. Undefined: none, or it couldn't be moved (a new one is made).
  */
-async function prodFirst(wsId: string, name: string, s: SiteHosting, ours: () => boolean): Promise<SiteHosting> {
-  if (s.projectId) return s;
-  const made = await makeProject(wsId, name, s, ours);
-  // The window reads the app again: it has a deploy project now.
-  keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
-  return made;
+async function previewElsewhere(wsId: string, name: string, h: AppHosting, site: string, repo: string, here: string, ours: () => boolean): Promise<{ label: string } | undefined> {
+  const others = [
+    ...new Set([
+      ...(h.behind ?? []).map((b) => b.computerId),
+      ...getState()
+        .bots.filter((b) => workspaceOf(b) === wsId)
+        .flatMap((b) => computerOf(b.id) ?? []),
+    ]),
+  ].filter((x) => x !== here);
+  const s = siteIn(h, name, site);
+  for (const c of others) {
+    const r = await publicUrls.list(c).catch(() => null);
+    held(ours);
+    if (!r?.enabled || !r.value.enabled) continue;
+    const u = (r.value.public_urls ?? []).find((x) => isLabelOf("preview", x.label, repo, site) || (!!s.preview && x.label === s.preview));
+    if (!u || u.disabled) continue;
+    const gone = await publicUrls.remove(c, u.id).catch(() => null);
+    held(ours);
+    if (!gone?.enabled) continue;
+    return { label: u.label };
+  }
+  return undefined;
 }
 
 /**
- * deployApp to Staging (with nothing else under way on the app: withApp): changeset `at` (the newest on main by
- * default) of every site, one after another, or the one `site` names, each on its Staging project on the app's
- * computer (made the first time, after Prod's: prodFirst). Prod is never touched. Answers the app as it is now.
+ * deployApp to the Preview (with nothing else under way on the app: withApp): changeset `at` (the newest on main
+ * by default) of every site, one after another, or the one `site` names, each on its Preview project on the app's
+ * computer (made the first time, after Published's: ensureProd, ensurePreview). Published is never touched.
+ * Answers the app as it is now, and each site's link.
  */
-async function sendStaging(
+async function sendPreview(
   wsId: string,
   name: string,
   opts: { at?: string; botId?: string; site?: unknown },
   ours: () => boolean,
-): Promise<{ app: HostedApp; deployment: OrgoDeployment; deployed: { site: string; deployment: OrgoDeployment; url: string | null }[] }> {
+): Promise<{ app: HostedApp; deployment: OrgoDeployment; deployed: { site: string; deployment: OrgoDeployment; url: string | null }[]; said?: string }> {
   const kept = await homeFor(wsId, name, opts, ours);
-  const repo = ingotRepo(wsId, name);
   const base = hostingOf(wsId, name) ?? kept;
   const todo = (opts.site !== undefined ? [siteIn(base, name, opts.site)] : sitesOf(base, name)).map((x) => x.site);
   const deployed: { site: string; deployment: OrgoDeployment; url: string | null }[] = [];
+  const said: string[] = [];
   for (const site of todo) {
     try {
       const now = stillOn(wsId, name, kept);
       if (site !== name && !now.sites?.some((x) => x.name === site)) continue;
-      const prod = await prodFirst(wsId, name, siteIn(now, name, site), ours);
+      const prod = await ensureProd(wsId, name, siteIn(now, name, site), ours);
       stillOn(wsId, name, kept);
-      const list = await projectsNow(prod.computerId, ours);
-      let p = stagingIn(list, hostingOf(wsId, name) ?? now, name, site, repo) ?? (await makeStaging(wsId, name, prod, list, ours));
+      let pv = await ensurePreview(wsId, name, prod, ours);
+      if (pv.said) said.push(pv.said);
       stillOn(wsId, name, kept);
-      let got = await deploys.deploy(prod.computerId, p.id, opts.at).catch((e: unknown) => e as Error);
+      if (!pv.made) await seedAuth(prod.computerId, pv.project, pv.url.url, ours);
+      let got = await deploys.deploy(prod.computerId, pv.project.id, opts.at).catch((e: unknown) => e as Error);
       held(ours);
       if (gone(got)) {
-        // Its Staging project is gone on Orgo: made again.
-        p = await makeStaging(wsId, name, prod, await projectsNow(prod.computerId, ours), ours);
-        got = await deploys.deploy(prod.computerId, p.id, opts.at).catch((e: unknown) => e as Error);
+        // Its Preview project is gone on Orgo: made again, on its link's port.
+        pv = await ensurePreview(wsId, name, prod, ours);
+        got = await deploys.deploy(prod.computerId, pv.project.id, opts.at).catch((e: unknown) => e as Error);
         held(ours);
       }
       if (got instanceof Error) throw refused(got);
       if (!got.enabled) throw new HostedAppError(got.why, 403);
-      deployed.push({ site, deployment: got.value, url: p.url ?? null });
+      deployed.push({ site, deployment: got.value, url: pv.url.url });
     } catch (e) {
       if (deployed.length && ours()) keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
       throw partly(e, todo.length, deployed.map((d) => d.site), site, " to its preview");
@@ -1020,15 +1508,19 @@ async function sendStaging(
   if (!deployed.length) throw new HostedAppError(NO_SITE, 404);
   keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
   const app = await appNow(wsId, name, ours);
-  const urlOf = (site: string) => (site === name ? app.staging?.url : app.sites?.find((x) => x.name === site)?.staging?.url) ?? null;
-  return { app, deployment: deployed[0].deployment, deployed: deployed.map((d) => ({ ...d, url: urlOf(d.site) ?? d.url })) };
+  return { app, deployment: deployed[0].deployment, deployed, ...(said.length ? { said: said.join(" ") } : {}) };
 }
 
 /**
- * A site's Staging project as orgo-web has it now (null: none yet), read for what's asked of it (logs, settings,
- * variables, a rollback), with Prod's project as the computer lists it (for its variables' names).
+ * A site's Preview project as orgo-web has it now (null: none yet), read for what's asked of it (logs, settings,
+ * variables, a rollback), with Published's project as the computer lists it (for its variables' names).
  */
-async function stagingOf(wsId: string, name: string, ours: () => boolean, site?: unknown): Promise<{ h: SiteHosting & { projectId: string }; p: OrgoDeployProject; prod: OrgoDeployProject | undefined } | null> {
+async function previewOf(
+  wsId: string,
+  name: string,
+  ours: () => boolean,
+  site?: unknown,
+): Promise<{ h: SiteHosting & { projectId: string }; p: OrgoDeployProject; prod: OrgoDeployProject | undefined } | null> {
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const h = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
@@ -1036,22 +1528,254 @@ async function stagingOf(wsId: string, name: string, ours: () => boolean, site?:
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
+  const repo = ingotRepo(wsId, name);
   const list = await projectsNow(h.computerId, ours);
-  const found = stagingIn(list, hostingOf(wsId, name) ?? h, name, h.site, ingotRepo(wsId, name));
-  if (!found) return null;
-  const p = await deploys.project(h.computerId, found.id).catch((e: unknown) => Promise.reject(refused(e)));
+  const { urls } = await urlsNow(h.computerId, ours).catch(() => ({ urls: [] as OrgoPublicUrl[] }));
+  const all = hostingOf(wsId, name) ?? h;
+  const found = previewIn(list, urls, repo, h.site, knownLabel(h, all, name, repo, list, urls));
+  if (!found?.project) return null;
+  const p = await deploys.project(h.computerId, found.project.id).catch((e: unknown) => Promise.reject(refused(e)));
   held(ours);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
-  return { h: { ...h, projectId: found.id, ...(p.value.url ? { url: p.value.url } : {}) }, p: p.value, prod: list.find((x) => x.id === h.projectId) };
+  return { h: { ...h, projectId: found.project.id, ...(found.url ? { url: found.url.url } : {}) }, p: p.value, prod: prodIn(list, all, name, h.site, repo) };
+}
+
+/* ---------------- Its Preview's password ---------------- */
+
+/*
+ * Each site's Preview asks for a password (orgo-web's gate on its public URL: a browser without its cookie gets a
+ * password page first), unless the owner turned it off for that site (AppHosting.passwordOff). Bops sets one as soon
+ * as the link exists or is found without one, on any Mac (passwordNow: ensurePreview, and each read of the Apps page),
+ * and a new one once each Preview deploy goes live (its live deploy is another than the one the last was set with:
+ * AppHosting.passwordSet); a deploy that fails or stops leaves it as it was, and Published never has one. Orgo keeps
+ * the password: Bops keeps only the owner's choice and when it set one. A link Orgo can't tell about (`protected`
+ * absent: an orgo-web from before passwords) is left alone, and one Orgo can't put a password on yet (503
+ * PASSWORD_UNAVAILABLE, before its migration) or that the user's key can't change (403) is left alone for an hour,
+ * so nothing is tried again and again. The password is the owner's to see beside the link, in the window alone
+ * (PreviewPassword), and members' the owner gave Your Apps at Write (lib/server/apps-for-members.ts): never in a
+ * bot's chat or prompt.
+ */
+
+/** A Preview password's characters: letters and digits, without the ones that look alike (0, O, o, 1, l, I). */
+const PASSWORD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // gitleaks:allow (an alphabet, not a key)
+export const PASSWORD_LENGTH = 7;
+
+/** A new Preview password: PASSWORD_LENGTH random characters of PASSWORD_ABC, case sensitive, at least one a letter and one a digit. */
+export function newPassword(rand: (n: number) => number = (n) => randomInt(n)): string {
+  const ok = (p: string) => /[A-Za-z]/.test(p) && /[2-9]/.test(p);
+  let p = "";
+  for (let tries = 0; tries < 100 && !ok(p); tries++) p = Array.from({ length: PASSWORD_LENGTH }, () => PASSWORD_ABC[rand(PASSWORD_ABC.length)]).join("");
+  // (A random source that never gives both: a letter and a digit put first.)
+  return ok(p) ? p : `a2${p.slice(2)}`;
+}
+
+const settingPassword = (g.bopsPasswordsSetting ??= new Map<string, Promise<boolean | undefined>>());
+const passwordRefused = (g.bopsPasswordRefused ??= new Map<string, number>());
+/**
+ * How long after Orgo turned a password down it isn't asked again (each read of the Apps page would ask): a few
+ * minutes, or an hour when it can't take one yet (PASSWORD_UNAVAILABLE) or the key can't change it (403).
+ */
+const PASSWORD_AGAIN_MS = 5 * 60_000;
+const PASSWORD_LATER_MS = 60 * 60_000;
+/** Orgo can't put a password on a link yet: before its migration (503 PASSWORD_UNAVAILABLE), or the user's key can't (403). */
+const passwordUnavailable = (e: unknown) => e instanceof OrgoError && ((e.status === 503 && e.code === "PASSWORD_UNAVAILABLE") || e.status === 403);
+
+/** A site's record as kept now (undefined: the app or the site is gone, or it's lost its computer). */
+const siteNow = (wsId: string, name: string, site: string, computerId: string) => {
+  const h = hostingOf(wsId, name);
+  return h && !h.lost && h.computerId === computerId ? sitesOf(h, name).find((x) => x.site === site) : undefined;
+};
+
+/** One change to a Preview link's password at a time (by its computer and URL): `fn` waits for any under way, then what reads ask meanwhile waits for it. */
+async function onePassword<T extends boolean | undefined>(key: string, fn: () => Promise<T>, meanwhile: boolean | undefined): Promise<T> {
+  for (let was = settingPassword.get(key); was; was = settingPassword.get(key)) await was.catch(() => undefined);
+  const run = fn();
+  const shown = run.catch(() => meanwhile);
+  settingPassword.set(key, shown);
+  try {
+    return await run;
+  } finally {
+    if (settingPassword.get(key) === shown) settingPassword.delete(key);
+  }
 }
 
 /**
- * POST /api/hosted-apps/[name] "promote": Prod gets what Staging serves, each site its own Staging's changeset
- * (every site with a Staging that serves one, or the one `site` names), built again on its Prod project with
- * Prod's variables and settings: deployApp to Prod with that changeset, one site after another. `at` (with a
- * site): the changeset the window saw on Staging; Staging serving another one since is refused, nothing sent.
+ * A site's Preview password as it should be now, from its link as Orgo listed it (`url`) and the deploy live on its
+ * Preview (`live`: its project's current one, null: none): one set when Orgo says the link has none, a new one when
+ * another deploy went live since the last was set (passwordSet), the record kept. Nothing when the owner turned it
+ * off, Orgo can't tell, Orgo turned its link off, or Orgo turned a set down lately (PASSWORD_AGAIN_MS, or
+ * PASSWORD_LATER_MS). Answers whether the link asks for one now (undefined: Orgo can't tell). Best effort: it never
+ * throws.
  */
-export async function promoteApp(wsId: string, name: string, opts: { site?: unknown; at?: unknown; ours?: () => boolean } = {}): Promise<{ app: HostedApp; promoted: { site: string; at: string }[]; said?: string }> {
+async function passwordNow(wsId: string, name: string, site: string, computerId: string, url: OrgoPublicUrl, live: string | null, ours: () => boolean): Promise<boolean | undefined> {
+  const key = `${computerId}/${url.id}`;
+  const was = settingPassword.get(key);
+  if (was) return was;
+  if (typeof url.protected !== "boolean") return undefined;
+  const s = siteNow(wsId, name, site, computerId);
+  if (!s || s.passwordOff || url.disabled || !ours()) return url.protected;
+  if (url.protected) {
+    // (One set before Bops kept when: taken as set for what's live now.)
+    if (!s.passwordSet) keepSite(wsId, name, site, (x) => ({ ...x, passwordSet: { at: Date.now(), live } }));
+    if (!s.passwordSet || !live || s.passwordSet.live === live) return true;
+  }
+  const until = passwordRefused.get(key);
+  if (until && Date.now() < until) return url.protected;
+  return onePassword(
+    key,
+    async () => {
+      // (Read again: the owner may have turned it off meanwhile.)
+      if (siteNow(wsId, name, site, computerId)?.passwordOff) return url.protected;
+      const r = await publicUrls.setPassword(computerId, url.id, newPassword()).catch((e: unknown) => e as Error);
+      if (!ours()) return url.protected;
+      if (r instanceof Error || !r.enabled || r.value.protected === false) {
+        passwordRefused.set(key, Date.now() + (passwordUnavailable(r) ? PASSWORD_LATER_MS : PASSWORD_AGAIN_MS));
+        return url.protected;
+      }
+      passwordRefused.delete(key);
+      keepSite(wsId, name, site, (x) => ({ ...x, passwordSet: { at: Date.now(), live } }));
+      return true;
+    },
+    url.protected,
+  );
+}
+
+/** When Bops last set a site's Preview password (PreviewSite.passwordAt), as kept now. */
+const passwordAtOf = (wsId: string, name: string, site: string) => {
+  const h = hostingOf(wsId, name);
+  return h ? sitesOf(h, name).find((x) => x.site === site)?.passwordSet?.at : undefined;
+};
+
+/** A site's Preview link as Orgo lists it now, with the deploy live on it (null: none); null when it has no link yet. */
+async function previewLinkOf(wsId: string, name: string, ours: () => boolean, site?: unknown): Promise<{ h: SiteHosting; url: OrgoPublicUrl; live: string | null } | null> {
+  if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
+  const h = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
+  if (!h) throw new HostedAppError(NO_APP, 404);
+  if (h.lost) return null;
+  const why = await closedHere();
+  held(ours);
+  if (why) throw new HostedAppError(why, 403);
+  const repo = ingotRepo(wsId, name);
+  const list = await projectsNow(h.computerId, ours);
+  const { urls } = await urlsNow(h.computerId, ours);
+  const found = previewIn(list, urls, repo, h.site, knownLabel(h, hostingOf(wsId, name) ?? h, name, repo, list, urls));
+  if (!found?.url) return null;
+  // (Its live deploy as its project says it on its own, as the Apps page reads it.)
+  const p = found.project ? await within(deploys.project(h.computerId, found.project.id).then((r) => (r.enabled ? r.value : null), () => null), READ_MS) : null;
+  held(ours);
+  return { h, url: found.url, live: (p ?? found.project)?.current?.id ?? null };
+}
+
+/**
+ * A Preview's password as the window gets it: read from Orgo when its link asks for one (`on`), with the cookie that
+ * opens it, and when Bops set it (`at`). A key that can't read it (403: one without write on computers) gets none,
+ * with why, never an error to ask again about; Orgo may keep only the cookie's check of an older one (password null).
+ */
+async function passwordAnswer(computerId: string, url: OrgoPublicUrl, on: boolean | undefined, at: number | undefined, ours: () => boolean): Promise<PreviewPassword> {
+  const when = at ? { at } : {};
+  if (!on) return { url: url.url, on: on ?? null, password: null, cookie: null, ...when };
+  const r = await publicUrls.password(computerId, url.id).catch((e: unknown) => (e instanceof OrgoError && e.status === 403 ? null : Promise.reject(refused(e))));
+  held(ours);
+  if (!r) return { url: url.url, on: true, password: null, cookie: null, why: PASSWORD_WORDS.key, ...when };
+  if (!r.enabled) throw new HostedAppError(r.why, 403);
+  const c = r.value.cookie;
+  return {
+    url: url.url,
+    on: true,
+    password: typeof r.value.password === "string" ? r.value.password : null,
+    cookie: c?.name === PASS_COOKIE && typeof c.value === "string" && c.value ? { name: PASS_COOKIE, value: c.value } : null,
+    ...when,
+  };
+}
+
+/**
+ * GET /api/hosted-apps/[name]/password: a site's Preview password and the cookie that opens its link (PreviewPassword),
+ * as it should be first (passwordNow: set when it has none, a new one once another deploy went live). Nothing for a
+ * site with no link yet.
+ */
+export async function previewPassword(wsId: string, name: string, site?: unknown): Promise<PreviewPassword> {
+  const ours = sameState();
+  const got = await previewLinkOf(wsId, name, ours, site);
+  if (!got) return { url: null, on: null, password: null, cookie: null };
+  const on = await passwordNow(wsId, name, got.h.site, got.h.computerId, got.url, got.live, ours);
+  held(ours);
+  return passwordAnswer(got.h.computerId, got.url, on, passwordAtOf(wsId, name, got.h.site), ours);
+}
+
+const PASSWORD_WORDS = {
+  none: "It has no preview link yet. Deploy a preview first.",
+  cant: "Orgo can't put a password on its preview yet.",
+  off: "Its password is off. Turn it on first.",
+  key: "Your Orgo key can't see or change it. Sign in with Orgo again to use one that can.",
+};
+
+/**
+ * POST /api/hosted-apps/[name]/password: a site's Preview password made new ("new": the link stays, a browser with
+ * the old one asks again), or turned on (a new one) or off for that site, the owner's choice kept on its record.
+ * Answers PreviewPassword. Refused while the app is being removed, for a site with no link yet, and where Orgo can't
+ * put one on it.
+ */
+export async function changePreviewPassword(wsId: string, name: string, action: unknown, site?: unknown): Promise<PreviewPassword> {
+  const ours = sameState();
+  if (action !== "new" && action !== "on" && action !== "off") throw new HostedAppError("What should happen to its password?", 400);
+  notRemoving(wsId, name);
+  const got = await previewLinkOf(wsId, name, ours, site);
+  if (!got) throw new HostedAppError(PASSWORD_WORDS.none, 409);
+  const { h, url, live } = got;
+  if (typeof url.protected !== "boolean") throw new HostedAppError(PASSWORD_WORDS.cant, 409);
+  if (action === "new" && h.passwordOff) throw new HostedAppError(PASSWORD_WORDS.off, 409);
+  const key = `${h.computerId}/${url.id}`;
+  const on = await onePassword(
+    key,
+    async () => {
+      const r = await publicUrls
+        .setPassword(h.computerId, url.id, action === "off" ? null : newPassword())
+        .catch((e: unknown) =>
+          Promise.reject(
+            e instanceof OrgoError && e.status === 503 && e.code === "PASSWORD_UNAVAILABLE"
+              ? new HostedAppError(PASSWORD_WORDS.cant, 409)
+              : e instanceof OrgoError && e.status === 403
+                ? new HostedAppError(PASSWORD_WORDS.key, 403)
+                : refused(e),
+          ),
+        );
+      held(ours);
+      if (!r.enabled) throw new HostedAppError(r.why, 403);
+      passwordRefused.delete(key);
+      keepSite(wsId, name, h.site, ({ passwordOff: _off, passwordSet: _set, ...x }) => {
+        void _off;
+        void _set;
+        return action === "off" ? { ...x, passwordOff: true } : { ...x, passwordSet: { at: Date.now(), live } };
+      });
+      return action !== "off";
+    },
+    url.protected,
+  );
+  return passwordAnswer(h.computerId, url, on, passwordAtOf(wsId, name, h.site), ours);
+}
+
+/** Why Publish is refused for a site with no domain that never served (Published lives on its domains only). */
+const NO_DOMAIN = "Connect a domain first. Published sites live only on their own domain.";
+
+/**
+ * Whether a site's Published can be published to: it has a domain on its port (pending is enough: its certificate
+ * comes once its DNS points at the edge), or it served something before (a legacy one, live with no domain).
+ */
+function domainReady(p: OrgoDeployProject | undefined, all: OrgoCustomDomain[]): boolean {
+  if (p && (servingOf(p) || (p.deployments ?? []).some((d) => d.state === "succeeded"))) return true;
+  const port = p?.port;
+  return typeof port === "number" && all.some((d) => d.target_port === port && d.status !== "failed" && d.status !== "disabled");
+}
+
+/**
+ * POST /api/hosted-apps/[name] "promote" (Publish): Published gets what the Preview serves, each site its own
+ * Preview's changeset (every site with a Preview that serves one, or the one `site` names), built on its
+ * Published project with its own variables and settings, one site after another. A site with no domain that
+ * never served is refused (NO_DOMAIN). `at` (with a site): the changeset the window saw on the Preview; the
+ * Preview serving another one since is refused (PREVIEW_MOVED), nothing sent. Its sign in variables are set to
+ * its domain when it has none of them (never one the user set).
+ */
+export async function promoteApp(wsId: string, name: string, opts: { site?: unknown; at?: unknown; ours?: () => boolean } = {}): Promise<{ app: HostedApp; promoted: { site: string; at: string; domain: string | null }[]; said?: string }> {
   const ours = opts.ours ?? sameState();
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
@@ -1066,44 +1790,110 @@ export async function promoteApp(wsId: string, name: string, opts: { site?: unkn
     held(ours);
     if (why) throw new HostedAppError(why, 403);
     const sites = opts.site !== undefined ? [siteIn(now, name, opts.site).site] : sitesOf(now, name).map((x) => x.site);
-    const views = await stagingsOf(wsId, name, now, (c) => projectsNow(c, ours).catch(() => null));
+    const read = await previewsOf(wsId, name, now, (c) => projectsNow(c, ours).catch(() => null), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours);
     held(ours);
-    if (!views) throw new HostedAppError("Couldn't read its preview just now. Try again in a minute.", 502);
-    const plan = sites.map((site) => ({ site, at: views.get(site)?.serving ?? null }));
+    if (!read) throw new HostedAppError("Couldn't read its preview just now. Try again in a minute.", 502);
+    const plan = sites.map((site) => ({ site, at: read.previews.get(site)?.serving ?? null }));
     const ready = plan.filter((x): x is { site: string; at: string } => !!x.at);
-    if (!ready.length) throw new HostedAppError(sites.length === 1 && sites[0] !== name ? `${sites[0]}'s preview isn't live yet, so there's nothing to publish.` : "The preview isn't live yet, so there's nothing to publish. Deploy a preview first.", 409);
-    if (opts.at !== undefined && opts.site !== undefined && ready[0].at !== opts.at) throw new HostedAppError("The preview changed since you looked. Look again.", 409, { code: "STAGING_MOVED" });
-    const promoted: { site: string; at: string }[] = [];
+    if (!ready.length) throw new HostedAppError(sites.length === 1 && sites[0] !== name ? `${sites[0]}'s preview isn't live yet, so there's nothing to publish.` : "The preview isn't live yet. Deploy a preview first.", 409, { code: "NO_PREVIEW" });
+    if (opts.at !== undefined && opts.site !== undefined && ready[0].at !== opts.at) throw new HostedAppError("The preview changed since you looked. Look again.", 409, { code: "PREVIEW_MOVED" });
+    // Each site's domain: one with none that never served isn't published (its domains are read once, for all).
+    const all = await domains.ofComputer(now.computerId).then((l) => l.domains ?? [], () => null);
+    held(ours);
+    const promoted: { site: string; at: string; domain: string | null }[] = [];
+    const noDomain: string[] = [];
     let app: HostedApp | undefined;
     for (const x of ready) {
       try {
+        const prod = await ensureProd(wsId, name, siteIn(hostingOf(wsId, name) ?? now, name, x.site), ours);
+        const p = (await projectsNow(prod.computerId, ours)).find((y) => y.id === prod.projectId);
+        if (all && !domainReady(p, all)) {
+          noDomain.push(x.site);
+          continue;
+        }
+        const domain = all && typeof p?.port === "number" ? firstDomain(all, p.port) : null;
+        // Sign in at its own domain, when nothing says where yet.
+        const named = domain ?? (all && typeof p?.port === "number" ? all.find((d) => d.target_port === p.port && d.status !== "failed" && d.status !== "disabled")?.domain : undefined);
+        if (p && named) await seedAuth(prod.computerId, p, named.startsWith("https://") ? named : `https://${named}`, ours);
         app = (await sendDeploys(wsId, name, { at: x.at, site: x.site }, ours)).app;
-        promoted.push(x);
+        promoted.push({ ...x, domain });
       } catch (e) {
         if (!promoted.length || (e instanceof HostedAppError && e.message === SWAPPED)) throw e;
         const words = e instanceof HostedAppError ? e.message : "Orgo didn't answer.";
         throw new HostedAppError(`Publishing ${promoted.map((p) => p.site).join(" and ")}, but not ${x.site}: ${words}`, e instanceof HostedAppError ? e.status : 502, { partial: true });
       }
     }
+    if (!promoted.length && noDomain.length) throw new HostedAppError(NO_DOMAIN, 409, { code: "NO_DOMAIN", sites: noDomain });
     const left = plan.filter((x) => !x.at).map((x) => x.site);
-    const said = left.length ? `${left.join(", ")} ${left.length === 1 ? "has" : "have"} no preview live, so ${left.length === 1 ? "it stays" : "they stay"} as published before.` : undefined;
+    const said = [
+      left.length ? `${left.join(", ")} ${left.length === 1 ? "has" : "have"} no preview live, so ${left.length === 1 ? "it stays" : "they stay"} as published before.` : "",
+      noDomain.length ? `${noDomain.join(", ")} ${noDomain.length === 1 ? "has" : "have"} no domain yet, so ${noDomain.length === 1 ? "it isn't" : "they aren't"} published. Connect one first.` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
     return { app: app ?? (await appNow(wsId, name, ours)), promoted, ...(said ? { said } : {}) };
   });
 }
 
+/** A site's Published address: https://<the first active domain on its port>, or null. */
+const firstDomain = (all: OrgoCustomDomain[], port: unknown): string | null => {
+  const d = typeof port === "number" ? all.find((x) => x.target_port === port && x.status === "active") : undefined;
+  return d ? `https://${d.domain}` : null;
+};
+
 /**
- * A site's Staging projects on a computer the app left (its bot moved to another one that stays up): kept with
- * its Prod ones left there (AppHosting.behind, which Remove app takes down, and which a Bops from before
- * Staging knows too), read after the move, never holding it up. Nothing when Orgo can't say.
+ * POST /api/hosted-apps/[name] "reapply" (Apply variables, the owner's, in the window only): the changeset a
+ * site's Published serves now, built again on it, so its variables as they are now apply (Publish takes only the
+ * Preview's changeset, which it may serve already). Refused when it serves nothing.
  */
-async function stagingLeft(wsId: string, name: string, was: AppHosting) {
+export async function reapplyApp(wsId: string, name: string, opts: { site?: unknown } = {}): Promise<{ app: HostedApp }> {
+  const ours = sameState();
+  const got = await projectOf(wsId, name, ours, opts.site);
+  const at = got ? servingOf(got.p) : null;
+  if (!got || !at) throw new HostedAppError("Nothing is published yet.", 409, { code: "NOT_PUBLISHED" });
+  return withApp(wsId, name, "deploy", async () => ({ app: (await sendDeploys(wsId, name, { at, site: got.h.site }, ours)).app }));
+}
+
+/**
+ * POST /api/hosted-apps/[name] "preview" { site?, label? } (the owner's, in the window only): a site's Preview
+ * made now, its link before any deploy (after its Published project), with `label` when the owner chose its name
+ * ahead (12 lowercase letters and digits, the first a letter: one they registered in Google sign in already).
+ * Once a site has its Preview, its name never changes: another name is refused. Answers the app, and the link.
+ */
+export async function makePreview(wsId: string, name: string, ask: { site?: unknown; label?: unknown } = {}): Promise<{ app: HostedApp; url: string; said?: string }> {
+  const ours = sameState();
+  if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
+  const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
+  if (!h) throw new HostedAppError(NO_APP, 404);
+  const given = ask.label === undefined || ask.label === null || ask.label === "" ? undefined : labelGiven(ask.label);
+  if (given === null) throw new HostedAppError("A preview's name is 12 lowercase letters and digits, starting with a letter.", 400, { field: "label" });
+  siteIn(h, name, ask.site);
+  return withApp(wsId, name, "deploy", async () => {
+    const kept = await homeFor(wsId, name, {}, ours);
+    const now = stillOn(wsId, name, kept);
+    const prod = await ensureProd(wsId, name, siteIn(now, name, ask.site), ours);
+    const pv = await ensurePreview(wsId, name, prod, ours, given ? { given } : {});
+    keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
+    return { app: await appNow(wsId, name, ours), url: pv.url.url, ...(pv.said ? { said: pv.said } : {}) };
+  });
+}
+
+/**
+ * A site's Preview projects on a computer the app left (its bot moved to another one that stays up): kept with
+ * its Published ones left there (AppHosting.behind, which Remove app takes down, and which a Bops 0.0.32 knows
+ * too), read after the move, never holding it up. Their links move with the next Preview deploy (ensurePreview).
+ */
+async function previewLeft(wsId: string, name: string, was: AppHosting) {
   if (was.lost) return;
   const repo = repoOrNull(wsId, name);
   if (!repo) return;
-  const list = await deploys.projects(was.computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : null), () => null);
+  const [list, urls] = await Promise.all([
+    deploys.projects(was.computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : null), () => null),
+    publicUrls.list(was.computerId).then((r) => (r.enabled && r.value.enabled ? (r.value.public_urls ?? []) : []), () => []),
+  ]);
   if (!list) return;
   const left = sitesOf(was, name).flatMap((s) => {
-    const p = stagingIn(list, was, name, s.site, repo);
+    const p = previewIn(list, urls, repo, s.site, knownLabel(s, was, name, repo, list, urls))?.project;
     return p ? [{ site: s.site, computerId: was.computerId, projectId: p.id }] : [];
   });
   if (!left.length) return;
@@ -1111,6 +1901,44 @@ async function stagingLeft(wsId: string, name: string, was: AppHosting) {
     if (!x || x.computerId === was.computerId) return x;
     const behind = [...(x.behind ?? []), ...left.filter((l) => !x.behind?.some((b) => b.projectId === l.projectId))];
     return { ...x, behind };
+  });
+}
+
+/**
+ * POST /api/hosted-apps/[name] "removeLeftOver" { project } (the owner's, in the window only, asked once more
+ * there): one of the app's left overs taken off its computer (a project, its own URL with it; or a Preview link,
+ * "url:<id>"). Only one the app's lists say is a left over now, never one a site has.
+ */
+export async function removeLeftOver(wsId: string, name: string, project: unknown): Promise<{ app: HostedApp }> {
+  const ours = sameState();
+  if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
+  const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
+  if (!h) throw new HostedAppError(NO_APP, 404);
+  if (typeof project !== "string" || !/^(?:url:)?[\w-]{1,80}$/.test(project)) throw new HostedAppError("That isn't one of its left overs.", 404);
+  return withApp(wsId, name, "removeSite", async () => {
+    const now = hostingOf(wsId, name);
+    if (!now || now.lost) throw new HostedAppError(NO_APP, 404);
+    const why = await closedHere();
+    held(ours);
+    if (why) throw new HostedAppError(why, 403);
+    const repo = ingotRepo(wsId, name);
+    const list = await projectsNow(now.computerId, ours);
+    const { urls } = await urlsNow(now.computerId, ours);
+    const x = leftOversOf(now, name, repo, list, urls, placesOf(now, name, repo, list, urls)).find((l) => l.id === project);
+    if (!x) throw new HostedAppError("That isn't one of its left overs.", 404);
+    if (x.id.startsWith("url:")) {
+      const r = await publicUrls.remove(now.computerId, x.id.slice(4)).catch((e: unknown) => e as Error);
+      held(ours);
+      if (r instanceof Error && !(r instanceof OrgoError && r.status === 404)) throw refused(r);
+    } else {
+      await takeDown(wsId, { botId: now.botId, computerId: now.computerId, projectId: x.id, site: name }, ours);
+      // (A link Bops made for it, which its project doesn't own, goes with it.)
+      const u = urls.find((y) => y.label === x.name);
+      if (u) await publicUrls.remove(now.computerId, u.id).catch(() => null);
+    }
+    held(ours);
+    keepHosting(wsId, name, (y) => y && { ...y, queuedAt: Date.now() });
+    return { app: await appNow(wsId, name, ours) };
   });
 }
 
@@ -1131,18 +1959,9 @@ export async function appLog(wsId: string, name: string, after: string | null, s
   const h = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
   if (!h) throw new HostedAppError("There's no app by that name in this workspace.", 404);
   const none = { state: null, log: "", next: null, more: false };
-  let project: OrgoDeployProject;
-  if (env === "staging") {
-    const got = await stagingOf(wsId, name, ours, site);
-    if (!got) return none;
-    project = got.p;
-  } else {
-    if (!h.projectId) return none;
-    const p = await deploys.project(h.computerId, h.projectId).catch((e: unknown) => Promise.reject(refused(e)));
-    held(ours);
-    if (!p.enabled) throw new HostedAppError(p.why, 403);
-    project = p.value;
-  }
+  const got = appEnvOf(env) === "preview" ? await previewOf(wsId, name, ours, site) : await projectOf(wsId, name, ours, site);
+  if (!got) return none;
+  const project = got.p;
   const d = newest(project);
   if (!d) return none;
   const at = cursorOf(after);
@@ -1165,14 +1984,20 @@ async function projectOf(wsId: string, name: string, ours: () => boolean, site?:
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const h = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
-  if (!h.projectId) return null;
+  if (h.lost) return null;
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
-  const p = await deploys.project(h.computerId, h.projectId).catch((e: unknown) => Promise.reject(refused(e)));
+  // Published as its computer's list says it (prodIn: never a Preview its record may name); unread, its record's.
+  const repo = repoOrNull(wsId, name);
+  const list = repo ? await deploys.projects(h.computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : null), () => null) : null;
+  held(ours);
+  const id = list && repo ? prodIn(list, hostingOf(wsId, name) ?? h, name, h.site, repo)?.id : h.projectId;
+  if (!id) return null;
+  const p = await deploys.project(h.computerId, id).catch((e: unknown) => Promise.reject(refused(e)));
   held(ours);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
-  return { h: { ...h, projectId: h.projectId }, p: p.value };
+  return { h: { ...h, projectId: id }, p: p.value };
 }
 
 /** How many of its deploys the page lists. */
@@ -1189,8 +2014,9 @@ const deployOf = (d: OrgoDeployment): AppDeploy => ({
   canRollback: !!d.can_rollback && d.state === "succeeded",
 });
 
+/** A project's settings as the window shows them; `url`: its address (a Preview's link; Published's first active domain, or null). */
 const settingsOf = (p: OrgoDeployProject, url: string | null): AppSettingsAnswer => ({
-  url: p.url ?? url,
+  url,
   settings: {
     port: typeof p.port === "number" ? p.port : null,
     install: p.install_cmd ?? null,
@@ -1212,17 +2038,20 @@ const settingsOf = (p: OrgoDeployProject, url: string | null): AppSettingsAnswer
  */
 export async function appSettings(wsId: string, name: string, site?: unknown, env?: unknown): Promise<AppSettingsAnswer> {
   const ours = sameState();
-  if (env === "staging") {
-    const got = await stagingOf(wsId, name, ours, site);
+  if (appEnvOf(env) === "preview") {
+    const got = await previewOf(wsId, name, ours, site);
     if (got) return { ...settingsOf(got.p, got.h.url ?? null), prodEnv: envNames(got.prod) };
-    // No Staging yet: Prod's variables' names, to say what Staging won't have.
+    // No Preview yet: Published's variables' names, to say what the Preview won't have.
     const prod = await projectOf(wsId, name, ours, site).catch(() => null);
     return { url: null, settings: null, env: [], deploys: [], prodEnv: envNames(prod?.p) };
   }
   const got = await projectOf(wsId, name, ours, site);
-  if (!got) return { url: hostingAt(wsId, name, site)?.url ?? null, settings: null, env: [], deploys: [] };
-  return settingsOf(got.p, got.h.url ?? null);
+  if (!got) return { url: null, settings: null, env: [], deploys: [] };
+  return settingsOf(got.p, await publishedAt(got.h.computerId, got.p.port));
 }
+
+/** Published's address on its computer: https://<its first active domain on `port`>, or null (none, or Orgo didn't say). */
+const publishedAt = (computerId: string, port: unknown) => domains.ofComputer(computerId).then((l) => firstDomain(l.domains ?? [], port), () => null);
 
 /** A project's variables' names, as Orgo answers them (never their values). */
 const envNames = (p: OrgoDeployProject | undefined | null) => [...new Set((p?.env_keys ?? []).filter((k) => typeof k === "string"))].sort();
@@ -1289,7 +2118,7 @@ export async function changeSettings(
   if (c.health !== undefined) patch.health_path = healthOf(c.health);
   if (!Object.keys(patch).length) throw new HostedAppError("There's nothing to change.", 400);
   const ours = sameState();
-  if (env === "staging") return stagingSettings(wsId, name, site, patch, ours);
+  if (appEnvOf(env) === "preview") return previewSettings(wsId, name, site, patch, ours);
   const got = await projectOf(wsId, name, ours, site);
   if (!got) return withApp(wsId, name, "first", () => firstSettings(wsId, name, site, patch, ours));
   const { h, p } = got;
@@ -1318,7 +2147,7 @@ export async function changeSettings(
     if (!list) said = `Its port is ${now} now. Couldn't read its domains to move them too, so any on port ${was} still point there.`;
     else if (left.length) said = `Its port is ${now} now, but ${left.join(", ")} still ${left.length === 1 ? "points" : "point"} at port ${was}. Remove ${left.length === 1 ? "it" : "them"} and add ${left.length === 1 ? "it" : "them"} again.`;
   }
-  return { ...settingsOf(r.value, h.url ?? null), ...(said ? { said } : {}) };
+  return { ...settingsOf(r.value, await publishedAt(h.computerId, r.value.port)), ...(said ? { said } : {}) };
 }
 
 /**
@@ -1334,22 +2163,20 @@ async function firstSettings(wsId: string, name: string, site: unknown, patch: P
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
-  const made = h.projectId ? h : await makeProject(wsId, name, h, ours);
-  // The window reads the app again: it has a deploy project now.
-  if (!h.projectId) keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
-  const r = await deploys.change(made.computerId, made.projectId!, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
+  const made = await ensureProd(wsId, name, h, ours);
+  const r = await deploys.change(made.computerId, made.projectId, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
-  return settingsOf(r.value, made.url ?? null);
+  return settingsOf(r.value, null);
 }
 
 /**
- * Settings changed on a site's Staging project (its own: Prod's stay as they are; it has no domains to move),
- * made first when it has none (after Prod's), with nothing else under way on the app.
+ * Settings changed on a site's Preview project (its own: Published's stay as they are; it has no domains to move),
+ * made first when it has none (after Published's), with nothing else under way on the app.
  */
-async function stagingSettings(wsId: string, name: string, site: unknown, patch: Parameters<typeof deploys.change>[2], ours: () => boolean): Promise<AppSettingsAnswer> {
-  const got = await stagingOf(wsId, name, ours, site);
-  const project = got ? { computerId: got.h.computerId, id: got.p.id, url: got.h.url ?? null } : await withApp(wsId, name, "first", () => firstStaging(wsId, name, site, ours));
+async function previewSettings(wsId: string, name: string, site: unknown, patch: Parameters<typeof deploys.change>[2], ours: () => boolean): Promise<AppSettingsAnswer> {
+  const got = await previewOf(wsId, name, ours, site);
+  const project = got ? { computerId: got.h.computerId, id: got.p.id, url: got.h.url ?? null } : await withApp(wsId, name, "first", () => firstPreview(wsId, name, site, ours));
   const r = await deploys.change(project.computerId, project.id, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
@@ -1357,23 +2184,21 @@ async function stagingSettings(wsId: string, name: string, site: unknown, patch:
 }
 
 /**
- * A site's Staging project made before its first deploy to Staging (its settings or variables saved first, with
- * nothing else under way on the app: withApp), after Prod's (prodFirst); one made meanwhile is the one.
+ * A site's Preview made before its first deploy (its settings or variables saved first, with nothing else under
+ * way on the app: withApp), after Published's (ensureProd); one made meanwhile is the one. `env`: the user's
+ * variables to make it with (on top of the sign in seeds).
  */
-async function firstStaging(wsId: string, name: string, site: unknown, ours: () => boolean, env?: Record<string, string>): Promise<{ computerId: string; id: string; url: string | null; made: boolean }> {
+async function firstPreview(wsId: string, name: string, site: unknown, ours: () => boolean, env?: Record<string, string>): Promise<{ computerId: string; id: string; url: string | null; made: boolean }> {
   const h = hostingAt(wsId, name, site);
   if (!h) throw new HostedAppError(NO_APP, 404);
   if (h.lost) throw new HostedAppError(LOST, 409);
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
-  const prod = await prodFirst(wsId, name, h, ours);
-  const list = await projectsNow(prod.computerId, ours);
-  const there = stagingIn(list, hostingOf(wsId, name) ?? h, name, prod.site, ingotRepo(wsId, name));
-  if (there) return { computerId: prod.computerId, id: there.id, url: there.url ?? null, made: false };
-  const p = await makeStaging(wsId, name, prod, list, ours, env);
-  keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
-  return { computerId: prod.computerId, id: p.id, url: p.url ?? null, made: true };
+  const prod = await ensureProd(wsId, name, h, ours);
+  const pv = await ensurePreview(wsId, name, prod, ours, env ? { env } : {});
+  if (pv.made) keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
+  return { computerId: prod.computerId, id: pv.project.id, url: pv.url.url, made: pv.made };
 }
 
 /** How many variables a project can have (orgo-web MAX_ENV_VARS), and how long a value can be. */
@@ -1403,12 +2228,12 @@ export async function changeEnv(wsId: string, name: string, env: unknown, site?:
   }
   const ours = sameState();
   if (where === "local") return { env: await changeLocalEnv(wsId, name, out, site, ours) };
-  if (where === "staging") {
-    const got = await stagingOf(wsId, name, ours, site);
+  if (appEnvOf(where) === "preview") {
+    const got = await previewOf(wsId, name, ours, site);
     if (got) return { env: await envOn(got.h.computerId, got.p.id, out, ours) };
     const set = Object.fromEntries(Object.entries(out).filter((e): e is [string, string] => e[1] !== null));
     if (!Object.keys(set).length) return { env: [] };
-    const made = await withApp(wsId, name, "first", () => firstStaging(wsId, name, site, ours, set));
+    const made = await withApp(wsId, name, "first", () => firstPreview(wsId, name, site, ours, set));
     // (One found there, made meanwhile, gets them on its own.)
     return { env: made.made ? Object.keys(set).sort() : await envOn(made.computerId, made.id, out, ours) };
   }
@@ -1437,16 +2262,14 @@ async function firstEnv(wsId: string, name: string, site: unknown, out: Record<s
   const h = hostingAt(wsId, name, site);
   if (!h) throw new HostedAppError(NO_APP, 404);
   if (h.lost) throw new HostedAppError(LOST, 409);
-  if (h.projectId) return envOn(h.computerId, h.projectId, out, ours);
   const set = Object.fromEntries(Object.entries(out).filter((e): e is [string, string] => e[1] !== null));
   if (!Object.keys(set).length) return [];
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
-  const made = await makeProject(wsId, name, h, ours, set);
-  // The window reads the app again: it has a deploy project now.
-  keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
-  const p = await deploys.project(made.computerId, made.projectId!).catch(() => null);
+  // (Found there, made meanwhile: it gets them on its own. Else made with them.)
+  const made = await ensureProd(wsId, name, h, ours, set);
+  const p = await deploys.project(made.computerId, made.projectId).catch(() => null);
   held(ours);
   return p?.enabled ? [...new Set((p.value.env_keys ?? []).filter((x) => typeof x === "string"))].sort() : Object.keys(set).sort();
 }
@@ -1471,7 +2294,8 @@ function rollbackRefused(e: unknown) {
 export async function rollbackApp(wsId: string, name: string, deployment: unknown, site?: unknown, env?: unknown): Promise<{ app: HostedApp }> {
   if (typeof deployment !== "string" || !/^[\w-]{1,80}$/.test(deployment)) throw new HostedAppError("That isn't one of its deploys.", 400);
   const ours = sameState();
-  const got = env === "staging" ? await stagingOf(wsId, name, ours, site) : await projectOf(wsId, name, ours, site);
+  const preview = appEnvOf(env) === "preview";
+  const got = preview ? await previewOf(wsId, name, ours, site) : await projectOf(wsId, name, ours, site);
   if (!got) throw new HostedAppError("It hasn't been deployed yet.", 409);
   const d = (got.p.deployments ?? []).find((x) => x.id === deployment);
   if (!d) throw new HostedAppError("That isn't one of its recent deploys.", 404);
@@ -1481,8 +2305,8 @@ export async function rollbackApp(wsId: string, name: string, deployment: unknow
   const r = await deploys.rollback(got.h.computerId, deployment).catch((e: unknown) => Promise.reject(rollbackRefused(e)));
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
-  // (Staging's rollback: the app as Orgo has it now, the rollback queued there; Prod's, as a deploy's answer.)
-  if (env === "staging") {
+  // (The Preview's rollback: the app as Orgo has it now, the rollback queued there; Published's, as a deploy's answer.)
+  if (preview) {
     keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
     return { app: await appNow(wsId, name, ours) };
   }
@@ -1550,14 +2374,28 @@ type Target = {
   zoneOf: Map<string, string>;
 };
 
-async function appTarget(wsId: string, name: string, ours: () => boolean, site?: unknown): Promise<Target | null> {
+/**
+ * (`make`: a domain is being connected, so a site with no Published project yet gets it made now, nothing
+ * deployed: ensureProd. A domain needs only its port. Without it, a site with none answers null.)
+ */
+async function appTarget(wsId: string, name: string, ours: () => boolean, site?: unknown, make = false): Promise<Target | null> {
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
-  const h = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
-  if (!h) throw new HostedAppError("There's no app by that name in this workspace.", 404);
-  if (!h.projectId) return null;
+  const at = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
+  if (!at) throw new HostedAppError("There's no app by that name in this workspace.", 404);
+  if (at.lost) {
+    if (make) throw new HostedAppError(LOST, 409);
+    return null;
+  }
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
+  const found = await projectOf(wsId, name, ours, site);
+  const h: SiteHosting & { projectId: string } | null = found
+    ? found.h
+    : make
+      ? await withApp(wsId, name, "first", () => ensureProd(wsId, name, hostingAt(wsId, name, site) ?? at, ours))
+      : null;
+  if (!h) return null;
   const [p, list] = await Promise.all([
     deploys.project(h.computerId, h.projectId).catch((e: unknown) => Promise.reject(refused(e))),
     domains.ofComputer(h.computerId).catch((e: unknown) => Promise.reject(dnsRefused(e))),
@@ -1597,7 +2435,8 @@ async function appTarget(wsId: string, name: string, ours: () => boolean, site?:
     zones.set(z.id.toLowerCase(), z.domain);
     zoneOf.set(d.id, z.id.toLowerCase());
   }
-  return { h, project, url: p.value.url ?? h.url ?? null, port, bought, all, mine, zones, zoneOf };
+  // (Its address: its first active domain, never the orgo.dev name its project may have.)
+  return { h, project, url: firstDomain(all, port), port, bought, all, mine, zones, zoneOf };
 }
 
 /**
@@ -1709,7 +2548,7 @@ export async function appDomains(wsId: string, name: string, site?: unknown, { c
 async function domainsNow(wsId: string, name: string, ours: () => boolean, site?: unknown, cloudflare = true): Promise<AppDomainsAnswer> {
   const t = await appTarget(wsId, name, ours, site);
   held(ours);
-  if (!t) return { url: hostingAt(wsId, name, site)?.url ?? null, domains: [], zones: [] };
+  if (!t) return { url: null, domains: [], zones: [] };
   const boughtList = t.bought ? Promise.resolve(t.bought) : t.zones.size && t.project ? domains.bought(t.project).catch(() => null) : Promise.resolve(null);
   // The user's Cloudflare zones, read alongside (only when one of its domains is outside Orgo, a few seconds at most).
   const [zones, list, bought, cfNow] = await Promise.all([
@@ -1818,7 +2657,17 @@ export async function removeRecord(wsId: string, name: string, zone: unknown, re
 
 /* ---------------- Adding a domain: one bought now, one the user owns, one the workspace bought ---------------- */
 
-const NO_ADDRESS = "Put it live once first: a domain needs its address to point at.";
+/**
+ * A site with no Published project yet, as Add a domain reads it: its computer's custom domains (for what's in use
+ * there), and none of its own. Null when its computer is gone.
+ */
+async function bareTarget(wsId: string, name: string, ours: () => boolean, site?: unknown): Promise<Target | null> {
+  const h = hostingAt(wsId, name, site);
+  if (!h || h.lost) return null;
+  const list = await domains.ofComputer(h.computerId).catch(() => null);
+  held(ours);
+  return { h, project: workspace(wsId)?.orgoProjectId, url: null, port: null, all: list?.domains ?? [], mine: [], zones: new Map(), zoneOf: new Map() };
+}
 const NOT_MINE = "That domain doesn't point at this app.";
 export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
@@ -1907,9 +2756,10 @@ export async function portsOn(wsId: string, computerId: string): Promise<Map<num
  */
 export async function domainOptions(wsId: string, name: string, site?: unknown): Promise<AppDomainOptions> {
   const ours = sameState();
-  const t = await appTarget(wsId, name, ours, site);
+  // (A site with no Published project yet: offered all the same, its domains on its computer read for what's in use; connecting one makes it.)
+  const t = (await appTarget(wsId, name, ours, site)) ?? (await bareTarget(wsId, name, ours, site));
   held(ours);
-  if (!t) return { buy: { open: false, why: NO_ADDRESS }, owned: [], contact: null };
+  if (!t) return { buy: { open: false, why: LOST }, owned: [], contact: null };
   // The user's own Cloudflare domains, read alongside (a few seconds at most), with every answer below.
   const cf = within(cloudflareOptions(wsId, name, t, ours), CF_OPTIONS_MS);
   const and = async (o: AppDomainOptions, bought: { domain: string }[] = []): Promise<AppDomainOptions> => {
@@ -2203,9 +3053,9 @@ export async function connectDomain(wsId: string, name: string, ask: { domain?: 
   if (zone === null) throw new HostedAppError("That isn't one of this workspace's domains.", 404);
   const sub = ask.subdomain === undefined || ask.subdomain === null ? "" : subdomainTyped(ask.subdomain);
   if (sub === null) throw new HostedAppError(BAD_NAME, 400, { field: "subdomain" });
-  const t = await appTarget(wsId, name, ours, site);
+  const t = await appTarget(wsId, name, ours, site, true);
   held(ours);
-  if (!t) throw new HostedAppError(NO_ADDRESS, 409);
+  if (!t) throw new HostedAppError(LOST, 409);
   if (typed) {
     const there = t.all.find((d) => d.domain.toLowerCase() === typed);
     if (there) throw new HostedAppError(t.mine.includes(there) ? "That domain points at this app already." : "That domain points at another app on this computer. Remove it there first.", 409, { field: "domain" });
@@ -2248,9 +3098,9 @@ export async function buyDomain(wsId: string, name: string, ask: { domain?: unkn
   if (typeof ask.price !== "number" || !Number.isInteger(ask.price) || ask.price < 0) throw new HostedAppError("Pick a domain from the search to see its price first.", 400);
   const registrant = registrantOf(ask.registrant);
   const ours = sameState();
-  const t = await appTarget(wsId, name, ours, site);
+  const t = await appTarget(wsId, name, ours, site, true);
   held(ours);
-  if (!t) throw new HostedAppError(NO_ADDRESS, 409);
+  if (!t) throw new HostedAppError(LOST, 409);
   if (t.port === null) throw new HostedAppError("Orgo doesn't say which port this app listens on, so no domain can point at it.", 409);
   const project = await computerProject(t, wsId, ours);
   if (!project) throw new HostedAppError(NO_PROJECT, 409);
@@ -2529,9 +3379,9 @@ export async function connectFromCloudflare(wsId: string, name: string, ask: { z
   if (!zoneId) throw new HostedAppError(CF_WORDS.notZone, 404);
   const sub = ask.subdomain === undefined || ask.subdomain === null ? "" : subdomainTyped(ask.subdomain);
   if (sub === null) throw new HostedAppError(BAD_NAME, 400, { field: "subdomain" });
-  const t = await appTarget(wsId, name, ours, site);
+  const t = await appTarget(wsId, name, ours, site, true);
   held(ours);
-  if (!t) throw new HostedAppError(NO_ADDRESS, 409);
+  if (!t) throw new HostedAppError(LOST, 409);
   const scope = await cfScopeOf(t, wsId, ours);
   held(ours);
   if (!scope) throw new HostedAppError(CF_WORDS.gone, 404, { code: "CF_KEY_GONE" });
@@ -2683,7 +3533,7 @@ export async function addSite(wsId: string, name: string, site: unknown): Promis
   const typed = typeof site === "string" ? site.trim() : "";
   if (!typed) throw new HostedAppError("Give it a name.", 400, { field: "site" });
   if (!isSiteName(typed)) throw new HostedAppError("Use lowercase letters, numbers and single hyphens, 32 at most, like shop-admin.", 400, { field: "site" });
-  if (STAGING_LIKE.test(typed)) throw new HostedAppError("A site's name can't end in staging: its preview is named that way. Pick another name.", 400, { field: "site" });
+  if (STAGING_LIKE.test(typed)) throw new HostedAppError("A site's name can't end in staging. Pick another name.", 400, { field: "site" });
   if (typed === name || h.sites?.some((x) => x.name === typed)) throw new HostedAppError(`${name} has a site called ${typed} already. Pick another name.`, 409, { field: "site" });
   if (1 + (h.sites?.length ?? 0) >= MAX_SITES) throw new HostedAppError(`An app can have ${MAX_SITES} sites at most, as many as one computer runs.`, 409, { field: "site" });
   notRemoving(wsId, name);
@@ -2739,21 +3589,37 @@ async function takeDown(wsId: string, s: SiteHosting, ours: () => boolean): Prom
 type TakenDown = { left: string[]; cf: CfLeft[] };
 
 /**
- * The Staging projects of some of an app's sites (`sites`) taken off its computer, as a site's Prod one is
- * (takeDown: its domains there too, then the project): found there by their names, so whichever Mac made them.
- * One whose computer is gone went with it.
+ * The Previews of some of an app's sites (`sites`) taken off its computer: each one's project (found by its
+ * label, so whichever Mac made it), then its link, there and on every computer it left (behind): once gone,
+ * anyone may take its name, so the user removes it from Google sign in too (the window says so). One whose
+ * computer is gone went with it.
  */
-async function stagingDown(wsId: string, name: string, h: AppHosting, sites: string[], ours: () => boolean): Promise<TakenDown> {
+async function previewDown(wsId: string, name: string, h: AppHosting, sites: string[], ours: () => boolean): Promise<TakenDown> {
   const out: TakenDown = { left: [], cf: [] };
   const repo = repoOrNull(wsId, name);
   if (h.lost || !repo) return out;
-  const list = await projectsNow(h.computerId, ours).catch((e: unknown) => (e instanceof HostedAppError && e.status === 404 ? [] : Promise.reject(e)));
+  // (Hosting not open to the account: it never had one.)
+  const list = await projectsNow(h.computerId, ours).catch((e: unknown) => (e instanceof HostedAppError && (e.status === 404 || e.status === 403) ? [] : Promise.reject(e)));
+  const { urls } = await urlsNow(h.computerId, ours).catch(() => ({ urls: [] as OrgoPublicUrl[] }));
+  const behind = [...new Set((h.behind ?? []).map((b) => b.computerId))].filter((c) => c !== h.computerId);
   for (const site of sites) {
-    const p = stagingIn(list, h, name, site, repo);
-    if (!p) continue;
-    const x = await takeDown(wsId, { botId: h.botId, computerId: h.computerId, projectId: p.id, site }, ours);
-    out.left.push(...x.left);
-    out.cf.push(...x.cf);
+    const s = siteIn(h, name, site);
+    const f = previewIn(list, urls, repo, site, knownLabel(s, h, name, repo, list, urls));
+    if (f?.project) {
+      const x = await takeDown(wsId, { botId: h.botId, computerId: h.computerId, projectId: f.project.id, site }, ours);
+      out.left.push(...x.left);
+      out.cf.push(...x.cf);
+    }
+    if (f?.url) {
+      await publicUrls.remove(h.computerId, f.url.id).catch(() => null);
+      held(ours);
+    }
+    for (const c of behind) {
+      const r = await publicUrls.list(c).catch(() => null);
+      held(ours);
+      const u = r?.enabled && r.value.enabled ? r.value.public_urls?.find((x) => isLabelOf("preview", x.label, repo, site) || (!!s.preview && x.label === s.preview)) : undefined;
+      if (u) await publicUrls.remove(c, u.id).catch(() => null);
+    }
   }
   return out;
 }
@@ -2790,8 +3656,8 @@ export async function removeSite(wsId: string, name: string, site: unknown): Pro
       held(ours);
       if (why) throw new HostedAppError(why, 403);
     }
-    // Its Staging first, then its Prod (with its domains).
-    const staged = await stagingDown(wsId, name, now, [s.site], ours);
+    // Its Preview first (its project, then its link), then its Published (with its domains).
+    const staged = await previewDown(wsId, name, now, [s.site], ours);
     const prod = await takeDown(wsId, s, ours);
     const left = keptDomains({ left: [...staged.left, ...prod.left], cf: [...staged.cf, ...prod.cf] });
     keepHosting(wsId, name, (x) => {
@@ -2812,9 +3678,10 @@ export async function removeSite(wsId: string, name: string, site: unknown): Pro
  * it there and pressing it again picks up where it stopped. Then its Ingot repo is deleted, all its history
  * with it, only when `repo` is true (the owner ticked it): else the code stays in Ingot. Then its record
  * goes (keepHosting: its computer's token too, once no app of the workspace is on it). Its projects left on
- * a computer it moved off (behind) are taken down the same. Not while a task is at work on it (the task
- * would make its record again), nor while a deploy of it is being sent or a first save makes a project
- * (withApp).
+ * a computer it moved off (behind) are taken down the same. Its Locals there are stopped and forgotten, and its
+ * working folder goes with its repo (forgetLocals), and its previews on this Mac close. Not while a task is at
+ * work on it (the task would make its record again), nor while a deploy of it is being sent or a first save
+ * makes a project (withApp).
  */
 export async function removeApp(wsId: string, name: string, ask: { repo?: unknown }): Promise<RemoveAppAnswer> {
   const ours = sameState();
@@ -2842,8 +3709,9 @@ async function takeAppDown(wsId: string, name: string, repo: boolean, ours: () =
   }
   const left: TakenDown = { left: [], cf: [] };
   const add = (x: TakenDown) => void (left.left.push(...x.left), left.cf.push(...x.cf));
-  // Every site's Staging first (found on its computer by name), then each site's Prod.
-  if (sites.length) add(await stagingDown(wsId, name, h, sitesOf(h, name).map((x) => x.site), ours));
+  // Every site's Preview first (found on its computer by its label), then each site's Published.
+  // (Not when Bops can't reach Orgo's hosting at all, signed out: then nothing of it can be read, and it never had a Preview from here.)
+  if (!h.lost && (sites.length || behind.length || repo || !(await closedHere()))) add(await previewDown(wsId, name, h, sitesOf(h, name).map((x) => x.site), ours));
   for (const s of sites) {
     add(await takeDown(wsId, s, ours));
     keepSite(wsId, name, s.site, () => ({}));
@@ -2867,7 +3735,12 @@ async function takeAppDown(wsId: string, name: string, repo: boolean, ours: () =
     held(ours);
     listed.delete(wsId);
   }
+  // Its Locals on its computer and on any it moved off: best effort, so one that can't be reached never keeps it.
+  for (const c of new Set([...(h.lost ? [] : [h.computerId]), ...behind.map((b) => b.computerId)])) await forgetLocals(wsId, name, c, repo, ours).catch(() => {});
+  held(ours);
+  localRead.delete(`${wsId}/${name}`);
   keepHosting(wsId, name, () => undefined);
+  closeForward(`${wsId}/${name}/`);
   const said = keptDomains(left);
   return { removed: name, repo, ...(said ? { said } : {}) };
 }
@@ -2877,19 +3750,32 @@ async function takeAppDown(wsId: string, name: string, repo: boolean, ours: () =
 /** Where bops-local goes on a computer (vm/bin/bops-local), and this Bops' copy of it. */
 export const LOCAL_BIN = "/usr/local/bin/bops-local";
 const localScript = () => readFileSync(process.env.BOPS_LOCAL_SCRIPT || join(/*turbopackIgnore: true*/ process.cwd(), "vm/bin/bops-local"));
-/** The copy of bops-local each computer was found or put with, by computer. */
-const localChecked = new Map<string, string>();
+/** A bops-local's version, from its BOPS_LOCAL_VERSION line (0: one from before it had one). */
+export const localVersion = (body: string) => Number(/^BOPS_LOCAL_VERSION=(\d{1,6})$/m.exec(body)?.[1] ?? 0);
+/**
+ * The computers whose bops-local this Bops found as new as its own, or put there, and when: looked at again after
+ * LOCAL_TOOL_MS, or as soon as an older one answers (localBash), since an older Mac (v0.0.32 to v0.0.34) puts its
+ * own back whenever the file there isn't the same as its own.
+ */
+const localChecked = new Map<string, { version: number; at: number }>();
+const LOCAL_TOOL_MS = 3 * 60_000;
 
-/** bops-local on the app's computer as this Bops has it: put there when it's missing or another copy (one quick command). */
+/**
+ * bops-local on the app's computer, at least as new as this Bops has it: put there when it's missing or older
+ * (one quick command), never over a newer one another Mac put there (a newer one still takes what this Bops
+ * asks of it), so Macs on different builds never swap it back and forth.
+ */
 async function localTool(computerId: string, ours: () => boolean) {
   const body = localScript();
-  const md5 = createHash("md5").update(body).digest("hex");
-  if (localChecked.get(computerId) === md5) return;
+  const version = localVersion(body.toString("utf8"));
+  const kept = localChecked.get(computerId);
+  if (kept?.version === version && Date.now() - kept.at < LOCAL_TOOL_MS) return;
   const r = await orgo.bash(
     computerId,
     [
       "# bops-local install",
-      `if [ "$(md5sum ${LOCAL_BIN} 2>/dev/null | cut -c1-32)" != ${md5} ]; then`,
+      `have=$(grep -m1 -oE '^BOPS_LOCAL_VERSION=[0-9]+' ${LOCAL_BIN} 2>/dev/null | cut -d= -f2)`,
+      `if [ ! -x ${LOCAL_BIN} ] || [ "\${have:-0}" -lt ${version} ]; then`,
       `  printf %s ${body.toString("base64")} | base64 -d > ${LOCAL_BIN}.new && chmod 755 ${LOCAL_BIN}.new && mv -f ${LOCAL_BIN}.new ${LOCAL_BIN} || { echo BOPS_LOCAL_FAIL=install; exit 1; }`,
       "fi",
       "echo BOPS_LOCAL_TOOL=ok",
@@ -2898,14 +3784,71 @@ async function localTool(computerId: string, ours: () => boolean) {
   );
   held(ours);
   if (!/BOPS_LOCAL_TOOL=ok/.test(r.output)) throw new HostedAppError("Couldn't set Local up on its computer. Try again in a minute.", 502);
-  localChecked.set(computerId, md5);
+  localChecked.set(computerId, { version, at: Date.now() });
 }
 
-/** bops-local's refusals, in words. */
+/**
+ * Whether bops-local's answer is an older one's, put back on its computer since this Bops last looked (localTool):
+ * it refuses what only a newer one takes (usage: mark, forget only; bad-port: auto; bad-screen: a screen; bad-name: a
+ * copy's <name>.<copy>, which Bops checks before it asks), or says a Local without the BOPS_LOCAL_MORE line a newer one
+ * says after every BOPS_LOCAL line.
+ */
+const olderLocal = (output: string) => /^BOPS_LOCAL_FAIL=(?:usage|bad-port|bad-screen|bad-name)$/m.test(output) || (/^BOPS_LOCAL \S/m.test(output) && !/^BOPS_LOCAL_MORE /m.test(output));
+
+/**
+ * bops-local commands (`script`) on the app's computer, run once localTool put it there: when an older one
+ * answers (olderLocal), this Bops' is put back and they're run once more, that answer the one that stands.
+ */
+async function localBash(computerId: string, script: string, timeout: number, ours: () => boolean) {
+  const r = await orgo.bash(computerId, script, timeout);
+  held(ours);
+  if (!olderLocal(r.output)) return r;
+  localChecked.delete(computerId);
+  await localTool(computerId, ours);
+  const again = await orgo.bash(computerId, script, timeout);
+  held(ours);
+  return again;
+}
+
+/**
+ * An app's Locals on a computer (`computerId`) as it's removed: every site's stopped and forgotten there, every bot's
+ * copy's too (bops-local forget: their files go, so their ports are free for the next app's), and its working folder
+ * and every copy of it too when its repo went (`folder`), each only when it's this workspace's repo's: one that isn't
+ * an Ingot working folder may hold work, and another workspace's app by the same name (the computer works for both)
+ * is left as it is, Locals and all. Never on a computer that sleeps: it isn't woken for this.
+ */
+async function forgetLocals(wsId: string, name: string, computerId: string, folder: boolean, ours: () => boolean) {
+  if (!isRepoName(name) || (await asleepNow(computerId).catch(() => true))) return;
+  held(ours);
+  const repo = repoOrNull(wsId, name);
+  const dir = appFolder(name);
+  const state = `${dir}/.ingot/state.json`;
+  const field = (k: string, file = state) => `$(sed -n 's/^ *"${k}": "\\([a-z0-9-]*\\)".*/\\1/p' ${file} 2> /dev/null | head -n 1)`;
+  await localTool(computerId, ours);
+  await localBash(
+    computerId,
+    [
+      `# bops-local forget ${name}`,
+      `there=""; [ ! -f ${state} ] || there="${field("workspace")}/${field("repo")}"`,
+      `if [ -n "\${there%%/*}" ] && [ "\${there%%/*}" != local ] && [ "$there" != '${repo ?? "-"}' ]; then echo BOPS_LOCAL_OTHER=1; exit 0; fi`,
+      `${LOCAL_BIN} forget ${name}`,
+      // (Its bots' copies, each its repo's: a folder of the same name that isn't, or a git clone beside it, stays.)
+      ...(folder && repo ? [`for d in ${dir}.*; do s="$d/.ingot/state.json"; if [ -f "$s" ] && [ "${field("workspace", '"$s"')}/${field("repo", '"$s"')}" = '${repo}' ]; then rm -rf "$d" && echo "BOPS_LOCAL_COPY=gone"; fi; done`] : []),
+      ...(folder && repo ? [`if [ "$there" = '${repo}' ]; then rm -rf ${dir} && echo BOPS_LOCAL_FOLDER=gone; fi`] : []),
+    ].join("\n"),
+    60,
+    ours,
+  );
+}
+
+/** bops-local's refusals, in words (port-held and port-taken say their port: localFailed). */
 const LOCAL_WORDS: Record<string, string> = {
   "no-folder": "Its working folder isn't on its computer yet. Ask its bot to work on it first.",
   "no-command": "Bops couldn't tell how to run it. Type the command that starts it.",
-  "no-port": "No port from 4100 to 4199 is free on its computer.",
+  "no-port": "No port from 3000 to 3099 is free on its computer.",
+  "bad-port": "Use a port from 1024 to 65535.",
+  "bad-screen": "Couldn't open it on that screen.",
+  busy: "Its computer is busy starting another Local. Try again in a moment.",
   "not-started": "Start it first.",
   "no-browser": "Couldn't open it on its computer's screen. Open its screen and go to it there.",
   "bad-env": "Couldn't save its variables there. Try again.",
@@ -2919,45 +3862,148 @@ const unb64 = (v: string) => (v === "-" ? null : Buffer.from(v, "base64").toStri
 /** How long a Local's state is kept before its computer is asked again (the window asks every few seconds while one starts). */
 const LOCAL_MS = 4000;
 const localRead = new Map<string, { at: number; answer: LocalAnswer }>();
-/** Whether this Mac reaches a bot's computer over the tailnet, kept 30 seconds (each look waits up to 2.5). */
+/**
+ * Whether this Mac reaches an app's computer over the tailnet, kept 30 seconds (each look waits up to 2.5): its
+ * address there, from the bot whose computer it is (workBot: one that shares another's has no record of its own).
+ */
 const reachRead = new Map<string, { at: number; ip: string | null }>();
-async function tailnetIp(botId: string): Promise<string | null> {
-  const b = bot(botId);
-  if (!b?.tailnet) return null;
-  const kept = reachRead.get(botId);
+async function tailnetIp(h: AppHosting): Promise<string | null> {
+  const b = bot(h.botId);
+  const own = b && workBot(b, getState().bots);
+  const c = own?.computerId === h.computerId ? own : getState().bots.find((x) => x.computerId === h.computerId);
+  if (!c?.tailnet) return null;
+  const kept = reachRead.get(c.id);
   if (kept && Date.now() - kept.at < 30_000) return kept.ip;
-  const ip = (await tailnetUp(b)) ? b.tailnet.ip : null;
-  reachRead.set(botId, { at: Date.now(), ip });
+  const ip = (await tailnetUp(c)) ? c.tailnet.ip : null;
+  reachRead.set(c.id, { at: Date.now(), ip });
   return ip;
 }
 
-/** An app's Locals from bops-local's lines (`output`), by site: its sites' only, the newest line of each standing. */
-async function localsFrom(output: string, h: AppHosting, name: string): Promise<Record<string, LocalSite>> {
+/** A port as a bops-local line says it (1024 to 65535), else undefined. */
+const portIn = (v: string | undefined) => {
+  const n = v && /^\d{1,5}$/.test(v) ? Number(v) : NaN;
+  return n >= 1024 && n <= 65535 ? n : undefined;
+};
+
+/**
+ * What a BOPS_LOCAL_MORE line says of a Local (bops-local's second line, after its BOPS_LOCAL one), each only
+ * when said and well formed: dev=<its port>, good=<changeset>:<when, seconds>, fixes=<n>, auth=<0|1>,
+ * mismatch=<port>. A key it doesn't know (a newer bops-local's) is passed over.
+ */
+function moreOf(words: string): Partial<Pick<LocalSite, "devPort">> & Pick<LocalSite, "lastGood" | "fixes" | "auth" | "mismatch"> {
+  const out: ReturnType<typeof moreOf> = {};
+  for (const w of words.trim().split(/\s+/)) {
+    const at = w.indexOf("=");
+    const [k, v] = at > 0 ? [w.slice(0, at), w.slice(at + 1)] : [w, ""];
+    if (k === "dev" && portIn(v)) out.devPort = portIn(v);
+    else if (k === "good") {
+      const m = /^([0-9a-f]{4,64}):(\d{1,12})$/.exec(v);
+      if (m) out.lastGood = { at: m[1], when: Number(m[2]) * 1000 };
+    } else if (k === "fixes" && /^\d{1,6}$/.test(v)) out.fixes = Number(v);
+    else if (k === "auth" && (v === "0" || v === "1")) out.auth = v === "1";
+    else if (k === "mismatch" && portIn(v)) out.mismatch = portIn(v);
+  }
+  return out;
+}
+
+/**
+ * An app's Locals from bops-local's lines (`output`), by site: its sites' only, the newest line of each
+ * standing; its own folder's (<name>--<site>) in `sites`, each other bot's that works on it (appCoders) in `copies`,
+ * in their order, from its copy's (<name>.<copy>--<site>: one no bot of it has now is passed over), every such bot
+ * there, its copy's Locals or none. Its BOPS_LOCAL line is v0.0.34's word for word; its BOPS_LOCAL_MORE line, when its
+ * bops-local writes one, adds what it says (moreOf), its dev port among it (3000 from a bops-local that doesn't say
+ * it). `bot`: whose the app's own folder is, while that bot is here.
+ */
+function localsFrom(output: string, h: AppHosting, name: string, wsId: string): Pick<LocalAnswer, "sites" | "bot" | "copies"> {
   const sites = new Set(sitesOf(h, name).map((x) => x.site));
-  const ip = await tailnetIp(h.botId);
-  const out: Record<string, LocalSite> = {};
+  const coders = appCoders(getState(), wsId, name);
+  const copies: LocalCopy[] = coders.filter((id) => ownCopy(h, id)).map((id) => ({ bot: id, name: bot(id)?.name ?? id, sites: {} }));
+  const byWord = new Map<string, Record<string, LocalSite>>([[name, {}], ...copies.map((c) => [localWord(name, copyName(c.bot)), c.sites] as const)]);
+  const more = new Map<string, string>();
+  for (const m of output.matchAll(/^BOPS_LOCAL_MORE ([a-z0-9.-]+)--([a-z0-9-]+)((?: \S+)*)$/gm)) more.set(`${m[1]}--${m[2]}`, m[3]);
   for (const m of output.matchAll(/^BOPS_LOCAL (\S+)--(\S+) (running|starting|failed|stopped) (\S+) (\S+) (\S+) (\S+) (\S+)$/gm)) {
-    const [, app, site, state, port, since, cmd, err, env] = m;
-    if (app !== name || !sites.has(site)) continue;
+    const [, word, site, state, port, since, cmd, err, env] = m;
+    const out = byWord.get(word);
+    if (!out || !sites.has(site)) continue;
     const n = /^\d{1,5}$/.test(port) ? Number(port) : null;
-    const up = state === "running" || state === "starting";
+    const said = moreOf(more.get(`${word}--${site}`) ?? "");
     out[site] = {
       state: state as LocalSite["state"],
       port: n,
       command: unb64(cmd),
       since: /^\d+$/.test(since) ? Number(since) * 1000 : null,
-      error: state === "failed" ? (unb64(err)?.trim().split("\n").filter(Boolean).at(-1)?.slice(0, 300) ?? "It stopped.") : null,
-      url: up && n && ip ? `http://${ip}:${n}/` : null,
+      // (Its log's last lines, as Fix it shows them; localWords says the last in one.)
+      error: state === "failed" ? (unb64(err)?.split("\n").map((l) => l.trimEnd().slice(0, LOG_LINE)).filter((l) => l.trim()).slice(-LOG_LINES).join("\n").slice(-1500) || "It stopped.") : null,
       env: env === "-" ? [] : env.split(",").filter((x) => ENV_NAME.test(x)),
+      ...said,
+      devPort: said.devPort ?? DEV_PORT,
     };
   }
-  return out;
+  const own = bot(h.botId) && !ownCopy(h, h.botId) ? { id: h.botId, name: bot(h.botId)!.name } : undefined;
+  return { sites: byWord.get(name)!, ...(own ? { bot: own } : {}), ...(copies.length ? { copies } : {}) };
 }
 
-/** What bops-local said went wrong (BOPS_LOCAL_FAIL), in words; undefined when nothing did. */
-const localFailed = (output: string) => {
+/**
+ * Each of an app's open forwards (local-preview.ts) kept on its Local's port, each copy's too: the same port on this
+ * Mac as on its computer, so one that moved (a Local started before ports were one a site, started again) moves here
+ * too (one through SSH, through a tunnel to that port: carryTo); closed once it stopped.
+ */
+function followForwards(wsId: string, name: string, a: Pick<LocalAnswer, "sites" | "copies">) {
+  const each = [...Object.entries(a.sites).map(([site, x]) => [fwdKey(wsId, name, site), x] as const), ...(a.copies ?? []).flatMap((c) => Object.entries(c.sites).map(([site, x]) => [fwdKey(wsId, name, site, c.bot), x] as const))];
+  for (const [key, x] of each) {
+    const f = forwardOf(key);
+    if (!f) continue;
+    if (x.state !== "running" && x.state !== "starting") closeForward(key);
+    else if (f.via === "ssh") {
+      if (x.port && x.port !== f.port) void carryTo(wsId, name, key, x.port);
+    } else if (x.port && x.port !== f.macPort) {
+      closeForward(key);
+      void openForward({ key, app: name, macPort: x.port, host: f.host, port: x.port }).catch(() => {});
+    } else if (x.port && x.port !== f.port) void openForward({ key, app: name, macPort: f.macPort, host: f.host, port: x.port }).catch(() => {});
+  }
+}
+
+/** Forwards being moved to a tunnel to their Local's new port (carryTo), by key. */
+const carrying = new Set<string>();
+
+/**
+ * A forward through SSH moved with its Local to `port`: a tunnel to that port, then the forward on the same port
+ * here through it, once (one move at a time a forward). One closed meanwhile (its tab, Stop, the app removed)
+ * stays closed; one that can't move closes.
+ */
+async function carryTo(wsId: string, name: string, key: string, port: number) {
+  if (carrying.has(key)) return;
+  carrying.add(key);
+  try {
+    const h = hostingOf(wsId, name);
+    const t = h && !h.lost ? await sshTunnel(h.computerId, port).catch(() => null) : null;
+    if (!t || !forwardOf(key)) {
+      t?.carrier.close();
+      if (!t) closeForward(key);
+      return;
+    }
+    closeForward(key);
+    await openForward({ key, app: name, macPort: port, host: t.host, port, carrier: t.carrier }).catch(() => {});
+  } finally {
+    carrying.delete(key);
+  }
+}
+
+/**
+ * What bops-local said went wrong (BOPS_LOCAL_FAIL), in words; undefined when nothing did. Its port held by
+ * something else there, or another Local's (BOPS_LOCAL_HELD: the port, and whose: a site's, or a bot's copy's of
+ * workspace `wsId`), says which: it never moves.
+ */
+const localFailed = (output: string, wsId?: string) => {
   const code = /^BOPS_LOCAL_FAIL=(\S+)$/m.exec(output)?.[1];
-  return code ? (LOCAL_WORDS[code] ?? "Local didn't do that. Try again.") : undefined;
+  if (!code) return undefined;
+  const [, port, word, other] = /^BOPS_LOCAL_HELD=(\d{1,5})(?: ([a-z0-9.-]+)--([a-z0-9-]+))?$/m.exec(output) ?? [];
+  if (code === "port-held" && port)
+    return `Something else on its computer is using port ${port}, so its Local can't start there. Stop that, or clear its port to get a free one.`;
+  const copyOf = word?.includes(".") ? getState().bots.find((b) => workspaceOf(b) === wsId && copyName(b.id) === word.slice(word.indexOf(".") + 1)) : undefined;
+  const whose = copyOf ? `the Local of ${copyOf.name}'s copy` : other && !word?.includes(".") ? `${other}'s Local's` : "another Local's";
+  if (code === "port-taken" && port) return `Port ${port} is ${whose} on its computer. Pick another, or clear its port to get a free one.`;
+  return LOCAL_WORDS[code] ?? "Local didn't do that. Try again.";
 };
 
 /** The app's record for Local: its computer (one whose computer is gone has nowhere to run). */
@@ -2978,8 +4024,72 @@ async function asleepNow(computerId: string): Promise<boolean> {
 }
 
 /**
- * GET /api/hosted-apps/[name]/local: every site's Local as its computer says now (bops-local status), read
- * only while the computer runs: asleep, nothing runs there, and it isn't woken to say so. Kept a few seconds.
+ * The bot a site of an app's own working folder is worked on by: the one whose Works on (lib/types.ts siteOf) is that
+ * site and that has no copy of its own (copyFor), else the app's own bot (its hosting record's).
+ */
+function siteBot(wsId: string, name: string, site: string): string | undefined {
+  const b = siteBotOf(getState(), wsId, name, site);
+  return b && !copyFor(wsId, name, b.id) ? b.id : hostingOf(wsId, name)?.botId;
+}
+
+/** A site's name as a person reads it: the app's, for its own. */
+const siteWord = (name: string, site: string) => (site === name ? name : site);
+
+/** How many Local addresses told for Google a site keeps (the newest). */
+const TOLD_KEPT = 20;
+
+/**
+ * What Bops keeps of the Locals it just read from their computer: each site's port as a hint on its hosting
+ * record (localPort, its own folder's: a bot's prompt says its address without asking the computer, and other Macs
+ * see it), written only when it changed; and for a site whose app signs in (auth), running at an address it was never
+ * told for (its own folder's Local or a copy's), a note in the chat of the bot whose Local it is with the two lines to
+ * add to Google sign in, once an address (the site's toldGoogle, its copies' addresses with its own; and never when
+ * that chat has it already: an older Mac rebuilds a site's record without toldGoogle, while a chat keeps its
+ * messages). Nothing once another account's state came in.
+ */
+function heardLocals(wsId: string, name: string, a: Pick<LocalAnswer, "sites" | "copies">, ours: () => boolean) {
+  const h = hostingOf(wsId, name);
+  if (!ours() || !h || h.lost) return;
+  // What changes of one site's record (none: nothing), and the addresses to tell Google of, each with the bot of the copy it's of (none: its own folder's).
+  const fresh = (site: string, kept: { localPort?: number; toldGoogle?: string[] }) => {
+    const x = a.sites[site];
+    const told = [...(kept.toldGoogle ?? [])];
+    const tell: { address: string; copyBot?: string }[] = [];
+    for (const [y, copyBot] of [[x, undefined] as const, ...(a.copies ?? []).map((c) => [c.sites[site], c.bot] as const)]) {
+      if (!y?.port || y.auth !== true || (y.state !== "running" && y.state !== "starting") || told.includes(localAddress(y))) continue;
+      told.push(localAddress(y));
+      tell.push({ address: localAddress(y), ...(copyBot ? { copyBot } : {}) });
+    }
+    if ((!x?.port || x.port === kept.localPort) && !tell.length) return undefined;
+    return { patch: { ...(x?.port ? { localPort: x.port } : {}), ...(tell.length ? { toldGoogle: told.slice(-TOLD_KEPT) } : {}) }, tell };
+  };
+  if (!sitesOf(h, name).some((s) => fresh(s.site, s.site === name ? h : (h.sites?.find((y) => y.name === s.site) ?? {})))) return;
+  const told: { site: string; address: string; copyBot?: string }[] = [];
+  keepHosting(wsId, name, (now) => {
+    if (!now || now.lost) return now;
+    const own = fresh(name, now);
+    for (const t of own?.tell ?? []) told.push({ site: name, ...t });
+    const more = now.sites?.map((y) => {
+      const f = fresh(y.name, y);
+      for (const t of f?.tell ?? []) told.push({ site: y.name, ...t });
+      return f ? { ...y, ...f.patch } : y;
+    });
+    return { ...now, ...(own?.patch ?? {}), ...(more ? { sites: more } : {}) };
+  });
+  for (const t of told) {
+    const botId = t.copyBot ?? siteBot(wsId, name, t.site);
+    const chatId = botId && bot(botId) ? botChatId(botId) : undefined;
+    if (!botId || !chatId || !getState().chats.some((c) => c.id === chatId)) continue;
+    const text = `${siteWord(name, t.site)}'s Local is at ${t.address}. If it signs in with Google, add these two lines to its OAuth client in Google Cloud (Credentials), once:\nAuthorized JavaScript origins: ${t.address}\nAuthorized redirect URIs: ${t.address}/api/auth/callback/google`;
+    if (getState().messages.some((m) => m.chatId === chatId && m.appNote && m.text === text)) continue;
+    addMessage({ chatId, role: "bot", botId, text, appNote: true, bops: true });
+  }
+}
+
+/**
+ * GET /api/hosted-apps/[name]/local: every site's Local as its computer says now (bops-local status), of its own
+ * folder and of each copy of it (localsFrom), read only while the computer runs: asleep, nothing runs there, and it
+ * isn't woken to say so. Kept a few seconds.
  */
 export async function localStatus(wsId: string, name: string, { fresh = false }: { fresh?: boolean } = {}): Promise<LocalAnswer> {
   const ours = sameState();
@@ -2995,10 +4105,13 @@ export async function localStatus(wsId: string, name: string, { fresh = false }:
   if (asleep instanceof Error) return { sites: {}, why: asleep.message };
   if (asleep) return remember(key, { sites: {}, asleep: true });
   await localTool(h.computerId, ours);
-  const r = await orgo.bash(h.computerId, `${LOCAL_BIN} status ${name}`, 30).catch(() => null);
+  const r = await localBash(h.computerId, `${LOCAL_BIN} status ${name}`, 30, ours).catch(() => null);
   held(ours);
   if (!r) return { sites: {}, why: "Couldn't reach its computer just now. Try again in a minute." };
-  return remember(key, { sites: await localsFrom(r.output, h, name) });
+  const all = localsFrom(r.output, h, name, wsId);
+  followForwards(wsId, name, all);
+  heardLocals(wsId, name, all, ours);
+  return remember(key, all);
 }
 
 const remember = (key: string, answer: LocalAnswer) => {
@@ -3014,44 +4127,184 @@ function localCommand(v: unknown): string | undefined {
 }
 
 /**
- * POST /api/hosted-apps/[name]/local: a site's Local (`site`, none the app's own) started (on its computer, from its
- * working folder: `command`, else the one it ran last, else its site's start command, else what its folder says;
- * with Staging's variables, its own on top), stopped, or opened on its computer's screen (its Chrome, at
- * localhost). Start and open are the user's doing, so they wake an asleep computer; stop never does (nothing runs
- * on one asleep). Answers every site's Local as it is then.
+ * A Local's port as it's typed (where its dev command listens, and its address here and on its computer): 1024
+ * to 65535, never Bops' own 3210; "auto", the lowest free one there (its port field cleared); none, the one it has.
  */
-export async function localAct(wsId: string, name: string, ask: { action?: unknown; site?: unknown; command?: unknown }): Promise<LocalAnswer> {
+function devPortOf(v: unknown): number | "auto" | undefined {
+  if (v === "auto") return "auto";
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\s*\d{1,5}\s*$/.test(v) ? Number(v) : NaN;
+  if (!Number.isInteger(n) || n < 1024 || n > 65535) throw new HostedAppError("Use a port from 1024 to 65535.", 400, { field: "port" });
+  if (n === 3210) throw new HostedAppError("Bops uses 3210 on this Mac. Pick another.", 400, { field: "port" });
+  return n;
+}
+
+const LOCAL_ACTIONS = new Set(["start", "stop", "open", "preview", "unpreview", "fix"]);
+
+/**
+ * The screen a site's Local opens on, as its X display: the one a live task on the app works on in the same folder
+ * (`copyBot`'s copy, or its own folder: a task of a bot without a copy; the site's own first), else a free screen of
+ * its computer (lib/screens.ts screenMap), else none, said so.
+ */
+function screenFor(wsId: string, name: string, site: string, h: AppHosting, copyBot?: string): number {
+  const st = getState();
+  const on = st.sessions.filter((s) => isLive(s) && s.display !== undefined && s.app?.wsId === wsId && s.app.name === name && computerOf(s.botId) === h.computerId && (copyFor(wsId, name, s.botId) ? s.botId : undefined) === copyBot);
+  const task = on.find((s) => (s.app?.site ?? name) === site) ?? on[0];
+  if (task?.display !== undefined) return task.display;
+  const free = screenMap(st, h.botId).find((x) => x.kind === "free");
+  if (free) return free.display;
+  throw new HostedAppError("No screen on its computer is free right now. Open preview shows it here, or try again once a task there is done.", 409, { code: "NO_SCREEN" });
+}
+
+/**
+ * POST /api/hosted-apps/[name]/local: a site's Local (`site`, none the app's own) started (on its computer, from
+ * its working folder: `command`, else the one it ran last, else its site's start command, else what its folder
+ * says; on its port: `port`, else the one it has, else the lowest free there, as "auto" asks too; with its
+ * Preview's variables, its sign in addresses made its own address, its own on top), stopped, opened on a screen
+ * of its computer (its Chrome there, at its address: screenFor), previewed on this Mac (`preview`:
+ * http://localhost:<port>/, this Mac's same port forwarded to its computer over the tailnet, local-preview.ts;
+ * `start`: started first when it isn't running), its preview closed (`unpreview`), or a Fix it press counted
+ * (`fix`, the owner's: bops-local mark fix). Start, open and preview are the user's doing, so they wake an asleep
+ * computer; stop and fix never do (nothing runs on one asleep). A site's first start makes its Published project
+ * first when it has none (ensureProd: so an older Bops deploying it never makes one on the port Local holds).
+ * Answers every site's Local as it is then.
+ */
+export async function localAct(wsId: string, name: string, ask: { action?: unknown; site?: unknown; bot?: unknown; command?: unknown; port?: unknown; start?: unknown }): Promise<LocalAnswer> {
   const ours = sameState();
   const h = localHome(wsId, name);
   const site = siteIn(h, name, ask.site).site;
-  if (ask.action !== "start" && ask.action !== "stop" && ask.action !== "open") throw new HostedAppError("Start it, stop it, or open it.", 400);
-  const command = ask.action === "start" ? localCommand(ask.command) : undefined;
+  if (typeof ask.action !== "string" || !LOCAL_ACTIONS.has(ask.action)) throw new HostedAppError("Start it, stop it, or open it.", 400);
+  const action = ask.action as "start" | "stop" | "open" | "preview" | "unpreview" | "fix";
+  // Whose copy's Local (none: its own folder's, as for a bot that doesn't work on it).
+  if (ask.bot !== undefined && ask.bot !== null && ask.bot !== "" && (typeof ask.bot !== "string" || !bot(ask.bot) || workspaceOf(bot(ask.bot)) !== wsId))
+    throw new HostedAppError("There's no bot by that name in this workspace.", 404);
+  const copy = copyFor(wsId, name, typeof ask.bot === "string" ? ask.bot : undefined);
+  const copyBot = copy ? (ask.bot as string) : undefined;
+  const word = localWord(name, copy);
+  const key = `${wsId}/${name}`;
+  const fwd = fwdKey(wsId, name, site, copyBot);
+  if (action === "unpreview") {
+    closeForward(fwd);
+    return localRead.get(key)?.answer ?? { sites: {} };
+  }
+  if (action === "preview") return previewLocal(wsId, name, site, ask.start === true, ours, copyBot);
+  const command = action === "start" ? localCommand(ask.command) : undefined;
+  const dev = action === "start" ? devPortOf(ask.port) : undefined;
   notRemoving(wsId, name);
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
-  const key = `${wsId}/${name}`;
-  if (ask.action === "stop" && (await asleepNow(h.computerId))) return remember(key, { sites: {}, asleep: true });
+  if (action === "stop") closeForward(fwd);
+  if ((action === "stop" || action === "fix") && (await asleepNow(h.computerId))) return remember(key, { sites: {}, asleep: true });
   held(ours);
+  const display = action === "open" ? screenFor(wsId, name, site, h, copyBot) : undefined;
   await localTool(h.computerId, ours);
-  let line = `${LOCAL_BIN} ${ask.action} ${name} ${site}`;
-  if (ask.action === "start") {
-    // Staging's project (for its variables) and the site's start command, from the computer's list (unsaid when Orgo can't say).
-    const list = await deploys.projects(h.computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : []), () => []);
-    held(ours);
+  let line = action === "fix" ? `${LOCAL_BIN} mark ${word} ${site} fix` : `${LOCAL_BIN} ${action} ${word} ${site}${display !== undefined ? ` ${display}` : ""}`;
+  if (action === "start") {
+    // Its Preview (for its variables and its link) and the site's Published start command, from the computer's lists (unsaid when Orgo can't say).
     const repo = repoOrNull(wsId, name);
-    const staging = repo ? stagingIn(list, h, name, site, repo) : undefined;
-    const prod = list.find((p) => p.id === siteIn(h, name, site).projectId);
+    let list = await deploys.projects(h.computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : null), () => null);
+    const urls = await publicUrls.list(h.computerId).then((r) => (r.enabled && r.value.enabled ? (r.value.public_urls ?? []) : []), () => [] as OrgoPublicUrl[]);
+    held(ours);
+    const s = siteIn(h, name, site);
+    let prod = list && repo ? prodIn(list, h, name, site, repo) : undefined;
+    // Its first start: Published's project made first (best effort: Local runs whatever Orgo says).
+    if (list && repo && !prod) {
+      const made = await withApp(wsId, name, "first", () => ensureProd(wsId, name, s, ours)).catch(() => null);
+      held(ours);
+      if (made) {
+        list = await deploys.projects(h.computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : list), () => list);
+        prod = list?.find((p) => p.id === made.projectId);
+      }
+    }
+    const pv = list && repo ? previewIn(list, urls, repo, site, knownLabel(s, h, name, repo, list, urls)) : undefined;
     const b = (v: string | null | undefined) => (v ? Buffer.from(v).toString("base64") : "-");
-    line += ` ${b(command)} ${b(site !== name ? prod?.start_cmd : null)} ${staging?.name ?? "-"}`;
+    line += ` ${b(command)} ${b(site !== name ? prod?.start_cmd : null)} ${pv?.project?.name ?? "-"} ${b(pv?.url?.url)} ${dev ?? "-"}`;
   }
-  const r = await orgo.bash(h.computerId, `${line}\n${LOCAL_BIN} status ${name}`, 60).catch((e: unknown) => e as Error);
+  const r = await localBash(h.computerId, `${line}\n${LOCAL_BIN} status ${name}`, 60, ours).catch((e: unknown) => e as Error);
   held(ours);
   if (r instanceof Error) throw new HostedAppError("Couldn't reach its computer just now. Try again in a minute.", r instanceof OrgoTimeout ? 504 : 502);
-  const failed = localFailed(r.output);
+  const failed = localFailed(r.output, wsId);
   if (failed) throw new HostedAppError(failed, 409);
-  const answer = remember(key, { sites: await localsFrom(r.output, h, name) });
-  return ask.action === "open" && /^BOPS_LOCAL_OPENED=1$/m.test(r.output) ? { ...answer, opened: true } : answer;
+  const all = localsFrom(r.output, h, name, wsId);
+  followForwards(wsId, name, all);
+  heardLocals(wsId, name, all, ours);
+  const answer = remember(key, all);
+  return action === "open" && /^BOPS_LOCAL_OPENED=1$/m.test(r.output) ? { ...answer, opened: true, ...(display !== undefined ? { display } : {}) } : answer;
+}
+
+/** Why a preview on this Mac can't open, so it opens on the computer's screen instead (the window does that). */
+const ON_SCREEN = {
+  tailnet: "This Mac can't reach its computer, so it opens on its screen.",
+  refused: "Orgo didn't turn on SSH for its computer, so it opens on its screen.",
+  noAddress: "Its computer has no SSH address yet, so it opens on its screen.",
+  noAnswer: "Its computer's SSH didn't answer, so it opens on its screen.",
+  stopped: "Start it first.",
+};
+
+/** A preview that opens on its computer's screen instead, saying why (an SshError's why, in words). */
+const onScreen = (why: SshError["why"] | "tailnet") =>
+  new HostedAppError(why === "refused" ? ON_SCREEN.refused : why === "no-address" ? ON_SCREEN.noAddress : why === "no-answer" ? ON_SCREEN.noAnswer : ON_SCREEN.tailnet, 409, {
+    fallback: "screen",
+    code: why === "tailnet" ? "NO_TAILNET" : "NO_SSH",
+  });
+
+/**
+ * How this Mac reaches a site's Local on its computer, for its forward (`key`) to `port` there: over the tailnet
+ * when the computer is on it (straight to its address); else through the computer's SSH (computer-ssh.ts), the
+ * owner's own (never on a computer's runner, nor while a workspace shared with the user is open), once that port of
+ * this Mac is free. Undefined: its forward goes through SSH to that port already. Refused with `fallback: "screen"`
+ * and why when neither can.
+ */
+async function reachLocal(h: AppHosting, key: string, port: number, ours: () => boolean): Promise<{ host: string; carrier?: Carrier } | undefined> {
+  const ip = await tailnetIp(h);
+  held(ours);
+  if (ip) return { host: ip };
+  const open = forwardOf(key);
+  if (open?.via === "ssh" && open.macPort === port && open.port === port) return undefined;
+  if (onRunner() || sharedOpen()) throw onScreen("tailnet");
+  if (await macPortBusy(port)) {
+    const busy = new ForwardError(port);
+    throw new HostedAppError(busy.message, 409, { fallback: "screen", code: busy.code });
+  }
+  const t = await sshTunnel(h.computerId, port).catch((e: unknown) => {
+    if (!(e instanceof SshError)) return Promise.reject(e);
+    console.warn(`[ssh] ${h.computerId}: ${e.message}`);
+    return Promise.reject(onScreen(e.why));
+  });
+  if (!ours()) t.carrier.close();
+  held(ours);
+  return t;
+}
+
+/**
+ * A site's Local (of `copyBot`'s copy, or of its own folder) previewed on this Mac: started first when asked and it isn't running, then this Mac's
+ * localhost:<port> forwarded to the same port of its computer (over the tailnet, else through its SSH: reachLocal),
+ * so its address is the same on both. Refused with `fallback: "screen"` when this Mac can't reach the computer or
+ * that port of this Mac is in use.
+ */
+async function previewLocal(wsId: string, name: string, site: string, start: boolean, ours: () => boolean, copyBot?: string): Promise<LocalAnswer> {
+  const h = localHome(wsId, name);
+  let answer = await localStatus(wsId, name, { fresh: true });
+  held(ours);
+  const mine = (a: LocalAnswer) => localsOf(a, copyBot)?.[site];
+  const up = (a: LocalAnswer) => !!mine(a) && (mine(a)!.state === "running" || mine(a)!.state === "starting");
+  if (!up(answer) && start) answer = await localAct(wsId, name, { action: "start", site, ...(copyBot ? { bot: copyBot } : {}) });
+  const x = mine(answer);
+  if (!x || !up(answer) || !x.port) throw new HostedAppError(answer.asleep ? "Its computer is asleep." : ON_SCREEN.stopped, 409, { code: "NOT_STARTED" });
+  const key = fwdKey(wsId, name, site, copyBot);
+  const reach = await reachLocal(h, key, x.port, ours);
+  try {
+    if (reach) {
+      // (Its forward on another port, from before its Local moved, goes: one a site.)
+      if ((forwardOf(key)?.macPort ?? x.port) !== x.port) closeForward(key);
+      await openForward({ key, app: name, macPort: x.port, host: reach.host, port: x.port, carrier: reach.carrier });
+    }
+  } catch (e) {
+    if (e instanceof ForwardError) throw new HostedAppError(e.message, 409, { fallback: "screen", code: e.code });
+    throw e;
+  }
+  return { ...answer, preview: `${localAddress(x)}/` };
 }
 
 /**
@@ -3068,10 +4321,10 @@ async function changeLocalEnv(wsId: string, name: string, out: Record<string, st
   if (why) throw new HostedAppError(why, 403);
   await localTool(h.computerId, ours);
   const changes = Buffer.from(JSON.stringify(out)).toString("base64");
-  const r = await orgo.bash(h.computerId, `printf %s ${changes} | ${LOCAL_BIN} env ${name} ${s}`, 30).catch(() => null);
+  const r = await localBash(h.computerId, `printf %s ${changes} | ${LOCAL_BIN} env ${name} ${s}`, 30, ours).catch(() => null);
   held(ours);
   if (!r) throw new HostedAppError("Couldn't reach its computer just now. Try again in a minute.", 502);
-  const failed = localFailed(r.output);
+  const failed = localFailed(r.output, wsId);
   if (failed) throw new HostedAppError(failed, 409);
   localRead.delete(`${wsId}/${name}`);
   const names = /^BOPS_LOCAL_ENV=(\S+)$/m.exec(r.output)?.[1] ?? "-";
@@ -3080,13 +4333,39 @@ async function changeLocalEnv(wsId: string, name: string, out: Record<string, st
 
 /* ---------------- What a bot does with them ---------------- */
 
+/**
+ * The site a bot works on by default (its Works on, Workspace.botSites: lib/types.ts siteOf), when it names one of
+ * the workspace's apps and a site of it: work_on_app, local_app, deploy_app and Publish take it when they name none.
+ */
+export function botSite(botId: string): { app: string; site: string } | undefined {
+  const b = bot(botId);
+  const x = b ? siteOf(getState(), b) : undefined;
+  if (!b || !x || typeof x.app !== "string" || typeof x.site !== "string") return undefined;
+  const h = workspace(workspaceOf(b))?.hostedApps?.[x.app];
+  return h && sitesOf(h, x.app).some((s) => s.site === x.site) ? { app: x.app, site: x.site } : undefined;
+}
+
+/** The site of `name` a bot's call is about: the one it named, else the bot's own (botSite) when it's of this app. */
+const siteFor = (botId: string, name: string, site?: string) => site ?? (botSite(botId)?.app === name ? botSite(botId)?.site : undefined);
+
+/** The name `words` mean of those `has` knows: as written when it's one, else the name they make ("Recipe Box": recipe-box). */
+function nameIn(words: string, has: (name: string) => boolean): string | undefined {
+  const want = words.trim().replace(/^["“']|["”']$/g, "");
+  if (isRepoName(want) && has(want)) return want;
+  const made = repoNameFor(want);
+  return has(made) ? made : undefined;
+}
+
 /** One of the workspace's apps by its name, or the name its words make ("Recipe Box": recipe-box). */
 function appNamed(wsId: string, words: string): string | undefined {
   const apps = workspace(wsId)?.hostedApps ?? {};
-  const want = words.trim().replace(/^["“']|["”']$/g, "");
-  if (isRepoName(want) && apps[want]) return want;
-  const made = repoNameFor(want);
-  return apps[made] ? made : undefined;
+  return nameIn(words, (name) => !!apps[name]);
+}
+
+/** A repo in the workspace's Ingot by its name, or the name its words make, from the list Bops last read (reposAtHand). */
+function repoNamed(wsId: string, words: string): string | undefined {
+  const names = new Set((reposAtHand(wsId) ?? []).map((r) => r.name));
+  return nameIn(words, (name) => names.has(name));
 }
 
 /**
@@ -3109,9 +4388,11 @@ const short = (id: string) => id.slice(0, 7);
  * another computer, is refused: its working folder and its site are on that computer. A workspace that
  * isn't on Orgo yet can't have apps (Ingot keeps its repos under its Orgo project). `deploy`: the user asked
  * for it to go live too, which Bops does itself once the task has committed (deployAfterTask), so the task is
- * told that rather than to have them deploy it.
+ * told that rather than to have them deploy it. A repo in the workspace's Ingot that isn't one of its apps yet (its
+ * code put there some other way) is taken by its name as an app: it gets its first home on this bot's computer, as
+ * a new app does, under the repo's own name, and the task clones it (readyAppForTask: Ingot already has the repo).
  */
-export function appWork(botId: string, a: { app: string | null; name: string | null; change: string; deploy?: boolean }): { goal: string; title: string; name: string } {
+export function appWork(botId: string, a: { app: string | null; name: string | null; change: string; deploy?: boolean }): { goal: string; title: string; name: string; site: string } {
   const b = bot(botId);
   if (!b) throw new HostedAppError("That bot is gone.", 404);
   const wsId = workspaceOf(b);
@@ -3121,7 +4402,7 @@ export function appWork(botId: string, a: { app: string | null; name: string | n
   if (!change) throw new HostedAppError("Say what to build or change.");
   let name: string;
   if (a.app?.trim()) {
-    const found = appNamed(wsId, a.app);
+    const found = appNamed(wsId, a.app) ?? repoNamed(wsId, a.app);
     if (!found) throw new HostedAppError(`There's no app called "${a.app.trim().slice(0, 80)}" in this workspace.`, 404);
     name = found;
   } else {
@@ -3139,21 +4420,85 @@ export function appWork(botId: string, a: { app: string | null; name: string | n
   // Its record: this bot and its computer (a bot that's gone hands it on; another computer's projects don't come along, its sites' names do).
   if (computerId && (!h || h.lost || h.computerId !== computerId || !bot(h.botId))) keepHosting(wsId, name, (x) => movedTo(x, name, botId, computerId));
   const owner = ownerName();
-  const dir = appFolder(name);
+  // Its folder: the app's own for its own bot, else a copy of its own (readyAppForTask makes it ready as the task starts).
+  const now = hostingOf(wsId, name);
+  const copy = now && !now.lost && ownCopy(now, botId) ? copyName(botId) : undefined;
+  const dir = appFolder(name, copy);
+  const word = localWord(name, copy);
+  const others = now ? appCoders(getState(), wsId, name).filter((x) => x !== botId).length > 0 || !!copy : false;
   const git = `git ${gitAs(botId)}`;
+  const site = siteFor(botId, name) ?? name;
   const goal = [
-    `Work on ${owner}'s app ${name}. It's the Ingot repo ${repo} (Ingot is Orgo's source control; name it in full wherever a command takes a repo), and its working folder on this computer is ${dir}: Bops cloned it there, or pulled the newest into it, as this task started.`,
+    copy
+      ? `Work on ${owner}'s app ${name}. It's the Ingot repo ${repo} (Ingot is Orgo's source control; name it in full wherever a command takes a repo), and your working folder on this computer is ${dir}, a copy of your own: Bops cloned it there, or pulled the newest main into it (merged with what you hadn't committed), as this task started.`
+      : `Work on ${owner}'s app ${name}. It's the Ingot repo ${repo} (Ingot is Orgo's source control; name it in full wherever a command takes a repo), and its working folder on this computer is ${dir}: Bops cloned it there, or pulled the newest into it, as this task started.`,
     `What to do: ${change}`,
-    "1. Make the change in that folder. An app that runs a server listens on the port in $PORT, which Orgo sets when it deploys it; a plain site needs only an index.html. Keep secrets out of the folder: .env files are never committed.",
-    `2. Run it there to check it works (for a plain site, python3 -m http.server in the folder), look at it with curl or in the browser, then stop it. When ${owner} wants to look at it before it goes on the web, leave it running as its Local instead: bops-local start ${name} ${name} (it says the port; bops-local stop ${name} ${name} stops it).`,
-    `3. Commit it from the folder: ingot commit -m "<what changed, in one clear line>" (or the Ingot tools' repo_commit). If Ingot says the commit is stale, someone committed first: run ingot pull, fix any file it lists between its <<<<<<< yours and >>>>>>> theirs markers, check it again, and commit again.`,
+    WHERE_THINGS_ARE(owner),
+    "1. Make the change in that folder. An app that runs a server listens on the port in $PORT, which Orgo sets when it deploys it and bops-local sets for its Local; a plain site needs only an index.html. Keep secrets out of the folder: .env files are never committed. Read its own address from AUTH_URL (or NEXTAUTH_URL) rather than writing one in: Bops sets it to its Local's address for its Local, its preview link for its Preview, and its domain once published.",
+    `2. Run it as its Local and leave it running: bops-local start ${word} ${site} (it runs its dev script, else its start script, with hot reload, and prints a BOPS_LOCAL line whose fourth word is its port). ${owner} watches it live in Bops beside this chat while you save. Check each change with curl -i http://127.0.0.1:<that port>/. If it fails, bops-local status ${word} and /root/.bops/local/${word}--${site}.log say why. Don't run another server on that port, and don't stop its Local when you're done.`,
+    `3. Commit it from the folder: ingot commit -m "<what changed, in one clear line>" (or the Ingot tools' repo_commit). ${SYNC_WORDS}`,
+    ...(others ? [OTHERS_WORDS(name)] : []),
     `Plain git works too, if you'd rather, in a clone of its own (never inside ${dir}): git clone "$(ingot git-url ${repo})" ${dir}-git, make the change and commit there (${git} commit), and git push origin HEAD:main. Ingot's credential helper is set up on this computer already, so git asks no password. A push refused as stale means someone committed first: ${git} pull --no-rebase, fix any file it lists as a conflict, ${git} commit, then push again. Both ways land on the same history.`,
     a.deploy
-      ? `4. Say what you changed. ${owner} asked for it to go live too: once you've committed and this task ends, Bops deploys its newest commit to its preview itself and tells them where, so don't tell them to deploy it. If you couldn't commit it, say why.`
-      : `4. Say what you changed. ${owner} puts it live from the Apps page, or by asking me.`,
+      ? `4. Say what you changed. ${owner} asked for a link too: once you've committed and this task ends, Bops deploys its newest commit to its preview itself and tells them where, so don't tell them to deploy it. If you couldn't commit it, say why.`
+      : `4. Say what you changed. ${owner} sees it in its Local now; it goes on the web when they ask, as a preview link first.`,
   ].join("\n");
-  return { goal, title: `Work on ${name}`, name };
+  return { goal, title: `Work on ${name}`, name, site };
 }
+
+/* ---------------- How a working folder syncs: through main alone ---------------- */
+
+/*
+ * Every working folder of an app (its own, and each bot's copy) is a clone of its own (`ingot clone`, its own
+ * .ingot/state.json and base: never a git worktree, nor a copy of another folder's files), and syncs with the others
+ * only through main in the central Ingot: as a task starts, Bops readies it (readyWorkFolder: cloned the first time,
+ * else `ingot pull`, a three way merge of what it hasn't committed with main's newest, the parts both changed left
+ * between conflict markers); the bot commits from it with `ingot commit` (onto main's newest only: refused as stale,
+ * nothing written, when main moved on since its base, and while a pull's conflicts are still there), and when it's
+ * stale pulls, fixes any conflict in its own folder, and commits again (SYNC_WORDS). This is the one place that says
+ * and does it, so landing a bot's work another way later (on a ref of its own, merged on Ingot) changes only this.
+ */
+
+/**
+ * An app's working folder (`copy`: a bot's copy of it) made ready on its computer for a task (ingot.ts readyFolder),
+ * with the computer's token ready: one Ingot turned away is replaced (the old one revoked) and the folder made again.
+ * Says what was done, for the task's steps; throws IngotError when it can't be.
+ */
+async function readyWorkFolder(computerId: string, wsId: string, name: string, botId: string, ours: () => boolean, opts: { signal?: AbortSignal; copy?: string } = {}): Promise<string> {
+  try {
+    return await readyFolder(computerId, wsId, name, opts.signal, opts.copy);
+  } catch (e) {
+    if (!(e instanceof IngotError && e.refused)) throw e;
+    stillOurs(ours);
+    console.warn(`[hosted-apps] ${computerId}: Ingot turned its token away, so it gets a new one`);
+    await ensureIngotCli(computerId, wsId, { signal: opts.signal, botId, renew: true });
+    stillOurs(ours);
+    return readyFolder(computerId, wsId, name, opts.signal, opts.copy);
+  }
+}
+
+/** How a bot's commit lands (its task's goal, and what bots read of the apps: hostedAppsLine): fixed words. */
+const SYNC_WORDS =
+  "If Ingot says the commit is stale, someone committed first: run ingot pull, fix any file it lists between its <<<<<<< yours and >>>>>>> theirs markers, check it again, and commit again. Stale is when Ingot says main has moved on: nothing of yours was written, and the pull merges the new main into your folder. A commit is refused while a conflict is still there.";
+
+/** For a task on an app other bots work on too (each in a copy of its own): fixed words but its name. */
+const OTHERS_WORDS = (name: string) =>
+  `Other bots work on ${name} at the same time, each in a copy of its own beside this folder, with Locals of its own: work only in your folder and on your Local, never in theirs. Your changes reach them only through main, and theirs reach you when you pull. A conflict in your folder is yours to fix there.`;
+
+/**
+ * The four places an app's site is, as a coding task's goal says them (appWork): fixed words, no real address
+ * (bops-local prints its Local's, and a prompt's note lists them: hostedAppsLine), so the goal reads the same
+ * for every app.
+ */
+const WHERE_THINGS_ARE = (owner: string) =>
+  [
+    `Where things are, in the words to use with ${owner}:`,
+    "Screen: the screen of this computer this task works on (screen 1 to 4). Open pages only in your own screen's Chrome, never in another screen's.",
+    "Local: this site's dev server on this computer, with hot reload, at http://localhost:<its port>. Its address is the one bops-local prints, and it stays the same: the same on this computer's screens and in Bops beside this chat, and Bops sets AUTH_URL to it. Never start, stop or restart another site's Local, and never kill a process on a port that isn't your site's.",
+    "Preview: its fixed link, https://<12 letters and digits>.orgo.dev, to test and share (Bops deploys it there).",
+    `Published: its own domain, only when ${owner} publishes it.`,
+    `When you tell ${owner} where to look, say the place and its address: its Local, http://localhost:<its port>.`,
+  ].join("\n");
 
 /**
  * The app a task works on (Session.app, which only work_on_app sets), or undefined. Never on a routine's
@@ -3186,9 +4531,11 @@ export function appMcp(sessionId: string): Record<string, unknown> {
 /**
  * As a task on an app starts on its computer (sessions.ts): the ingot command and its config there, with
  * the computer's own token (ensureIngotCli), the app's repo made in Ingot when it's new, by the task's bot
- * (from this Mac), and its working folder cloned or brought to the newest main (readyFolder). The app is
+ * (from this Mac), and the task's bot's working folder cloned or brought to the newest main (readyWorkFolder):
+ * the app's own for its own bot, else a copy of the bot's own (kept on AppHosting.copies from then on). The app is
  * kept on that computer. A token Ingot turned away there is replaced, the old one revoked, and the folder
- * made again. A task asked to put the app live too notes the app's newest commit the first time (keepFrom).
+ * made again. The app's newest commit is noted as the task first runs (keepHeads: what its changes are told from,
+ * and for a task asked to put it live too, what a new commit is told from).
  * Answers what was done, for the task's steps (undefined: the task isn't on an app). Throws IngotError when it
  * can't be made ready.
  */
@@ -3204,21 +4551,15 @@ export async function readyAppForTask(sessionId: string, computerId: string, sig
     if (h) console.warn(`[hosted-apps] ${a.name} moves from ${h.computerId} to ${computerId}: ${h.lost ? "its computer is gone" : "its bot's computer is another one now"}`);
     keepHosting(a.wsId, a.name, (x) => movedTo(x, a.name, s.botId, computerId));
   }
+  // Another bot than the app's own works in a copy of its own from its first task on it.
+  const now = hostingOf(a.wsId, a.name);
+  const copy = now && ownCopy(now, s.botId) ? copyName(s.botId) : undefined;
+  if (copy) keepCopy(a.wsId, a.name, s.botId);
   await ingot.createRepo(a.wsId, a.name, authorOf(s.botId), signal);
   stillOurs(ours);
   listed.delete(a.wsId);
-  let said: string;
-  try {
-    said = await readyFolder(computerId, a.wsId, a.name, signal);
-  } catch (e) {
-    if (!(e instanceof IngotError && e.refused)) throw e;
-    stillOurs(ours);
-    console.warn(`[hosted-apps] ${computerId}: Ingot turned its token away, so it gets a new one`);
-    await ensureIngotCli(computerId, a.wsId, { signal, botId: s.botId, renew: true });
-    stillOurs(ours);
-    said = await readyFolder(computerId, a.wsId, a.name, signal);
-  }
-  await keepFrom(sessionId, a, ours, signal);
+  const said = await readyWorkFolder(computerId, a.wsId, a.name, s.botId, ours, { signal, copy });
+  await keepHeads(sessionId, a, ours, signal);
   return said;
 }
 
@@ -3226,19 +4567,24 @@ export async function readyAppForTask(sessionId: string, computerId: string, sig
 const appOfTask = (st: { sessions: Session[] }, sessionId: string) => st.sessions.find((x) => x.id === sessionId)?.app;
 
 /**
- * A task asked to put its app live after (Session.app.deployAfter), as it first starts with that ask: the app's
- * newest commit now (null: nothing committed yet), which a new commit is told from as it ends (deployAfterTask).
- * Left unset when Ingot can't say now; one read is never read again (the run after an answer, a restart).
+ * The app's newest commit (null: nothing committed yet), read once as a task on it first runs, for what's kept of
+ * it on the task: `startHead`, what the changes it makes are told from (every task on an app); and for a task asked
+ * to put it live after (Session.app.deployAfter, as it first starts with that ask), `from`, which a new commit is
+ * told from as it ends (deployAfterTask). Left unset when Ingot can't say now; one read is never read again (the run
+ * after it, a restart, an answer to its question).
  */
-async function keepFrom(sessionId: string, a: { wsId: string; name: string }, ours: () => boolean, signal?: AbortSignal) {
+async function keepHeads(sessionId: string, a: { wsId: string; name: string }, ours: () => boolean, signal?: AbortSignal) {
   const now = session(sessionId)?.app;
-  if (!now?.deployAfter || now.from !== undefined) return;
+  const wantFrom = !!now?.deployAfter && now.from === undefined;
+  if (!now || (now.startHead !== undefined && !wantFrom)) return;
   const head = await ingot.head(a.wsId, a.name, signal).catch(() => undefined);
   stillOurs(ours);
   if (head === undefined) return;
   update((st) => {
     const x = appOfTask(st, sessionId);
-    if (x?.deployAfter && x.from === undefined) x.from = head;
+    if (!x) return;
+    if (x.startHead === undefined) x.startHead = head;
+    if (x.deployAfter && x.from === undefined) x.from = head;
   });
 }
 
@@ -3289,7 +4635,7 @@ export async function addApp(wsId: string, ask: { name?: unknown; what?: unknown
   const deploy = ask.deploy === true;
   // From here on it's all at once: nothing waits between keeping the app and starting its task.
   const w = appWork(b.id, { app: null, name, change: what, deploy });
-  const app = { wsId, name: w.name };
+  const app = { wsId, name: w.name, site: w.site };
   const chatId = botChatId(b.id);
   const task = startSession({ botId: b.id, goal: w.goal, title: w.title, chatId, sentVia: "you", where: "cloud", app: deploy ? { ...app, deployAfter: true } : app });
   // Asked of a task already on the app (sessions.ts foldInto): that one puts it live after, too.
@@ -3299,7 +4645,7 @@ export async function addApp(wsId: string, ask: { name?: unknown; what?: unknown
       chatId: task.chatId,
       role: "bot",
       botId: b.id,
-      text: `Making ${w.name} on my computer. ${deploy ? "I'll put it live once it's built." : "Put it live from the Apps page once it's built."}`,
+      text: `Making ${w.name} on my computer. ${deploy ? "I'll deploy a preview of it once it's built." : "Watch it with Preview at the top of this chat once it runs."}`,
       sessionIds: [task.id],
       appNote: true,
       bops: true,
@@ -3348,7 +4694,98 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   if (!mine) return;
   await flushState(5000).catch(() => false);
   if (!ours()) return;
-  say(await deployForBot(s.botId, a.name, null, ours, "staging").catch((e: Error) => `Not deployed: ${e.message}`));
+  say(await deployForBot(s.botId, a.name, null, ours, "preview").catch((e: Error) => `Not deployed: ${e.message}`));
+}
+
+const previewedAt = new Map<string, number>();
+
+/**
+ * A task on an app ended a run with its work done (sessions.ts, where deployAfterTask is called): the Local of
+ * the site it worked on (Session.app.site, else the app's own), in its bot's folder (its copy, or the app's own),
+ * is started when it isn't running and its folder
+ * has something to run. Its chat says where to watch it, the place and its address, as the bot (once per task),
+ * or, when its dev server opened on a port of its own (mismatch: one that ignores $PORT), that it isn't there and
+ * what to do; a task asked to deploy says how that went instead. Then it's checked (after it's said: a first page
+ * can take a minute and more to build), all the same for a task asked to deploy and never on a mismatch: when its
+ * / answers below 500 and its working folder has nothing uncommitted, bops-local keeps the folder's changeset as
+ * its last good one (mark good: what Fix it's loop breaker goes back to). Nothing for a routine's run, one
+ * another account's state came in on, or one that ended any other way.
+ */
+export async function previewAfterTask(sessionId: string): Promise<void> {
+  const s = session(sessionId);
+  const a = taskApp(s);
+  if (!s || !a || s.status !== "done" || s.replacedBy || s.brainRun?.waits) return;
+  // (Asked to deploy: deployAfterTask says how that went, read before it takes the ask off.)
+  const quiet = !!s.app?.deployAfter;
+  // (Once a run: the paths a run ends by may each call it.)
+  const was = previewedAt.get(sessionId);
+  if (was && Date.now() - was < 60_000) return;
+  previewedAt.set(sessionId, Date.now());
+  const ours = sameState();
+  const h = hostingOf(a.wsId, a.name);
+  if (!h || h.lost) return;
+  const site = s.app?.site && sitesOf(h, a.name).some((x) => x.site === s.app?.site) ? s.app.site : a.name;
+  // (The task's bot's own: its copy's, or the app's own folder's.)
+  const copy = copyFor(a.wsId, a.name, s.botId);
+  const copyBot = copy ? s.botId : undefined;
+  const now = await localStatus(a.wsId, a.name, { fresh: true }).catch(() => null);
+  if (!ours() || !now || now.asleep || now.why) return;
+  let x: LocalSite | undefined = localsOf(now, copyBot)?.[site];
+  if (!x || (x.state !== "running" && x.state !== "starting")) {
+    const r = await localAct(a.wsId, a.name, { action: "start", ...(site !== a.name ? { site } : {}), ...(copyBot ? { bot: copyBot } : {}) }).catch(() => null);
+    if (!ours()) return;
+    x = localsOf(r, copyBot)?.[site];
+  }
+  if (!x?.port || (x.state !== "running" && x.state !== "starting")) return;
+  if (!quiet && ours())
+    addMessage({
+      chatId: s.chatId,
+      role: "bot",
+      botId: s.botId,
+      text: x.mismatch
+        ? `${siteWord(a.name, site)}'s dev server opened on port ${x.mismatch} instead of its own port, ${x.port}, so its Local isn't at ${localAddress(x)}. Its dev command has to use $PORT: press Fix it in Preview at the top of this chat, or ask me.`
+        : `${siteWord(a.name, site)}'s Local is running at ${localAddress(x)}. Open it with Preview at the top of this chat.`,
+      sessionIds: [s.id],
+      appNote: true,
+      bops: true,
+    });
+  // (A dev server on a port of its own, one that ignores $PORT, never answers on its: nothing to check.)
+  if (!x.mismatch) await markIfGood(a.wsId, a.name, site, x.port, ours, copy).catch(() => {});
+}
+
+/**
+ * A site's Local (of a bot's copy, `copy`, or of the app's own folder) checked on its computer after a task (previewAfterTask): its / asked on its port until it
+ * answers (a first page can take a while to build), its working folder's base changeset read (.ingot/state.json)
+ * and whether anything there is uncommitted (`ingot status`). Answering below 500 with a clean folder at a
+ * changeset: bops-local mark good with it. Says whether it did.
+ */
+async function markIfGood(wsId: string, name: string, site: string, port: number, ours: () => boolean, copy?: string): Promise<boolean> {
+  const h = localHome(wsId, name);
+  const dir = appFolder(name, copy);
+  const word = localWord(name, copy);
+  const r = await orgo.bash(
+    h.computerId,
+    [
+      `# bops-local check ${word} ${site}`,
+      "export HOME=~root",
+      `cd ${dir} 2>/dev/null || exit 0`,
+      "code=000",
+      `for _ in $(seq 1 15); do code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1:${port}/ 2>/dev/null); [ "\${code:-000}" != 000 ] && break; sleep 2; done`,
+      'echo "BOPS_CHECK_HTTP=${code:-000}"',
+      `echo "BOPS_CHECK_BASE=$(sed -n 's/^ *"base": "\\([0-9a-f]*\\)".*/\\1/p' .ingot/state.json 2>/dev/null | head -n 1)"`,
+      `if ${INGOT_BIN} status 2>/dev/null | grep -qx 'nothing to commit, the folder matches its base'; then echo BOPS_CHECK_CLEAN=1; fi`,
+    ].join("\n"),
+    90,
+  );
+  held(ours);
+  const code = Number(/^BOPS_CHECK_HTTP=(\d{3})$/m.exec(r.output)?.[1] ?? 0);
+  const base = /^BOPS_CHECK_BASE=([0-9a-f]{64})$/m.exec(r.output)?.[1];
+  if (!(code >= 100 && code < 500) || !base || !/^BOPS_CHECK_CLEAN=1$/m.test(r.output)) return false;
+  await localTool(h.computerId, ours);
+  const m = await localBash(h.computerId, `${LOCAL_BIN} mark ${word} ${site} good ${base}`, 30, ours);
+  if (!/^BOPS_LOCAL_MARKED=1$/m.test(m.output)) return false;
+  localRead.delete(`${wsId}/${name}`);
+  return true;
 }
 
 /** How many pages of an app's log (200 each) a short id is looked for in. */
@@ -3384,76 +4821,94 @@ async function wholeId(wsId: string, name: string, at: string, ours: () => boole
 }
 
 /**
- * deploy_app, for a bot: changeset `at` of an app (the newest on main when null; its short id works too)
- * put on the web, in words for the model, with its public URL when there is one. `where`: Staging (the
- * default: a second copy on the same computer, to look at first), or Prod, only when the owner's own words
- * asked for it (chat.ts): with no `at`, what Staging serves goes there (Promote), else the newest. `ours`: the
- * state the work began on, when it began before this call (deployAfterTask).
+ * deploy_app, for a bot: changeset `at` of an app (the newest on main when null; its short id works too) on its
+ * Preview, in words for the model, with its fixed link. `where` prod (only when the owner's own words asked to
+ * publish it: chat.ts) is Publish: what the Preview serves goes on its domain; an `at` that isn't what the
+ * Preview serves is refused (it goes on the Preview first, to look at). `ours`: the state the work began on, when
+ * it began before this call (deployAfterTask).
  */
-export async function deployForBot(botId: string, app: string, at: string | null, ours = sameState(), where: "staging" | "prod" = "staging"): Promise<string> {
+export async function deployForBot(botId: string, app: string, at: string | null, ours = sameState(), where: "preview" | "prod" = "preview"): Promise<string> {
   const b = bot(botId);
   if (!b) return "That bot is gone.";
   const wsId = workspaceOf(b);
   const name = appNamed(wsId, app);
   if (!name) return `There's no app called "${app.slice(0, 80)}" in this workspace.`;
+  const site = siteFor(botId, name);
   try {
     const id = at ? await wholeId(wsId, name, at, ours) : undefined;
-    if (where === "staging") return await stagingForBot(wsId, name, id, botId, ours);
-    // Prod with no changeset named: what Staging serves (Promote), when it serves one.
-    if (!id) {
-      const promoted = await promoteApp(wsId, name, { ours }).catch((e: unknown) => (e instanceof HostedAppError && e.status === 409 && /isn't live yet/.test(e.message) ? null : Promise.reject(e)));
-      if (promoted) {
-        const url = promoted.app.hosting?.url;
-        const what = promoted.promoted.map((x) => `${x.site === name ? name : x.site} at ${short(x.at)}`).join(", ");
-        return `Publishing ${what}, what its preview serves.${url ? ` It's live at ${url} in a minute or two.` : " It gets its public address once this first deploy is live."}${promoted.said ? ` ${promoted.said}` : ""}`;
-      }
+    if (where !== "prod") return await previewForBot(wsId, name, id, botId, ours, site);
+    // Publish: what the Preview serves, never a commit it doesn't.
+    if (id) {
+      const h = hostingOf(wsId, name);
+      const read = h ? await previewsOf(wsId, name, h, (c) => projectsNow(c, ours).catch(() => null), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours) : null;
+      const serving = read?.previews.get(site ?? name)?.serving ?? null;
+      if (serving !== id)
+        return serving
+          ? `Not published: Publish puts what its preview serves (${short(serving)}). Deploy ${short(id)} to its preview first, look at it, then publish.`
+          : `Not published: its preview isn't live yet. Deploy ${short(id)} to its preview first, look at it, then publish.`;
     }
-    const { app: now, deployed } = await deployApp(wsId, name, { ...(id ? { at: id } : {}), botId, ours });
-    const on = now.hosting ? bot(now.hosting.botId)?.name : undefined;
-    const url = now.hosting?.url;
-    const what = id ? `${name} at ${short(id)}` : `the newest commit of ${name}`;
-    if (deployed.length > 1) {
-      const each = deployed.map((d) => (d.url ? `${d.site} at ${d.url}` : `${d.site} (its address comes once this first deploy is live)`));
-      return `Publishing ${what} on its ${deployed.length} sites${on ? ` on ${on}'s computer` : ""}, one after another: ${each.join("; ")}. Each is live in a few minutes, as Orgo builds them one at a time.`;
-    }
-    return `Publishing ${what}${on ? ` on ${on}'s computer` : ""}. ${url ? `It's live at ${url} in a minute or two.` : "It gets its public address once this first deploy is live, and the Apps page shows it then."}`;
+    const promoted = await promoteApp(wsId, name, { ours, ...(site ? { site } : {}) });
+    const what = promoted.promoted.map((x) => `${x.site === name ? name : x.site} at ${short(x.at)}`).join(", ");
+    const on = promoted.promoted.flatMap((x) => (x.domain ? [x.domain.replace(/^https:\/\//, "")] : []));
+    return `Publishing ${what}, what its preview serves${on.length ? `, on ${on.join(" and ")}. It's live there in a minute or two.` : ". It's live on its domain once its DNS points at Orgo."}${promoted.said ? ` ${promoted.said}` : ""}`;
   } catch (e) {
+    if (e instanceof HostedAppError && e.extra?.code === "NO_DOMAIN") {
+      const sites = (e.extra?.sites as string[] | undefined) ?? [name];
+      return `Not published: ${sites.join(" and ")} ${sites.length === 1 ? "has" : "have"} no domain yet. Connect one in Your Apps (Published, Domain, From Cloudflare), then say publish again.`;
+    }
     // (Some of its sites went, which its words say first: not "Not deployed".)
-    if (e instanceof HostedAppError) return e.extra?.partial ? e.message : `Not deployed: ${e.message}`;
+    if (e instanceof HostedAppError) return e.extra?.partial ? e.message : `Not ${where === "prod" ? "published" : "deployed"}: ${e.message}`;
     throw e;
   }
 }
 
-/** deployForBot to Staging: in words for the model, with each site's Staging address once it has one. */
-async function stagingForBot(wsId: string, name: string, id: string | undefined, botId: string, ours: () => boolean): Promise<string> {
-  const { app: now, deployed } = await deployApp(wsId, name, { ...(id ? { at: id } : {}), botId, ours, env: "staging" });
+/** deployForBot to the Preview: in words for the model, with each site's fixed link, and whether it asks for a password (never the password). */
+async function previewForBot(wsId: string, name: string, id: string | undefined, botId: string, ours: () => boolean, site?: string): Promise<string> {
+  const { app: now, deployed, said } = await deployApp(wsId, name, { ...(id ? { at: id } : {}), botId, ours, env: "preview", ...(site ? { site } : {}) });
   const on = now.hosting ? bot(now.hosting.botId)?.name : undefined;
   const what = id ? `${name} at ${short(id)}` : `the newest commit of ${name}`;
-  const after = "Say publish, or press Publish on the Apps page, to put it at its real address once it looks right.";
+  // (Whether its link asks for one, as Orgo said in the read after the deploy.)
+  const pv = (x: string) => (x === name ? now.preview : now.sites?.find((y) => y.name === x)?.preview);
+  const locked = deployed.some((d) => pv(d.site)?.protected === true);
+  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}Say publish, or press Publish in Your Apps, to put it on its domain once it looks right.`;
+  const more = said ? ` ${said}` : "";
   if (deployed.length > 1) {
-    const each = deployed.map((d) => (d.url ? `${d.site} at ${d.url}` : `${d.site} (its preview link comes once this first deploy is live)`));
-    return `Deploying a preview of ${what} on its ${deployed.length} sites${on ? ` on ${on}'s computer` : ""}, one after another: ${each.join("; ")}. ${after}`;
+    const each = deployed.map((d) => (d.url ? `${d.site} at ${d.url}` : d.site));
+    return `Deploying a preview of ${what}${on ? ` on ${on}'s computer` : ""}, one site after another: ${each.join("; ")}. Each link stays the same for every preview, so add them to Google sign in once if the app uses it. ${after}${more}`;
   }
   const url = deployed[0]?.url;
-  return `Deploying a preview of ${what}${on ? ` on ${on}'s computer` : ""}. ${url ? `It's at ${url} in a minute or two, a link to share.` : "It gets its preview link once this first deploy is live, and the Apps page shows it then."} ${after}`;
+  return `Deploying a preview of ${what}${on ? ` on ${on}'s computer` : ""}. ${url ? `It's at ${url} in a minute or two. That link stays the same for every preview, so add it to Google sign in once if the app uses it.` : "Its link shows in Your Apps."} ${after}${more}`;
 }
 
 /**
- * local_app, for a bot: an app's Local (its working folder run as a dev server on its computer) started or
- * stopped, in words for the model: where to open it.
+ * local_app, for a bot: an app's Local (its working folder run as a dev server on its computer: the bot's own copy's
+ * when it works on the app in one) started, stopped or read, in words for the model: the place and its address, http://localhost:<its port>, the same on
+ * its computer's screens and beside this chat; a dev server listening on another port than its own, said so.
  */
-export async function localForBot(botId: string, app: string, action: "start" | "stop", site?: string): Promise<string> {
+export async function localForBot(botId: string, app: string, action: "start" | "stop" | "status", site?: string, port?: number): Promise<string> {
   const b = bot(botId);
   if (!b) return "That bot is gone.";
   const wsId = workspaceOf(b);
   const name = appNamed(wsId, app);
   if (!name) return `There's no app called "${app.slice(0, 80)}" in this workspace.`;
+  const owner = ownerName();
+  site = siteFor(botId, name, site);
+  const who = siteWord(name, site ?? name);
+  // (Its own: its copy's, when it works on the app in one.)
+  const copy = copyFor(wsId, name, botId);
+  const word = localWord(name, copy);
   try {
-    const r = await localAct(wsId, name, { action, ...(site ? { site } : {}) });
-    const x = r.sites[site ?? name];
-    if (action === "stop") return `Stopped ${name}'s Local.`;
-    if (!x || x.state === "failed") return `${name}'s Local didn't start${x?.error ? `: ${x.error}` : "."}`;
-    return `${name}'s Local is ${x.state === "running" ? "running" : "starting"} on its computer at http://localhost:${x.port}/ (open it in that computer's browser${x.url ? `, or at ${x.url} from ${ownerName()}'s Mac` : ""}). It isn't on the web.`;
+    const r = action === "status" ? await localStatus(wsId, name, { fresh: true }) : await localAct(wsId, name, { action, ...(site ? { site } : {}), ...(port ? { port } : {}), ...(copy ? { bot: botId } : {}) });
+    const x = localsOf(r, copy ? botId : undefined)?.[site ?? name];
+    // Its dev server ignores $PORT: where it listens instead, and what to change.
+    const mismatch = x?.mismatch && x.port ? ` Its dev server listens on ${x.mismatch} instead of its own port, ${x.port}: make its dev command use $PORT (or --port ${x.port}), then start it again.` : "";
+    if (action === "stop") return `Stopped ${who}'s Local.`;
+    if (action === "status") {
+      if (r.asleep) return `${who}'s Local is stopped: its computer is asleep.`;
+      return `${who}'s Local is ${x?.state ?? "stopped"}${x && (x.state === "running" || x.state === "starting") ? ` at ${localAddress(x)}` : ""}.${mismatch}`;
+    }
+    if (!x || x.state === "failed") return `${who}'s Local didn't start${x?.error ? `: ${localWords(x.error)}` : "."} Its log is /root/.bops/local/${word}--${site ?? name}.log on its computer.`;
+    return `${who}'s Local ${x.state === "running" ? "is running" : "is starting (a first start installs what it needs)"} at ${localAddress(x)} on its computer, with hot reload: that address stays the same, on its computer's screens and in the Preview tab beside this chat, where ${owner} sees it (Preview at the top of the chat opens it). It isn't on the web.${mismatch}`;
   } catch (e) {
     if (e instanceof HostedAppError) return `Not done: ${e.message}`;
     throw e;
@@ -3461,19 +4916,289 @@ export async function localForBot(botId: string, app: string, action: "start" | 
 }
 
 /**
- * The workspace's apps for a bot's prompt, with where each is on the web (work_on_app, deploy_app). Empty
- * when it has none.
+ * The workspace's apps for a bot's prompt, with where each is: its Preview's link (its state copy: no Orgo call
+ * in a prompt; that it asks for a password, never the password), whether it's published (Bops shows no orgo.dev
+ * name for Published), and the bot's own copy of it when it works on it in one (with how copies sync: SYNC_WORDS,
+ * once any app has more bots working on it). Then the repos in its Ingot
+ * that aren't apps yet (code put there some other way: work_on_app takes one by name), from the list Bops last read
+ * (reposAtHand), never asked of Ingot here: with no list at hand, nothing is said of them. Empty when it has neither.
  */
 export function hostedAppsLine(botId: string): string {
   const b = bot(botId);
-  const apps = Object.entries((b && workspace(workspaceOf(b))?.hostedApps) ?? {}).filter(([name]) => isRepoName(name));
-  if (!apps.length) return "";
-  const where = (x: { url?: string; projectId?: string }) => (x.url ? `live at ${x.url}` : x.projectId ? "deployed, no address yet" : "not on the web yet");
+  const wsId = b ? workspaceOf(b) : undefined;
+  const hosted = (wsId ? workspace(wsId)?.hostedApps : undefined) ?? {};
+  const apps = Object.entries(hosted).filter(([name]) => isRepoName(name));
+  const loose = ((wsId ? reposAtHand(wsId) : undefined) ?? []).map((r) => r.name).filter((name) => !hosted[name]);
+  const repos = loose.length
+    ? `In your workspace's Ingot but not on a computer yet: ${loose.slice(0, 20).join(", ")}${loose.length > 20 ? `, and ${loose.length - 20} more` : ""} (work_on_app with its name as app gives it one).`
+    : "";
+  if (!apps.length) return repos;
+  const base = previewBase();
+  // Each site's Local address from the hint Bops keeps as it reads one (localPort: no computer is asked here).
+  const where = (x: { preview?: string; projectId?: string; localPort?: number; passwordOff?: true }) =>
+    `${x.localPort ? `Local at http://localhost:${x.localPort}; ` : ""}${x.preview ? `preview at https://${x.preview}.${base}${x.passwordOff ? ", with no password" : ""}` : "no preview yet"}; ${x.projectId ? "published on its domain once it has one" : "not published yet"}`;
+  // (An app this bot works on in a copy of its own: its copy's folder, and no address of the app's own Local, which isn't its.)
   const one = ([name, h]: [string, AppHosting]) => {
     const on = h.botId !== botId ? bot(h.botId)?.name : undefined;
     if (h.lost) return `${name} (its computer is gone, so it needs a new home: deploy_app or work_on_app gives it one)`;
-    const more = h.sites?.length ? `, and its other sites from the same repo, deployed with it: ${h.sites.map((x) => `${x.name} ${where(x)}`).join(", ")}` : "";
-    return `${name} (${where(h)}${more}${on ? `, on ${on}'s computer` : ""})`;
+    const copy = wsId ? copyFor(wsId, name, botId) : undefined;
+    const at = (x: Parameters<typeof where>[0]) => where(copy ? { ...x, localPort: undefined } : x);
+    const more = h.sites?.length ? `, and its other sites from the same repo: ${h.sites.map((x) => `${x.name} (${at(x)})`).join(", ")}` : "";
+    const mine = copy ? `; you work on it in a copy of your own, ${appFolder(name, copy)}, whose Local bops-local start ${localWord(name, copy)} <site> runs` : "";
+    return `${name} (${at(h)}${more}${on ? `; on ${on}'s computer` : ""}${mine})`;
   };
-  return `Your workspace's apps on the web, each an Ingot repo (work_on_app to build or change one, deploy_app to put it live): ${apps.map(one).join("; ")}. Each runs three ways on its bot's computer: Local, the live preview while you work (its working folder as a dev server, local_app); its Preview (a copy at a link to share, where deploy_app puts changes first); and Published (the address above and its domains: deploy_app with where prod, only when ${ownerName()} asks to publish it).`;
+  const owner = ownerName();
+  const shared = apps.some(([name, h]) => !h.lost && wsId && appCoders(getState(), wsId, name).length > 1);
+  const copies = shared ? ` When more bots work on one app, each works in a copy of its own with Locals of its own, and all commit to the same main: ${SYNC_WORDS} Never change another bot's copy.` : "";
+  return `Your workspace's apps on the web, each an Ingot repo (work_on_app builds or changes one, local_app runs it, deploy_app deploys it): ${apps.map(one).join("; ")}. Each runs three ways on its bot's computer: Local, the live view while you work (its working folder as a dev server with hot reload, each site at its own http://localhost:<port>, the same on its computer's screens and beside this chat, where ${owner} watches it); Preview, a fixed link of its own to share and to test sign in (deploy_app puts changes there), which asks for a password unless ${owner} turned it off (${owner} sees it beside the Preview link in Bops; you never have it, so never write one in this chat or ask for it, and check your work on Local); and Published, only on its own domain (deploy_app with where prod, only when ${owner}'s own words ask to publish it). Say the place and its address when you point ${owner} at one.${copies}${repos ? ` ${repos}` : ""}`;
+}
+
+/** The domain Orgo's public links are under: orgo.dev, or staging.orgo.dev when this Bops uses Orgo's staging. */
+const previewBase = () => (/staging/.test(orgoOrigin()) ? "staging.orgo.dev" : "orgo.dev");
+
+/* ---------------- What a task changed, and Restore ---------------- */
+
+/** A changeset's message as a card and Restore's question show it: its first line, 200 characters at most. */
+const firstLine = (message: unknown) => (typeof message === "string" ? (message.trim().split("\n")[0] ?? "").trim().slice(0, 200) : "");
+
+/** Who Ingot says made a changeset, in its words ("Boppy on bops-boppy via Alex"). */
+const authorName = (c: IngotChangeset) => c.author?.name || c.author?.id || "";
+
+/**
+ * The changesets on main after `id` (every one for null: the app had none then), newest first, read a page of 200 at
+ * a time (LOOK_PAGES at most), or null when `id` isn't among them (it's no changeset of the app's on main, or one too
+ * far back to read) or there's no such repo. IngotError when Ingot can't say.
+ */
+async function laterThan(wsId: string, name: string, id: string | null, ours: () => boolean): Promise<IngotChangeset[] | null> {
+  const out: IngotChangeset[] = [];
+  let before: string | undefined;
+  for (let page = 0; page < LOOK_PAGES; page++) {
+    const log = await ingot.log(wsId, name, { limit: 200, ...(before ? { before } : {}) });
+    held(ours);
+    if (!log) return null;
+    for (const c of log.changesets) {
+      if (c.id === id) return out;
+      out.push(c);
+    }
+    if (!log.next) return id === null ? out : null;
+    before = log.next;
+  }
+  return null;
+}
+
+/**
+ * The bots a task's changesets on its app are named after (ingot.ts byBots): its own, and the workspace's bot whose
+ * computer it works on when that's another's (the computer's token is named after that one: ingot.ts tokenName).
+ */
+function committersOf(botId: string, wsId: string): string[] {
+  const computerId = computerOf(botId);
+  const there = computerId ? getState().bots.find((x) => x.computerId === computerId && workspaceOf(x) === wsId) : undefined;
+  return there && there.id !== botId ? [botId, there.id] : [botId];
+}
+
+/** Tasks whose card is being made now (the paths a run ends by may each call changeCardAfterTask). */
+const carding = new Set<string>();
+
+/**
+ * A task on an app ended a run (sessions.ts, where deployAfterTask is called; done or not, what it committed is on
+ * main either way): when it knows where the app was as it first ran (Session.app.startHead) and its bot committed
+ * since, one card in its chat as the bot (Message.appChange, appNote: a shared workspace never shows it), told from
+ * the newest card this task posted before (a later run's card has that run's changes only), else from startHead, to
+ * the bot's newest changeset: its first line and short id, how many changesets that is in all (someone else's in
+ * between too: Restore to before this change undoes them as well) and whose. Its text says it for an older Bops,
+ * which shows only that: "Changed recipe-box: A search box (a1b2c3d)". None when the bot committed nothing since,
+ * none twice for one changeset, and none once another account's state came in meanwhile, or while Ingot can't say.
+ */
+export async function changeCardAfterTask(sessionId: string): Promise<void> {
+  const s = session(sessionId);
+  const a = taskApp(s);
+  const start = s?.app?.startHead;
+  if (!s || !a || start === undefined || s.replacedBy || carding.has(sessionId)) return;
+  carding.add(sessionId);
+  try {
+    const ours = sameState();
+    const cards = () => getState().messages.filter((m) => m.appChange && m.sessionIds?.includes(sessionId));
+    const from = cards().at(-1)?.appChange?.to ?? start;
+    const later = await laterThan(a.wsId, a.name, from, ours).catch(() => null);
+    if (!ours() || !later) return;
+    const at = later.findIndex((c) => byBots(c, committersOf(s.botId, a.wsId)));
+    if (at < 0) return;
+    const newest = later[at];
+    if (cards().some((m) => m.appChange?.to === newest.id)) return;
+    const all = later.slice(at);
+    const title = firstLine(newest.message) || "a change";
+    addMessage({
+      chatId: s.chatId,
+      role: "bot",
+      botId: s.botId,
+      text: `Changed ${a.name}: ${title} (${short(newest.id)})${all.length > 1 ? `, the newest of ${all.length} changes` : ""}`,
+      sessionIds: [s.id],
+      appNote: true,
+      bops: true,
+      appChange: { ws: a.wsId, app: a.name, from, to: newest.id, title, count: all.length, authors: [...new Set(all.map(authorName).filter(Boolean))] },
+    });
+  } finally {
+    carding.delete(sessionId);
+  }
+}
+
+/** Files a package manager installs from: when Restore changes one, each Local that runs starts again (bops-local start installs first). */
+const DEPS = /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/;
+
+/** Apps being restored now ("<wsId>/<name>"): a second Restore of one waits for none, it's refused. */
+const restoring = new Set<string>();
+
+/** Why an app can't be restored while a task works on it (its folder would be pulled under it), in words; undefined when none does. */
+function workedOn(wsId: string, name: string): string | undefined {
+  const t = getState().sessions.find((x) => isLive(x) && x.app?.wsId === wsId && x.app.name === name);
+  return t ? `${bot(t.botId)?.name ?? "A bot"} is working on ${name} now. Restore it once that task ends.` : undefined;
+}
+
+/** The app and the changeset to put it back to, checked, for Restore and its question. */
+function restoreHome(wsId: string, name: string, to: unknown): { h: AppHosting; to: string } {
+  if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
+  const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
+  if (!h) throw new HostedAppError(NO_APP, 404);
+  if (typeof to !== "string" || !CHANGESET.test(to)) throw new HostedAppError("That isn't a changeset of it.", 400);
+  if (!workspace(wsId)?.orgoProjectId) throw new HostedAppError(NO_PROJECT, 409);
+  return { h, to };
+}
+
+/** Ingot couldn't do it: in its words, else (it isn't answering) in ours, with the status the routes answer. */
+const restoreRefused = (e: unknown) =>
+  e instanceof IngotError ? new HostedAppError(e.offline ? "Ingot isn't answering, so it can't be restored just now. Try again in a minute." : e.message, e.offline ? 503 : 502) : e;
+
+/**
+ * GET /api/hosted-apps/[name]?restore=<to>, for Restore's question in the window (AppRestoreConfirm): every changeset
+ * on main after `to`, newest first, with its first line, who made it and when, which restoring to `to` undoes; and
+ * `blocked` when it can't be restored now: a task works on it, it's at `to` now, Ingot isn't answering. Ingot only:
+ * no computer is asked.
+ */
+export async function restoreConfirm(wsId: string, name: string, to: unknown): Promise<AppRestoreConfirm> {
+  const ours = sameState();
+  const { to: id } = restoreHome(wsId, name, to);
+  let later: IngotChangeset[] | null;
+  try {
+    later = await laterThan(wsId, name, id, ours);
+  } catch (e) {
+    if (e instanceof IngotError && e.offline) return { later: [], blocked: "Ingot isn't answering, so it can't be restored just now. Try again in a minute." };
+    throw restoreRefused(e);
+  }
+  if (!later) throw new HostedAppError("That isn't a changeset of it.", 404);
+  const list = later.map((c) => ({ id: c.id, title: firstLine(c.message), author: authorName(c), at: msOf(c.at) ?? 0 }));
+  const busy = workedOn(wsId, name);
+  if (busy) return { later: list, blocked: busy };
+  return list.length ? { later: list } : { later: list, blocked: `${name} is at ${short(id)} now, so there's nothing to restore.` };
+}
+
+/**
+ * POST /api/hosted-apps/[name] { action: "restore", to }, the owner's alone (the route refuses a shared workspace):
+ * the whole app (every site shares its repo and working folder) put back as it was at changeset `to`, as a NEW
+ * changeset on top of main ("Restore <app> to <short id>", by Bops: authorOf), so its history stays one line and
+ * nothing is lost. Ingot makes it itself from the two changesets' files (ingot.ts changesTo: what `to` has that
+ * main's newest hasn't, or has with other bytes or another executable bit, and what main's has that `to` hasn't,
+ * deleted), naming blobs it has already, so no file goes from here or from the computer. Refused while a task works
+ * on the app (its folder would be pulled under it), and, before anything is committed, while its working folder on
+ * its computer has changes nobody committed (ingot.ts folderChanges, by the computer's bash as for bops-local: the
+ * computer is woken for it, as for Start), so no one's work is lost. Main moved as it was committed (Ingot's stale):
+ * made again once from main's newest, and said; moved again, refused, saying so. Already like that (nothing to
+ * change, or Ingot's empty): said, nothing committed. Then the folder is pulled (ingot pull, with the computer's
+ * token ready), so Local reloads, and when package.json or a lockfile changed, each site's Local that runs starts
+ * again (bops-local start installs first). Each card of the app's whose change it put back (Message.appChange with
+ * `from` = `to`) says Restored. Answers the app, the new changeset, and what was done in words.
+ */
+export async function restoreApp(wsId: string, name: string, to: unknown): Promise<{ app: HostedApp; restored?: string; said: string }> {
+  const ours = sameState();
+  const { h, to: want } = restoreHome(wsId, name, to);
+  notRemoving(wsId, name);
+  const busy = workedOn(wsId, name);
+  if (busy) throw new HostedAppError(busy, 409);
+  const key = `${wsId}/${name}`;
+  if (restoring.has(key)) throw new HostedAppError(`${name} is being restored already.`, 409);
+  restoring.add(key);
+  try {
+    return await restoreTo(wsId, name, h, want, ours);
+  } finally {
+    restoring.delete(key);
+  }
+}
+
+async function restoreTo(wsId: string, name: string, h: AppHosting, want: string, ours: () => boolean): Promise<{ app: HostedApp; restored?: string; said: string }> {
+  const failed = (e: unknown) => Promise.reject(restoreRefused(e));
+  const wanted = await ingot.tree(wsId, name, want).catch(failed);
+  held(ours);
+  if (!wanted) throw new HostedAppError("That isn't a changeset of it.", 404);
+  /** Main's newest now and what makes its files `to`'s. */
+  const planOn = async (head: string | null | undefined): Promise<{ head: string; changes: IngotChange[] }> => {
+    if (!head) throw new HostedAppError("That isn't a changeset of it.", 404);
+    const now = await ingot.tree(wsId, name, head).catch(failed);
+    held(ours);
+    if (!now) throw new HostedAppError("That isn't a changeset of it.", 404);
+    return { head, changes: changesTo(now, wanted) };
+  };
+  let plan = await planOn(await ingot.head(wsId, name).catch(failed));
+  held(ours);
+  const already = async () => ({ app: await appNow(wsId, name, ours), said: `${name} is as it was at ${short(want)} already, so there was nothing to restore.` });
+  if (!plan.changes.length) return already();
+  // Its working folder first: nothing is committed while it has changes nobody committed.
+  const unread = (e: unknown) =>
+    Promise.reject(e instanceof IngotError ? new HostedAppError(e.message, 502) : new HostedAppError("Couldn't reach its computer just now, so its working folder couldn't be checked. Try again in a minute.", e instanceof OrgoTimeout ? 504 : 502));
+  const folder = h.lost ? ({ there: false } as const) : await folderChanges(h.computerId, wsId, name).catch(unread);
+  held(ours);
+  if (folder.there && folder.changed.length) {
+    const some = folder.changed.slice(0, 3).join(", ");
+    const more = folder.changed.length > 3 ? ` and ${folder.changed.length - 3} more` : "";
+    throw new HostedAppError(`${name}'s working folder on its computer has changes nobody committed (${some}${more}), so it wasn't restored. Ask its bot to commit them, or to put them back, first.`, 409, { changed: folder.changed.slice(0, 20) });
+  }
+  // The commit, made once more from main's newest when someone committed as it went.
+  let made: string | undefined;
+  let moved = false;
+  for (;;) {
+    const r = await ingot.commit(wsId, name, { base: plan.head, message: `Restore ${name} to ${short(want)}`, changes: plan.changes }, authorOf(undefined)).catch(failed);
+    held(ours);
+    if ("id" in r) {
+      made = r.id;
+      break;
+    }
+    if ("empty" in r) return already();
+    if (moved || !r.stale) throw new HostedAppError(`Someone committed to ${name} twice as it was being restored, so it wasn't. Look at its history, then try again.`, 409);
+    moved = true;
+    plan = await planOn(r.stale);
+    if (!plan.changes.length) return already();
+  }
+  listed.delete(wsId);
+  update((st) => {
+    for (const m of st.messages) if (m.appChange && m.appChange.ws === wsId && m.appChange.app === name && m.appChange.from === want) m.appChange.restored = true;
+  });
+  const said = [`Restored ${name} to ${short(want)}, as a new change (${short(made)}).`];
+  if (moved) said.push("Someone committed to it as it was being restored, so that change is undone too.");
+  if (folder.there) said.push(...(await pullRestored(wsId, name, h, plan.changes, ours)));
+  return { app: await appNow(wsId, name, ours), restored: made, said: said.join(" ") };
+}
+
+/**
+ * After a restore: the app's working folder on its computer pulled (readyFolder, with the computer's token ready; a
+ * token Ingot turned away replaced, as a task's start does), so Local reloads; and when the restore changed what a
+ * package manager installs from (DEPS), each site's Local that runs started again, which installs first. What
+ * couldn't be done, in words: the restore itself stands either way, and the bot's next task pulls it as it starts.
+ */
+async function pullRestored(wsId: string, name: string, h: AppHosting, changes: IngotChange[], ours: () => boolean): Promise<string[]> {
+  try {
+    await ensureIngotCli(h.computerId, wsId, { botId: h.botId });
+    stillOurs(ours);
+    await readyWorkFolder(h.computerId, wsId, name, h.botId, ours);
+  } catch (e) {
+    held(ours);
+    return [`Its working folder on its computer didn't get it yet (${(e as Error).message}), so its Local shows it once its bot's next task starts.`];
+  }
+  held(ours);
+  if (!changes.some((c) => DEPS.test(c.path))) return [];
+  const now = await localStatus(wsId, name, { fresh: true }).catch(() => null);
+  held(ours);
+  const running = Object.entries(now?.sites ?? {}).filter(([, x]) => x.state === "running" || x.state === "starting");
+  for (const [site] of running) {
+    await localAct(wsId, name, { action: "start", site }).catch(() => null);
+    held(ours);
+  }
+  return running.length ? ["What it installs changed, so its Local is starting again with a fresh install."] : [];
 }

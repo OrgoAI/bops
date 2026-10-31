@@ -1020,15 +1020,22 @@ assert.equal(note(after1).role, "developer");
 assert.match(note(after1).content, /now is \d{4}-[^\n]* in UTC/);
 assert.match(note(after1).content, /"Sam public background" \(ses_research\), finished/);
 assert.match(note(before1).content, /"Sam public background" \(ses_research\), running/);
-// A long chat: its first message stays the same for a few turns, not one turn (24 to 31 messages are read).
+// A long chat: its first message stays the same for a few turns, not one turn (24 to 31 messages are read whole).
+// What fell out is in the chat's summary (chat-summary.ts), read first, folded after each turn: until the first fold
+// is in, those are still read whole (16 at most).
+const { foldChat } = await import(`${root}/lib/server/chat-summary.ts`);
 for (let i = 0; i < 30; i++) S.addMessage({ chatId, role: i % 2 ? "bot" : "user", botId: i % 2 ? main.id : undefined, text: `filler ${i}` });
 const firsts = [];
 for (let i = 0; i < 6; i++) {
   answer(`ok ${i}`);
   await say(`next ${i}`);
+  await foldChat(chatId);
   const t = botTurns().at(-1);
   firsts.push(JSON.stringify(t.input[0]));
-  assert.ok(t.input.length - 1 >= 24 && t.input.length - 1 < 32, `24 to 31 messages (${t.input.length - 1})`);
+  const summed = typeof t.input[0].content === "string" && t.input[0].content.startsWith("[Bops: the conversation so far");
+  const whole = t.input.length - 1 - (summed ? 1 : 0);
+  if (i === 0) assert.ok(whole >= 24 && whole < 32 + 16, `24 to 31 messages, and up to 16 not yet in the summary (${whole})`);
+  else assert.ok(summed && whole >= 24 && whole < 32, `the summary, then 24 to 31 messages (${whole})`);
 }
 assert.ok(new Set(firsts).size <= 3, "the conversation's start moves a few messages at a time, not every turn");
 S.update((s) => (s.sessions = s.sessions.filter((x) => x.id !== "ses_research")));
@@ -1320,6 +1327,27 @@ const again = X.startSession({ botId: main.id, goal: "Weekly numbers", title: "W
 assert.notEqual(again.id, "ses_c_same", "the same job again: a new thread, not one nobody works on");
 await until(() => !S.session(again.id).routing, "the new thread to be placed");
 X.stopSession(again.id);
+
+// Work on an app (Session.app, from work_on_app) never goes to a thread that isn't on that app: plain tasks about it that
+// ended waiting on the user (they couldn't, with no folder), one by the same title and one Jev calls the same job, keep
+// out of it. The same work asked again goes to the app's own thread.
+S.update((s) =>
+  s.sessions.push(
+    { ...cloudThread("ses_site_title", "Work on site-a", "Get the site-a app's Local running"), status: "failed", error: "There's no repo on this computer", endedAt: Date.now() },
+    { ...cloudThread("ses_site_meaning", "Site A Local", "Start the site-a app's Local"), status: "failed", error: "Ingot isn't set up here", endedAt: Date.now() },
+  ),
+);
+Object.assign(jevSame, { choice: "ses_site_meaning", confidence: 0.95 });
+const siteApp = { wsId: "ws_main", name: "site-a", site: "site-a" };
+const onApp = X.startSession({ botId: main.id, goal: "Work on the app site-a: get its Local running", title: "Work on site-a", where: "cloud", app: siteApp });
+assert.notEqual(onApp.id, "ses_site_title", "not the plain task by its title");
+await until(() => !S.session(onApp.id)?.routing, "the app's thread to be placed");
+assert.ok(S.session(onApp.id), "nor the one Jev calls the same job");
+assert.deepEqual([repliesOf("ses_site_title"), repliesOf("ses_site_meaning")], [[], []]);
+assert.deepEqual(S.session(onApp.id).app, siteApp);
+assert.equal(X.startSession({ botId: main.id, goal: "Work on the app site-a: get its Local running", title: "Work on site-a", where: "cloud", app: siteApp }).id, onApp.id, "its own thread takes it");
+X.stopSession(onApp.id);
+Object.assign(jevSame, { choice: "different", confidence: 0.9 });
 
 // A one-off's run is over when the user stops it, whichever Bops ran it: Stop on Mac C's thread it left behind, or a stop
 // a computer's runner never got to (its computer went down, so the Mac ended that thread), is that run's end, "Stopped

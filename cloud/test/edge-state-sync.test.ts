@@ -404,7 +404,8 @@ test("many removed in one write, one of them written again: every reader hears e
   const res = await postMessages(id, [], ["msg_000001", "msg_000002", "msg_000003", "msg_000004"]);
   assert.equal(res.status, 200);
   const removed = await page(id, s1);
-  assert.deepEqual(removed.messages.map((m) => [m.id, m.json]), [["msg_000001", null], ["msg_000002", null], ["msg_000003", null], ["msg_000004", null]]);
+  // One UPDATE gives each row its seq in whatever order Postgres walks them, so they're compared by id.
+  assert.deepEqual(removed.messages.map((m) => [m.id, m.json]).sort(), [["msg_000001", null], ["msg_000002", null], ["msg_000003", null], ["msg_000004", null]]);
   assert.deepEqual((await page(id, 0)).messages.map((m) => m.id), ["msg_000005"], "from the start, they're gone");
   // Undo (Restore on the Mac): two written again as they were, each with a seq after its removal's.
   await postMessages(id, [msg(2), msg(3)]);

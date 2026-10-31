@@ -7,7 +7,7 @@ import { accountDeleted, query, sweepDeletedUsers, tx } from "./db.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { afterStateUpload } from "./plans.ts";
 import { appVersionOf, olderThan } from "./app-version.ts";
-import { botIdsOn, chatsOn, computersMessage, runsBy, threadsOf, writeDenials } from "./computer-scope.ts";
+import { botIdsOn, carriesPasswords, chatsOn, computersMessage, forComputer, runsBy, threadsOf, withHeldBack, writeDenials } from "./computer-scope.ts";
 import {
   BOPS_DEVICE_HEADER,
   COMPUTER_NOT_ALLOWED,
@@ -513,7 +513,8 @@ const get: Route = {
     if (row) requireLevel(req, row.protocol);
     if (!row || row.empty) throw new HttpError(404, "No state saved yet", v2 ? { version: row?.version ?? 0, seq: await lastSeq(user!.id) } : undefined);
     if (v2) {
-      const body: CloudState = { version: row.version, seq: await lastSeq(user!.id), protocol: row.protocol, writer: row.writer, state: row.state };
+      // A computer's runner reads it without what's kept for members alone (computer-scope.ts forComputer).
+      const body: CloudState = { version: row.version, seq: await lastSeq(user!.id), protocol: row.protocol, writer: row.writer, state: user!.computer ? forComputer(row.state) : row.state };
       return sendZipped(req, res, 200, body);
     }
     // A build from before: the whole state, its messages back in.
@@ -538,7 +539,8 @@ const getHead: Route = {
 async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUser, base: unknown, state: Record<string, unknown>) {
   checkUser(req, user, true);
   if (!wholeNumber(base)) throw new HttpError(400, "base must be a whole number, 0 or more");
-  const json = toJson(blobOf(state));
+  let json = toJson(blobOf(state));
+  let written = state;
   // A computer's runner writes as its own device, which Bops Cloud sets (server.ts computerCheck).
   const writer = user.computer?.device || deviceOf(req);
   const level = stateLevelOf(req);
@@ -550,8 +552,15 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
     if (row.version !== base) return null;
     // A computer's write: only what its runner's own work changes, over the blob it read (computer-scope.ts).
     if (user.computer) {
-      const denied = writeDenials(await lockedState(c, user.id), JSON.parse(json) as Record<string, unknown>, user.computer);
+      const sent = JSON.parse(json) as Record<string, unknown>;
+      if (carriesPasswords(sent)) throw notForComputer(["workspaces"]);
+      const stored = await lockedState(c, user.id);
+      // What it read without (forComputer) is put back first: it sends the workspaces as it read them.
+      const next = withHeldBack(stored, sent);
+      const denied = writeDenials(stored, next, user.computer);
       if (denied.length) throw notForComputer(denied);
+      json = toJson(next);
+      written = next;
     }
     const r = await c.query<{ version: string }>(
       `UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, protocol = GREATEST(protocol, $3), writer = $4, updated_at = now() WHERE user_id = $1 RETURNING version`,
@@ -562,15 +571,15 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   });
   if (version === null) {
     const now = await readRow(user.id);
-    const body: CloudStateConflict = { error: "Your Bops changed on another Mac", code: STATE_CONFLICT, version: now?.version ?? 0, state: now?.state ?? {} };
+    const body: CloudStateConflict = { error: "Your Bops changed on another Mac", code: STATE_CONFLICT, version: now?.version ?? 0, state: now && user.computer ? forComputer(now.state) : (now?.state ?? {}) };
     return sendZipped(req, res, 409, body);
   }
   sendJson(res, 200, { version });
   // An older Mac of the user's on the tunnel now can't be given this state: off it, before it hears of it.
   if (raised) dropOlderMac(user.id, level);
   announce(user.id);
-  // Devices watching a workspace whose part of it changed read it now (live.ts).
-  stateWritten(user.id, state, writer);
+  // Devices watching a workspace whose part of it changed read it now (live.ts): the blob as written.
+  stateWritten(user.id, written, writer);
   // A paid plan that waited to know the main bot is set up now (plans.ts).
   afterStateUpload(user.id);
   forgetTelemetryChoice(user.id);

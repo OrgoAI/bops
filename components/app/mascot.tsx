@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, useSyncExternalStore } from "react";
 import { moodOf, moodSignals, NO_SIGNALS, type MoodSignals } from "@/lib/bot-mood";
-import { isMoving, mascotMarkup, type Mood } from "@/lib/mascot";
+import { CODER_MIN_SIZE, isMoving, mascotMarkup, type Mood } from "@/lib/mascot";
 import type { AppState } from "@/lib/types";
 import { useStateArrival } from "./state-arrival";
 import { useWindowVisible } from "./window-visible";
@@ -11,6 +11,7 @@ import { useWindowVisible } from "./window-visible";
  * Plush-style bot mascots with headphones (lib/mascot.ts draws them). Every mascot in the app reads
  * what the bots are doing from one place (BotMoods, set at the top of the app) and picks its mood the
  * same way (lib/bot-mood.ts moodOf): a busy bot opens its eyes, an idle one vibes with them closed.
+ * A coder's (BotMoods' coders) wears the coder's mark wherever it's big enough to read.
  */
 export const BotMoods = createContext<MoodSignals>(NO_SIGNALS);
 
@@ -23,7 +24,7 @@ export function BotMoodsFrom({
   call,
   children,
 }: {
-  state: Pick<AppState, "sessions" | "chats" | "messages" | "liveMoods">;
+  state: Pick<AppState, "sessions" | "chats" | "messages" | "liveMoods"> & Partial<Pick<AppState, "bots" | "account" | "shared" | "workspace" | "workspaces" | "appApprovals">>;
   call: { botId: string; speaking: boolean } | null;
   children: React.ReactNode;
 }) {
@@ -81,7 +82,7 @@ export function Mascot({
   /** The main bot's highlighter headphones; false draws them in ink (the chat pill's small mark). */
   antenna?: boolean;
   /**
-   * Shows what the bot is doing as it does it (thinking, writing, speaking, working, or shy), moving: the
+   * Shows what the bot is doing as it does it (thinking, writing, coding, speaking, working, or shy), moving: the
    * mascots people watch (the sidebar's rows and main bot, the chat's header and typing line, the
    * call). Elsewhere a busy bot just opens its eyes.
    */
@@ -96,24 +97,26 @@ export function Mascot({
   const talkingNow = () => onCall && talk.get();
   const talking = useSyncExternalStore(talk.subscribe, talkingNow, talkingNow);
   const mood = moodOf(talking ? { ...signals, call: { botId, speaking: true } } : signals, botId, chatId);
-  if (live && isMoving(mood)) return <MovingMascot botId={botId} color={color} size={size} antenna={antenna} mood={mood} />;
-  return <MascotSvg botId={botId} color={color} size={size} antenna={antenna} mood={mood === "idle" ? "idle" : "awake"} />;
+  // The coder's mark, still and on top of any mood, only where it can be read.
+  const coder = size >= CODER_MIN_SIZE && signals.coders.has(botId);
+  if (live && isMoving(mood)) return <MovingMascot botId={botId} color={color} size={size} antenna={antenna} mood={mood} coder={coder} />;
+  return <MascotSvg botId={botId} color={color} size={size} antenna={antenna} mood={mood === "idle" ? "idle" : "awake"} coder={coder} />;
 }
 
 /** A mascot in a mood that moves (app/globals.css, mascot-*): its motion rests while the window is hidden. */
-function MovingMascot(props: { botId: string; color: string; size: number; antenna: boolean; mood: Mood }) {
+function MovingMascot(props: { botId: string; color: string; size: number; antenna: boolean; mood: Mood; coder: boolean }) {
   const visible = useWindowVisible();
   return <MascotSvg {...props} paused={!visible} />;
 }
 
-function MascotSvg({ botId, color, size, antenna, mood, paused }: { botId: string; color: string; size: number; antenna: boolean; mood: Mood; paused?: boolean }) {
+function MascotSvg({ botId, color, size, antenna, mood, coder, paused }: { botId: string; color: string; size: number; antenna: boolean; mood: Mood; coder: boolean; paused?: boolean }) {
   // Markup comes from our own constant shapes and bot colors, never from user text.
   return (
     <svg
       viewBox="0 0 40 40"
       className={paused ? "mascot-paused" : undefined}
       style={{ width: size, height: size, flexShrink: 0 }}
-      dangerouslySetInnerHTML={{ __html: mascotMarkup(botId, color, { mood, accent: antenna }) }}
+      dangerouslySetInnerHTML={{ __html: mascotMarkup(botId, color, { mood, accent: antenna, coder }) }}
     />
   );
 }

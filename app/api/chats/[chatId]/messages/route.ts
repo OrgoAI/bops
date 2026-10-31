@@ -1,8 +1,10 @@
+import { picksOf } from "@/lib/app-preview";
+import { appsOwnShown } from "@/lib/apps-access";
 import { handleMessage } from "@/lib/server/chat";
 import { uploadPath } from "@/lib/server/uploads";
 import { clearChat, deletePicked, removeMessages, type Removed } from "@/lib/server/remove";
 import { sharedOpen } from "@/lib/server/shared";
-import { chat, react } from "@/lib/server/store";
+import { chat, getState, react } from "@/lib/server/store";
 import type { Tapback } from "@/lib/types";
 import { notReady } from "@/lib/server/ready";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -12,7 +14,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/chats/[chat
   const unready = notReady();
   if (unready) return unready;
   const { chatId } = await ctx.params;
-  const { text, replyTo, images, lookingAt, agent } = (await request.json()) as {
+  const { text, replyTo, images, lookingAt, agent, appNote, picks } = (await request.json()) as {
     text?: string;
     /** The agent picked in the message box for the threads this message starts (Message.agent): from the Bops window only. */
     agent?: string;
@@ -20,12 +22,21 @@ export async function POST(request: Request, ctx: RouteContext<"/api/chats/[chat
     images?: { id: string; type: string; w?: number; h?: number }[];
     /** The app open beside the chat (lib/server/made-apps.ts), which a change the user asks for is about. */
     lookingAt?: string;
+    /**
+     * About one of the owner's apps on the web (Message.appNote): Fix it on its Preview tab, or what its Select and
+     * Draw put in the message box (components/app/preview-tab.tsx). Only the owner's, from the Bops window, where
+     * they see their apps: a shared workspace's members without them are never shown it.
+     */
+    appNote?: unknown;
+    /** With appNote: what Select put in it, each line and where it is in the page's code (lib/app-preview.ts picksOf), for the bot only. */
+    picks?: unknown;
   };
   if (!chat(chatId)) return Response.json({ error: "no such chat" }, { status: 404 });
   const pics = (images ?? []).filter((i) => uploadPath(i.id)).slice(0, 10);
   if (!text?.trim() && !pics.length) return Response.json({ error: "empty message" }, { status: 400 });
   const picked = typeof agent === "string" && fromBopsWindow(request) ? agent : undefined;
-  void handleMessage(chatId, text?.trim() ?? "", replyTo, pics, undefined, undefined, undefined, undefined, typeof lookingAt === "string" ? lookingAt : undefined, undefined, picked);
+  const aboutApp = appNote === true && fromBopsWindow(request) && !sharedOpen() && appsOwnShown(getState());
+  void handleMessage(chatId, text?.trim() ?? "", replyTo, pics, undefined, undefined, undefined, undefined, typeof lookingAt === "string" ? lookingAt : undefined, undefined, picked, aboutApp, aboutApp ? picksOf(picks, text?.trim() ?? "") : undefined);
   return Response.json({ ok: true });
 }
 

@@ -3,15 +3,17 @@
 import { useState } from "react";
 import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
 import type { AppState } from "@/lib/types";
+import { PasswordShown } from "./preview-password";
 import { memberAct } from "./shared-act";
 import { ago } from "./ui";
 
 /*
  * Your Apps in a workspace someone shared with the user, when its owner gave them Your Apps (lib/shared.ts SharedOpen.apps,
  * cloud/ws-slice.ts appsFor): its apps on the web as the owner's Mac last read them. Read sees each app's sites and
- * addresses, what they serve, deploys and history, and domains; Write also deploys, goes back to an earlier deploy,
- * changes a site's settings and uses one of the workspace's own domains, each sent to the owner's Bops (memberAct),
- * which does it and keeps it on the app under their name. Never its variables, logs or a domain to buy: the owner's.
+ * addresses (each site's Preview link, where a member's Deploy goes, with its state), what they serve, deploys and
+ * history, and domains; Write also sees a Preview's password, deploys, goes back to an earlier Preview deploy, changes
+ * a site's settings and uses one of the workspace's own domains, each sent to the owner's Bops (memberAct), which does
+ * it and keeps it on the app under their name. Never its variables, logs or a domain to buy: the owner's.
  */
 
 /** Every word the shared page says (the tests read them for dashes and the old name). */
@@ -38,6 +40,9 @@ export const SHARED_APPS_WORDS = {
   settings: "Settings",
   domains: "Domains",
   sites: "Sites",
+  preview: "Preview",
+  published: "Published",
+  askPassword: "Ask the owner for its password.",
   live: "Live",
   notOnWeb: "Not on the web yet",
   subdomain: "Subdomain",
@@ -99,7 +104,12 @@ function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApp
   const [open, setOpen] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const write = apps.level === "write";
-  const live = a.sites?.[0]?.live ?? null;
+  // Up top, its own site's Preview, where a member's Deploy goes; Published's from an owner's Bops that sends no Preview.
+  // By its link: Bops Cloud drops a null previewLive (a Preview with no deploy yet).
+  const site = a.sites?.[0];
+  const pv = !!site && (!!site.preview || site.previewLive != null);
+  const live = (pv ? site.previewLive : site?.live) ?? null;
+  const serving = pv ? site.previewServing : site?.serving;
   const going = acts.find((x) => x.state !== "failed");
   const send = async (act: MemberAppAct) => {
     setSaid(null);
@@ -114,7 +124,7 @@ function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApp
         <button type="button" onClick={() => setOpen((x) => !x)} aria-expanded={open} className="flex min-w-0 flex-1 flex-col text-left">
           <span className="truncate text-[14px] font-semibold leading-[18px]">{a.name}</span>
           <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">
-            {[stateWord(live?.state), a.sites?.[0]?.serving ? shortId(a.sites[0].serving) : null, a.url].filter(Boolean).join(" · ")}
+            {[pv ? W.preview : null, stateWord(live?.state), serving ? shortId(serving) : null, pv ? site.preview : a.url].filter(Boolean).join(" · ")}
           </span>
         </button>
         {write ? (
@@ -152,15 +162,19 @@ function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApp
         <div className="motion-fade-in flex flex-col gap-3 border-t border-[#F0F0ED] px-4 py-3">
           <Part title={W.sites}>
             {(a.sites ?? []).map((s) => (
-              <span key={s.name} className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
-                <span className="font-medium">{s.name}</span>
-                <span className="text-[#6B6B6B]">{stateWord(s.live?.state)}</span>
-                {s.url && <span className="text-[#3A3A38]">{s.url}</span>}
-                {(s.domains ?? []).map((d) => (
-                  <span key={d.domain} className="rounded-full bg-[#F6F6F4] px-2 py-0.5 text-[11.5px] text-[#3A3A38]">
-                    {d.domain}
-                  </span>
-                ))}
+              <span key={s.name} className="flex flex-col gap-0.5">
+                <span className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
+                  <span className="font-medium">{s.name}</span>
+                  {s.preview && <span className="text-[#9A9A98]">{W.published}</span>}
+                  <span className="text-[#6B6B6B]">{stateWord(s.live?.state)}</span>
+                  {s.url && <span className="text-[#3A3A38]">{s.url}</span>}
+                  {(s.domains ?? []).map((d) => (
+                    <span key={d.domain} className="rounded-full bg-[#F6F6F4] px-2 py-0.5 text-[11.5px] text-[#3A3A38]">
+                      {d.domain}
+                    </span>
+                  ))}
+                </span>
+                {s.preview && <PreviewLine site={s} link={s.preview} write={write} />}
               </span>
             ))}
           </Part>
@@ -184,9 +198,12 @@ function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApp
             <Part title={W.deploys}>
               {a.deploys.map((d) => (
                 <span key={d.id} className="flex items-center gap-2 text-[12.5px] leading-[18px]">
-                  <span className="min-w-0 flex-1 truncate">{[stateWord(d.state), d.at ? shortId(d.at) : null, d.site !== a.name ? d.site : null, d.when ? ago(d.when) : null].filter(Boolean).join(" · ")}</span>
+                  <span className="min-w-0 flex-1 truncate">
+                    {[stateWord(d.state), d.env === "preview" ? W.preview : d.env === "prod" ? W.published : null, d.at ? shortId(d.at) : null, d.site !== a.name ? d.site : null, d.when ? ago(d.when) : null].filter(Boolean).join(" · ")}
+                  </span>
                   {d.live && <span className="text-[#1E7A4C]">{W.live}</span>}
-                  {write && d.canRollback && !d.live && (
+                  {/* Members go back on its Preview only (lib/server/member-acts.ts): never on a Published deploy. */}
+                  {write && d.canRollback && !d.live && d.env !== "prod" && (
                     <button type="button" disabled={!!going} onClick={() => void send({ act: "rollback", app: a.name, deployment: d.id, ...(d.site !== a.name ? { site: d.site } : {}) })} className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}>
                       {W.goBack}
                     </button>
@@ -200,6 +217,23 @@ function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApp
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A site's Preview, where a member's Deploy goes: its state and link, and while the link asks for a password, the password
+ * at Write (the owner gave them all of Your Apps), as the owner sees it; at Read, or when the owner's Bops couldn't read it, who to ask.
+ */
+function PreviewLine({ site: s, link, write }: { site: NonNullable<SharedApp["sites"]>[number]; link: string; write: boolean }) {
+  return (
+    <span data-shared-preview className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
+      <span className="text-[#9A9A98]">{W.preview}</span>
+      <span className="text-[#6B6B6B]">{stateWord(s.previewLive?.state)}</span>
+      <a href={link} target="_blank" rel="noreferrer" title={link} className="min-w-0 truncate font-mono text-[11.5px] leading-4 text-[#3A3A38] hover:underline">
+        {link}
+      </a>
+      {s.previewProtected && (write && s.previewPassword ? <PasswordShown password={s.previewPassword} /> : <span className="text-[12px] leading-4 text-[#9A9A98]">{W.askPassword}</span>)}
+    </span>
   );
 }
 

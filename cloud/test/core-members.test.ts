@@ -572,7 +572,13 @@ test("cleanAct keeps only an act's own fields, each checked", () => {
   const key = "k_12345678";
   assert.deepEqual(cleanAct({ key, act: { act: "chat", chatId: "bot:a", text: "  hi  ", extra: 1 } }), { key, act: { act: "chat", chatId: "bot:a", text: "hi" } });
   assert.deepEqual(cleanAct({ key, act: { act: "answer", askId: "ap", reply: "reject", message: " no thanks " } }), { key, act: { act: "answer", askId: "ap", reply: "reject", message: "no thanks" } });
+  // Compact: a chat's or a thread's, its id alone.
+  assert.deepEqual(cleanAct({ key, act: { act: "compact", chatId: "bot:a", text: "x" } }), { key, act: { act: "compact", chatId: "bot:a" } });
+  assert.deepEqual(cleanAct({ key, act: { act: "compact", sessionId: "t1" } }), { key, act: { act: "compact", sessionId: "t1" } });
   for (const bad of [
+    { key, act: { act: "compact" } },
+    { key, act: { act: "compact", chatId: "bot:a", sessionId: "t1" } },
+    { key, act: { act: "compact", chatId: "x".repeat(121) } },
     null,
     { key: "short", act: { act: "chat", chatId: "c", text: "x" } },
     { key: "bad key!!", act: { act: "chat", chatId: "c", text: "x" } },
@@ -1197,6 +1203,26 @@ test("over HTTP: an act on a Read bot, a group with one, two bots' talk, or what
   assert.equal(queued.length, 0, "nothing refused was queued");
 });
 
+test("over HTTP: Compact takes what saying something there takes: a chat's every bot at Write, a thread's bot at Write and not on the owner's Mac", async () => {
+  actFakes();
+  assert.equal((await act("act-sam", { key: "k_compact_01", act: { act: "compact", chatId: "bot:max" } })).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "compact", chatId: "bot:max" });
+  assert.equal((await act("act-sam", { key: "k_compact_02", act: { act: "compact", chatId: "g-max" } })).status, 202);
+  assert.equal((await act("act-sam", { key: "k_compact_03", act: { act: "compact", sessionId: "t-max" } })).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "compact", sessionId: "t-max" });
+  const refused = async (body: unknown, status: number, code?: string) => {
+    const r = await act("act-sam", body);
+    assert.deepEqual([r.status, r.json.code], [status, code], JSON.stringify(body));
+  };
+  await refused({ key: "k_compact_04", act: { act: "compact", chatId: "bot:ivy" } }, 403, "member_read_only");
+  await refused({ key: "k_compact_05", act: { act: "compact", chatId: "g-both" } }, 403, "member_read_only");
+  await refused({ key: "k_compact_06", act: { act: "compact", sessionId: "t-ivy" } }, 403, "member_read_only");
+  await refused({ key: "k_compact_07", act: { act: "compact", sessionId: "t-mac" } }, 403, "member_owner_only");
+  await refused({ key: "k_compact_08", act: { act: "compact", chatId: "pair:ivy:max" } }, 400);
+  await refused({ key: "k_compact_09", act: { act: "compact", chatId: "bot:max", sessionId: "t-max" } }, 400);
+  assert.equal(queued.length, 3, "nothing refused was queued");
+});
+
 test("over HTTP: the owner, a project with no workspace of its own, a bad body, a big one and a runner are refused", async () => {
   actFakes();
   assert.deepEqual([(await act("act-owner", chatAct("bot:max"))).json.code], ["own_workspace"]);
@@ -1396,6 +1422,52 @@ test("Your Apps at Write adds each site's settings and the workspace's domains, 
     ["a workspace with no apps", appsBlob({ apps: "write" }, { hostedApps: undefined }), TOM_VIEW],
   ] as const)
     assert.equal("apps" in sharedSlice(blob as Record<string, unknown>, "ws_apps", viewer as SliceViewer), false, why);
+});
+
+test("Your Apps: each site's Preview, where members deploy (its link, newest deploy, what it serves, whether it asks for a password), and where each deploy went; its password at Write only; nothing new from an owner's Bops before Preview", () => {
+  const PASSWORD = "Mx4tR8q";
+  /** The owner's Mac of v0.0.35 on: Published with no domain yet, its Preview beside it, each deploy saying where it went. */
+  const withPreview = (apps: Record<string, unknown>) => {
+    const blob = appsBlob(apps);
+    const seen = (blob.workspaces as Record<string, Record<string, unknown>>[])[0].appsForMembers as { apps: Record<string, { sites: Record<string, unknown>[]; deploys: Record<string, unknown>[] }> };
+    const shop = seen.apps.shop;
+    shop.sites[0] = { ...shop.sites[0], url: null, preview: "https://k7p2qxm4wr3d.orgo.dev", previewLive: { id: "dep-p3", state: "running", when: 12, error: "never shown" }, previewServing: "cs-3", previewProtected: true, previewPassword: PASSWORD };
+    shop.deploys = [{ ...shop.deploys[0], env: "prod" }, { ...shop.deploys[1], env: "preview" }];
+    return blob;
+  };
+  const SAM_VIEW: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam" };
+  const read = sharedSlice(withPreview({ apps: "read" }), "ws_apps", TOM_VIEW);
+  const seen = read.apps!.list[0];
+  assert.deepEqual(seen.sites, [
+    {
+      name: "shop",
+      url: null,
+      preview: "https://k7p2qxm4wr3d.orgo.dev",
+      previewLive: { id: "dep-p3", state: "running", when: 12 },
+      previewServing: "cs-3",
+      previewProtected: true,
+      serving: "cs-2",
+      live: { id: "dep-2", state: "succeeded", when: 9 },
+      domains: [{ domain: "shop.acme.example", status: "active" }],
+    },
+  ]);
+  assert.deepEqual(seen.deploys!.map((d) => [d.id, d.env]), [["dep-2", "prod"], ["dep-1", "preview"]], "Published's and the Preview's told apart");
+  assert.ok(!JSON.stringify(read).includes(PASSWORD), "never the password at Read");
+  // At Write (the owner gave them all of Your Apps), whatever their email: the password beside its link.
+  for (const viewer of [TOM_VIEW, SAM_VIEW]) assert.equal(sharedSlice(withPreview({ apps: "write" }), "ws_apps", viewer).apps!.list[0].sites![0].previewPassword, PASSWORD, viewer.email);
+  for (const [why, blob, viewer] of [
+    ["None", withPreview({ apps: "none" }), TOM_VIEW],
+    ["an entry an older Bops wrote (no level)", withPreview({}), TOM_VIEW],
+    ["set before they joined", withPreview({ apps: "write", at: 5 }), { ...TOM_VIEW, joinedAt: 10 }],
+    ["someone the owner gave nothing", withPreview({ apps: "write" }), { role: "member", email: "kim@example.com", id: "u-kim" }],
+    ["an admin given nothing", withPreview({ apps: "write" }), { role: "admin", email: "ada@example.com", id: "u-ada" }],
+    ["the owner (their own page reads it)", withPreview({ apps: "write" }), OWNER_VIEW],
+  ] as const)
+    assert.ok(!JSON.stringify(sharedSlice(blob as Record<string, unknown>, "ws_apps", viewer as SliceViewer)).includes(PASSWORD), why);
+  // From an owner's Bops of v0.0.34 (no Preview, deploys that say nothing of where): its sites and deploys as they were.
+  const older = sharedSlice(appsBlob({ apps: "write" }), "ws_apps", TOM_VIEW).apps!.list[0];
+  assert.deepEqual(Object.keys(older.sites![0]).sort(), ["domains", "live", "name", "serving", "url"]);
+  assert.ok(older.deploys!.every((d) => !("env" in d)));
 });
 
 test("Your Apps is in the member's fingerprint: what the owner's Mac reads again gives them a new one", () => {

@@ -19,13 +19,15 @@
 //   that has it, give exactly what this build gives without it: losing it is back to today, less access and never more.
 //   A saved site login keeps nothing new (its bots list says where it's used), and v0.0.32's loginsFor agrees with it.
 //
-// - An app's Local and Staging (Your Apps' three environments, all on the app's bot computer): nothing of either is
-//   kept in Bops' state. Staging is a second deploy project of each site on the computer, found there by its name
-//   every time; Local is written on the computer. The app's record (Workspace.hostedApps, one field v0.0.32 merges
-//   field by field) has exactly v0.0.32's fields, so a v0.0.32 Mac saving it, merging it or rebuilding it (its
-//   movedTo) can't lose anything of Staging: at worst a Staging project it left behind on another computer isn't
-//   listed there, and this build makes a new one where the app is. v0.0.32's own deploy (its makeProject) finds
-//   Prod's project by name, never Staging's, while Prod's is there, and this build makes Prod's before Staging's.
+// - An app's Local, Preview and Published (Your Apps, all on the app's bot computer): of Local, only hints (each site's
+//   port, AppHosting.localPort and AppSiteHosting.localPort, and the addresses told for Google sign in, toldGoogle);
+//   of the Preview, only a copy of its link's label (AppHosting.preview, AppSiteHosting.preview), and of its password
+//   only the owner's choice to turn it off and when Bops last set one (passwordOff, passwordSet: Orgo keeps the
+//   password; a v0.0.32 that rebuilds the record without them only means a Preview turned off gets one again); all
+//   optional, additive. A task's app (Session.app) gains optional site and startHead. The Preview's link and project are found on Orgo by the label's seal (lib/server/app-labels.ts), so a
+//   v0.0.32 Mac that rebuilds the app's record (its whole copy standing in a merge) never changes the link: this
+//   build finds it again and makes nothing. Published is found by its own sealed label first, never a Preview a record
+//   names. v0.0.32's own Deploy, beside a marked Published and Preview, takes Published's (the oldest, made first).
 //
 // - A computer's name and the site a bot works on (Workspace.computerNames, Workspace.botSites; lib/bot-groups.ts): both
 //   on the workspace, which v0.0.32 merges field by field and never writes, so kept in every case, the same bot changed
@@ -123,10 +125,39 @@ const OLD_FAKES = {
 };
 /** This build's lib/server/logins.ts and keys.ts reach these; the rest of each one's exports throw. */
 const NOW_FAKES = {
-  store: forward("store", ["getState", "update"]),
+  store: forward("store", ["getState", "update", "bot", "addMessage", "flushState", "ownerName", "sameState", "session"]),
   "access-sync": "export const accessChanged = () => {};",
+  // This build's lib/server/hosted-apps.ts reaches these (globalThis.__fnow, set per check).
+  orgo: [
+    "const o = (k) => new Proxy({}, { get: (_, m) => (...a) => globalThis.__fnow.orgo[k][m](...a) });",
+    "export const deploys = o('deploys');",
+    "export const domains = o('domains');",
+    "export const publicUrls = o('publicUrls');",
+    "export const orgo = o('orgo');",
+    "export class OrgoError extends Error { constructor(m, status, code, said) { super(m); this.status = status; this.code = code; this.said = said; } }",
+    "export class OrgoTimeout extends Error {}",
+    "export const deployedAt = (d) => d?.at ?? d?.source_version ?? d?.commit_sha ?? null;",
+    "export const computerAsleepError = () => false;",
+    "export const HOSTING_CLOSED = 'closed';",
+  ].join("\n"),
+  "orgo-auth": "export const loadOrgoKey = async () => 'sk_test'; export const orgoOrigin = () => 'https://www.orgo.ai';",
+  persist: "export const selfHosted = () => false; export const onRunner = () => false;",
+  tailnet: "export const tailnetUp = async () => false;",
+  ingot: [
+    "export const isRepoName = (s) => typeof s === 'string' && s.length <= 64 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(s);",
+    "export const ingotWorkspace = () => globalThis.__fnow.ingot.workspace;",
+    "export const hasToken = () => true;",
+    "export const msOf = (v) => { const t = typeof v === 'number' ? v : Date.parse(v ?? ''); return Number.isFinite(t) ? t : null; };",
+    "export const ingot = { repos: async () => [{ name: 'field-notes', head: null }] };",
+    "export class IngotError extends Error {}",
+    "export const SWAPPED = 'Another account signed in meanwhile, so that stopped.';",
+    "export const NO_PROJECT = 'Not on Orgo yet.';",
+    "export const dropToken = async () => {};",
+    "export const INGOT_MCP = { args: [] };",
+  ].join("\n"),
+  cloudflare: "export const CF_WORDS = {};",
 };
-const NOW_FAKED = /^\.\/(store|access-sync|permission|app-version|orgo|orgo-auth)$/;
+const NOW_FAKED = /^\.\/(store|access-sync|permission|app-version|orgo|orgo-auth|persist|tailnet|ingot|cloudflare)$/;
 const COMPOSIO = "export class Composio { constructor() { return globalThis.__f32.composio; } }";
 registerHooks({
   resolve(specifier, context, next) {
@@ -142,7 +173,7 @@ registerHooks({
       if (name && !["composio", "keys", "vault"].includes(name)) return { url: `fake32:${name}?${url}`, shortCircuit: true };
       return { url, shortCircuit: true };
     }
-    if (/\/lib\/server\/(logins|keys)\.ts$/.test(parent) && NOW_FAKED.test(specifier)) return { url: `fakenow:${specifier.slice(2)}?${new URL(`${specifier}.ts`, parent).href}`, shortCircuit: true };
+    if (/\/lib\/server\/(logins|keys|hosted-apps)\.ts$/.test(parent) && NOW_FAKED.test(specifier)) return { url: `fakenow:${specifier.slice(2)}?${new URL(`${specifier}.ts`, parent).href}`, shortCircuit: true };
     // This build's own files: "@/" is the repo, and an import without its extension is its .ts or .tsx.
     if (specifier.startsWith("@/")) specifier = pathToFileURL(`${root}/${specifier.slice(2)}`).href;
     try {
@@ -565,9 +596,15 @@ const fieldsOf = (src, name) => {
 const HA32 = old("lib/hosted-apps.ts");
 const HA = readFileSync(`${root}/lib/hosted-apps.ts`, "utf8");
 
-check("The app's record (Workspace.hostedApps) has exactly v0.0.32's fields: nothing of Local or Staging is kept in Bops' state", () => {
-  for (const t of ["AppHosting", "AppSiteHosting", "AppProjectBehind"]) assert.deepEqual(fieldsOf(HA, t), fieldsOf(HA32, t), t);
-  assert.ok(fieldsOf(HA, "AppHosting").includes("behind"), "where Staging projects left on another computer go: v0.0.32 knows it");
+check("The app's record adds only its Preview label's copy, its Local's hints and its Preview password's choice to v0.0.32's fields, optional: AppHosting and AppSiteHosting gain preview, localPort, toldGoogle, passwordOff and passwordSet, AppProjectBehind is as it was", () => {
+  const added = ["preview", "localPort", "toldGoogle", "passwordOff", "passwordSet"];
+  assert.deepEqual(fieldsOf(HA, "AppHosting"), [...fieldsOf(HA32, "AppHosting"), ...added].sort());
+  assert.deepEqual(fieldsOf(HA, "AppSiteHosting"), [...fieldsOf(HA32, "AppSiteHosting"), ...added].sort());
+  assert.deepEqual(fieldsOf(HA, "AppProjectBehind"), fieldsOf(HA32, "AppProjectBehind"));
+  assert.match(HA, /\n {2}preview\?: string;\n/, "optional on AppHosting");
+  assert.match(HA, /\n {2}localPort\?: number;\n[\s\S]*?\n {2}toldGoogle\?: string\[\];\n/, "optional on AppHosting");
+  assert.match(HA, /\n {2}passwordOff\?: true;\n[\s\S]*?\n {2}passwordSet\?: PasswordSet;\n/, "optional on AppHosting");
+  assert.match(HA, /export type AppSiteHosting = \{[^}]*preview\?: string; localPort\?: number; toldGoogle\?: string\[\]; passwordOff\?: true; passwordSet\?: PasswordSet \}/, "optional on AppSiteHosting");
 });
 
 const W1 = {
@@ -589,6 +626,43 @@ check("v0.0.32 changing the app (a deploy it queued) while this build kept its S
   const r = V32.merge3(clone(W1), mine, theirs);
   assert.deepEqual(notesOf(r), { ...notesOf(theirs), queuedAt: 7 });
   assert.deepEqual(notesOf(V32.merge3(clone(W1), mine, theirs, KEPT)), { ...notesOf(theirs), queuedAt: 7 }, "a copy it kept, merged in later, too");
+});
+check("v0.0.32 queueing a deploy (queuedAt) while this build wrote the Preview's label: both kept, field by field", () => {
+  const theirs = clone(W1);
+  notesOf(theirs).preview = "k7p2qxm4wr3d";
+  notesOf(theirs).sites = [{ name: "notes-admin", preview: "m3n4b5v6c7x8" }];
+  const mine = clone(W1);
+  notesOf(mine).queuedAt = 9;
+  const r = V32.merge3(clone(W1), mine, theirs);
+  assert.deepEqual(notesOf(r), { ...notesOf(theirs), queuedAt: 9 });
+});
+check("v0.0.32 queueing a deploy (queuedAt) while this build kept each site's Local port and the addresses told for Google: both kept, field by field", () => {
+  const theirs = clone(W1);
+  notesOf(theirs).localPort = 3000;
+  notesOf(theirs).toldGoogle = ["http://localhost:3000"];
+  notesOf(theirs).sites = [{ name: "notes-admin", localPort: 3001, toldGoogle: ["http://localhost:3001"] }];
+  const mine = clone(W1);
+  notesOf(mine).queuedAt = 11;
+  assert.deepEqual(notesOf(V32.merge3(clone(W1), mine, theirs)), { ...notesOf(theirs), queuedAt: 11 });
+});
+check("v0.0.32 queueing a deploy (queuedAt) while this build kept a Preview password's choice and when it set one: both kept, field by field", () => {
+  const theirs = clone(W1);
+  notesOf(theirs).passwordSet = { at: 5, live: "d_1" };
+  notesOf(theirs).sites = [{ name: "notes-admin", passwordOff: true }];
+  const mine = clone(W1);
+  notesOf(mine).queuedAt = 13;
+  assert.deepEqual(notesOf(V32.merge3(clone(W1), mine, theirs)), { ...notesOf(theirs), queuedAt: 13 });
+});
+check("A task's app (Session.app) gains only optional site and startHead: v0.0.32 reads name and wsId as before, and keeps a session it didn't change whole", () => {
+  const T = readFileSync(`${root}/lib/types.ts`, "utf8");
+  const T32 = old("lib/types.ts");
+  const appOf = (src) => /\n {2}app\?: \{([^}]*)\};/.exec(src)?.[1].split(";").map((x) => x.trim().split(/\??:/)[0]).filter(Boolean).sort();
+  assert.deepEqual(appOf(T), [...appOf(T32), "site", "startHead"].sort());
+  assert.match(T, /\n {2}app\?: \{[^}]*site\?: string; startHead\?: string \| null \};/, "both optional");
+  const S = { owner: { name: "Ava" }, sessions: [{ id: "s1", app: { wsId: "ws_main", name: "field-notes", site: "notes-admin", startHead: null } }], bots: [], chats: [] };
+  const theirs = clone(S);
+  theirs.sessions.push({ id: "s2" });
+  assert.deepEqual(V32.merge3(clone(S), clone(S), theirs).sessions[0].app, S.sessions[0].app);
 });
 check("v0.0.32 rebuilding the app's record while this build listed Staging behind (both changed it): v0.0.32's stands, so that Staging project is only no longer listed (never deleted), and Prod's record is v0.0.32's", () => {
   const theirs = clone(W1);
@@ -634,6 +708,168 @@ await checkAsync("v0.0.32's own Deploy on an app with a Staging project beside P
   delete notesOf(st).projectId;
   await H32.deployApp("ws_main", "field-notes", { ours: () => true });
   assert.deepEqual(queued.at(-1), "p_staging", "the one case left, and only after someone deletes Prod's project on Orgo");
+});
+
+/*
+ * This build's own hosted-apps.ts against a fake Orgo (its projects, public URLs and domains on one computer) and a
+ * state as v0.0.32 leaves it: what it finds, what it makes, and what it never touches.
+ */
+const NOWH = await import(`${root}/lib/server/hosted-apps.ts`);
+const LBL = await import(`${root}/lib/server/app-labels.ts`);
+const REPO = `${PROJ}/field-notes`;
+/** A fake Orgo for this build: projects and public URLs on c_new, every call recorded. */
+function fakeOrgo({ projects = [], urls = [], domains = [] } = {}) {
+  const o = { projects, urls, domains, calls: [] };
+  const rec = (m, path, body) => o.calls.push([m, path, body]);
+  const view = (u) => ({ ...u, url: `https://${u.label}.orgo.dev`, hostname: `${u.label}.orgo.dev` });
+  globalThis.__fnow = {
+    ingot: { workspace: PROJ },
+    orgo: {
+      deploys: {
+        projects: async () => (rec("GET", "projects"), { enabled: true, value: { projects: o.projects } }),
+        project: async (_c, id) => {
+          const p = o.projects.find((x) => x.id === id);
+          if (!p) throw Object.assign(new Error("gone"), { status: 404, code: "NOT_FOUND" });
+          return { enabled: true, value: p };
+        },
+        create: async (_c, body) => {
+          rec("POST", "projects", body);
+          const p = { id: `p_${o.projects.length + 1}`, name: body.name, port: body.port, source: "ingot", ingot_repo: REPO, url: null, deployments: [], current: null, env_keys: Object.keys(body.env ?? {}) };
+          o.projects.push(p);
+          return { enabled: true, value: p };
+        },
+        deploy: async (_c, id, at) => (rec("POST", `deploy ${id}`, at), { enabled: true, value: { id: `d_${o.calls.length}`, project_id: id, state: "queued", created_at: new Date().toISOString(), at: at ?? null } }),
+        env: async (_c, id, env) => (rec("PATCH", `env ${id}`, env), { enabled: true, value: { env_keys: Object.keys(env) } }),
+        change: async (_c, id, patch) => (rec("PATCH", `project ${id}`, patch), { enabled: true, value: Object.assign(o.projects.find((x) => x.id === id), patch) }),
+        remove: async (_c, id) => (rec("DELETE", `project ${id}`), { enabled: true, value: {} }),
+      },
+      publicUrls: {
+        list: async () => ({ enabled: true, value: { enabled: true, public_urls: o.urls.map(view) } }),
+        create: async (_c, port, label) => {
+          rec("POST", "url", { port, label });
+          const u = { id: `u_${o.urls.length + 1}`, label, port, created_at: new Date().toISOString() };
+          o.urls.push(u);
+          return { enabled: true, value: view(u) };
+        },
+        remove: async (_c, id) => (rec("DELETE", `url ${id}`), { enabled: true, value: {} }),
+        port: async (_c, id, port) => (rec("PATCH", `url ${id}`, { port }), { enabled: true, value: view(Object.assign(o.urls.find((x) => x.id === id), { port })) }),
+      },
+      domains: {
+        ofComputer: async () => ({ domains: o.domains }),
+        move: async (_c, id, port) => (rec("PATCH", `domain ${id}`, { port }), {}),
+        remove: async (_c, id) => (rec("DELETE", `domain ${id}`), {}),
+      },
+      orgo: {},
+    },
+  };
+  return o;
+}
+/** The state this build reads, set as __f32.store (forwarded for both builds' store). */
+const stateWith = (st) => {
+  globalThis.__f32 = {
+    store: { getState: () => st, update: (fn) => fn(st), bot: (id) => st.bots.find((b) => b.id === id), ownerName: () => "Ava", sameState: () => () => true, flushState: async () => true, addMessage: () => ({}), session: () => undefined },
+    ingot: { workspace: PROJ },
+  };
+  return st;
+};
+const nowState = () => {
+  const st = clone(W1);
+  st.workspaces[0].orgoProjectId = PROJ;
+  st.account = { user: { id: "u", email: "ava@orgo.ai", name: "Ava" }, signedInAt: 1 };
+  return stateWith(st);
+};
+const PROD = LBL.newLabel("prod", REPO, "field-notes");
+const PREV = LBL.newLabel("preview", REPO, "field-notes");
+const marked = () => ({
+  projects: [
+    { id: "p_prod", name: PROD, port: 3100, source: "ingot", ingot_repo: REPO, url: null, deployments: [], current: null },
+    { id: "p_prev", name: PREV, port: 3101, source: "ingot", ingot_repo: REPO, url: `https://${PREV}.orgo.dev`, deployments: [], current: null },
+  ],
+  urls: [{ id: "u_1", label: PREV, port: 3101, created_at: "2026-10-29T00:00:00Z" }],
+});
+
+await checkAsync("v0.0.32 rebuilt the record (its whole copy stood, the label's copy gone): this build finds the same link on Orgo by its seal, makes nothing, and keeps the copy again", async () => {
+  const st = nowState();
+  notesOf(st).projectId = "p_prod";
+  const o = fakeOrgo(marked());
+  const r = await NOWH.listApps("ws_main");
+  const app = r.apps.find((a) => a.name === "field-notes");
+  assert.equal(app.preview.url, `https://${PREV}.orgo.dev`);
+  assert.deepEqual(o.calls.filter(([m]) => m !== "GET"), [], "nothing made");
+  assert.equal(notesOf(st).preview, PREV, "its copy back");
+});
+
+await checkAsync("v0.0.32's own Deploy beside a marked Published and Preview (one site): Published's, with its record and with its record forgetting it (the oldest of the repo's, made first); it makes nothing and has no public URL call", async () => {
+  const H32 = await import(fromTag("lib/server/hosted-apps.ts"));
+  const st = clone(W1);
+  st.workspaces[0].orgoProjectId = PROJ;
+  const { projects } = marked();
+  const queued = [];
+  globalThis.__f32 = {
+    store: { getState: () => st, update: (fn) => fn(st), bot: (id) => st.bots.find((b) => b.id === id), ownerName: () => "Ava", sameState: () => () => true, flushState: async () => true },
+    ingot: { workspace: PROJ },
+    orgo: {
+      deploys: {
+        projects: async () => ({ enabled: true, value: { projects } }),
+        project: async (_c, id) => ({ enabled: true, value: projects.find((p) => p.id === id) }),
+        deploy: async (_c, id, at) => (queued.push(id), { enabled: true, value: { id: `d_${queued.length}`, state: "queued", created_at: new Date().toISOString(), at: at ?? null } }),
+        create: async () => assert.fail("nothing made"),
+      },
+    },
+  };
+  notesOf(st).projectId = "p_prod";
+  await H32.deployApp("ws_main", "field-notes", { ours: () => true });
+  delete notesOf(st).projectId;
+  await H32.deployApp("ws_main", "field-notes", { ours: () => true });
+  assert.deepEqual(queued, ["p_prod", "p_prod"]);
+  assert.ok(!/publicUrls|public-urls/.test(old("lib/server/orgo.ts")), "v0.0.32 has no public URL call");
+});
+
+await checkAsync("Published deleted on Orgo and v0.0.32 took the Preview as its record: this build never takes it as Published; the Preview stays at its link; Publish makes a new marked Published from 3100 and rewrites the record, the domains untouched", async () => {
+  const st = nowState();
+  const m = marked();
+  m.projects = m.projects.filter((p) => p.id !== "p_prod");
+  m.projects[0].current = { id: "d_1", state: "succeeded", at: "c".repeat(64), created_at: "2026-10-29T00:00:00Z" };
+  m.domains = [{ id: "cd_1", domain: "notes.example", target_port: 3101, status: "active" }];
+  notesOf(st).projectId = "p_prev";
+  const o = fakeOrgo(m);
+  const app = (await NOWH.listApps("ws_main")).apps.find((a) => a.name === "field-notes");
+  assert.equal(app.preview.url, `https://${PREV}.orgo.dev`);
+  assert.equal(app.live, null, "no Published");
+  await NOWH.promoteApp("ws_main", "field-notes", { ours: () => true }).catch(() => null);
+  const made = o.calls.find(([m, w, body]) => m === "POST" && w === "projects" && LBL.isLabelOf("prod", body.name, REPO, "field-notes"));
+  assert.ok(made, "a new marked Published");
+  assert.ok(made[2].port >= 3100 && made[2].publicUrl === false, "from 3100, with no public URL");
+  assert.equal(notesOf(st).projectId, o.projects.find((p) => p.name === made[2].name).id, "the record rewritten");
+  assert.deepEqual(o.calls.filter(([m, w]) => /domain/.test(w) && m !== "GET"), [], "domains untouched");
+});
+
+await checkAsync("A legacy Published (the live sites' shape: named as the site on 3000 with its own orgo.dev URL, the record naming it): this build finds it, makes a Preview beside it on 3100 with a marked label, changes nothing of it, and shows no orgo.dev name for it; v0.0.32's Deploy still queues it", async () => {
+  const st = nowState();
+  notesOf(st).projectId = "p_legacy";
+  notesOf(st).url = "https://field-notes.orgo.dev";
+  const legacy = { id: "p_legacy", name: "field-notes", port: 3000, source: "ingot", ingot_repo: REPO, url: "https://field-notes.orgo.dev", deployments: [], current: null };
+  const o = fakeOrgo({ projects: [legacy], urls: [{ id: "u_own", label: "field-notes", port: 3000, created_at: "2026-01-01T00:00:00Z" }] });
+  await NOWH.deployApp("ws_main", "field-notes", { ours: () => true, env: "preview", botId: "sam" });
+  const pv = o.projects.find((p) => LBL.isLabelOf("preview", p.name, REPO, "field-notes"));
+  assert.ok(pv && pv.port >= 3100);
+  assert.equal(o.projects.filter((p) => LBL.isLabelOf("prod", p.name, REPO, "field-notes")).length, 0, "no new Published");
+  assert.deepEqual(o.calls.filter(([m, w, b]) => (m !== "GET" && w.includes("p_legacy")) || (w === "url" && b.port === 3000) || /^DELETE/.test(m)), [], "nothing of it changed");
+  const app = (await NOWH.listApps("ws_main")).apps.find((a) => a.name === "field-notes");
+  assert.equal(app.domain, null);
+  assert.ok(!JSON.stringify(app).includes("field-notes.orgo.dev"), "no orgo.dev name for Published");
+  assert.equal(notesOf(st).url, "https://field-notes.orgo.dev", "kept as it was for v0.0.32");
+  // v0.0.32's own Deploy of it.
+  const H32 = await import(fromTag("lib/server/hosted-apps.ts"));
+  const queued = [];
+  const st32 = clone(st);
+  globalThis.__f32 = {
+    store: { getState: () => st32, update: (fn) => fn(st32), bot: (id) => st32.bots.find((b) => b.id === id), ownerName: () => "Ava", sameState: () => () => true, flushState: async () => true },
+    ingot: { workspace: PROJ },
+    orgo: { deploys: { projects: async () => ({ enabled: true, value: { projects: o.projects } }), project: async (_c, id) => ({ enabled: true, value: o.projects.find((p) => p.id === id) }), deploy: async (_c, id) => (queued.push(id), { enabled: true, value: { id: "d", state: "queued", created_at: new Date().toISOString() } }), create: async () => assert.fail("nothing made") } },
+  };
+  await H32.deployApp("ws_main", "field-notes", { ours: () => true });
+  assert.deepEqual(queued, ["p_legacy"]);
 });
 
 /* ---------------- A computer's name, and the site a bot works on ---------------- */
@@ -735,6 +971,32 @@ check("why not on the bot: a site on Juno (Bot.site) set while v0.0.32 notes an 
   mine.bots[1].mail.seenAt = 2;
   assert.equal(V32.merge3(clone(shop0), mine, theirs).bots[1].site, undefined, "v0.0.32 keeps its whole copy of Juno");
   assert.equal(NOW.merge3(clone(shop0), mine, theirs).bots[1].site, undefined, "and so does this build's merge");
+});
+
+/* ---------------- What a task changed in an app, and Restore ---------------- */
+
+// A task's startHead (Session.app.startHead: where its app was as it first ran, which the card of what it changed is
+// told from) is one more field of a task's app record; a change card (Message.appChange) one more field of a message.
+const ses0 = {
+  ...clone(base0),
+  sessions: [{ id: "ses_app", botId: "juno", chatId: "bot:juno", title: "Work on recipe-box", goal: "g", status: "running", host: "orgo", steps: [], replies: [], createdAt: 1, app: { wsId: "ws_main", name: "recipe-box", startHead: "a".repeat(64) } }],
+};
+const headOf = (st) => st.sessions.find((x) => x.id === "ses_app")?.app?.startHead;
+check("v0.0.32 saving something else, or ending the same task, keeps where its app was as it first ran (Session.app.startHead)", () => {
+  const mine = clone(ses0);
+  mine.workspaces[0].name = "Acme";
+  assert.equal(headOf(V32.merge3(clone(ses0), mine, clone(ses0))), "a".repeat(64));
+  const ended = clone(ses0);
+  Object.assign(ended.sessions[0], { status: "done", endedAt: 2 });
+  const r = V32.merge3(clone(ses0), ended, clone(ses0));
+  assert.deepEqual([r.sessions[0].status, headOf(r)], ["done", "a".repeat(64)]);
+  assert.equal(headOf(V32.merge3(clone(ses0), ended, clone(ses0), KEPT)), "a".repeat(64), "a copy it kept, merged in later");
+});
+check("a change card never goes through a merge, v0.0.32's or this build's: messages are rows of their own (NEVER_SYNCED), and v0.0.32 shows its words", () => {
+  assert.ok(V32.NEVER_SYNCED.includes("messages"));
+  assert.ok(NOW.NEVER_SYNCED.includes("messages"));
+  // v0.0.32's Message has no appChange: the window shows the text, which says the same ("Changed <app>: <first line> (<short id>)").
+  assert.ok(!old("lib/types.ts").includes("appChange"));
 });
 
 rmSync(dir, { recursive: true, force: true });

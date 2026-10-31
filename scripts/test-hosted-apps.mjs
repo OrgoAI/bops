@@ -29,7 +29,7 @@
 // back); adding a domain: what it can be added from, a search priced in Orgo credits, a buy sent once with the price
 // seen and the registry's fields (each of Orgo's refusals in words, nothing pointed after one), then pointed at the
 // app's port and checked until live; one bought but not pointed; one the user owns (its records, Check again); one
-// removed; auto-renew; every new route 404 for an account apps aren't open to. Every script sent to a computer passes
+// removed; auto-renew; every new route (Restore and its question too) 404 for an account apps aren't open to. Every script sent to a computer passes
 // bash -n, and nothing a person or a bot reads has a dash.
 //
 // orgo-web is a fake (a computer's status and bash, the deploy routes and their settings, variables and rollbacks, its
@@ -64,7 +64,7 @@ import { constants, createHash, generateKeyPairSync, privateDecrypt, randomBytes
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 
@@ -101,6 +101,70 @@ mkdirSync(vendor);
 process.env.BOPS_INGOT_DIR = vendor;
 // This Bops' bops-local, put on a computer as Local starts (vm/bin/bops-local).
 process.env.BOPS_LOCAL_SCRIPT = join(root, "vm/bin/bops-local");
+// ssh and ssh-keygen are stand-ins, never the real ones: ssh-keygen makes a made-up key pair and says so in
+// keygen.log; ssh says its argv in ssh.log, refuses as a real one would (no answer, a host key that isn't the one
+// pinned, a key too open, its key not in the computer's authorized_keys: ssh.json says the computer's), and else
+// forwards its socket to the port of this Mac that stands in for that port of the computer (ssh.json ports).
+const SSH_HOST = "198.51.100.7";
+writeFileSync(
+  join(bin, "ssh-keygen.mjs"),
+  `import { randomBytes } from "node:crypto";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+const a = process.argv.slice(2);
+const at = (f) => a[a.indexOf(f) + 1];
+appendFileSync(join(dirname(process.argv[1]), "keygen.log"), JSON.stringify(a) + "\\n");
+const body = Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from("ssh-ed25519"), Buffer.from([0, 0, 0, 32]), randomBytes(32)]).toString("base64");
+writeFileSync(at("-f"), "-----BEGIN OPENSSH PRIVATE KEY-----\\nmade up\\n-----END OPENSSH PRIVATE KEY-----\\n", { mode: 0o644 });
+writeFileSync(at("-f") + ".pub", "ssh-ed25519 " + body + " " + at("-C") + "\\n");
+`,
+);
+writeFileSync(
+  join(bin, "ssh.mjs"),
+  `import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import net from "node:net";
+import { dirname, join } from "node:path";
+const here = dirname(process.argv[1]);
+const a = process.argv.slice(2);
+appendFileSync(join(here, "ssh.log"), JSON.stringify({ pid: process.pid, argv: a }) + "\\n");
+const fail = (words) => (process.stderr.write(words + "\\r\\n"), process.exit(255));
+const ctl = JSON.parse(existsSync(join(here, "ssh.json")) ? readFileSync(join(here, "ssh.json"), "utf8") : "{}");
+const opt = (k) => a.find((x, i) => a[i - 1] === "-o" && x.startsWith(k + "="))?.slice(k.length + 1);
+const host = a.at(-1);
+const port = a[a.indexOf("-p") + 1];
+if (ctl.down) fail("ssh: connect to host " + host + " port " + port + ": Connection refused");
+const known = (opt("UserKnownHostsFile") ?? "").replace(/^"|"$/g, "");
+if (!existsSync(known) || !readFileSync(known, "utf8").split("\\n").includes("[" + host + "]:" + port + " " + ctl.hostKey)) fail("Host key verification failed.");
+const key = a[a.indexOf("-i") + 1];
+if ((statSync(key).mode & 0o077) !== 0) fail("Permissions for '" + key + "' are too open.");
+const body = readFileSync(key + ".pub", "utf8").split(" ")[1];
+if (!readFileSync(ctl.authorized, "utf8").split("\\n").some((l) => l.split(" ").includes(body))) fail("root@" + host + ": Permission denied (publickey).");
+const [sock, , remote] = a[a.indexOf("-L") + 1].split(":");
+const server = net.createServer((c) => {
+  const up = net.connect({ host: "127.0.0.1", port: ctl.ports?.[remote] ?? 9 });
+  c.pipe(up);
+  up.pipe(c);
+  up.on("error", () => c.destroy());
+  c.on("error", () => up.destroy());
+});
+server.listen(sock);
+const end = () => (server.close(), existsSync(sock) && unlinkSync(sock), process.exit(0));
+process.on("SIGTERM", end);
+process.on("SIGINT", end);
+`,
+);
+for (const name of ["ssh", "ssh-keygen"]) writeFileSync(join(bin, name), `#!/bin/sh\nexec "${process.execPath}" "${join(bin, `${name}.mjs`)}" "$@"\n`, { mode: 0o755 });
+process.env.BOPS_SSH_BIN = join(bin, "ssh");
+process.env.BOPS_SSH_KEYGEN_BIN = join(bin, "ssh-keygen");
+/** What the stand in ssh is told (ssh.json), and what the stand ins said (each a line). */
+const sshSays = (o) => writeFileSync(join(bin, "ssh.json"), JSON.stringify(o));
+const logLines = (name) => {
+  try {
+    return readFileSync(join(bin, name), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+};
 let BINARY = randomBytes(400 * 1024);
 writeFileSync(join(vendor, "ingot-linux-amd64"), BINARY);
 
@@ -243,6 +307,17 @@ const unquote = (w) => w.slice(1, -1).replace(/'\\''/g, "'");
 const fleet = new Map();
 const computer = (id, o = {}) =>
   fleet.set(id, { id, status: "running", arch: "amd64", openssl: true, bin: null, part: Buffer.alloc(0), configText: null, configs: 0, tokenFiles: new Map(), tokenWrites: 0, seals: new Map(), gits: 0, pulls: 0, folders: new Map(), stray: new Set(), cloned: [], conflict: null, ...o }).get(id);
+/** A computer's own SSH files, in a folder of its own here (root's authorized_keys, its host key): the folder. */
+function sshFiles(c) {
+  if (!c.sshHome) {
+    c.sshHome = mkdtempSync(join(scratch, `ssh-${c.id}-`));
+    mkdirSync(join(c.sshHome, "root/.ssh"), { recursive: true });
+    mkdirSync(join(c.sshHome, "etc/ssh"), { recursive: true });
+    c.hostKey = `ssh-ed25519 ${Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from("ssh-ed25519"), Buffer.from([0, 0, 0, 32]), randomBytes(32)]).toString("base64")}`;
+    writeFileSync(join(c.sshHome, "etc/ssh/ssh_host_ed25519_key.pub"), `${c.hostKey} root@${c.id}\n`);
+  }
+  return c.sshHome;
+}
 /** The token Ingot takes that a computer has in a workspace's token file, if any (the ingot command signs in to that workspace's repos with it). */
 const signedIn = (c, ws) => [...central.tokens.values()].find((t) => t.secret === c.tokenFiles.get(ws)?.trim() && t.workspace === ws && t.scope === "write" && !t.revoked_at);
 /** The ingot command's words for a 401 from Ingot (internal/auth/agent.go). */
@@ -255,61 +330,143 @@ const badSyntax = [];
 const kinds = (id, from = 0) => ran.slice(from).filter((r) => r.computerId === id).map((r) => /^# bops-ingot (\S+(?: \S+)?)/.exec(r.command)?.[1] ?? r.command.slice(0, 40));
 
 /**
- * bops-local on a fake computer (vm/bin/bops-local, as far as Bops sends it): installed with its own command,
- * then each line one call of it, run in turn as bash would (one failing doesn't stop the next). Each computer
- * keeps its Locals (c.locals, by <app>--<site>: port, command, its own variables, stopped) and what was asked.
+ * bops-local on a fake computer (vm/bin/bops-local, as far as Bops sends it): installed with its own command, only
+ * over an older one (c.localVersion: the one there, 1 for one from before versions), then each line one call of
+ * it, run in turn as bash would (one failing doesn't stop the next). Each computer keeps its Locals (c.locals, by
+ * <app>--<site>, a bot's copy's <app>.<copy>--<site>: port, command, its own variables, stopped, good, fixes) and
+ * what was asked; status of an app says its copies' too, and forget takes a copy's, its own folder's (only) or all. A Local's port is
+ * its own: given, else the one it had, else the lowest from 3000 no other Local has (c.held: ports something
+ * else holds there); one given that another has is port-taken, one something else holds is port-held. Each
+ * BOPS_LOCAL line has its BOPS_LOCAL_MORE line (c.localAuth: the app signs in; x.mismatch). One from before
+ * versions (c.localVersion 1, as an older Mac puts back) answers as it did: no BOPS_LOCAL_MORE line, auto refused
+ * (bad-port), mark refused (usage), open on display 99 whatever it's asked. A Local checked after a task (#
+ * bops-local check) answers c.localCheck: { http, base, clean }.
  */
 function localFake(c, command) {
   const lines = command.split("\n");
   if (lines[0] === "# bops-local install") {
     assert.match(command, /\| base64 -d > \/usr\/local\/bin\/bops-local\.new && chmod 755 /);
-    c.localInstalls = (c.localInstalls ?? 0) + 1;
-    c.localBin = true;
+    const v = Number(/-lt (\d+) \]; then/.exec(command)?.[1]);
+    assert.ok(v >= 2, "this Bops' bops-local says its version");
+    if (!c.localBin || (c.localVersion ?? 1) < v) {
+      c.localInstalls = (c.localInstalls ?? 0) + 1;
+      c.localBin = true;
+      c.localVersion = v;
+    }
     return { output: "BOPS_LOCAL_TOOL=ok\n", exit_code: 0 };
+  }
+  // An app's Locals forgotten as it's removed, its working folder too when the script says so: never another workspace's.
+  if (/^# bops-local forget /.test(lines[0])) {
+    const name = lines[0].split(" ")[3];
+    const dir = `/workspace/apps/${name}`;
+    const there = c.folders.get(dir);
+    const repo = /\[ "\$there" != '([^']+)' \]/.exec(command)?.[1];
+    (c.forgets ??= []).push({ name, folder: /\nif \[ "\$there" = '[^']+' \]; then rm -rf \/workspace\/apps\/[a-z0-9-]+ && echo BOPS_LOCAL_FOLDER=gone; fi$/.test(command) });
+    if (there && !there.startsWith("local/") && there !== repo) return { output: "BOPS_LOCAL_OTHER=1\n", exit_code: 0 };
+    if ((c.localVersion ?? 1) < 3) return { output: "BOPS_LOCAL_FAIL=usage\n", exit_code: 1 };
+    let n = 0;
+    for (const k of [...(c.locals?.keys() ?? [])]) if (k.startsWith(`${name}--`) || k.startsWith(`${name}.`)) n += c.locals.delete(k) ? 1 : 0;
+    let out = `BOPS_LOCAL_FORGOT=${n}\n`;
+    // Its bots' copies with its repo (each a folder of its repo's: another one's by that name stays).
+    if (command.includes(`\nfor d in ${dir}.*; do s="$d/.ingot/state.json"; if [ -f "$s" ] && [ `))
+      for (const [d, r] of [...c.folders]) if (d.startsWith(`${dir}.`) && r === repo) (c.folders.delete(d), (out += "BOPS_LOCAL_COPY=gone\n"));
+    if (c.forgets.at(-1).folder && there === repo) {
+      c.folders.delete(dir);
+      out += "BOPS_LOCAL_FOLDER=gone\n";
+    }
+    return { output: out, exit_code: 0 };
+  }
+  if (/^# bops-local check /.test(lines[0])) {
+    (c.localChecks ??= []).push(lines[0]);
+    const k = c.localCheck ?? { http: 200, base: "", clean: false };
+    return { output: `BOPS_CHECK_HTTP=${k.http}\nBOPS_CHECK_BASE=${k.base}\n${k.clean ? "BOPS_CHECK_CLEAN=1\n" : ""}`, exit_code: 0 };
   }
   if (!lines.every((l) => /^(printf %s [A-Za-z0-9+/=]+ \| )?\/usr\/local\/bin\/bops-local /.test(l))) return null;
   if (!c.localBin) return { output: "bash: /usr/local/bin/bops-local: No such file or directory\n", exit_code: 127 };
   c.locals ??= new Map();
+  const older = (c.localVersion ?? 1) < 2;
   const say = (k) => {
     const x = c.locals.get(k);
     if (!x) return "";
-    const state = x.stopped ? "stopped" : c.localFails ? "failed" : "running";
+    const state = x.stopped ? "stopped" : c.localFails ? "failed" : x.mismatch ? "starting" : "running";
     const env = [...x.env.keys()].sort().join(",") || "-";
-    return `BOPS_LOCAL ${k} ${state} ${x.port} ${x.since} ${Buffer.from(x.cmd).toString("base64")} ${state === "failed" ? Buffer.from(c.localFails).toString("base64") : "-"} ${env}\n`;
+    const more = ` dev=${x.dev ?? 3000}${x.good ? ` good=${x.good}` : ""}${x.fixes !== undefined ? ` fixes=${x.fixes}` : ""} auth=${c.localAuth ? 1 : 0}${x.mismatch ? ` mismatch=${x.mismatch}` : ""}${x.more ?? ""}`;
+    // (c.localOld: an older bops-local's, with no second line.)
+    return `BOPS_LOCAL ${k} ${state} ${x.port} ${x.since} ${Buffer.from(x.cmd).toString("base64")} ${state === "failed" ? Buffer.from(c.localFails).toString("base64") : "-"} ${env}\n${c.localOld || older ? "" : `BOPS_LOCAL_MORE ${k}${more}\n`}`;
   };
   let out = "";
   let code = 0;
+  const fail = (words) => {
+    out += words;
+    code = 1;
+  };
   for (const line of lines) {
     const stdin = /^printf %s ([A-Za-z0-9+/=]+) \| /.exec(line)?.[1];
     const [cmd, app, site, ...rest] = line.replace(/^.*\/usr\/local\/bin\/bops-local /, "").split(" ");
     const k = `${app}--${site}`;
     (c.localAsked ??= []).push([cmd, app, site, ...rest]);
     if (cmd === "status") {
-      for (const key of c.locals.keys()) if (key.startsWith(`${app}--`)) out += say(key);
+      // (An app's: its own folder's and each copy's, <app>.<copy>--<site>, as a newer bops-local says them.)
+      for (const key of c.locals.keys()) if (key.startsWith(`${app}--`) || (!older && !app.includes(".") && key.startsWith(`${app}.`))) out += say(key);
       out += "BOPS_LOCAL_DONE=1\n";
+    } else if (cmd === "forget") {
+      // A copy's (<app>.<copy>), its own folder's alone (only), or every one of the app's.
+      let n = 0;
+      for (const key of [...c.locals.keys()]) if (key.startsWith(`${app}--`) || (site !== "only" && !app.includes(".") && key.startsWith(`${app}.`))) n += c.locals.delete(key) ? 1 : 0;
+      out += `BOPS_LOCAL_FORGOT=${n}\n`;
     } else if (cmd === "start") {
       if (!c.folders.has(`/workspace/apps/${app}`)) {
-        out += "BOPS_LOCAL_FAIL=no-folder\n";
-        code = 1;
+        fail("BOPS_LOCAL_FAIL=no-folder\n");
         continue;
       }
-      const [given, fallback, from] = rest.map((v) => (v === "-" ? null : v));
+      const [given, fallback, from, url, devArg] = rest.map((v) => (v === "-" ? null : v));
+      if (older && devArg === "auto") {
+        fail("BOPS_LOCAL_FAIL=bad-port\n");
+        continue;
+      }
       const was = c.locals.get(k);
-      const port = was?.port ?? 4100 + c.locals.size;
+      const others = [...c.locals].filter(([key]) => key !== k).map(([key, y]) => [key, y.dev ?? 3000]);
+      let port;
+      if (devArg && devArg !== "auto") {
+        const other = others.find(([, d]) => d === Number(devArg));
+        if (other) {
+          fail(`BOPS_LOCAL_HELD=${devArg} ${other[0]}\nBOPS_LOCAL_FAIL=port-taken\n`);
+          continue;
+        }
+        port = Number(devArg);
+      } else if (!devArg && was) port = was.dev ?? 3000;
+      else for (port = 3000; others.some(([, d]) => d === port) || (c.held ?? []).includes(port); port++);
+      if ((c.held ?? []).includes(port)) {
+        fail(`BOPS_LOCAL_HELD=${port}\nBOPS_LOCAL_FAIL=port-held\n`);
+        continue;
+      }
       const cmdText = given ? Buffer.from(given, "base64").toString() : was?.cmd ?? (fallback ? Buffer.from(fallback, "base64").toString() : "npm run dev");
-      c.locals.set(k, { port, cmd: cmdText, since: 1761134400, stopped: false, env: was?.env ?? new Map(), from });
+      c.locals.set(k, { ...was, port, dev: port, cmd: cmdText, since: 1761134400, stopped: false, env: was?.env ?? new Map(), from, url: url ? Buffer.from(url, "base64").toString() : null });
       out += say(k);
     } else if (cmd === "stop") {
       if (c.locals.has(k)) c.locals.get(k).stopped = true;
       out += say(k);
     } else if (cmd === "open") {
       if (!c.locals.get(k)?.port) {
-        out += "BOPS_LOCAL_FAIL=not-started\n";
-        code = 1;
+        fail("BOPS_LOCAL_FAIL=not-started\n");
         continue;
       }
       (c.opened ??= []).push(`http://localhost:${c.locals.get(k).port}/`);
+      (c.openedOn ??= []).push(older ? "99" : (rest[0] ?? "99"));
       out += `BOPS_LOCAL_OPENED=1\n${say(k)}`;
+    } else if (cmd === "mark") {
+      if (older) {
+        fail("BOPS_LOCAL_FAIL=usage\n");
+        continue;
+      }
+      const x = c.locals.get(k);
+      if (!x) {
+        fail("BOPS_LOCAL_FAIL=not-started\n");
+        continue;
+      }
+      if (rest[0] === "good") Object.assign(x, { good: `${rest[1]}:1761134500`, fixes: 0 });
+      else x.fixes = (x.fixes ?? 0) + 1;
+      out += `BOPS_LOCAL_MARKED=1\n${say(k)}`;
     } else if (cmd === "env") {
       assert.ok(stdin, "its variables come on stdin, never as an argument");
       const x = c.locals.get(k) ?? { port: null, cmd: "", since: 0, stopped: true, env: new Map() };
@@ -330,6 +487,13 @@ function bash(id, command) {
   const check = spawnSync("bash", ["-n"], { input: command, encoding: "utf8" });
   if (check.status !== 0) badSyntax.push(`${command.split("\n")[0]}: ${check.stderr.trim()}`);
   const c = fleet.get(id);
+  // Bops' SSH key put on the computer and its host key read: in a real shell, on the computer's files in a folder of its own.
+  if (c && command.startsWith("# bops-ssh key\n")) {
+    const home = sshFiles(c);
+    c.sshKeyRuns = (c.sshKeyRuns ?? 0) + 1;
+    const r = spawnSync("bash", ["-c", command.replaceAll("/root/.ssh", `${home}/root/.ssh`).replaceAll("/etc/ssh", `${home}/etc/ssh`)], { encoding: "utf8" });
+    return { output: r.stdout + r.stderr, exit_code: r.status };
+  }
   const local = c && localFake(c, command);
   if (local) return local;
   const first = command.split("\n")[0];
@@ -373,7 +537,7 @@ function bash(id, command) {
     if (!key) return { output: "INGOT_FAIL=the key it was sealed to is gone\n", exit_code: 1 };
     let file = Buffer.alloc(0);
     for (const line of command.split("\n")) {
-      const sealed = new RegExp(`^  printf %s (${WORD}) \\| base64 -d \\| openssl pkeyutl -decrypt -inkey ${at.replace(/[.]/g, "\\.")} -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256$`).exec(line);
+      const sealed = new RegExp(`^  printf %s (${WORD}) \\| base64 -d \\| openssl pkeyutl -decrypt -inkey ${at.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256$`).exec(line);
       if (sealed) file = Buffer.concat([file, privateDecrypt({ key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.from(unquote(sealed[1]), "base64"))]);
       if (line === "  echo") file = Buffer.concat([file, Buffer.from("\n")]);
     }
@@ -433,7 +597,63 @@ function bash(id, command) {
 
 /* ---------------- A fake orgo-web: a computer's record and bash, the deploy runner ---------------- */
 
-const web = { projects: [], calls: [], closed: false, liveAtOnce: false, failAtOnce: null, members: null, membersDown: false };
+const web = { projects: [], calls: [], closed: false, liveAtOnce: false, failAtOnce: null, members: null, membersDown: false, urls: [], urlLimit: 10, accountLimit: 10, urlRefuse: null };
+
+/*
+ * orgo-web's public URLs (lib/public-urls), as Bops' Previews use them: a label taken once across every computer
+ * (LABEL_TAKEN), checkLabel's rules (INVALID_LABEL), one URL per port on a computer (PORT_TAKEN), the per computer
+ * and per account caps. `web.urlRefuse(label, port)` answers a create instead, once, when it returns something.
+ */
+const PUBLIC_RESERVED = new Set(["www", "api", "app", "admin", "edge", "staging", "test", "dev", "localhost"]);
+const urlLabelOk = (l) => typeof l === "string" && /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(l) && !/^[0-9]+$/.test(l) && !/^[0-9a-f]{8}$/.test(l) && !l.startsWith("orgo-") && l.slice(2, 4) !== "--" && !PUBLIC_RESERVED.has(l);
+const urlView = (u) => ({ id: u.id, url: `https://${u.label}.orgo.dev`, hostname: `${u.label}.orgo.dev`, label: u.label, port: u.port, created_at: u.created_at, ...(u.disabled ? { disabled: true } : {}) });
+function publicUrlsRoute(req, url, body) {
+  const m = url.pathname.match(/^\/api\/computers\/([^/]+)\/public-urls(?:\/([^/]+))?$/);
+  if (!m) return null;
+  const [, computerId, urlId] = m;
+  if (web.urlsClosed) return req.method === "GET" ? json({ enabled: false, public_urls: [] }) : json({ error: "public URLs are not enabled" }, 404);
+  const here = web.urls.filter((u) => u.computerId === computerId);
+  if (!urlId && req.method === "GET")
+    return json({ enabled: true, base_domain: "orgo.dev", limit: web.urlLimit, account_limit: web.accountLimit, account_used: web.urls.length, public_urls: here.map(urlView) });
+  if (!urlId && req.method === "POST") {
+    const label = typeof body?.label === "string" ? body.label.trim().toLowerCase() : "";
+    const refused = web.urlRefuse?.(label, body?.port);
+    if (refused) return json(refused.body, refused.status);
+    if (!urlLabelOk(label)) return json({ error: "That name can't be used.", code: "INVALID_LABEL" }, 400);
+    if (here.some((u) => u.port === body.port)) return json({ error: `Port ${body.port} has a public URL already.`, code: "PORT_TAKEN" }, 409);
+    if (here.length >= web.urlLimit) return json({ error: "This computer has as many public URLs as it can.", code: "PUBLIC_URL_LIMIT", limit: web.urlLimit }, 409);
+    if (web.urls.length >= web.accountLimit) return json({ error: "The account has as many as it can.", code: "PUBLIC_URL_ACCOUNT_LIMIT", limit: web.accountLimit }, 409);
+    if (web.urls.some((u) => u.label === label)) return json({ error: `The name ${label} is taken. Pick another name.`, code: "LABEL_TAKEN" }, 409);
+    const u = { id: randomUUID(), computerId, label, port: body.port, created_at: iso(), owned: false };
+    web.urls.push(u);
+    return json(urlView(u), 201);
+  }
+  const u = here.find((x) => x.id === urlId);
+  if (!u) return json({ error: "Public URL not found" }, 404);
+  if (req.method === "PATCH") {
+    if (here.some((x) => x !== u && x.port === body.port)) return json({ error: "Port taken", code: "PORT_TAKEN" }, 409);
+    u.port = body.port;
+    return json(urlView(u));
+  }
+  if (req.method === "DELETE") {
+    web.urls = web.urls.filter((x) => x !== u);
+    return new Response(null, { status: 204 });
+  }
+  return json({ error: "no" }, 405);
+}
+
+/**
+ * A live deploy's public URL, as orgo-web's ensurePublicUrl gives it: the one on the project's port (adopted, never
+ * owned), else one made from its name (owned: it goes with the project), unless it was made with public_url false.
+ */
+function liveUrl(p) {
+  const on = web.urls.find((u) => u.computerId === p.computerId && u.port === p.port);
+  if (on) return `https://${on.label}.orgo.dev`;
+  if (p.created?.public_url === false) return null;
+  const label = web.urls.some((u) => u.label === p.name) ? `${p.name}-x1y2` : p.name;
+  web.urls.push({ id: randomUUID(), computerId: p.computerId, label, port: p.port, created_at: iso(), owned: p.id });
+  return `https://${label}.orgo.dev`;
+}
 /** Who can use the workspace, as orgo-web's members list says: Alex alone, unless a test adds someone. */
 const ALEX_ALONE = { members: [{ id: "u_alex", email: "alex@example.com", role: "owner" }], invites: [] };
 /** orgo-web's rule for an Ingot repo (lib/deploys/config.ts checkIngotRepo): its workspace's id or local, a slash, its name. */
@@ -476,6 +696,8 @@ async function orgoWeb(req) {
   if (vaulted) return vaulted;
   const more = settingsAndAdding(req, url, body);
   if (more) return more;
+  const pub = publicUrlsRoute(req, url, body);
+  if (pub) return pub;
   let m = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/members$/);
   if (m && req.method === "GET") {
     if (web.membersDown) return json({ error: "Something went wrong" }, 500);
@@ -485,6 +707,25 @@ async function orgoWeb(req) {
   if (m && req.method === "GET") {
     const c = fleet.get(m[1]);
     return c ? json({ id: c.id, name: c.name ?? c.id, status: c.status, cpu: 4, ram: 16, os: "linux", ...(c.project ? { project_id: c.project } : {}) }) : json({ error: "Not found" }, 404);
+  }
+  // A computer's SSH (orgo-web's app/api/computers/[id]/ssh): turned on with a key, which writes its authorized_keys whole.
+  m = url.pathname.match(/^\/api\/computers\/([^/]+)\/ssh$/);
+  if (m) {
+    const c = fleet.get(m[1]);
+    if (!c) return json({ error: "Desktop not found" }, 404);
+    const s = (c.ssh ??= { enabled: false, keys: null, port: null });
+    if (s.refuse) return json(s.refuse.body, s.refuse.status);
+    if (req.method === "GET") {
+      const host = s.enabled && !s.noHost ? SSH_HOST : null;
+      return json({ enabled: s.enabled, authorized_key_set: !!s.keys, ipv4_host: host, ipv4_port: s.enabled ? s.port : null, ipv6_address: null, ssh_user: "root", ssh_command: host ? `ssh -p ${s.port} root@${host}` : null });
+    }
+    if (req.method === "POST") {
+      if (!/^ssh-ed25519 [A-Za-z0-9+/=]+( .+)?$/.test(body?.public_key ?? "")) return json({ error: "Not a valid SSH public key" }, 400);
+      Object.assign(s, { enabled: true, keys: body.public_key, port: s.port ?? 40022 });
+      writeFileSync(join(sshFiles(c), "root/.ssh/authorized_keys"), `${body.public_key}\n`, { mode: 0o600 });
+      return json({ enabled: true, authorized_key_set: true, ssh_host_port: s.port, pending: false, requires_restart: false });
+    }
+    return json({ error: "no" }, 405);
   }
   m = url.pathname.match(/^\/api\/computers\/([^/]+)\/bash$/);
   if (m && req.method === "POST") {
@@ -520,6 +761,8 @@ async function orgoWeb(req) {
       if (web.removeRefuse) return json(web.removeRefuse, 409);
       web.projects = web.projects.filter((x) => x !== p);
       web.envs.delete(p.id);
+      // Its own URL goes with it; one it adopted (Bops made it) stays.
+      web.urls = web.urls.filter((u) => u.owned !== p.id);
       return json({ deleted: true, cleaned: false });
     }
     if (kind === "deploy-projects" && sub === "deployments" && req.method === "POST") {
@@ -527,7 +770,7 @@ async function orgoWeb(req) {
       const head = central.repos.get(p.ingot_repo)?.changesets[0]?.id ?? null;
       const fail = web.failAtOnce;
       const d = { id: randomUUID(), project_id: p.id, state: fail ? "failed" : web.liveAtOnce ? "succeeded" : "queued", phase: null, error: fail?.error ?? null, source_version: body.at ?? p.ingot_at ?? head, created_at: iso(), finished_at: fail || web.liveAtOnce ? iso() : null, log: fail?.log ?? ["Exporting the changeset\n", "Building\n"] };
-      if (web.liveAtOnce) p.url = `https://${p.name}.orgo.dev`;
+      if (web.liveAtOnce) p.url = liveUrl(p);
       p.deployments.push(d);
       web.onDeploy?.(p, d);
       return json((({ log, ...x }) => (void log, x))(d), 202);
@@ -998,6 +1241,8 @@ globalThis.fetch = async (input, init) => {
   }
   if (url.origin === "https://api.openai.com" && url.pathname === "/v1/responses") {
     const b = JSON.parse(await req.text());
+    // The chat's summary (chat-summary.ts), folded after a turn: answered apart, so it never takes a turn's answer.
+    if (String(b.instructions ?? "").startsWith("You keep the running summary")) return json(response("resp_summary", [said("Alex and Boppy talked about the app.")]));
     asked.push(b);
     const next = answers.shift();
     return json(next ? await next(b) : response(`resp_${asked.length}`, [said("Done.")]));
@@ -1044,10 +1289,15 @@ const heard = [];
 const hear = (x) => (heard.push(typeof x === "string" ? x : JSON.stringify(x)), x);
 
 S = await import(`${root}/lib/server/store.ts`);
-const { botChatId } = await import(`${root}/lib/types.ts`);
+const { botChatId, DISPLAYS } = await import(`${root}/lib/types.ts`);
 const I = await import(`${root}/lib/server/ingot.ts`);
 const O = await import(`${root}/lib/server/orgo.ts`);
 const H = await import(`${root}/lib/server/hosted-apps.ts`);
+const L = await import(`${root}/lib/server/app-labels.ts`);
+/** The site's Published project (named with a Published label sealed for it) and Preview project (a Preview label), as the fake has them. */
+const prodProject = (app, site = app, c = "c_boppy") => web.projects.find((p) => p.computerId === c && L.isLabelOf("prod", p.name, `${PROJECT}/${app}`, site));
+const previewProject = (app, site = app, c = "c_boppy") => web.projects.find((p) => p.computerId === c && L.isLabelOf("preview", p.name, `${PROJECT}/${app}`, site));
+const previewUrl = (app, site = app, c = "c_boppy") => web.urls.find((u) => u.computerId === c && L.isLabelOf("preview", u.label, `${PROJECT}/${app}`, site));
 const Chat = await import(`${root}/lib/server/chat.ts`);
 const AppsRoute = await import(`${root}/app/api/hosted-apps/route.ts`);
 const AppRoute = await import(`${root}/app/api/hosted-apps/[name]/route.ts`);
@@ -1348,7 +1598,7 @@ await check("work_on_app on Alex's own turn: the app kept on the workspace with 
   assert.deepEqual(Object.keys(body.tools.find((x) => x.name === "deploy_app").parameters.properties), ["app", "at", "where"]);
   assert.equal(started.length, k + 1);
   const t = started.at(-1);
-  assert.deepEqual([t.botId, t.where, t.procedure, t.app, t.title, t.sentVia, t.chatId], ["boppy", "cloud", undefined, { wsId: WS, name: "recipe-box" }, "Work on recipe-box", "you", chatId]);
+  assert.deepEqual([t.botId, t.where, t.procedure, t.app, t.title, t.sentVia, t.chatId], ["boppy", "cloud", undefined, { wsId: WS, name: "recipe-box", site: "recipe-box" }, "Work on recipe-box", "you", chatId]);
   hear(t.goal);
   assert.match(t.goal, /^Work on Alex's app recipe-box\. It's the Ingot repo 3f6c2a1e-8b4d-4c7a-9e21-5d0b7a9c4f13\/recipe-box \(Ingot is Orgo's source control; name it in full wherever a command takes a repo\), and its working folder on this computer is \/workspace\/apps\/recipe-box/);
   assert.match(t.goal, /\nWhat to do: A page that lists Alex's recipes, with a search box\.\n/);
@@ -1381,9 +1631,10 @@ await check("As the task starts on its computer: the CLI ready there, the repo m
   assert.deepEqual(kinds("c_boppy", n), ["probe", "folder recipe-box"], "the repo isn't made on the computer");
   assert.deepEqual(boppy.cloned, ["3f6c2a1e-8b4d-4c7a-9e21-5d0b7a9c4f13/recipe-box"]);
   assert.ok(boppy.folders.has("/workspace/apps/recipe-box"));
-  const made = central.calls.slice(c).filter((x) => x.path.includes("/repos"));
+  const made = central.calls.slice(c).filter((x) => x.path.includes("/repos") && x.method !== "GET");
   assert.deepEqual(made.map((x) => [x.method, x.path, x.body, x.author, x.auth]), [["POST", "/api/v1/w/3f6c2a1e-8b4d-4c7a-9e21-5d0b7a9c4f13/repos", { name: "recipe-box" }, "boppy; Boppy", `Bearer ${ORGO_KEY}`]]);
   assert.deepEqual(repoOf("recipe-box").created_by, { id: "u_alex", name: "Boppy via Alex" });
+  assert.equal(S.getState().sessions.find((x) => x.id === appTask.id).app.startHead, null, "where its changes start: nothing committed yet");
   const again = await H.readyAppForTask(appTask.id, "c_boppy");
   assert.equal(hear(again), "Pulled the newest recipe-box into /workspace/apps/recipe-box");
   assert.equal(boppy.pulls, 1);
@@ -1570,7 +1821,7 @@ await check("work_on_app on a listed app, by name or words; one that isn't there
   const k = started.length;
   answers.push(calling(toolCall("work_on_app", { app: "Recipe Box", name: null, change: "Add a favorites list.", say: "Adding it." })));
   await Chat.handleMessage(chatId, "Add favorites to the recipe app");
-  assert.deepEqual([started.at(-1).app, started.length], [{ wsId: WS, name: "recipe-box" }, k + 1]);
+  assert.deepEqual([started.at(-1).app, started.length], [{ wsId: WS, name: "recipe-box", site: "recipe-box" }, k + 1]);
   answers.push(calling(toolCall("work_on_app", { app: "blog", name: null, change: "Add a post.", say: "Adding it." })));
   await Chat.handleMessage(chatId, "Add a post to the blog app");
   assert.equal(started.length, k + 1, "no task");
@@ -1581,6 +1832,61 @@ await check("work_on_app on a listed app, by name or words; one that isn't there
   assert.equal(started.length, k + 1, "no task for Ivy");
   assert.equal(hear(S.getState().messages.filter((m) => m.chatId === ivyChat).at(-1).text), "Couldn't work on the app: recipe-box is on Boppy's computer, so it's Boppy's to work on.");
   assert.equal(hostedApps()["recipe-box"].botId, "boppy");
+});
+
+await check("A repo in the workspace's Ingot that isn't an app yet: the note names it from the list read again as the turn starts (none at hand, none said, Ingot not asked for the note), work_on_app takes its name with a finished plain task about it in the chat, and the task clones the repo as it is", async () => {
+  central.repos.set(`${PROJECT}/site-a`, { created_by: { id: "u_alex", name: "Alex" }, created_at: iso(), changesets: [] });
+  const first = commit("site-a", "The first page", { id: "u_alex", name: "Alex" });
+  forgetListed();
+  let c = central.calls.length;
+  assert.doesNotMatch(H.hostedAppsLine("boppy"), /site-a/, "no list at hand: nothing said");
+  assert.equal(central.calls.length, c, "and Ingot isn't asked for it");
+  // Not yet read: work_on_app can't tell it's a repo, and says there's no such app.
+  answers.push(calling(toolCall("work_on_app", { app: "site-a", name: null, change: "Get its Local running.", deploy: false, say: "On it." })));
+  forgetListed();
+  central.down = true;
+  try {
+    await Chat.handleMessage(chatId, "Work on site-a");
+  } finally {
+    central.down = false;
+  }
+  assert.equal(hear(messages().at(-1).text), `Couldn't work on the app: There's no app called "site-a" in this workspace.`);
+  assert.equal(hostedApps()["site-a"], undefined);
+  // A plain task about it finished in this chat a moment ago (it had no folder, so it couldn't).
+  const now = Date.now();
+  S.update((st) => st.sessions.push({ id: "ses_site_plain", botId: "boppy", chatId, sentVia: "you", title: "Site A Local", goal: "Get the site-a app's Local running.", host: "orgo", runsOn: "cloud", status: "done", answer: "There's no repo on this computer.", steps: [], replies: [], createdAt: now - 60_000, endedAt: now }));
+  S.addMessage({ chatId, role: "bot", botId: "boppy", text: "There's no repo on this computer.", resultOf: "ses_site_plain" });
+  forgetListed();
+  c = central.calls.length;
+  const k = started.length;
+  answers.push(calling(toolCall("work_on_app", { app: "site-a", name: null, change: "Get its Local running.", deploy: false, say: "Starting its Local." })));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, "Work on the app site-a and get its Local running");
+  const body = asked[n];
+  assert.equal(ingotSince(c, "GET", /\/repos$/).length, 1, "read again as the turn started");
+  const notes = hear(body.input.filter((x) => x.role === "developer").map((x) => x.content).join("\n"));
+  assert.match(notes, /\. In your workspace's Ingot but not on a computer yet: site-a \(work_on_app with its name as app gives it one\)\./);
+  assert.match(notes, /"Site A Local" \(ses_site_plain\), finished in the cloud, on no app/);
+  assert.ok(toolNames(body).includes("tell_task") && toolNames(body).includes("work_on_app"));
+  // Its task: a new app's, under the repo's own name, on the bot's computer.
+  assert.equal(started.length, k + 1);
+  assert.deepEqual([started.at(-1).app, started.at(-1).title], [{ wsId: WS, name: "site-a", site: "site-a" }, "Work on site-a"]);
+  assert.match(started.at(-1).goal, /^Work on Alex's app site-a\. It's the Ingot repo 3f6c2a1e-8b4d-4c7a-9e21-5d0b7a9c4f13\/site-a /);
+  assert.deepEqual(hostedApps()["site-a"], { botId: "boppy", computerId: "c_boppy" });
+  assert.equal(messages().at(-1).text, "Starting its Local.");
+  // As it starts: nothing made anew (Ingot has the repo), its folder a clone of it, its changes told from its newest commit.
+  const task = S.getState().sessions.find((x) => x.app?.name === "site-a");
+  c = central.calls.length;
+  assert.equal(hear(await H.readyAppForTask(task.id, "c_boppy")), "Cloned the Ingot repo site-a into /workspace/apps/site-a");
+  assert.deepEqual(ingotSince(c, "POST", /\/repos$/).map((x) => x.body), [{ name: "site-a" }], "asked, and Ingot had it");
+  assert.deepEqual(repoOf("site-a").changesets.map((x) => x.id), [first.id], "its history as it was");
+  assert.equal(S.getState().sessions.find((x) => x.id === task.id).app.startHead, first.id);
+  assert.equal(boppy.cloned.at(-1), `${PROJECT}/site-a`);
+  // An app now: the note lists it with the others, not as a repo waiting.
+  const line = hear(H.hostedAppsLine("boppy"));
+  assert.match(line, /; site-a \(no preview yet; not published yet\)/);
+  assert.doesNotMatch(line, /not on a computer yet/);
+  S.update((st) => (st.sessions = st.sessions.filter((x) => x.id !== "ses_site_plain")));
 });
 
 await check("No work_on_app or deploy_app on a routine's run or a turn someone else started; on a turn that read something from outside, only when Alex's own words asked", async () => {
@@ -1620,40 +1926,61 @@ await check("No work_on_app or deploy_app on a routine's run or a turn someone e
 /* ---------------- Deploying ---------------- */
 
 let first;
-await check("A deploy from the window: its project made the first time on the app's computer (source ingot, the repo, a free name and port, nothing deployed by the create), then the newest changeset queued", async () => {
+await check("A deploy from the window goes to its Preview: Published's project made first (a random marked name, port 3100, no public URL, nothing deployed), then its Preview's link with a label of its own, then its project named as that label on its port, the newest queued there", async () => {
   web.projects = [];
+  web.urls = [];
   S.update((s) => {
     const h = s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"];
     delete h.projectId;
     delete h.url;
+    delete h.preview;
   });
   first = commit("recipe-box", "A recipe list with a search box", { id: "boppy", name: "Boppy" });
   forgetListed();
   const n = web.calls.length;
   const r = await post("recipe-box", { ws: WS, action: "deploy" });
   assert.equal(r.status, 200);
-  assert.equal(web.projects.length, 1);
-  const p = web.projects[0];
-  assert.deepEqual(p.created, { source: "ingot", repo: `${PROJECT}/recipe-box`, name: "recipe-box", port: 3000, deploy: false });
-  assert.equal(p.computerId, "c_boppy");
+  assert.equal(web.projects.length, 2);
+  const prod = prodProject("recipe-box");
+  const pv = previewProject("recipe-box");
+  assert.ok(prod && pv, "a Published and a Preview project");
+  assert.deepEqual(prod.created, { source: "ingot", repo: `${PROJECT}/recipe-box`, name: prod.name, port: 3100, deploy: false, public_url: false });
+  assert.match(prod.name, /^[a-z0-9]{12}$/);
+  assert.equal(pv.port, 3101);
+  assert.equal(pv.created.env.AUTH_URL, `https://${pv.name}.orgo.dev`, "sign in at its own link");
+  assert.equal(pv.created.env.AUTH_TRUST_HOST, "true");
+  // Its link first, with the project's name as its label, then the project (made after Published's).
+  const order = web.calls.slice(n).filter((c) => c.method === "POST" && /\/(public-urls|deploy-projects)$/.test(c.path)).map((c) => c.path.split("/").at(-1));
+  assert.deepEqual(order, ["deploy-projects", "public-urls", "deploy-projects"]);
+  assert.deepEqual(web.urls.map((u) => [u.label, u.port, u.owned]), [[pv.name, 3101, false]]);
   // orgo-web takes "<project>/<name>" only (checkIngotRepo, which the fake applies): a bare name is refused.
   await assert.rejects(O.deploys.create("c_boppy", { repo: "recipe-box", name: "bare", port: 3999 }), (e) => e instanceof O.OrgoError && e.code === "INVALID_REPO");
-  assert.equal(web.projects.length, 1);
-  assert.deepEqual(callsSince(n, "POST", /\/deploy-projects\/[^/]+\/deployments$/).map((c) => c.body), [{}], "the newest on main");
-  assert.deepEqual(hostedApps()["recipe-box"].projectId, p.id);
+  assert.deepEqual(callsSince(n, "POST", /\/deploy-projects\/[^/]+\/deployments$/).map((c) => [c.path.split("/")[5], c.body]), [[pv.id, {}]], "the newest on main, on the Preview only");
+  assert.equal(hostedApps()["recipe-box"].projectId, prod.id);
+  assert.equal(hostedApps()["recipe-box"].preview, pv.name, "its label kept as a copy");
+  assert.equal(hostedApps()["recipe-box"].url, undefined, "no address kept");
   assert.equal(r.body.app.name, "recipe-box");
   assert.equal(r.body.app.head, first.id);
-  assert.deepEqual([r.body.app.live.state, r.body.app.live.at, r.body.app.serving], ["queued", first.id, null]);
+  assert.equal(r.body.app.preview.url, `https://${pv.name}.orgo.dev`);
+  assert.deepEqual([r.body.app.preview.live.state, r.body.app.preview.live.at], ["queued", first.id]);
+  assert.equal(r.body.app.live, null, "Published untouched");
 });
 
-await check("A redeploy of an older changeset goes to the same project; a changeset id that isn't one is refused; a deploy from outside the window is refused", async () => {
+await check("A redeploy of an older changeset goes to the same Preview at the same link; a changeset id that isn't one is refused; a deploy from outside the window is refused", async () => {
   commit("recipe-box", "Favorites", { id: "boppy", name: "Boppy" });
+  const link = previewUrl("recipe-box").label;
   const n = web.calls.length;
   const r = await post("recipe-box", { ws: WS, action: "deploy", at: first.id });
   assert.equal(r.status, 200);
-  assert.equal(web.projects.length, 1, "no new project");
+  assert.equal(web.projects.length, 2, "no new project");
+  assert.deepEqual(callsSince(n, "POST", /\/public-urls$/), [], "no new link");
+  assert.equal(previewUrl("recipe-box").label, link);
   assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.body), [{ at: first.id }]);
-  assert.equal(newestFirst(web.projects[0])[0].source_version, first.id);
+  assert.equal(newestFirst(previewProject("recipe-box"))[0].source_version, first.id);
+  // A window's deploy that says env prod still goes to the Preview: Published only takes Publish.
+  const m0 = web.calls.length;
+  await post("recipe-box", { ws: WS, action: "deploy", env: "prod" });
+  assert.deepEqual(callsSince(m0, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [previewProject("recipe-box").id]);
   const bad = await post("recipe-box", { ws: WS, action: "deploy", at: "main" });
   assert.deepEqual([bad.status, bad.body.error], [400, "That isn't a changeset of it."]);
   const m = web.calls.length;
@@ -1664,17 +1991,36 @@ await check("A redeploy of an older changeset goes to the same project; a change
   assert.equal(what.status, 400);
 });
 
-await check("deploy_app in the chat answers the model with how it went and the address: to Staging, unless Alex's own words ask for Prod, which gets what Staging serves (Promote); live, the list and the bots' prompt say the URL", async () => {
+await check("deploy_app in the chat: to its Preview at its fixed link unless Alex's own words ask to publish it; Publish needs a domain first, then puts what the Preview serves on Published; the list and the bots' prompt never show an orgo.dev name for Published", async () => {
   web.liveAtOnce = true;
-  const t = await turnWith("Put the recipe app live", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "staging" })], "It's deploying.");
-  const AFTER = "Say publish, or press Publish on the Apps page, to put it at its real address once it looks right.";
-  assert.equal(t.out(), `Deploying a preview of the newest commit of recipe-box on Boppy's computer. It's at https://recipe-box-staging.orgo.dev in a minute or two, a link to share. ${AFTER}`);
-  // The bot asking for Prod on words that don't: Staging, and it's told so.
+  const AFTER = "Say publish, or press Publish in Your Apps, to put it on its domain once it looks right.";
+  const t = await turnWith("Put the recipe app live", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "preview" })], "It's deploying.");
+  const link = `https://${previewUrl("recipe-box").label}.orgo.dev`;
+  const SAID = `Deploying a preview of the newest commit of recipe-box on Boppy's computer. It's at ${link} in a minute or two. That link stays the same for every preview, so add it to Google sign in once if the app uses it. ${AFTER}`;
+  assert.equal(t.out(), SAID);
+  // "staging", as the builds before said it, is the Preview too.
+  const old = await turnWith("Put the recipe app live", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "staging" })], "Done.");
+  assert.equal(old.out(), SAID);
+  // The bot asking for Prod on words that don't: the Preview, and it's told so.
   const not = await turnWith("Put the recipe app up", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
-  assert.equal(not.out(), `Deploying a preview of the newest commit of recipe-box on Boppy's computer. It's at https://recipe-box-staging.orgo.dev in a minute or two, a link to share. ${AFTER} (It went to its preview: Alex didn't ask to publish it. Ask them, or they press Publish on the Apps page.)`);
-  const head = repoOf("recipe-box").changesets[0].id;
+  assert.equal(not.out(), `${SAID} (It went to its preview: Alex didn't ask to publish it. Ask them, or they press Publish in Your Apps.)`);
+  // A pasted preview link isn't asking to publish.
+  const pasted = await turnWith(`Looks good at ${link}`, [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
+  assert.match(pasted.out(), /\(It went to its preview: Alex didn't ask to publish it\./);
+  // Publish with no domain: refused, in words, nothing deployed on Published.
+  const n = web.calls.length;
   const prod = await turnWith("Ship the recipe app to production", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
-  assert.equal(prod.out(), `Publishing recipe-box at ${head.slice(0, 7)}, what its preview serves. It gets its public address once this first deploy is live.`);
+  assert.equal(prod.out(), "Not published: recipe-box has no domain yet. Connect one in Your Apps (Published, Domain, From Cloudflare), then say publish again.");
+  assert.deepEqual(callsSince(n, "POST", /\/deployments$/).filter((c) => c.path.includes(prodProject("recipe-box").id)), []);
+  // A domain on Published's port (pending is enough): Publish puts what the Preview serves there.
+  const pp = prodProject("recipe-box");
+  web.domains.push({ id: "cd_pub", computerId: "c_boppy", domain: "recipes.acme.test", target_port: pp.port, status: "pending", token: "t", managed: false });
+  const served = newestFirst(previewProject("recipe-box")).find((d) => d.state === "succeeded").source_version;
+  const yes = await turnWith("Publish the recipe app", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
+  assert.equal(yes.out(), `Publishing recipe-box at ${served.slice(0, 7)}, what its preview serves. It's live on its domain once its DNS points at Orgo.`);
+  assert.equal(newestFirst(pp)[0].source_version, served, "the Preview's exact commit");
+  assert.equal(pp.url, null, "Published got no public URL");
+  assert.equal(web.envs.get(pp.id)?.get("AUTH_URL"), "https://recipes.acme.test", "sign in at its domain, set as it had none");
   web.liveAtOnce = false;
   forgetListed();
   const a = await H.listApps(WS);
@@ -1682,21 +2028,35 @@ await check("deploy_app in the chat answers the model with how it went and the a
   const app = a.apps.find((x) => x.name === "recipe-box");
   assert.equal(a.enabled, true);
   assert.equal(app.live.state, "succeeded");
-  assert.equal(app.live.url, "https://recipe-box.orgo.dev");
-  assert.equal(app.serving, repoOf("recipe-box").changesets[0].id);
-  assert.equal(hostedApps()["recipe-box"].url, "https://recipe-box.orgo.dev", "the URL is kept");
-  const again = await turnWith("Promote the recipe app", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Deploying.");
-  assert.equal(again.out(), `Publishing recipe-box at ${head.slice(0, 7)}, what its preview serves. It's live at https://recipe-box.orgo.dev in a minute or two.`);
-  const now = again.first.input.find((x) => x.role === "developer").content;
-  assert.match(now, /\nYour workspace's apps on the web, each an Ingot repo \(work_on_app to build or change one, deploy_app to put it live\): [^\n]*recipe-box \(live at https:\/\/recipe-box\.orgo\.dev\)/);
-  assert.match(now, /notes \(not on the web yet\)/);
-  hear(now.split("\n").find((l) => l.startsWith("Your workspace's apps on the web")));
+  assert.equal(app.domain, null, "pending: no address yet");
+  assert.deepEqual(app.domains, [{ domain: "recipes.acme.test", status: "pending" }]);
+  assert.equal(app.serving, served);
+  assert.equal(app.preview.url, link);
+  assert.ok(!JSON.stringify(app).includes("recipe-box.orgo.dev"), "no friendly orgo.dev name anywhere");
+  assert.equal(hostedApps()["recipe-box"].url, undefined, "no address kept");
+  // Live on its domain: the list says it, the bot's prompt says the preview link.
+  web.domains.find((d) => d.id === "cd_pub").status = "active";
+  forgetListed();
+  const b = (await H.listApps(WS)).apps.find((x) => x.name === "recipe-box");
+  assert.equal(b.domain, "https://recipes.acme.test");
+  const now = H.hostedAppsLine("boppy");
+  assert.ok(now.startsWith("Your workspace's apps on the web, each an Ingot repo (work_on_app builds or changes one, local_app runs it, deploy_app deploys it): "), now);
+  assert.ok(now.includes(`recipe-box (preview at ${link}; published on its domain once it has one)`), now);
+  assert.ok(!/recipe-box\.orgo\.dev/.test(now));
+  hear(now);
+  web.domains = web.domains.filter((d) => d.id !== "cd_pub");
 });
 
 await check("deploy_app with the short id Ingot prints: the whole one looked up on main in Ingot and deployed, the computer asleep or not; the start of two, an unknown one, and one while Ingot is down are refused in words", async () => {
-  const n = web.calls.length;
+  // Publish names no commit of its own: one the Preview doesn't serve is refused, said how.
+  let n = web.calls.length;
+  const serving = newestFirst(previewProject("recipe-box")).find((d) => d.state === "succeeded").source_version;
   const t = await turnWith("Put the first version back live on prod", [toolCall("deploy_app", { app: "recipe-box", at: first.id.slice(0, 12), where: "prod" })], "Done.");
-  assert.match(t.out(), new RegExp(`^Publishing recipe-box at ${first.id.slice(0, 7)} on Boppy's computer\\.`));
+  assert.equal(t.out(), `Not published: Publish puts what its preview serves (${serving.slice(0, 7)}). Deploy ${first.id.slice(0, 7)} to its preview first, look at it, then publish.`);
+  assert.deepEqual(callsSince(n, "POST", /\/deployments$/), [], "nothing deployed");
+  n = web.calls.length;
+  const back = await turnWith("Put the first version on its preview", [toolCall("deploy_app", { app: "recipe-box", at: first.id.slice(0, 12), where: "preview" })], "Done.");
+  assert.match(back.out(), new RegExp(`^Deploying a preview of recipe-box at ${first.id.slice(0, 7)} on Boppy's computer\\.`));
   assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.body), [{ at: first.id }]);
   // Two changesets whose ids start alike.
   const a = commit("recipe-box", "Pink", { id: "boppy", name: "Boppy" });
@@ -1711,7 +2071,7 @@ await check("deploy_app with the short id Ingot prints: the whole one looked up 
   boppy.status = "suspended";
   const k = ran.length;
   let m = web.calls.length;
-  const asleep = await turnWith("Deploy the blue one", [toolCall("deploy_app", { app: "recipe-box", at: b.id.slice(0, 8), where: "staging" })]);
+  const asleep = await turnWith("Deploy the blue one", [toolCall("deploy_app", { app: "recipe-box", at: b.id.slice(0, 8), where: "preview" })]);
   assert.match(asleep.out(), new RegExp(`^Deploying a preview of recipe-box at ${b.id.slice(0, 7)} on Boppy's computer\\.`));
   assert.deepEqual(callsSince(m, "POST", /\/deployments$/).map((c) => c.body), [{ at: b.id }]);
   assert.equal(ran.length, k, "no command on the computer");
@@ -1726,42 +2086,54 @@ await check("deploy_app with the short id Ingot prints: the whole one looked up 
   central.down = false;
 });
 
-await check("A project Orgo no longer has is made again on the same computer", async () => {
+await check("Projects Orgo no longer has are made again on the same computer: the Preview's with the same name on its link's port (its link stays), Published's with a new marked name", async () => {
+  const link = previewUrl("recipe-box").label;
   web.projects = [];
   const r = await post("recipe-box", { ws: WS, action: "deploy" });
   assert.equal(r.status, 200);
-  assert.equal(web.projects.length, 1);
-  assert.equal(hostedApps()["recipe-box"].projectId, web.projects[0].id);
+  assert.equal(web.projects.length, 2);
+  assert.equal(previewProject("recipe-box").name, link, "the same name");
+  assert.equal(previewUrl("recipe-box").label, link, "the same link");
+  assert.equal(previewProject("recipe-box").port, previewUrl("recipe-box").port);
+  assert.equal(hostedApps()["recipe-box"].projectId, prodProject("recipe-box").id);
 });
 
-await check("A project there for the repo that this Bops lost track of is the one, found by its Ingot repo (orgo-web's ingot_repo; its repo is null)", async () => {
+await check("Projects there for the repo that this Bops lost track of are the ones, found by their marks (Published by its label's seal, the Preview by its link's): none made again, the link the same, the record found again", async () => {
   const kept = hostedApps()["recipe-box"].projectId;
+  const link = previewUrl("recipe-box").label;
   S.update((s) => {
-    delete s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].projectId;
+    const h = s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"];
+    delete h.projectId;
+    delete h.preview;
   });
   const n = web.calls.length;
   const r = await post("recipe-box", { ws: WS, action: "deploy" });
   assert.equal(r.status, 200);
-  assert.equal(web.projects.length, 1, "no second project");
-  assert.deepEqual(callsSince(n, "POST", /\/deploy-projects$/), [], "nothing made");
+  assert.equal(web.projects.length, 2, "no third project");
+  assert.deepEqual(callsSince(n, "POST", /\/(deploy-projects|public-urls)$/), [], "nothing made");
   assert.equal(hostedApps()["recipe-box"].projectId, kept);
+  assert.equal(hostedApps()["recipe-box"].preview, link);
+  assert.equal(r.body.app.preview.url, `https://${link}.orgo.dev`);
 });
 
-await check("Deploy this one on an app never deployed: its project made naming no changeset and that one queued; a deploy after it builds the newest on main, not that one", async () => {
+await check("Deploy this one on an app never deployed: its Preview made naming no changeset and that one queued there; a deploy after it builds the newest on main, not that one", async () => {
   web.projects = [];
+  web.urls = [];
   S.update((s) => {
     const h = s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"];
     delete h.projectId;
     delete h.url;
+    delete h.preview;
   });
   const newest = repoOf("recipe-box").changesets[0].id;
   assert.notEqual(newest, first.id);
   const r = await post("recipe-box", { ws: WS, action: "deploy", at: first.id });
   assert.equal(r.status, 200);
-  const p = web.projects[0];
-  assert.deepEqual(p.created, { source: "ingot", repo: `${PROJECT}/recipe-box`, name: "recipe-box", port: 3000, deploy: false });
+  const p = previewProject("recipe-box");
   assert.equal(p.ingot_at, null, "nothing kept for later deploys");
+  assert.equal(prodProject("recipe-box").ingot_at, null);
   assert.equal(newestFirst(p)[0].source_version, first.id);
+  assert.deepEqual(newestFirst(prodProject("recipe-box")), [], "nothing on Published");
   const again = await post("recipe-box", { ws: WS, action: "deploy" });
   assert.equal(again.status, 200);
   assert.equal(newestFirst(p)[0].source_version, newest);
@@ -1798,8 +2170,8 @@ await check("A deploy on a computer that has no token of the workspace's yet (th
 
 const recipeHead = () => repoOf("recipe-box").changesets[0].id;
 const recipeDeploys = () => newestFirst(web.projects.find((p) => p.id === hostedApps()["recipe-box"].projectId));
-/** Its Staging project's deploys (where a task's deploy goes), newest first. */
-const stagingDeploys = () => newestFirst(web.projects.find((p) => p.name === "recipe-box-staging"));
+/** Its Preview project's deploys (where a task's deploy goes), newest first. */
+const stagingDeploys = () => newestFirst(previewProject("recipe-box") ?? { deployments: [] });
 const sessionOf = (id) => S.getState().sessions.find((x) => x.id === id);
 const deploysSince = (n) => callsSince(n, "POST", /\/deploy-projects\/[^/]+\/deployments$/);
 const RECIPE = { wsId: WS, name: "recipe-box" };
@@ -1825,19 +2197,19 @@ await check("work_on_app with deploy, on Alex's own turn: the task carries the a
   assert.deepEqual(Object.keys(tool.parameters.properties), ["app", "name", "change", "deploy", "say"]);
   assert.equal(tool.parameters.properties.deploy.type, "boolean");
   hear(tool.parameters.properties.deploy.description);
-  assert.match(tool.description, /When Alex asks in the same message for it to go live too, set deploy: Bops deploys it once the task has committed, and says how it went in this chat\. Without deploy nothing goes live, so don't say it will/);
+  assert.match(tool.description, /When Alex asks in the same message for a link to share or for it to go on the web, set deploy: once the task has committed, Bops deploys it to its Preview \(its own fixed link\) and says how it went here\. Nothing is ever published this way/);
   assert.match(hear(asked[n].tools.find((x) => x.name === "deploy_app").description), /For a change work_on_app is starting now, set its deploy instead/);
   const t = started.at(-1);
-  assert.deepEqual(t.app, { ...RECIPE, deployAfter: true });
+  assert.deepEqual(t.app, { ...RECIPE, site: "recipe-box", deployAfter: true });
   hear(t.goal);
-  assert.match(t.goal, /\n4\. Say what you changed\. Alex asked for it to go live too: once you've committed and this task ends, Bops deploys its newest commit to its preview itself and tells them where, so don't tell them to deploy it\. If you couldn't commit it, say why\.$/);
+  assert.match(t.goal, /\n4\. Say what you changed\. Alex asked for a link too: once you've committed and this task ends, Bops deploys its newest commit to its preview itself and tells them where, so don't tell them to deploy it\. If you couldn't commit it, say why\.$/);
   assert.doesNotMatch(t.goal, /Apps page/);
   assert.equal(messages().at(-1).text, "Making it green, then putting it live.");
   answers.push(calling(toolCall("work_on_app", { app: "recipe-box", name: null, change: "Make the title blue.", deploy: false, say: "Making it blue." })));
   await Chat.handleMessage(chatId, "Make the recipe app's title blue");
   const u = started.at(-1);
-  assert.deepEqual(u.app, RECIPE);
-  assert.match(u.goal, /\n4\. Say what you changed\. Alex puts it live from the Apps page, or by asking me\.$/);
+  assert.deepEqual(u.app, { ...RECIPE, site: "recipe-box" });
+  assert.match(u.goal, /\n4\. Say what you changed\. Alex sees it in its Local now; it goes on the web when they ask, as a preview link first\.$/);
 });
 
 await check("On a turn that read something from outside Bops, the deploy goes with the task only when Alex's own words asked to deploy it (deploy_app's rule); else the task starts without it, and a note says so", async () => {
@@ -1845,15 +2217,15 @@ await check("On a turn that read something from outside Bops, the deploy goes wi
   const k = started.length;
   await turnWith("Put the menu from that page in the recipe app", [toolCall("web_fetch", { url: "https://example.com/menu" }), toolCall("work_on_app", { app: "recipe-box", name: null, change: "Add the menu.", deploy: true, say: "Adding the menu." })]);
   assert.equal(started.length, k + 1, "the task starts");
-  assert.deepEqual(started.at(-1).app, RECIPE, "without the deploy");
-  assert.match(started.at(-1).goal, /Alex puts it live from the Apps page/);
+  assert.deepEqual(started.at(-1).app, { ...RECIPE, site: "recipe-box" }, "without the deploy");
+  assert.match(started.at(-1).goal, /it goes on the web when they ask, as a preview link first/);
   const note = messages().slice(before).find((m) => m.text.startsWith("Won't put"));
   assert.equal(hear(note?.text), "Won't put recipe-box live after: this turn read something from outside Bops, so apps go on the web only when Alex asks for it themselves");
   assert.deepEqual([note.role, note.appNote], ["system", true]);
   const m = messages().length;
   await turnWith("Put the menu from that page in the recipe app and deploy it", [toolCall("web_fetch", { url: "https://example.com/menu" }), toolCall("work_on_app", { app: "recipe-box", name: null, change: "Add the menu.", deploy: true, say: "Adding the menu." })]);
   assert.equal(started.length, k + 2);
-  assert.deepEqual(started.at(-1).app, { ...RECIPE, deployAfter: true }, "Alex's own words asked");
+  assert.deepEqual(started.at(-1).app, { ...RECIPE, site: "recipe-box", deployAfter: true }, "Alex's own words asked");
   assert.match(started.at(-1).goal, /Bops deploys its newest commit to its preview itself/);
   assert.ok(!messages().slice(m).some((x) => x.text.startsWith("Won't put")));
 });
@@ -1874,15 +2246,15 @@ await check("Asked of a task already on the app (foldInto hands that one back): 
   assert.match(twin, /foldInto\(twin, s\.goal, where, opts\);\n.*\n\s*if \(s\.app\?\.deployAfter\) askDeploy\(twin\.id, s\.app\);/);
 });
 
-await check("As a task asked to deploy first starts, the app's newest commit is noted, once (picked up again, it's kept); a task with no deploy ask reads nothing more of Ingot", async () => {
+await check("As a task first starts, the app's newest commit is noted, once (picked up again, it's kept): where its changes start (startHead), and for one asked to deploy, what a new commit is told from; a task that started before reads nothing more of Ingot", async () => {
   appSession("ses_dep");
   const head = recipeHead();
   const c = central.calls.length;
   await H.readyAppForTask("ses_dep", "c_boppy");
-  assert.equal(sessionOf("ses_dep").app.from, head);
+  assert.deepEqual([sessionOf("ses_dep").app.from, sessionOf("ses_dep").app.startHead], [head, head]);
   await H.readyAppForTask("ses_dep", "c_boppy");
-  assert.equal(sessionOf("ses_dep").app.from, head);
-  assert.equal(ingotSince(c, "GET", /\/repos\/recipe-box$/).length, 1, "read once");
+  assert.deepEqual([sessionOf("ses_dep").app.from, sessionOf("ses_dep").app.startHead], [head, head]);
+  assert.equal(ingotSince(c, "GET", /\/repos\/recipe-box$/).length, 1, "read once, for both");
   const d = central.calls.length;
   await H.readyAppForTask(appTask.id, "c_boppy");
   assert.deepEqual(ingotSince(d, "GET", /\/repos\/recipe-box$/), []);
@@ -1903,7 +2275,8 @@ await check("Done with a new commit: Bops deploys the newest itself, once, and s
   assert.equal(said.length, 1);
   assert.match(hear(said[0].text), /^Deploying a preview of the newest commit of recipe-box on Boppy's computer\. /);
   assert.deepEqual([said[0].role, said[0].botId, said[0].sessionIds, said[0].appNote, said[0].bops, said[0].resultOf], ["bot", "boppy", ["ses_dep"], true, true, undefined]);
-  assert.deepEqual(sessionOf("ses_dep").app, { ...RECIPE, from: c1.id }, "the ask is off, from is what went live");
+  assert.deepEqual(sessionOf("ses_dep").app, { ...RECIPE, from: c1.id, startHead: sessionOf("ses_dep").app.startHead }, "the ask is off, from is what went live");
+  assert.ok(sessionOf("ses_dep").app.startHead && sessionOf("ses_dep").app.startHead !== c1.id, "where it started stays");
   assert.ok(saved, "the state was saved as the deploy went");
   assert.equal(saved.app.deployAfter, undefined, "saved without the ask before Orgo queued it");
   // Picked up again and done again (an answer to it, a restart): nothing more.
@@ -2189,7 +2562,7 @@ await check("An app's domains: the ones its computer serves on its deploy projec
   const was = ran.length;
   const r = await get(DnsRoute, `/api/hosted-apps/recipe-box/dns?ws=${WS}`, { name: "recipe-box" });
   assert.equal(r.status, 200);
-  assert.equal(r.body.url, recipeProject().url);
+  assert.equal(r.body.url, "https://acme.example", "Published's address: its first active domain, never an orgo.dev name");
   assert.deepEqual(r.body.domains.map((d) => d.domain), ["acme.example", "www.acme.example", "recipes.example.com"], "the ones on its port, on its computer");
   const [apex, www, mine] = r.body.domains;
   assert.deepEqual([apex.status, apex.cert, apex.managed, apex.zone, apex.publish], ["active", "issued", true, ZONE, []]);
@@ -2232,7 +2605,7 @@ await check("Its domains when Orgo's list doesn't name the workspace's bought do
   S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["never-live"] = { botId: "boppy", computerId: "c_boppy" }));
   const m = web.calls.length;
   assert.deepEqual(await H.appDomains(WS, "never-live"), { url: null, domains: [], zones: [] });
-  assert.equal(web.calls.length, m, "nothing asked");
+  assert.ok(web.calls.slice(m).every((c) => c.method === "GET" && /\/deploy-projects$/.test(c.path)), "only its computer's projects read, for Published's");
   S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps["never-live"]);
 
   // The computer is in another of the user's Orgo workspaces (one two Bops workspaces share): its bought domains are that one's.
@@ -2365,6 +2738,11 @@ await check("Apps on the web are only for an @orgo.ai account for now: anyone el
     assert.equal((await get(CommitsRoute, `/api/hosted-apps/recipe-box/commits?ws=${WS}`, { name: "recipe-box" })).status, 404);
     assert.equal((await get(LogsRoute, `/api/hosted-apps/recipe-box/logs?ws=${WS}`, { name: "recipe-box" })).status, 404);
     assert.equal((await post("recipe-box", { ws: WS, action: "deploy" })).status, 404);
+    // Restore and its question (app-restore tests the rest), nothing asked of Ingot for them.
+    const asked = central.calls.length;
+    assert.equal((await post("recipe-box", { ws: WS, action: "restore", to: "a".repeat(64) })).status, 404);
+    assert.equal((await get(AppRoute, `/api/hosted-apps/recipe-box?ws=${WS}&restore=${"a".repeat(64)}`, { name: "recipe-box" })).status, 404);
+    assert.equal(central.calls.length, asked);
     const n = web.calls.length;
     assert.equal((await get(DnsRoute, `/api/hosted-apps/recipe-box/dns?ws=${WS}`, { name: "recipe-box" })).status, 404);
     assert.equal((await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "TXT", name: "x", value: "y" })).status, 404);
@@ -2434,21 +2812,21 @@ await check("Add app: from the window, the workspace's main bot builds it on its
   assert.equal(started.length, n + 1, "one task");
   const t = started.at(-1);
   assert.deepEqual([t.botId, t.title, t.chatId, t.where, t.sentVia], ["boppy", "Work on guest-book", chatId, "cloud", "you"]);
-  assert.deepEqual(t.app, { wsId: WS, name: "guest-book", deployAfter: true }, "put live once it's built");
+  assert.deepEqual(t.app, { wsId: WS, name: "guest-book", site: "guest-book", deployAfter: true }, "put live once it's built");
   assert.match(t.goal, /What to do: A page where visitors leave a note\./);
-  assert.match(t.goal, /asked for it to go live too/);
+  assert.match(t.goal, /asked for a link too/);
   assert.equal(S.getState().sessions.find((s) => s.id === r.body.sessionId)?.app?.deployAfter, true);
   assert.deepEqual(hostedApps()["guest-book"], { botId: "boppy", computerId: "c_boppy" }, "kept on the workspace with its bot and computer");
   const line = messages().at(-1);
   assert.deepEqual([line.role, line.botId, line.sessionIds, line.appNote, line.bops], ["bot", "boppy", [r.body.sessionId], true, true]);
-  assert.equal(line.text, "Making guest-book on my computer. I'll put it live once it's built.");
+  assert.equal(line.text, "Making guest-book on my computer. I'll deploy a preview of it once it's built.");
   hear(line.text);
 
   const quiet = await addAsk({ ws: WS, name: "quiet-notes", what: "Notes, just for us.", deploy: false });
   assert.equal(quiet.status, 200);
-  assert.deepEqual(started.at(-1).app, { wsId: WS, name: "quiet-notes" }, "not put live: no deploy asked");
-  assert.match(started.at(-1).goal, /puts it live from the Apps page/);
-  assert.equal(hear(messages().at(-1).text), "Making quiet-notes on my computer. Put it live from the Apps page once it's built.");
+  assert.deepEqual(started.at(-1).app, { wsId: WS, name: "quiet-notes", site: "quiet-notes" }, "not put live: no deploy asked");
+  assert.match(started.at(-1).goal, /it goes on the web when they ask, as a preview link first/);
+  assert.equal(hear(messages().at(-1).text), "Making quiet-notes on my computer. Watch it with Preview at the top of this chat once it runs.");
 });
 
 await check("Add app's name: an Ingot repo's (refused otherwise, with the field), never one another app or a repo in the workspace's Ingot has (409), and not while Ingot can't tell; nothing started for any of them, nor from a page that isn't the Bops window", async () => {
@@ -2488,7 +2866,7 @@ await check("Its settings: its address, port and commands, its variables' names 
   const was = ran.length;
   const r = await ask(SettingsRoute, "GET", `/api/hosted-apps/recipe-box/settings?ws=${WS}`, RB);
   assert.equal(r.status, 200);
-  assert.equal(r.body.url, p.url);
+  assert.equal(r.body.url, "https://acme.example", "its first active domain");
   assert.deepEqual(r.body.settings, { port: p.port, install: null, build: null, start: null });
   assert.deepEqual(r.body.env, []);
   assert.ok(r.body.deploys.length > 0 && r.body.deploys.length <= 10);
@@ -2677,7 +3055,9 @@ await check("What a domain can be added from (the window only): buying open, the
   const away = await ask(DomainsRoute, "GET", `/api/hosted-apps/recipe-box/domains?ws=${WS}`, RB, undefined, { window: false });
   assert.deepEqual([away.status, away.body.error], [403, "Domains can only be added in the Bops app."]);
   assert.equal(web.calls.length, n);
-  assert.deepEqual((await H.domainOptions(WS, "guest-book")).buy, { open: false, why: "Put it live once first: a domain needs its address to point at." }, "never deployed");
+  // Never deployed: offered all the same (connecting one makes its Published project), none of its own yet.
+  const never = await H.domainOptions(WS, "guest-book");
+  assert.equal(never.buy.open, true, "a domain can be added before any deploy");
 });
 
 await check("Searching for a domain (the window only): orgo-web's names, each priced for its shortest term and each year after, only an available one priced, a page at a time; words that can't be a name refused before Orgo is asked; Orgo's refusals in words", async () => {
@@ -3961,7 +4341,10 @@ await check("Settings, Domains: every new route only from the Bops window (403 w
 const SUITE = { name: "shop-suite" };
 const suite = () => hostedApps()["shop-suite"];
 const suiteProjects = () => web.projects.filter((p) => p.ingot_repo === `${PROJECT}/shop-suite`);
-const siteProject = (site) => suiteProjects().find((p) => p.name === site);
+/** A site's Published project (named with a label sealed for it), and its Preview's. */
+const siteProject = (site) => prodProject("shop-suite", site);
+const sitePreview = (site) => previewProject("shop-suite", site);
+const SUITE_SITES = ["shop-suite", "shop-suite-admin", "shop-suite-till", "shop-suite-api"];
 /** A made-up app whose repo holds a few apps, on Boppy's computer, with one commit. */
 function suiteAgain() {
   addingAgain();
@@ -4011,56 +4394,62 @@ await check("A site added to an app: only its name kept, nothing made on Orgo ye
   assert.deepEqual(writesSince(n), [], "none of it asked of Orgo");
 });
 
-await check("Deploy deploys every site, one after another: each its own deploy project from the same repo (its own name and a free port), each queued in turn; one site alone with `site`; one it doesn't have refused; the list and the bot's words say each", async () => {
+await check("Deploy deploys every site's Preview, one after another: each site's Published project made first, then its link and its Preview project, each queued in turn; one site alone with `site`; one it doesn't have refused; Publish with no domains says so; the bot's words say each link", async () => {
   const n = web.calls.length;
   const r = await post("shop-suite", { ws: WS, action: "deploy" });
   assert.equal(r.status, 200);
-  const made = suiteProjects();
-  assert.deepEqual(made.map((p) => p.name), ["shop-suite", "shop-suite-admin", "shop-suite-till", "shop-suite-api"], "a project each, named as the site");
+  const prods = SUITE_SITES.map((x) => siteProject(x));
+  const previews = SUITE_SITES.map((x) => sitePreview(x));
+  assert.ok(prods.every(Boolean) && previews.every(Boolean), "a Published and a Preview project each, marked for its site");
   const ports = web.projects.filter((p) => p.computerId === "c_boppy").map((p) => p.port);
   assert.equal(new Set(ports).size, ports.length, "a port each, none another project's");
-  for (const p of made) assert.deepEqual(p.created, { source: "ingot", repo: `${PROJECT}/shop-suite`, name: p.name, port: p.port, deploy: false });
-  // One after another: each made, then queued, before the next.
+  for (const p of prods) assert.deepEqual(p.created, { source: "ingot", repo: `${PROJECT}/shop-suite`, name: p.name, port: p.port, deploy: false, public_url: false });
+  // One after another: each site's Published, its link, its Preview, then queued, before the next.
   const writes = writesSince(n).map((c) => `${c.method} ${c.path.replace(/[0-9a-f-]{36}/g, "id")}`);
-  assert.deepEqual(writes, Array(4).fill(["POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects/id/deployments"]).flat());
-  assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), made.map((p) => p.id), "in the order they were added");
-  assert.equal(suite().projectId, siteProject("shop-suite").id, "its own site's project where it always was");
-  assert.deepEqual(suite().sites.map((x) => x.projectId), made.slice(1).map((p) => p.id));
-  assert.deepEqual(r.body.app.sites.map((x) => [x.name, x.live?.state]), made.map((p) => [p.name, "queued"]));
-  assert.equal(r.body.app.live.state, "queued", "the app's own, as before");
+  assert.deepEqual(writes, Array(4).fill(["POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/public-urls", "POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects/id/deployments"]).flat());
+  assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), previews.map((p) => p.id), "each site's Preview, in the order they were added");
+  assert.equal(suite().projectId, prods[0].id, "its own site's Published where it always was");
+  assert.deepEqual(suite().sites.map((x) => x.projectId), prods.slice(1).map((p) => p.id));
+  assert.deepEqual(suite().sites.map((x) => x.preview), previews.slice(1).map((p) => p.name), "each site's link kept as a copy");
+  assert.deepEqual(r.body.app.sites.map((x) => [x.name, x.preview.live?.state]), SUITE_SITES.map((x) => [x, "queued"]));
 
-  // The list: each site's state; the newest of each live once it is.
-  for (const p of made) for (const d of p.deployments) Object.assign(d, { state: "succeeded", finished_at: iso() });
-  for (const p of made) p.url = `https://${p.name}.orgo.dev`;
+  // The list: each site's Preview live once it is, at its own link; Published with no domain.
+  for (const p of previews) for (const d of p.deployments) Object.assign(d, { state: "succeeded", finished_at: iso() });
   const listed = (await H.listApps(WS)).apps.find((a) => a.name === "shop-suite");
-  assert.deepEqual(listed.sites.map((x) => [x.name, x.url, x.live.state, x.serving]), made.map((p) => [p.name, `https://${p.name}.orgo.dev`, "succeeded", p.deployments[0].source_version]));
-  assert.deepEqual([listed.live.state, listed.hosting.url], ["succeeded", "https://shop-suite.orgo.dev"]);
-  assert.equal(suite().sites[0].url, "https://shop-suite-admin.orgo.dev", "each site's address kept as Orgo gives it");
+  assert.deepEqual(
+    listed.sites.map((x) => [x.name, x.preview.url, x.preview.live.state, x.domain]),
+    SUITE_SITES.map((x, i) => [x, `https://${previews[i].name}.orgo.dev`, "succeeded", null]),
+  );
 
   // One site alone.
   let m = web.calls.length;
   const till = await post("shop-suite", { ws: WS, action: "deploy", site: "shop-suite-till" });
   assert.equal(till.status, 200);
-  assert.deepEqual(writesSince(m).map((c) => c.path), [`/api/computers/c_boppy/deploy-projects/${siteProject("shop-suite-till").id}/deployments`], "that one alone");
-  assert.deepEqual(till.body.app.sites.map((x) => x.live?.state), ["succeeded", "succeeded", "queued", "succeeded"], "the others as Orgo says");
+  assert.deepEqual(writesSince(m).map((c) => c.path), [`/api/computers/c_boppy/deploy-projects/${sitePreview("shop-suite-till").id}/deployments`], "that one alone");
+  assert.deepEqual(till.body.app.sites.map((x) => x.preview.live?.state), ["succeeded", "succeeded", "queued", "succeeded"], "the others as Orgo says");
   m = web.calls.length;
   const nope = await post("shop-suite", { ws: WS, action: "deploy", site: "shop-suite-nope" });
   assert.deepEqual([nope.status, nope.body.error], [404, "There's no site by that name in this app."]);
   assert.deepEqual(writesSince(m), []);
 
-  // A site Orgo lost track of is made again; one Orgo turns down stops the rest, saying which went.
-  web.projects = web.projects.filter((p) => p !== siteProject("shop-suite-api"));
+  // A site's Preview Orgo lost track of is made again, on the same link.
+  const link = sitePreview("shop-suite-api").name;
+  web.projects = web.projects.filter((p) => p !== sitePreview("shop-suite-api"));
   m = web.calls.length;
   const again = await post("shop-suite", { ws: WS, action: "deploy" });
   assert.equal(again.status, 200);
   assert.equal(callsSince(m, "POST", /\/deploy-projects$/).length, 1, "the one Orgo lost, made again");
-  assert.equal(suite().sites[2].projectId, siteProject("shop-suite-api").id);
-  web.closedFor = siteProject("shop-suite-till").id;
+  assert.deepEqual(callsSince(m, "POST", /\/public-urls$/), [], "its link stays");
+  assert.equal(sitePreview("shop-suite-api").name, link);
 
+  // Publish with no domains anywhere: refused for each, in words; nothing on Published.
+  m = web.calls.length;
   const said = hear(await H.deployForBot("boppy", "shop-suite", null, undefined, "prod"));
-  assert.match(said, /^Publishing the newest commit of shop-suite on its 4 sites on Boppy's computer, one after another: shop-suite at https:\/\/shop-suite\.orgo\.dev; shop-suite-admin at https:\/\/shop-suite-admin\.orgo\.dev; shop-suite-till at https:\/\/shop-suite-till\.orgo\.dev; shop-suite-api /);
+  assert.match(said, /^Not published: shop-suite.* no domain yet\. Connect one in Your Apps \(Published, Domain, From Cloudflare\), then say publish again\.$/);
+  assert.deepEqual(callsSince(m, "POST", /\/deployments$/), []);
   const line = hear(H.hostedAppsLine("boppy"));
-  assert.match(line, /shop-suite \(live at https:\/\/shop-suite\.orgo\.dev, and its other sites from the same repo, deployed with it: shop-suite-admin live at https:\/\/shop-suite-admin\.orgo\.dev, shop-suite-till live at https:\/\/shop-suite-till\.orgo\.dev, shop-suite-api (deployed, no address yet|live at [^,]+)\)/);
+  for (const [i, x] of SUITE_SITES.entries()) assert.ok(line.includes(`preview at https://${previews[i].name}.orgo.dev`), x);
+  assert.ok(!/shop-suite[a-z-]*\.orgo\.dev/.test(line), "no site named on orgo.dev");
 });
 
 await check("Each site's own settings, health check, variables, log, deploys and domains (the ones on its port), by `site`: a new port moves only that site's domains; a health path sent as typed, refused before Orgo when it can't be one", async () => {
@@ -4068,7 +4457,7 @@ await check("Each site's own settings, health check, variables, log, deploys and
   const own = siteProject("shop-suite");
   web.domains.push({ id: "cd_admin", computerId: "c_boppy", domain: "admin.shop.example", status: "active", target_port: admin.port, zone: null, token: "tok-admin" });
   const got = await ask(SettingsRoute, "GET", `/api/hosted-apps/shop-suite/settings?ws=${WS}&site=shop-suite-admin`, SUITE);
-  assert.deepEqual([got.status, got.body.url, got.body.settings.port], [200, "https://shop-suite-admin.orgo.dev", admin.port]);
+  assert.deepEqual([got.status, got.body.url, got.body.settings.port], [200, "https://admin.shop.example", admin.port]);
   assert.equal((await ask(SettingsRoute, "GET", `/api/hosted-apps/shop-suite/settings?ws=${WS}`, SUITE)).body.settings.port, own.port, "none named: its own");
   assert.deepEqual((await ask(SettingsRoute, "GET", `/api/hosted-apps/shop-suite/settings?ws=${WS}&site=nope`, SUITE)).body.error, "There's no site by that name in this app.");
   assert.deepEqual((await H.appDomains(WS, "shop-suite", "shop-suite-admin")).domains.map((d) => d.domain), ["admin.shop.example"], "the domains on its port");
@@ -4103,6 +4492,8 @@ await check("Each site's own settings, health check, variables, log, deploys and
   assert.deepEqual(writesSince(n).map((c) => c.path), [`/api/computers/c_boppy/deploy-projects/${admin.id}/env`], "on that site's project");
   assert.deepEqual((await H.appSettings(WS, "shop-suite")).env, [], "not the app's own site's");
 
+  // (Published's own deploy, as Publish makes one: a window's Deploy goes to the Preview.)
+  admin.deployments.push({ id: randomUUID(), project_id: admin.id, state: "succeeded", phase: null, error: null, source_version: sha("the admin published"), created_at: iso(), finished_at: iso(), log: ["Built\n"] });
   const log = await get(LogsRoute, `/api/hosted-apps/shop-suite/logs?ws=${WS}&site=shop-suite-admin`, SUITE);
   assert.match(log.body.next, new RegExp(`^${admin.deployments.at(-1).id}:`), "its own newest deploy's log");
   const back = { id: randomUUID(), project_id: admin.id, state: "succeeded", phase: null, error: null, source_version: sha("an older admin"), created_at: iso(), finished_at: iso(), log: [], can_rollback: true, release_live: false };
@@ -4156,10 +4547,11 @@ await check("The list says every site's domains at once (the ones its computer s
       "the computer's list read once for all four sites, and no other computer's (its apps have one site each)",
     );
     assert.deepEqual(callsSince(n, "GET", /\/dns-check$/), [], "no look at anyone's DNS");
-    assert.equal(listed.sites[1].url, "https://shop-suite-admin.orgo.dev", "one with none still has its address");
-    for (const a of (await H.listApps(WS)).apps.filter((x) => !x.sites)) assert.ok(!("domains" in a), `${a.name}: one site, nothing more`);
+    assert.equal(listed.sites[1].domain, null, "one with none has no address (never an orgo.dev name)");
+    // An app with one site has its own domains at its top (its Published address is its first active one).
+    for (const a of (await H.listApps(WS)).apps.filter((x) => !x.sites && x.hosting?.projectId && !x.hosting.lost)) assert.ok(Array.isArray(a.domains), `${a.name}: its own domains`);
 
-    // Every app with one site: no computer's list read at all.
+    // Every app with one site: each computer's list read once all the same, for their addresses.
     const record = structuredClone(suite());
     const apps = (f) => S.update((s) => f(s.workspaces.find((w) => w.id === WS).hostedApps));
     apps((h) => {
@@ -4171,7 +4563,8 @@ await check("The list says every site's domains at once (the ones its computer s
     const ones = await H.listApps(WS);
     apps((h) => (h["shop-suite"] = structuredClone(record)));
     assert.ok(ones.apps.every((a) => !a.sites), "one site each");
-    assert.deepEqual(callsSince(n, "GET", /^\/api\/computers\/[^/]+\/domains$/), [], "none asked");
+    const reads = callsSince(n, "GET", /^\/api\/computers\/[^/]+\/domains$/).map((c) => c.path);
+    assert.equal(reads.length, new Set(reads).size, "once a computer");
 
     // Two apps with more sites on the same computer: its list read once for both.
     apps((h) => (h["shop-suite-twin"] = structuredClone(record)));
@@ -4181,7 +4574,8 @@ await check("The list says every site's domains at once (the ones its computer s
       assert.deepEqual(both.map((a) => a.name).sort(), ["shop-suite", "shop-suite-twin"]);
       assert.equal(callsSince(n, "GET", /^\/api\/computers\/[^/]+\/domains$/).length, 1, "once for the two");
       assert.deepEqual(both[0].sites.map((x) => x.domains), listed.sites.map((x) => x.domains), "each one's from it");
-      assert.deepEqual(both[1].sites.map((x) => x.domains), listed.sites.map((x) => x.domains));
+      // (The twin's record names the suite's projects, which aren't its repo's: none is its Published, so its domains are unsaid.)
+      assert.ok(both[1].sites.every((x) => x.domains === undefined));
       assert.deepEqual(writesSince(n), []);
     } finally {
       apps((h) => delete h["shop-suite-twin"]);
@@ -4239,7 +4633,7 @@ await check("Variables before the first deploy: saved, the site's deploy project
   assert.deepEqual([r.status, r.body], [200, { env: ["MODE", "SHOP_KEY"] }]);
   const p = siteProject("shop-suite-new");
   assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [["POST", "/api/computers/c_boppy/deploy-projects"]], "made, nothing deployed");
-  assert.deepEqual(p.created, { source: "ingot", repo: `${PROJECT}/shop-suite`, name: "shop-suite-new", port: p.port, deploy: false, env: { SHOP_KEY: SECRET, MODE: "test" } }, "with its variables");
+  assert.deepEqual(p.created, { source: "ingot", repo: `${PROJECT}/shop-suite`, name: p.name, port: p.port, deploy: false, env: { SHOP_KEY: SECRET, MODE: "test" }, public_url: false }, "Published's, with its variables");
   assert.equal(p.deployments.length, 0);
   assert.deepEqual(suite().sites.at(-1), { name: "shop-suite-new", projectId: p.id }, "kept");
   assert.ok((suite().queuedAt ?? 0) > (queuedAt ?? 0), "the window reads the app again");
@@ -4247,7 +4641,8 @@ await check("Variables before the first deploy: saved, the site's deploy project
   assert.deepEqual([settings.settings.port, settings.env, settings.deploys], [p.port, ["MODE", "SHOP_KEY"], []], "its settings there now, before a deploy");
   n = web.calls.length;
   await post("shop-suite", { ws: WS, action: "deploy", site: "shop-suite-new" });
-  assert.deepEqual(writesSince(n).map((c) => c.path), [`/api/computers/c_boppy/deploy-projects/${p.id}/deployments`], "its first deploy builds on that project");
+  // Its first deploy goes to its Preview, made beside that Published one (which isn't made again).
+  assert.deepEqual(writesSince(n).map((c) => c.path), ["/api/computers/c_boppy/public-urls", "/api/computers/c_boppy/deploy-projects", `/api/computers/c_boppy/deploy-projects/${sitePreview("shop-suite-new").id}/deployments`]);
 
   // An app never deployed: its own site's project made the same way.
   forgetListed();
@@ -4265,12 +4660,17 @@ await check("Removing a site: its domains on its port, then its deploy project, 
   const till = siteProject("shop-suite-till");
   web.domains.push({ id: "cd_till", computerId: "c_boppy", domain: "till.shop.example", status: "active", target_port: till.port, zone: null, token: "tok-till" });
   let n = web.calls.length;
+  const [tillPreview, tillLink] = [sitePreview("shop-suite-till"), web.urls.find((u) => u.label === sitePreview("shop-suite-till").name)];
   const r = await post("shop-suite", { ws: WS, action: "removeSite", site: "shop-suite-till" });
   assert.equal(r.status, 200);
   assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [
+    // Its Preview first (its project, then its link), then its Published (its domains, then its project).
+    ["DELETE", `/api/computers/c_boppy/deploy-projects/${tillPreview.id}`],
+    ["DELETE", `/api/computers/c_boppy/public-urls/${tillLink.id}`],
     ["DELETE", "/api/computers/c_boppy/domains/cd_till"],
     ["DELETE", `/api/computers/c_boppy/deploy-projects/${till.id}`],
   ]);
+  assert.ok(!web.urls.some((u) => u.label === tillPreview.name), "its link gone");
   assert.ok(!siteProject("shop-suite-till") && !web.domains.some((d) => d.id === "cd_till"));
   assert.deepEqual(suite().sites.map((x) => x.name), ["shop-suite-admin", "shop-suite-api", "shop-suite-new"]);
   assert.deepEqual(r.body.app.sites.map((x) => x.name), ["shop-suite", "shop-suite-admin", "shop-suite-api", "shop-suite-new"]);
@@ -4297,6 +4697,9 @@ await check("Removing an app (the window only): each site's domains and deploy p
   await post("shop-suite", { ws: WS, action: "addSite", site: ADMIN });
   await post("shop-suite", { ws: WS, action: "deploy" });
   const [own, admin] = [siteProject("shop-suite"), siteProject(ADMIN)];
+  const [ownPv, adminPv] = [sitePreview("shop-suite"), sitePreview(ADMIN)];
+  const linkOf = (p) => web.urls.find((u) => u.label === p.name);
+  const [ownLink, adminLink] = [linkOf(ownPv), linkOf(adminPv)];
   web.domains.push({ id: "cd_suite", computerId: "c_boppy", domain: "suite.shop.example", status: "active", target_port: own.port, zone: null, token: "tok-suite" });
   const away = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS }, { window: false });
   assert.deepEqual([away.status, away.body.error], [403, "Apps can only be removed in the Bops app."]);
@@ -4309,21 +4712,26 @@ await check("Removing an app (the window only): each site's domains and deploy p
   let n = web.calls.length;
   const stuck = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
   assert.deepEqual([stuck.status, stuck.body.error], [409, "Orgo says: Something went wrong"]);
-  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [
-    ["DELETE", "/api/computers/c_boppy/domains/cd_suite"],
-    ["DELETE", `/api/computers/c_boppy/deploy-projects/${own.id}`],
-  ], "its domains first, then its project, which Orgo turned down: nothing after it");
+  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [["DELETE", `/api/computers/c_boppy/deploy-projects/${ownPv.id}`]], "its Preview first, which Orgo turned down: nothing after it");
   assert.equal(suite().projectId, own.id, "still there to try again");
   web.removeRefuse = null;
   n = web.calls.length;
   const i = central.calls.length;
   const r = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
   assert.deepEqual([r.status, r.body], [200, { removed: "shop-suite", repo: false }]);
-  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [
+  // (Its Locals forgotten on its computer last, through its bash: forgetLocals' own check says more.)
+  assert.deepEqual(boppy.forgets.at(-1), { name: "shop-suite", folder: false });
+  assert.deepEqual(writesSince(n).filter((c) => !c.path.endsWith("/bash")).map((c) => [c.method, c.path]), [
+    ["DELETE", `/api/computers/c_boppy/deploy-projects/${ownPv.id}`],
+    ["DELETE", `/api/computers/c_boppy/public-urls/${ownLink.id}`],
+    ["DELETE", `/api/computers/c_boppy/deploy-projects/${adminPv.id}`],
+    ["DELETE", `/api/computers/c_boppy/public-urls/${adminLink.id}`],
+    ["DELETE", "/api/computers/c_boppy/domains/cd_suite"],
     ["DELETE", `/api/computers/c_boppy/deploy-projects/${own.id}`],
     ["DELETE", `/api/computers/c_boppy/deploy-projects/${admin.id}`],
   ]);
   assert.ok(!suite() && !suiteProjects().length, "its record and its projects gone");
+  assert.ok(!web.urls.some((u) => u === ownLink || u === adminLink), "its links gone");
   assert.ok(repoOf("shop-suite"), "its code kept in Ingot");
   assert.deepEqual(ingotSince(i, "DELETE", /\/repos\//), []);
   assert.ok(!(await H.listApps(WS)).apps.some((a) => a.name === "shop-suite"));
@@ -4369,7 +4777,12 @@ await check("A bot's computer gone: its apps keep their records and sites' names
     assert.equal(r.status, 200);
     const home = hostedApps()["ivy-site"];
     assert.deepEqual([home.botId, home.computerId, home.lost, home.sites.map((x) => x.name)], ["ivy", "c_boppy", undefined, ["ivy-site-blog"]]);
-    assert.deepEqual(web.projects.filter((p) => p.ingot_repo === `${PROJECT}/ivy-site`).map((p) => [p.computerId, p.name]), [["c_boppy", "ivy-site"], ["c_boppy", "ivy-site-blog"]]);
+    // Each site's Published and Preview, made on its new home.
+    const ivyRepo = `${PROJECT}/ivy-site`;
+    assert.deepEqual(
+      web.projects.filter((p) => p.ingot_repo === ivyRepo).map((p) => [p.computerId, L.isLabelOf("prod", p.name, ivyRepo, "ivy-site") || L.isLabelOf("prod", p.name, ivyRepo, "ivy-site-blog") ? "prod" : L.isLabelOf("preview", p.name, ivyRepo, "ivy-site") || L.isLabelOf("preview", p.name, ivyRepo, "ivy-site-blog") ? "preview" : p.name]),
+      [["c_boppy", "prod"], ["c_boppy", "preview"], ["c_boppy", "prod"], ["c_boppy", "preview"]],
+    );
     // Gone again, then removed: nothing left to take off a computer.
     for (const p of web.projects.filter((x) => x.ingot_repo === `${PROJECT}/ivy-site`)) web.projects = web.projects.filter((x) => x !== p);
     S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["ivy-site"] = { ...s.workspaces.find((w) => w.id === WS).hostedApps["ivy-site"], computerId: "c_ivy" }));
@@ -4423,7 +4836,16 @@ await check("Settings before a site's first deploy: saved, its deploy project is
   assert.ok((suite().queuedAt ?? 0) > (queuedAt ?? 0), "the window reads the app again");
   n = web.calls.length;
   assert.equal((await post("shop-suite", { ws: WS, action: "deploy", site: "shop-suite-admin" })).status, 200);
-  assert.deepEqual(writesSince(n).map((c) => c.path), [`/api/computers/c_boppy/deploy-projects/${p.id}/deployments`], "its first deploy builds on that project");
+  // Its first deploy goes to its Preview, made then with those commands copied once, and built there.
+  const pv = sitePreview("shop-suite-admin");
+  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [
+    ["POST", "/api/computers/c_boppy/public-urls"],
+    ["POST", "/api/computers/c_boppy/deploy-projects"],
+    ["PATCH", `/api/computers/c_boppy/deploy-projects/${pv.id}`],
+    ["POST", `/api/computers/c_boppy/deploy-projects/${pv.id}/deployments`],
+  ]);
+  assert.deepEqual([pv.start_cmd, pv.health_path], ["npm run admin", "/up"], "built as Published would be");
+  assert.equal(p.deployments.length, 0, "Published untouched");
   S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["shop-suite"] = { botId: "boppy", computerId: "c_gone", lost: 1, sites: [{ name: "shop-suite-admin" }] }));
   n = web.calls.length;
   const lost = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/shop-suite/settings", SUITE, { ws: WS, start: "npm start" });
@@ -4450,8 +4872,9 @@ await check("One thing at a time on an app: Remove app and Remove site refused w
   g.open();
   assert.equal((await sending).status, 200);
   assert.deepEqual((await env).body, { env: ["API_KEY"] });
-  assert.deepEqual(suiteProjects().map((p) => p.name), ["shop-suite", "shop-suite-admin", "shop-suite-api"], "one project a site");
-  assert.deepEqual([suite().projectId, ...suite().sites.map((x) => x.projectId)], suiteProjects().map((p) => p.id), "each one kept");
+  const three = ["shop-suite", "shop-suite-admin", "shop-suite-api"];
+  assert.ok(three.every((x) => siteProject(x) && sitePreview(x)) && suiteProjects().length === 6, "a Published and a Preview a site, no more");
+  assert.deepEqual([suite().projectId, ...suite().sites.map((x) => x.projectId)], three.map((x) => siteProject(x).id), "each one's Published kept");
   assert.deepEqual([...web.envs.get(siteProject("shop-suite-api").id).keys()], ["API_KEY"], "on the project it deploys");
 
   const r = gate("DELETE", /\/deploy-projects\/[^/]+$/);
@@ -4481,7 +4904,7 @@ await check("A deploy of several sites that stops partway: the ones that went ar
   dropSecond();
   const r = await post("shop-suite", { ws: WS, action: "deploy" });
   web.hold = null;
-  assert.deepEqual([r.status, r.body.error, r.body.partial], [502, "Deploying shop-suite, but not shop-suite-admin: fetch failed.", true]);
+  assert.deepEqual([r.status, r.body.error, r.body.partial], [502, "Deploying shop-suite to its preview, but not shop-suite-admin: fetch failed.", true]);
   assert.ok(suite().queuedAt > 0, "read again: shop-suite is deploying");
   assert.equal(siteProject("shop-suite-api"), undefined, "nothing after it");
   dropSecond();
@@ -4496,43 +4919,44 @@ await check("A deploy of several sites that stops partway: the ones that went ar
   assert.deepEqual([none.status, none.body.error, none.body.partial], [500, "fetch failed", undefined], "nothing went: as it was");
 });
 
-await check("An app moved off a computer that's still up (its bot on another one now): its projects there serve on, kept as left behind, and Remove app takes them down with the rest; moved back, they're its again; a computer gone takes its left ones with it", async () => {
+await check("An app moved off a computer that's still up (its bot on another one now): its projects there serve on (Published's and the Preview's), kept as left behind, its links' labels coming along; Remove app takes them down with the rest, its links too; moved back, they're its again; a computer gone takes its left ones with it", async () => {
   suiteAgain();
   web.domains = web.domains.filter((d) => d.computerId !== "c_boppy" || d.target_port === recipeProject().port);
   await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" });
   assert.equal((await post("shop-suite", { ws: WS, action: "deploy" })).status, 200);
   const [own, admin] = [siteProject("shop-suite"), siteProject("shop-suite-admin")];
+  const [ownPv, adminPv] = [sitePreview("shop-suite"), sitePreview("shop-suite-admin")];
   const had = S.getState().bots.find((b) => b.id === "boppy").computerId;
   const onto = (c) => S.update((s) => (s.bots.find((b) => b.id === "boppy").computerId = c));
+  const ids = () => (suite().behind ?? []).map((x) => x.projectId).sort();
+  const all4 = [own.id, admin.id, ownPv.id, adminPv.id].sort();
   try {
     onto("c_boppy2");
     H.appWork("boppy", { app: "shop-suite", name: null, change: "A new page" });
-    const left = [
-      { site: "shop-suite", computerId: "c_boppy", projectId: own.id },
-      { site: "shop-suite-admin", computerId: "c_boppy", projectId: admin.id },
-    ];
-    assert.deepEqual(suite(), { botId: "boppy", computerId: "c_boppy2", sites: [{ name: "shop-suite-admin" }], behind: left });
-    // Moved back: they're its again, found by name (none made).
+    await until(() => ids().length === 4);
+    assert.deepEqual(ids(), all4, "Published's and the Preview's left behind");
+    assert.deepEqual([suite().computerId, suite().preview, suite().sites], ["c_boppy2", ownPv.name, [{ name: "shop-suite-admin", preview: adminPv.name }]], "its links' labels come along");
+    // Moved back: they're its again, found by their marks (none made).
     onto(had);
     H.appWork("boppy", { app: "shop-suite", name: null, change: "Another page" });
-    assert.deepEqual(suite(), { botId: "boppy", computerId: "c_boppy", sites: [{ name: "shop-suite-admin" }] });
+    assert.equal(suite().behind, undefined);
     let n = web.calls.length;
     assert.equal((await post("shop-suite", { ws: WS, action: "deploy" })).status, 200);
-    assert.deepEqual(callsSince(n, "POST", /\/deploy-projects$/), [], "none made");
+    assert.deepEqual(callsSince(n, "POST", /\/(deploy-projects|public-urls)$/), [], "none made");
     assert.deepEqual([suite().projectId, suite().sites[0].projectId], [own.id, admin.id]);
-    // Off it again, then removed: the ones left there come down, their domains first.
+    // Off it again, then removed: the ones left there come down, their domains first, and their links.
     onto("c_boppy2");
     H.appWork("boppy", { app: "shop-suite", name: null, change: "A third page" });
-    assert.deepEqual(suite().behind, left);
+    await until(() => ids().length === 4);
     web.domains.push({ id: "cd_left", computerId: "c_boppy", domain: "left.shop.example", status: "active", target_port: own.port, zone: null, token: "tok-left" });
+    const links = web.urls.filter((u) => u.label === ownPv.name || u.label === adminPv.name).map((u) => u.id);
     n = web.calls.length;
     const r = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
     assert.deepEqual([r.status, r.body], [200, { removed: "shop-suite", repo: false }]);
-    assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [
-      ["DELETE", "/api/computers/c_boppy/domains/cd_left"],
-      ["DELETE", `/api/computers/c_boppy/deploy-projects/${own.id}`],
-      ["DELETE", `/api/computers/c_boppy/deploy-projects/${admin.id}`],
-    ]);
+    const deletes = writesSince(n).filter((c) => c.method === "DELETE").map((c) => c.path);
+    assert.ok(deletes.indexOf("/api/computers/c_boppy/domains/cd_left") < deletes.indexOf(`/api/computers/c_boppy/deploy-projects/${own.id}`), "its domains first");
+    for (const id of all4) assert.ok(deletes.includes(`/api/computers/c_boppy/deploy-projects/${id}`), id);
+    for (const id of links) assert.ok(deletes.includes(`/api/computers/c_boppy/public-urls/${id}`), "its links too");
     assert.ok(!suite() && !suiteProjects().length);
   } finally {
     onto(had);
@@ -4550,6 +4974,9 @@ await check("Remove site and Remove app take what Bops set in the user's Cloudfl
   await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" });
   assert.equal((await post("shop-suite", { ws: WS, action: "deploy" })).status, 200);
   const [own, admin] = [siteProject("shop-suite"), siteProject("shop-suite-admin")];
+  const [ownPv, adminPv] = [sitePreview("shop-suite"), sitePreview("shop-suite-admin")];
+  const linkOf = (p) => web.urls.find((u) => u.label === p.name).id;
+  const [ownLink, adminLink] = [linkOf(ownPv), linkOf(adminPv)];
   web.domains.push(
     { id: "cd_cfsuite", computerId: "c_boppy", domain: "suite.acme.test", status: "active", target_port: own.port, zone: null, token: "tok-cfsuite" },
     { id: "cd_cfadmin", computerId: "c_boppy", domain: "admin.acme.test", status: "pending", target_port: admin.port, zone: null, token: "tok-cfadmin" },
@@ -4572,6 +4999,8 @@ await check("Remove site and Remove app take what Bops set in the user's Cloudfl
     const site = await post("shop-suite", { ws: WS, action: "removeSite", site: "shop-suite-admin" });
     assert.deepEqual([site.status, site.body.said], [200, undefined]);
     assert.deepEqual(writesSince(n).filter((c) => c.path !== "/api/secrets/call").map((c) => [c.method, c.path]), [
+      ["DELETE", `/api/computers/c_boppy/deploy-projects/${adminPv.id}`],
+      ["DELETE", `/api/computers/c_boppy/public-urls/${adminLink}`],
       ["DELETE", "/api/computers/c_boppy/domains/cd_cfadmin"],
       ["DELETE", `/api/computers/c_boppy/deploy-projects/${admin.id}`],
     ]);
@@ -4582,7 +5011,10 @@ await check("Remove site and Remove app take what Bops set in the user's Cloudfl
     n = web.calls.length;
     const app = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
     assert.deepEqual([app.status, app.body], [200, { removed: "shop-suite", repo: false, said: "Bops couldn't reach Cloudflare, so remove CNAME suite there." }]);
-    assert.deepEqual(writesSince(n).filter((c) => c.path !== "/api/secrets/call").map((c) => [c.method, c.path]), [
+    // (Then its Locals forgotten, through its computer's bash.)
+    assert.deepEqual(writesSince(n).filter((c) => c.path !== "/api/secrets/call" && !c.path.endsWith("/bash")).map((c) => [c.method, c.path]), [
+      ["DELETE", `/api/computers/c_boppy/deploy-projects/${ownPv.id}`],
+      ["DELETE", `/api/computers/c_boppy/public-urls/${ownLink}`],
       ["DELETE", "/api/computers/c_boppy/domains/cd_cfsuite"],
       ["DELETE", `/api/computers/c_boppy/deploy-projects/${own.id}`],
     ]);
@@ -4593,14 +5025,16 @@ await check("Remove site and Remove app take what Bops set in the user's Cloudfl
   }
 });
 
-/* ---------------- Local, Staging and Prod, all on the app's own computer ---------------- */
+/* ---------------- Local, Preview and Published, all on the app's own computer ---------------- */
 
 const NOTES = { name: "field-notes" };
 const notesProjects = () => web.projects.filter((p) => p.ingot_repo === `${PROJECT}/field-notes`);
 const notesProject = (name) => notesProjects().find((p) => p.name === name);
 const notes = () => hostedApps()["field-notes"];
-/** AppHosting's fields as a Bops from before Staging (v0.0.32) knows them: Bops keeps nothing else of an app. */
-const KNOWN = ["botId", "computerId", "projectId", "url", "queuedAt", "sites", "lost", "behind"];
+/** AppHosting's fields as Bops 0.0.32 knows them, and the one this build adds (its Preview label's copy). */
+const KNOWN = ["botId", "computerId", "projectId", "url", "queuedAt", "sites", "lost", "behind", "preview"];
+const NOTES_REPO = `${PROJECT}/field-notes`;
+const notesLink = (c = "c_boppy") => previewUrl("field-notes", "field-notes", c);
 /** A made-up app with one commit, its working folder on Boppy's computer, never deployed. */
 function notesAgain() {
   addingAgain();
@@ -4619,195 +5053,254 @@ const goLive = (p) => {
 const localAsk = (body, opts) => ask(LocalRoute, "POST", "/api/hosted-apps/field-notes/local", NOTES, { ws: WS, ...body }, opts);
 const localRead = () => ask(LocalRoute, "GET", `/api/hosted-apps/field-notes/local?ws=${WS}&fresh=1`, NOTES);
 
-await check("Deploy to Staging: Prod's project made first (nothing deployed on it), then the site's Staging project beside it on the same computer (<site>-staging, a port of its own), the newest queued there and Prod untouched; nothing of Staging kept in Bops' state; the list says Staging apart from Prod", async () => {
+await check("Preview links: a label taken moves to another, one Orgo can't take too, a port taken moves on; six failures, and the caps, say so in words; nothing kept of a link that wasn't made", async () => {
   notesAgain();
-  const head = repoOf("field-notes").changesets[0].id;
-  const n = web.calls.length;
-  const r = await post("field-notes", { ws: WS, action: "deploy", env: "staging" });
-  assert.equal(r.status, 200);
-  const [prod, staging] = [notesProject("field-notes"), notesProject("field-notes-staging")];
-  assert.ok(prod && staging, "a project each");
-  assert.deepEqual([prod.computerId, staging.computerId], ["c_boppy", "c_boppy"], "both on the app's own computer");
-  assert.deepEqual(prod.deployments, [], "nothing deployed on Prod");
-  assert.deepEqual(staging.deployments.map((d) => [d.state, d.source_version]), [["queued", head]]);
-  assert.notEqual(staging.port, prod.port);
-  assert.deepEqual(staging.created, { source: "ingot", repo: `${PROJECT}/field-notes`, name: "field-notes-staging", port: staging.port, deploy: false });
-  assert.deepEqual(
-    writesSince(n).map((c) => `${c.method} ${c.path.replace(/[0-9a-f-]{36}/g, "id")}`),
-    ["POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects/id/deployments"],
-    "Prod's made, then Staging's, then Staging's deploy",
-  );
-  assert.equal(callsSince(n, "POST", /\/deployments$/)[0].path.split("/")[5], staging.id, "on Staging's project");
-  assert.deepEqual(Object.keys(notes()).filter((k) => !KNOWN.includes(k)), [], "only what a Bops from before Staging knows");
-  assert.equal(notes().projectId, prod.id);
-  await S.flushState(5000);
-  assert.ok(!JSON.stringify(S.getState()).includes(staging.id), "Staging's project is found on the computer, never kept");
-  assert.deepEqual([r.body.app.live, r.body.app.serving, r.body.app.staging.live.state, r.body.app.staging.projectId], [null, null, "queued", staging.id]);
-  goLive(staging);
-  forgetListed();
-  const a = (await H.listApps(WS)).apps.find((x) => x.name === "field-notes");
-  assert.deepEqual([a.staging.url, a.staging.serving, a.staging.live.state], ["https://field-notes-staging.orgo.dev", head, "succeeded"]);
-  assert.deepEqual([a.serving, a.live], [null, null], "Prod not on the web yet");
-  // A deploy from before Staging (no env) is Prod's, as it always was.
-  const k = web.calls.length;
-  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
-  assert.deepEqual(callsSince(k, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [prod.id]);
-  goLive(prod);
-});
-
-await check("Promote to Prod: Prod gets the changeset Staging serves (built again on Prod's own project), never the newest; with the one the window saw, refused once Staging moved on; nothing live on Staging, refused", async () => {
-  const st = notesProject("field-notes-staging");
-  const prod = notesProject("field-notes");
-  const served = st.deployments[0].source_version;
-  const newer = commit("field-notes", "A second page", { id: "boppy", name: "Boppy" });
+  web.urls = web.urls.filter((u) => !L.isLabelOf("preview", u.label, NOTES_REPO, "field-notes"));
+  let k = 0;
+  web.urlRefuse = () => (++k === 1 ? { status: 409, body: { error: "taken", code: "LABEL_TAKEN" } } : k === 2 ? { status: 400, body: { error: "bad", code: "INVALID_LABEL" } } : k === 3 ? { status: 409, body: { error: "port", code: "PORT_TAKEN" } } : null);
   let n = web.calls.length;
-  const moved = await post("field-notes", { ws: WS, action: "promote", site: "field-notes", at: newer.id });
-  assert.deepEqual([moved.status, moved.body.error], [409, "The preview changed since you looked. Look again."]);
-  assert.deepEqual(writesSince(n), [], "nothing sent");
-  const r = await post("field-notes", { ws: WS, action: "promote", site: "field-notes", at: served });
+  const r = await post("field-notes", { ws: WS, action: "deploy" });
+  web.urlRefuse = null;
   assert.equal(r.status, 200);
-  assert.deepEqual(writesSince(n).map((c) => [c.path.split("/")[5], c.body]), [[prod.id, { at: served }]], "Prod's project, Staging's changeset");
-  assert.deepEqual([r.body.app.live.state, r.body.app.live.at], ["queued", served]);
-  assert.equal(st.deployments.length, 1, "Staging as it was");
-  goLive(prod);
-  // Nothing live on Staging: nothing to promote.
-  const had = st.deployments;
-  st.deployments = [];
-  n = web.calls.length;
-  const none = await post("field-notes", { ws: WS, action: "promote" });
-  assert.deepEqual([none.status, none.body.error], [409, "The preview isn't live yet, so there's nothing to publish. Deploy a preview first."]);
-  assert.deepEqual(writesSince(n), []);
-  st.deployments = had;
+  const tries = callsSince(n, "POST", /\/public-urls$/).map((c) => c.body);
+  assert.equal(tries.length, 4);
+  assert.equal(new Set(tries.map((t) => t.label)).size, 3, "a new label after a taken or refused one, the same after a port taken");
+  assert.notEqual(tries[2].port, tries[3].port, "the next port after a taken one");
+  for (const t of tries) assert.ok(L.isLabelOf("preview", t.label, NOTES_REPO, "field-notes"), t.label);
+  assert.equal(previewProject("field-notes").name, tries[3].label);
+  assert.equal(notes().preview, tries[3].label);
+  // Gone (its link and its project, its copy too): a label taken six times over says so; the caps say theirs.
+  web.projects = web.projects.filter((p) => p !== previewProject("field-notes"));
+  web.urls = web.urls.filter((u) => u.label !== tries[3].label);
+  S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].preview);
+  for (const [refuse, words] of [
+    [{ status: 409, body: { error: "taken", code: "LABEL_TAKEN" } }, "Couldn't get a link for its preview. Try again in a minute."],
+    [{ status: 409, body: { error: "x", code: "PUBLIC_URL_ACCOUNT_LIMIT", limit: 10 } }, "Your Orgo account has as many public links as it allows (10)."],
+    [{ status: 409, body: { error: "x", code: "PUBLIC_URL_LIMIT", limit: 10 } }, "Its computer has as many public links as Orgo allows. Remove a site or a left over first."],
+  ]) {
+    web.urlRefuse = () => refuse;
+    n = web.calls.length;
+    const x = await post("field-notes", { ws: WS, action: "deploy" });
+    web.urlRefuse = null;
+    assert.deepEqual([x.status, x.body.error], [409, words]);
+    assert.equal(previewProject("field-notes"), undefined, "no project without its link");
+    assert.equal(notes().preview, undefined, "nothing kept");
+  }
+  // Public URLs not open here at all: hosting's words.
+  web.urlsClosed = true;
+  const closed = await post("field-notes", { ws: WS, action: "deploy" });
+  web.urlsClosed = false;
+  assert.deepEqual([closed.status, closed.body.error], [403, "Hosting apps on the web isn't open to your Orgo account yet."]);
 });
 
-await check("Staging keeps its own variables, settings, log and deploys (env staging), apart from Prod's; its settings answer names Prod's variables, to say which it lacks; a rollback there is only of its own deploys", async () => {
-  const [prod, st] = [notesProject("field-notes"), notesProject("field-notes-staging")];
-  const SECRET = "staging-only-secret-4f1";
-  const e1 = await ask(EnvRoute, "PATCH", "/api/hosted-apps/field-notes/env", NOTES, { ws: WS, where: "staging", env: { API_TOKEN: SECRET } });
-  assert.deepEqual([e1.status, e1.body], [200, { env: ["API_TOKEN"] }]);
-  const e2 = await ask(EnvRoute, "PATCH", "/api/hosted-apps/field-notes/env", NOTES, { ws: WS, env: { API_TOKEN: "prod-value", SENTRY_DSN: "dsn" } });
-  assert.deepEqual(e2.body, { env: ["API_TOKEN", "SENTRY_DSN"] });
-  assert.deepEqual([web.envs.get(st.id).get("API_TOKEN"), web.envs.get(prod.id).get("API_TOKEN")], [SECRET, "prod-value"], "each its own");
-  const s1 = await ask(SettingsRoute, "GET", `/api/hosted-apps/field-notes/settings?ws=${WS}&env=staging`, NOTES);
-  assert.deepEqual([s1.body.url, s1.body.env, s1.body.prodEnv, s1.body.deploys.length], ["https://field-notes-staging.orgo.dev", ["API_TOKEN"], ["API_TOKEN", "SENTRY_DSN"], 1]);
-  const s0 = await ask(SettingsRoute, "GET", `/api/hosted-apps/field-notes/settings?ws=${WS}`, NOTES);
-  assert.deepEqual([s0.body.url, s0.body.env, "prodEnv" in s0.body], ["https://field-notes.orgo.dev", ["API_TOKEN", "SENTRY_DSN"], false], "Prod's as before");
+await check("Its link stays: deployed again, the same; its link deleted on Orgo, made again with the same label on its project's port; a project deleted keeps the link (Bops made it, so Orgo's project never owned it)", async () => {
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  const link = notesLink();
+  const pv = previewProject("field-notes");
+  assert.equal(pv.name, link.label);
   let n = web.calls.length;
-  const s2 = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/field-notes/settings", NOTES, { ws: WS, env: "staging", build: "npm run build:staging" });
-  assert.equal(s2.status, 200);
-  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path, c.body]), [["PATCH", `/api/computers/c_boppy/deploy-projects/${st.id}`, { build_cmd: "npm run build:staging" }]], "Staging's alone");
-  assert.equal(prod.build_cmd ?? null, null, "Prod's as it was");
-  const logs = await ask(LogsRoute, "GET", `/api/hosted-apps/field-notes/logs?ws=${WS}&env=staging`, NOTES);
-  assert.deepEqual([logs.status, logs.body.log], [200, "Exporting the changeset\nBuilding\n"]);
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  assert.deepEqual(callsSince(n, "POST", /\/(public-urls|deploy-projects)$/), [], "nothing made");
+  // Its link deleted on Orgo's own pages: made again, the same label.
+  web.urls = web.urls.filter((u) => u !== link);
   n = web.calls.length;
-  const back = await post("field-notes", { ws: WS, action: "rollback", env: "staging", deployment: prod.deployments[0].id });
-  assert.deepEqual([back.status, back.body.error], [404, "That isn't one of its recent deploys."], "Prod's deploy isn't Staging's");
-  assert.deepEqual(writesSince(n), []);
-  await S.flushState(5000);
-  assert.ok(!JSON.stringify(S.getState()).includes(SECRET) && ![...warned, ...heard].some((l) => l.includes(SECRET)), "the value went to Orgo alone");
-});
-
-await check("Prod never takes Staging's project: its record forgetting Prod's, a deploy finds Prod's own by name; Prod's gone on Orgo, a new one is made beside Staging's, which is left as it is; a site can't be named as a Staging is", async () => {
-  const [prod, st] = [notesProject("field-notes"), notesProject("field-notes-staging")];
-  const forget = () =>
-    S.update((s) => {
-      const h = s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"];
-      delete h.projectId;
-      delete h.url;
-    });
-  forget();
   assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
-  assert.equal(notes().projectId, prod.id, "Prod's own, found by name");
-  web.projects = web.projects.filter((p) => p !== prod);
-  forget();
+  assert.deepEqual(callsSince(n, "POST", /\/public-urls$/).map((c) => c.body), [{ port: pv.port, label: pv.name }]);
+  // Its project deleted on Orgo: the link stays (owned by no project), and the project comes back on it.
+  const again = notesLink();
+  web.projects = web.projects.filter((p) => p !== previewProject("field-notes"));
+  assert.ok(web.urls.includes(again), "its link stays");
   assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
-  const made = notesProject("field-notes");
-  assert.ok(made && made.id !== st.id && notes().projectId === made.id, "a new Prod project, never Staging's");
-  assert.equal(notesProject("field-notes-staging"), st, "Staging's as it was");
-  goLive(made);
-  const bad = await post("field-notes", { ws: WS, action: "addSite", site: "field-notes-staging" });
-  assert.deepEqual([bad.status, bad.body.error, bad.body.field], [400, "A site's name can't end in staging: its preview is named that way. Pick another name.", "site"]);
+  assert.deepEqual([previewProject("field-notes").name, previewProject("field-notes").port], [again.label, again.port]);
 });
 
-await check("Each site's Staging is a project of its own (<site>-staging; a long name cut, with a bit of its sha256, so two never share one): Deploy to Staging deploys every site's, or one; promote each site's own changeset; Remove site and Remove app take Staging down first", async () => {
-  assert.equal(H.stagingName("shop"), "shop-staging");
-  assert.equal(H.stagingName("shop", 3), "shop-staging-3");
-  const [a, b] = [H.stagingName("a-very-long-site-name-number-one"), H.stagingName("a-very-long-site-name-number-two")];
-  assert.ok(a !== b && a.length <= 32 && b.length <= 32 && H.stagingName("a-very-long-site-name-number-one", 9).length <= 32, `${a} ${b}`);
-  assert.ok(H.isStagingOf(a, "a-very-long-site-name-number-one") && !H.isStagingOf(a, "a-very-long-site-name-number-two"));
-  suiteAgain();
-  await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" });
-  const n = web.calls.length;
-  const r = await post("shop-suite", { ws: WS, action: "deploy", env: "staging" });
-  assert.equal(r.status, 200);
-  assert.deepEqual(suiteProjects().map((p) => p.name).sort(), ["shop-suite", "shop-suite-admin", "shop-suite-admin-staging", "shop-suite-staging"]);
-  assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [siteProject("shop-suite-staging").id, siteProject("shop-suite-admin-staging").id], "each site's Staging, in turn");
-  assert.deepEqual(r.body.app.sites.map((x) => [x.name, x.staging.live.state, x.live]), [["shop-suite", "queued", null], ["shop-suite-admin", "queued", null]]);
-  for (const p of suiteProjects()) goLive(p);
-  // One site alone; then promote each site's own.
-  const head = repoOf("shop-suite").changesets[0].id;
-  commit("shop-suite", "Admin only", { id: "boppy", name: "Boppy" });
-  let m = web.calls.length;
-  assert.equal((await post("shop-suite", { ws: WS, action: "deploy", env: "staging", site: "shop-suite-admin" })).status, 200);
-  assert.deepEqual(callsSince(m, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [siteProject("shop-suite-admin-staging").id]);
-  goLive(siteProject("shop-suite-admin-staging"));
-  const adminServes = siteProject("shop-suite-admin-staging").deployments.at(-1).source_version;
-  m = web.calls.length;
-  const p = await post("shop-suite", { ws: WS, action: "promote" });
-  assert.equal(p.status, 200);
-  assert.deepEqual(callsSince(m, "POST", /\/deployments$/).map((c) => [c.path.split("/")[5], c.body.at]), [[siteProject("shop-suite").id, head], [siteProject("shop-suite-admin").id, adminServes]], "each site's Prod gets its own Staging's changeset");
-  for (const x of suiteProjects()) goLive(x);
-  // Remove site: its Staging, then its Prod.
-  const [adminStaging, admin] = [siteProject("shop-suite-admin-staging"), siteProject("shop-suite-admin")];
-  m = web.calls.length;
-  assert.equal((await post("shop-suite", { ws: WS, action: "removeSite", site: "shop-suite-admin" })).status, 200);
-  assert.deepEqual(writesSince(m).map((c) => [c.method, c.path]), [
-    ["DELETE", `/api/computers/c_boppy/deploy-projects/${adminStaging.id}`],
-    ["DELETE", `/api/computers/c_boppy/deploy-projects/${admin.id}`],
-  ]);
-  // Remove app: every site's Staging, then each Prod.
-  const [ownStaging, own] = [siteProject("shop-suite-staging"), siteProject("shop-suite")];
-  m = web.calls.length;
-  const gone = await ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
-  assert.deepEqual([gone.status, gone.body], [200, { removed: "shop-suite", repo: false }]);
-  assert.deepEqual(writesSince(m).map((c) => [c.method, c.path]), [
-    ["DELETE", `/api/computers/c_boppy/deploy-projects/${ownStaging.id}`],
-    ["DELETE", `/api/computers/c_boppy/deploy-projects/${own.id}`],
-  ]);
-  assert.deepEqual(suiteProjects(), [], "nothing of it left on the computer");
-});
-
-await check("An app moved off a computer that's still up: its Staging projects there are kept with its Prod ones as left behind (which a Bops from before Staging knows, and Remove app takes down), read after the move", async () => {
-  const st = notesProject("field-notes-staging");
-  const prod = notesProject("field-notes");
+await check("Moved to another computer: its link moves with its next Preview deploy (removed on the computer it left, made here with the same label); its computer gone, its copy gives the label back; taken meanwhile, a new one and the words to add it to Google sign in", async () => {
+  const label = notesLink().label;
   const had = S.getState().bots.find((b) => b.id === "boppy").computerId;
+  computer("c_moved");
   const onto = (c) => S.update((s) => (s.bots.find((b) => b.id === "boppy").computerId = c));
   try {
-    onto("c_boppy2");
-    H.appWork("boppy", { app: "field-notes", name: null, change: "A third page" });
-    await until(() => notes().behind?.some((x) => x.projectId === st.id));
-    assert.deepEqual(notes().behind, [
-      { site: "field-notes", computerId: "c_boppy", projectId: prod.id },
-      { site: "field-notes", computerId: "c_boppy", projectId: st.id },
-    ]);
-    assert.deepEqual(Object.keys(notes()).filter((k) => !KNOWN.includes(k)), []);
+    onto("c_moved");
+    H.appWork("boppy", { app: "field-notes", name: null, change: "A new page" });
+    assert.equal(notes().computerId, "c_moved");
+    assert.equal(notes().preview, label, "its label comes along");
+    const n = web.calls.length;
+    const r = await post("field-notes", { ws: WS, action: "deploy" });
+    assert.equal(r.status, 200);
+    assert.ok(callsSince(n, "DELETE", /^\/api\/computers\/c_boppy\/public-urls\//).length === 1, "removed on the computer it left");
+    assert.equal(notesLink("c_moved").label, label, "the same link, here now");
+    assert.equal(notesLink("c_boppy"), undefined);
+    assert.equal(r.body.app.preview.url, `https://${label}.orgo.dev`);
+    // Its computer gone (its links with it): the copy gives the label back.
+    web.urls = web.urls.filter((u) => u.computerId !== "c_moved");
+    web.projects = web.projects.filter((p) => p.computerId !== "c_moved");
+    assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+    assert.equal(notesLink("c_moved").label, label, "the same link from its copy");
+    // Taken meanwhile by someone else: a new one, said.
+    web.urls = web.urls.filter((u) => u.computerId !== "c_moved");
+    web.projects = web.projects.filter((p) => p.computerId !== "c_moved");
+    web.urls.push({ id: randomUUID(), computerId: "c_someone", label, port: 3100, created_at: iso(), owned: false });
+    const said = hear(await H.deployForBot("boppy", "field-notes", null));
+    const now = notesLink("c_moved").label;
+    assert.notEqual(now, label);
+    assert.match(said, new RegExp(`Its preview link changed to https://${now}\\.orgo\\.dev, as the old one was taken\\. Add it to Google sign in\\.$`));
+    web.urls = web.urls.filter((u) => u.computerId !== "c_someone");
   } finally {
     onto(had);
-    S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"] = { botId: "boppy", computerId: "c_boppy", projectId: prod.id, url: prod.url }));
+    H.appWork("boppy", { app: "field-notes", name: null, change: "Back home" });
   }
 });
 
-await check("Local: Start puts bops-local on the app's computer (once) and runs its working folder there, with Staging's project named for its variables and a port of its own; status never wakes an asleep computer, nor does Stop; Open puts it on its screen; its own variables go on stdin, never kept here; why not, in words; only from the window; the bot's local_app", async () => {
+await check("Two marked links for one site (two Macs at once): the older is its Preview, the other a left over; nothing removed on its own, only on Remove; Published is never a Preview or an old staging project", async () => {
+  notesAgain();
+  web.urls = web.urls.filter((u) => !L.isLabelOf("preview", u.label, NOTES_REPO, "field-notes"));
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  const mine = notesLink();
+  const other = L.newLabel("preview", NOTES_REPO, "field-notes");
+  web.urls.push({ id: randomUUID(), computerId: "c_boppy", label: other, port: 3150, created_at: new Date(Date.now() + 60_000).toISOString(), owned: false });
+  // An old staging project from the builds before this one.
+  const old = { id: randomUUID(), computerId: "c_boppy", name: "field-notes-staging", port: 3001, source: "ingot", ingot_repo: NOTES_REPO, ingot_at: null, url: "https://field-notes-staging.orgo.dev", deployments: [] };
+  web.projects.push(old);
+  forgetListed();
+  const n = web.calls.length;
+  const app = (await H.listApps(WS)).apps.find((a) => a.name === "field-notes");
+  assert.equal(app.preview.url, `https://${mine.label}.orgo.dev`, "the older one");
+  assert.deepEqual(app.leftOver.map((x) => x.name).sort(), [other, "field-notes-staging"].sort());
+  assert.deepEqual(writesSince(n), [], "nothing removed on its own");
+  // Published's record naming the Preview, or the old staging: never taken as Published.
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].projectId = previewProject("field-notes").id));
+  assert.equal((await H.listApps(WS)).apps.find((a) => a.name === "field-notes").hosting.projectId, prodProject("field-notes").id, "found again by its mark, the record rewritten");
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].projectId = old.id));
+  assert.equal((await H.listApps(WS)).apps.find((a) => a.name === "field-notes").hosting.projectId, prodProject("field-notes").id);
+  // Remove, on the user's word: a link, then a project.
+  const gone = await post("field-notes", { ws: WS, action: "removeLeftOver", project: app.leftOver.find((x) => x.name === other).id });
+  assert.equal(gone.status, 200);
+  assert.ok(!web.urls.some((u) => u.label === other));
+  const gone2 = await post("field-notes", { ws: WS, action: "removeLeftOver", project: old.id });
+  assert.equal(gone2.status, 200);
+  assert.ok(!web.projects.includes(old));
+  assert.equal(gone2.body.app.leftOver, undefined);
+  assert.equal((await post("field-notes", { ws: WS, action: "removeLeftOver", project: prodProject("field-notes").id })).status, 404, "a site's own is never a left over");
+});
+
+await check("A legacy Published (the live sites': a project named as the site on 3000 with its own orgo.dev URL, its record naming it): found as Published, a Preview made beside it on 3100 and up, nothing of it changed, and no orgo.dev name for Published in any answer", async () => {
+  notesAgain();
+  const legacy = { id: randomUUID(), computerId: "c_boppy", name: "field-notes", port: 3000, source: "ingot", ingot_repo: NOTES_REPO, ingot_at: null, url: "https://field-notes.orgo.dev", deployments: [], start_cmd: "npm run serve" };
+  legacy.deployments.push({ id: randomUUID(), project_id: legacy.id, state: "succeeded", phase: null, error: null, source_version: repoOf("field-notes").changesets[0].id, created_at: iso(), finished_at: iso(), log: [] });
+  web.projects.push(legacy);
+  web.urls.push({ id: randomUUID(), computerId: "c_boppy", label: "field-notes", port: 3000, created_at: iso(), owned: legacy.id });
+  S.update((s) => Object.assign(s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"], { projectId: legacy.id, url: "https://field-notes.orgo.dev" }));
+  const n = web.calls.length;
+  const r = await post("field-notes", { ws: WS, action: "deploy" });
+  assert.equal(r.status, 200);
+  const pv = previewProject("field-notes");
+  assert.ok(pv.port >= 3100, "beside it, from 3100");
+  assert.equal(pv.start_cmd, "npm run serve", "built as it is");
+  assert.equal(prodProject("field-notes"), undefined, "no new Published");
+  assert.equal(notes().projectId, legacy.id);
+  assert.deepEqual(writesSince(n).filter((c) => c.path.includes(legacy.id) || (c.body && c.body.port === 3000)), [], "nothing of it changed, no URL on 3000");
+  forgetListed();
+  const app = (await H.listApps(WS)).apps.find((a) => a.name === "field-notes");
+  assert.equal(app.domain, null);
+  assert.equal(app.hosting.url, undefined, "the old address isn't sent");
+  assert.ok(!JSON.stringify(app).includes("field-notes.orgo.dev"), "no orgo.dev name for Published");
+  assert.equal(notes().url, "https://field-notes.orgo.dev", "kept as it was for Bops 0.0.32");
+  // Live with no domain: it publishes all the same (it served before).
+  for (const d of pv.deployments) Object.assign(d, { state: "succeeded", finished_at: iso() });
+  const pub = await post("field-notes", { ws: WS, action: "promote" });
+  assert.equal(pub.status, 200);
+  assert.equal(newestFirst(legacy)[0].source_version, pv.deployments[0].source_version);
+});
+
+await check("Publish and Apply variables: a domain first (pending is enough), the Preview's exact commit, PREVIEW_MOVED when it moved on; Apply variables builds Published's own commit again, refused when nothing's published; a domain connects before any deploy", async () => {
+  notesAgain();
+  web.urls = web.urls.filter((u) => !L.isLabelOf("preview", u.label, NOTES_REPO, "field-notes"));
+  // A domain before any deploy: Published's project made then, the domain on its port.
+  const c = await ask(DomainsRoute, "POST", "/api/hosted-apps/field-notes/domains", NOTES, { ws: WS, action: "connect", domain: "notes.example.org" });
+  assert.equal(c.status, 200);
+  const prod = prodProject("field-notes");
+  assert.ok(prod, "Published made for it");
+  assert.equal(web.domains.find((d) => d.domain === "notes.example.org").target_port, prod.port);
+  assert.deepEqual(prod.deployments, [], "nothing deployed");
+  // Nothing on the Preview yet: nothing to publish.
+  const none = await post("field-notes", { ws: WS, action: "promote" });
+  assert.deepEqual([none.status, none.body.error, none.body.code], [409, "The preview isn't live yet. Deploy a preview first.", "NO_PREVIEW"]);
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  const pv = previewProject("field-notes");
+  for (const d of pv.deployments) Object.assign(d, { state: "succeeded", finished_at: iso() });
+  const at = pv.deployments[0].source_version;
+  // The window saw another commit: refused.
+  const moved = await post("field-notes", { ws: WS, action: "promote", site: "field-notes", at: sha("another") });
+  assert.deepEqual([moved.status, moved.body.code, moved.body.error], [409, "PREVIEW_MOVED", "The preview changed since you looked. Look again."]);
+  const ok = await post("field-notes", { ws: WS, action: "promote", site: "field-notes", at });
+  assert.equal(ok.status, 200);
+  assert.equal(newestFirst(prod)[0].source_version, at, "the Preview's exact commit");
+  // Apply variables: nothing published yet is refused; once it is, its own commit built again.
+  for (const d of prod.deployments) Object.assign(d, { state: "succeeded", finished_at: iso() });
+  const n = web.calls.length;
+  const re = await post("field-notes", { ws: WS, action: "reapply" });
+  assert.equal(re.status, 200);
+  assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((x) => [x.path.split("/")[5], x.body]), [[prod.id, { at }]]);
+  // Without a domain and never live: NO_DOMAIN.
+  web.domains = web.domains.filter((d) => d.domain !== "notes.example.org");
+  prod.deployments = [];
+  const no = await post("field-notes", { ws: WS, action: "promote" });
+  assert.deepEqual([no.status, no.body.code, no.body.error], [409, "NO_DOMAIN", "Connect a domain first. Published sites live only on their own domain."]);
+  const nothing = await post("field-notes", { ws: WS, action: "reapply" });
+  assert.deepEqual([nothing.status, nothing.body.error], [409, "Nothing is published yet."]);
+});
+
+await check("A Preview named ahead (the owner's, from the window): made with that name before any deploy; once made its name never changes; a name that can't be one is refused", async () => {
+  notesAgain();
+  web.urls = web.urls.filter((u) => !L.isLabelOf("preview", u.label, NOTES_REPO, "field-notes") && u.label !== "kqwerty1234a");
+  const bad = await post("field-notes", { ws: WS, action: "preview", label: "Not-A-Name" });
+  assert.deepEqual([bad.status, bad.body.error], [400, "A preview's name is 12 lowercase letters and digits, starting with a letter."]);
+  const r = await post("field-notes", { ws: WS, action: "preview", label: "kqwerty1234a" });
+  assert.deepEqual([r.status, r.body.url], [200, "https://kqwerty1234a.orgo.dev"]);
+  assert.equal(notes().preview, "kqwerty1234a");
+  assert.equal(web.projects.find((p) => p.name === "kqwerty1234a")?.ingot_repo, NOTES_REPO);
+  // Deploys go to it; its copy lost, it's found again (one site) by its name and link.
+  assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].preview);
+  const n = web.calls.length;
+  const again = await post("field-notes", { ws: WS, action: "deploy" });
+  assert.equal(again.body.app.preview.url, "https://kqwerty1234a.orgo.dev");
+  assert.deepEqual(callsSince(n, "POST", /\/(public-urls|deploy-projects)$/), [], "nothing made");
+  const other = await post("field-notes", { ws: WS, action: "preview", label: "zzzzzzzzzzzz" });
+  assert.deepEqual([other.status, other.body.code], [409, "PREVIEW_NAMED"]);
+  const same = await post("field-notes", { ws: WS, action: "preview", label: "kqwerty1234a" });
+  assert.equal(same.status, 200);
+  const away = await post("field-notes", { ws: WS, action: "preview", label: "kqwerty1234a" }, false);
+  assert.equal(away.status, 403, "the window's only");
+});
+
+await check("Local: Start puts bops-local on the app's computer (once, never over a newer one) and runs its working folder there on a port of its own (3000 first, the one it has after, auto the lowest free, never one another site has or something else holds: said, never moved), with its Preview's project and link for its variables; status never wakes an asleep computer, nor does Stop; Open puts it on a screen; Preview here needs the tailnet or its computer's SSH, else its screen; its own variables go on stdin, never kept here; why not, in words; only from the window; the bot's local_app", async () => {
   forgetReady();
-  const st = notesProject("field-notes-staging");
+  const pvName = web.projects.find((p) => p.ingot_repo === NOTES_REPO && p.name === notes().preview)?.name ?? "-";
   const r = await localAsk({ action: "start" });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.sites["field-notes"], { state: "running", port: 4100, command: "npm run dev", since: 1761134400000, error: null, url: null, env: [] });
+  assert.deepEqual(r.body.sites["field-notes"], { state: "running", port: 3000, devPort: 3000, command: "npm run dev", since: 1761134400000, error: null, env: [], auth: false });
   assert.equal(boppy.localInstalls, 1, "bops-local put there");
-  assert.deepEqual(boppy.localAsked.find((x) => x[0] === "start"), ["start", "field-notes", "field-notes", "-", "-", st.name], "Staging's project for its variables");
+  assert.deepEqual(boppy.localAsked.find((x) => x[0] === "start"), ["start", "field-notes", "field-notes", "-", "-", pvName, pvName === "-" ? "-" : Buffer.from(`https://${pvName}.orgo.dev`).toString("base64"), "-"], "its Preview's project and link for its variables");
   const again = await localRead();
   assert.deepEqual([again.status, again.body.sites["field-notes"].state], [200, "running"]);
   assert.equal(boppy.localInstalls, 1, "not put there again");
+  // Its port held there by something else: said, and it never moves.
+  boppy.held = [3000];
+  const held = await localAsk({ action: "start" });
+  assert.deepEqual([held.status, held.body.error], [409, "Something else on its computer is using port 3000, so its Local can't start there. Stop that, or clear its port to get a free one."]);
+  boppy.held = undefined;
+  // A port of its own, given; cleared (auto), the lowest free again.
+  const vite = await localAsk({ action: "start", port: 5173 });
+  assert.deepEqual([vite.body.sites["field-notes"].port, vite.body.sites["field-notes"].devPort], [5173, 5173]);
+  assert.equal(boppy.localAsked.findLast((x) => x[0] === "start")[7], "5173");
+  for (const [port, words] of [[80, "Use a port from 1024 to 65535."], [3210, "Bops uses 3210 on this Mac. Pick another."], ["x", "Use a port from 1024 to 65535."]]) {
+    const bad = await localAsk({ action: "start", port });
+    assert.deepEqual([bad.status, bad.body.error, bad.body.field], [400, words, "port"]);
+  }
+  const auto = await localAsk({ action: "start", port: "auto" });
+  assert.equal(boppy.localAsked.findLast((x) => x[0] === "start")[7], "auto", "cleared: a free one, never 3000 as such");
+  assert.equal(auto.body.sites["field-notes"].port, 3000);
   // Asleep: nothing runs there, and it isn't woken to say so, nor to stop.
   boppy.status = "suspended";
   const k = ran.length;
@@ -4829,10 +5322,18 @@ await check("Local: Start puts bops-local on the app's computer (once) and runs 
   assert.deepEqual((await localRead()).body.sites["field-notes"].env, ["LOCAL_FLAG"]);
   await S.flushState(5000);
   assert.ok(!JSON.stringify(S.getState()).includes(SECRET) && ![...warned, ...heard].some((l) => l.includes(SECRET)), "never kept or said here");
-  // Open on its screen, then Stop.
+  // Preview on this Mac: without the tailnet, and with Orgo not turning on its computer's SSH, its screen instead (said).
+  boppy.ssh = { refuse: { status: 400, body: { error: "Direct SSH isn't available for this computer.", code: "SSH_UNSUPPORTED_OS" } } };
+  const pre = await localAsk({ action: "preview" });
+  assert.deepEqual([pre.status, pre.body.fallback, pre.body.error], [409, "screen", "Orgo didn't turn on SSH for its computer, so it opens on its screen."]);
+  boppy.ssh = undefined;
+  assert.equal((await localAsk({ action: "unpreview" })).status, 200);
+  // Open on a screen of its computer: a free one, said with the answer; none free, said.
   const o = await localAsk({ action: "open" });
   assert.deepEqual([o.status, o.body.opened], [200, true]);
-  assert.deepEqual(boppy.opened, ["http://localhost:4100/"]);
+  assert.deepEqual(boppy.opened, ["http://localhost:3000/"]);
+  assert.ok(DISPLAYS.includes(o.body.display), "a screen's X display");
+  assert.equal(boppy.openedOn.at(-1), String(o.body.display), "on that screen's Chrome");
   const s = await localAsk({ action: "stop" });
   assert.equal(s.body.sites["field-notes"].state, "stopped");
   // Why not, in words; only from the window.
@@ -4847,12 +5348,583 @@ await check("Local: Start puts bops-local on the app's computer (once) and runs 
   // A stopped one that stopped by itself says its last words.
   boppy.localFails = "Error: Cannot find module 'next'";
   assert.deepEqual((await localAsk({ action: "start" })).body.sites["field-notes"].error, "Error: Cannot find module 'next'");
+  // Its log's last lines (6 at most, none empty, each cut), for Fix it to show; the bot says the last.
+  boppy.localFails = ["> next dev", "", ...Array.from({ length: 7 }, (_, i) => `line ${i + 1}`), `Error: ${"x".repeat(400)}`, ""].join("\n");
+  const failed = (await localAsk({ action: "start" })).body.sites["field-notes"].error;
+  assert.deepEqual(failed.split("\n"), ["line 3", "line 4", "line 5", "line 6", "line 7", `Error: ${"x".repeat(293)}`]);
+  const why = await turnWith("Run field notes locally", [toolCall("local_app", { app: "field-notes", action: "start", site: null, port: null })]);
+  assert.equal(why.out(), `field-notes's Local didn't start: Error: ${"x".repeat(293)} Its log is /root/.bops/local/field-notes--field-notes.log on its computer.`);
   boppy.localFails = undefined;
-  // The bot.
-  const t = await turnWith("Run field notes locally so I can look", [toolCall("local_app", { app: "field-notes", action: "start" })]);
-  assert.equal(t.out(), "field-notes's Local is running on its computer at http://localhost:4100/ (open it in that computer's browser). It isn't on the web.");
-  const off = await turnWith("Stop field notes locally", [toolCall("local_app", { app: "field-notes", action: "stop" })]);
+  // The bot: the place and its address.
+  const t = await turnWith("Run field notes locally so I can look", [toolCall("local_app", { app: "field-notes", action: "start", site: null, port: null })]);
+  assert.equal(t.out(), "field-notes's Local is running at http://localhost:3000 on its computer, with hot reload: that address stays the same, on its computer's screens and in the Preview tab beside this chat, where Alex sees it (Preview at the top of the chat opens it). It isn't on the web.");
+  const st = await turnWith("Is field notes running?", [toolCall("local_app", { app: "field-notes", action: "status", site: null, port: null })]);
+  assert.equal(st.out(), "field-notes's Local is running at http://localhost:3000.");
+  const off = await turnWith("Stop field notes locally", [toolCall("local_app", { app: "field-notes", action: "stop", site: null, port: null })]);
   assert.equal(off.out(), "Stopped field-notes's Local.");
+});
+
+await check("Local, one port a site: a second site gets the next one; one given that another site has is refused with whose; bops-local's second line read (good, fixes, auth, a mismatch, a key it doesn't know passed over), an older one's line without it read as before; each site's port kept as a hint (hostedAppsLine says it), and the Google note once an address in its bot's chat for a site that signs in (once, too, after an older Mac rebuilt the site's record without it)", async () => {
+  notesAgain();
+  boppy.locals?.clear();
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].sites = [{ name: "notes-admin" }]));
+  const a = await localAsk({ action: "start" });
+  assert.equal(a.body.sites["field-notes"].port, 3000);
+  const b = await localAsk({ action: "start", site: "notes-admin" });
+  assert.deepEqual([b.status, b.body.sites["notes-admin"].port, b.body.sites["notes-admin"].devPort], [200, 3001, 3001], "the next port, never the first site's");
+  const taken = await localAsk({ action: "start", site: "notes-admin", port: 3000 });
+  assert.deepEqual([taken.status, taken.body.error], [409, "Port 3000 is field-notes's Local's on its computer. Pick another, or clear its port to get a free one."]);
+  // Its port kept on its record as Bops reads it, for the bots' prompt (no computer asked there).
+  assert.deepEqual([notes().localPort, notes().sites[0].localPort], [3000, 3001]);
+  assert.match(hear(H.hostedAppsLine("boppy")), /field-notes \(Local at http:\/\/localhost:3000; [^)]*its other sites from the same repo: notes-admin \(Local at http:\/\/localhost:3001; /);
+  assert.doesNotMatch(H.hostedAppsLine("boppy"), /localhost:3000 with hot reload/, "no address said as everyone's");
+  // The second line: what each key says; an older bops-local's line alone, as before.
+  const x = boppy.locals.get("field-notes--notes-admin");
+  Object.assign(x, { good: `${"a".repeat(64)}:1761134500`, fixes: 2, mismatch: 5173 });
+  const read = (await localRead()).body.sites["notes-admin"];
+  assert.deepEqual([read.lastGood, read.fixes, read.auth, read.mismatch, read.state], [{ at: "a".repeat(64), when: 1761134500000 }, 2, false, 5173, "starting"]);
+  Object.assign(x, { good: undefined, fixes: undefined, mismatch: undefined });
+  const t = await turnWith("Is the admin site running?", [toolCall("local_app", { app: "field-notes", action: "status", site: "notes-admin", port: null })]);
+  assert.match(t.out(), /^notes-admin's Local is running at http:\/\/localhost:3001\.$/);
+  // A key a newer bops-local writes is passed over; an older one's line alone is read as before.
+  boppy.locals.get("field-notes--field-notes").more = " later=yes fixes=1";
+  const newer = (await localRead()).body.sites["field-notes"];
+  assert.deepEqual([newer.fixes, newer.auth, "later" in newer], [1, false, false]);
+  delete boppy.locals.get("field-notes--field-notes").more;
+  boppy.localOld = true;
+  const older = (await localRead()).body.sites;
+  boppy.localOld = undefined;
+  assert.deepEqual(Object.keys(older["notes-admin"]).sort(), ["command", "devPort", "env", "error", "port", "since", "state"], "an older line: nothing more");
+  assert.deepEqual([read.devPort, older["notes-admin"].devPort], [3001, 3000], "its dev port from its second line (dev=), 3000 from one that doesn't say it");
+  // The Google note: a site that signs in, running at an address never told, once, in its bot's chat.
+  const chat = botChatId("boppy");
+  const before = messages().length;
+  boppy.localAuth = true;
+  await localRead();
+  await localRead();
+  const told = messages().slice(before).filter((m) => m.chatId === chat && /Authorized redirect URIs/.test(m.text));
+  assert.deepEqual(told.map((m) => hear(m.text)), [
+    "field-notes's Local is at http://localhost:3000. If it signs in with Google, add these two lines to its OAuth client in Google Cloud (Credentials), once:\nAuthorized JavaScript origins: http://localhost:3000\nAuthorized redirect URIs: http://localhost:3000/api/auth/callback/google",
+    "notes-admin's Local is at http://localhost:3001. If it signs in with Google, add these two lines to its OAuth client in Google Cloud (Credentials), once:\nAuthorized JavaScript origins: http://localhost:3001\nAuthorized redirect URIs: http://localhost:3001/api/auth/callback/google",
+  ]);
+  assert.deepEqual(told.map((m) => [m.role, m.botId, m.appNote, m.bops]), [["bot", "boppy", true, true], ["bot", "boppy", true, true]]);
+  assert.deepEqual([notes().toldGoogle, notes().sites[0].toldGoogle], [["http://localhost:3000"], ["http://localhost:3001"]]);
+  // A new address (its port given): told once more; Ivy works on the admin site, so it's said in Ivy's chat.
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).botSites = { ...(s.workspaces.find((w) => w.id === WS).botSites ?? {}), ivy: { app: "field-notes", site: "notes-admin" } }));
+  const m = S.getState().messages.length;
+  await localAsk({ action: "start", site: "notes-admin", port: 3007 });
+  await localRead();
+  const more = S.getState().messages.slice(m).filter((x) => /Authorized redirect URIs/.test(x.text));
+  assert.deepEqual(more.map((x) => [x.chatId, /localhost:3007\./.test(x.text)]), [[botChatId("ivy"), true]]);
+  assert.deepEqual(notes().sites[0].toldGoogle, ["http://localhost:3001", "http://localhost:3007"]);
+  // An older Mac rebuilds the site's record without what was told (as it deploys it): its chat has it, so not again.
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].sites = [{ name: "notes-admin" }]));
+  const o = S.getState().messages.length;
+  await localRead();
+  assert.deepEqual(S.getState().messages.slice(o).filter((x) => /Authorized redirect URIs/.test(x.text)), [], "never told again");
+  assert.deepEqual([notes().sites[0].localPort, notes().sites[0].toldGoogle], [3007, ["http://localhost:3007"]], "kept on its record again");
+  boppy.localAuth = false;
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    delete w.botSites.ivy;
+    delete w.hostedApps["field-notes"].sites;
+  });
+});
+
+await check("Local after a task: the site it worked on (Session.app.site) started and checked; its / below 500 with a clean folder marks the folder's changeset good, a 500 or anything uncommitted doesn't; said with the place and its address (a task asked to deploy is checked, not said); Fix it counted by the owner alone; Open on the screen of the task working on it, else a free one, else none; never over a newer bops-local", async () => {
+  notesAgain();
+  boppy.locals?.clear();
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].sites = [{ name: "notes-admin" }]));
+  await localAsk({ action: "start" });
+  const BASE = "b".repeat(64);
+  const done = (id, app) => S.update((s) => s.sessions.push({ id, botId: "boppy", chatId, sentVia: "you", title: "Work on field-notes", goal: "Work on Alex's app field-notes.", host: "orgo", status: "done", steps: [], replies: [], createdAt: Date.now(), app }));
+  // Clean and answering: good, at the folder's changeset; said with its address.
+  boppy.localCheck = { http: 200, base: BASE, clean: true };
+  done("ses_local_a", { wsId: WS, name: "field-notes", site: "notes-admin" });
+  const m = messages().length;
+  await H.previewAfterTask("ses_local_a");
+  assert.match(boppy.localChecks.at(-1), /^# bops-local check field-notes notes-admin$/);
+  assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "start").slice(0, 3), ["start", "field-notes", "notes-admin"], "the site it worked on, started");
+  assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "mark"), ["mark", "field-notes", "notes-admin", "good", BASE]);
+  const said = messages().slice(m);
+  assert.deepEqual(said.map((x) => [hear(x.text), x.role, x.appNote, x.bops, x.sessionIds]), [["notes-admin's Local is running at http://localhost:3001. Open it with Preview at the top of this chat.", "bot", true, true, ["ses_local_a"]]]);
+  assert.deepEqual((await localRead()).body.sites["notes-admin"].lastGood, { at: BASE, when: 1761134500000 });
+  // A 500, or a folder with something uncommitted: no mark.
+  for (const [id, check] of [["ses_local_b", { http: 500, base: BASE, clean: true }], ["ses_local_c", { http: 200, base: BASE, clean: false }], ["ses_local_d", { http: "000", base: BASE, clean: true }]]) {
+    boppy.localCheck = check;
+    const k = boppy.localAsked.length;
+    done(id, { wsId: WS, name: "field-notes" });
+    await H.previewAfterTask(id);
+    assert.ok(!boppy.localAsked.slice(k).some((x) => x[0] === "mark"), `${id}: not good`);
+    assert.match(boppy.localChecks.at(-1), /^# bops-local check field-notes field-notes$/, "a task from before sites were kept on it: the app's own");
+  }
+  // A task asked to deploy: its Local checked all the same, nothing said here (its deploy says how it went).
+  boppy.localCheck = { http: 200, base: BASE, clean: true };
+  const n = messages().length;
+  const k = boppy.localAsked.length;
+  done("ses_local_e", { wsId: WS, name: "field-notes", deployAfter: true });
+  await H.previewAfterTask("ses_local_e");
+  assert.deepEqual(boppy.localAsked.slice(k).filter((x) => x[0] === "mark"), [["mark", "field-notes", "field-notes", "good", BASE]]);
+  assert.equal(messages().length, n);
+  // Fix it: counted on the computer, the owner's alone.
+  const f = await localAsk({ action: "fix", site: "notes-admin" });
+  assert.deepEqual([f.status, f.body.sites["notes-admin"].fixes], [200, 1]);
+  assert.deepEqual(boppy.localAsked.at(-2), ["mark", "field-notes", "notes-admin", "fix"]);
+  const { orgoKey } = await import(`${root}/lib/server/orgo-auth.ts`);
+  globalThis.bopsShared = { user: S.stateUser(), key: orgoKey(), copy: { openNow: () => ({ id: "shared_p" }), data: () => ({}), close() {} }, subscriber: { stop() {} } };
+  try {
+    const no = await localAsk({ action: "fix", site: "notes-admin" });
+    assert.deepEqual([no.status, no.body.error], [403, "Only the owner can do this."]);
+  } finally {
+    globalThis.bopsShared = null;
+  }
+  // Open: on the screen of a live task working on it; with none, a free screen; with none free, said.
+  S.update((s) => s.sessions.push({ id: "ses_local_live", botId: "boppy", chatId, sentVia: "you", title: "Work on field-notes", goal: "x", host: "orgo", status: "running", display: 101, steps: [], replies: [], createdAt: Date.now(), app: { wsId: WS, name: "field-notes", site: "notes-admin" } }));
+  const on = await localAsk({ action: "open", site: "notes-admin" });
+  assert.deepEqual([on.status, on.body.display, boppy.openedOn.at(-1)], [200, 101, "101"]);
+  S.update((s) => {
+    s.sessions = s.sessions.filter((x) => x.id !== "ses_local_live");
+    for (const d of DISPLAYS) s.sessions.push({ id: `ses_busy_${d}`, botId: "boppy", chatId, sentVia: "you", title: "Busy", goal: "x", host: "orgo", status: "running", display: d, steps: [], replies: [], createdAt: Date.now() });
+  });
+  const none = await localAsk({ action: "open" });
+  assert.deepEqual([none.status, none.body.code], [409, "NO_SCREEN"]);
+  hear(none.body.error);
+  S.update((s) => (s.sessions = s.sessions.filter((x) => !x.id.startsWith("ses_busy_") && !x.id.startsWith("ses_local_"))));
+  // A newer bops-local there (another Mac's): left as it is, and used.
+  const c = computer("c_newer", { localBin: true, localVersion: 99 });
+  void c;
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"] = { ...s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"], computerId: "c_newer" }));
+  fleet.get("c_newer").folders.set("/workspace/apps/field-notes", `${PROJECT}/field-notes`);
+  await localRead();
+  assert.equal(fleet.get("c_newer").localInstalls, undefined, "never put over a newer one");
+  assert.equal(fleet.get("c_newer").localAsked.at(-1)[0], "status", "and asked all the same");
+  // An older one there (v4, whose BOPS_LOCAL line had an eighth word no v0.0.34 Mac reads): put over.
+  computer("c_v4", { localBin: true, localVersion: 4 });
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"].computerId = "c_v4"));
+  fleet.get("c_v4").folders.set("/workspace/apps/field-notes", `${PROJECT}/field-notes`);
+  await localRead();
+  assert.deepEqual([fleet.get("c_v4").localInstalls, fleet.get("c_v4").localVersion > 4], [1, true], "put over an older one");
+  S.update((s) => {
+    const h = s.workspaces.find((w) => w.id === WS).hostedApps["field-notes"];
+    h.computerId = "c_boppy";
+    delete h.sites;
+  });
+  assert.equal(H.localVersion(readFileSync(`${root}/vm/bin/bops-local`, "utf8")) >= 2, true, "this Bops' bops-local says its version");
+  assert.equal(H.localVersion("#!/bin/bash\necho old"), 0, "one from before versions: 0");
+});
+
+await check("Local after an older Mac put its bops-local back on the computer (v0.0.32 to v0.0.34 do, whenever the file there isn't theirs): an answer only an older one gives (auto refused, mark refused, a Local without its second line, open on 99) puts this Bops' back and asks again, once; and what's there is looked at again every few minutes", async () => {
+  notesAgain();
+  boppy.locals?.clear();
+  assert.equal((await localAsk({ action: "start" })).status, 200);
+  const installs = boppy.localInstalls;
+  const tries = (from, what) => boppy.localAsked.slice(from).filter((x) => x[0] === what).length;
+  // auto: an older one refuses it (bad-port).
+  boppy.localVersion = 1;
+  let k = boppy.localAsked.length;
+  const auto = await localAsk({ action: "start", port: "auto" });
+  assert.deepEqual([auto.status, auto.body.sites["field-notes"]?.port, auto.body.sites["field-notes"]?.auth], [200, 3000, false], "this Bops' own answered");
+  assert.deepEqual([boppy.localInstalls, tries(k, "start")], [installs + 1, 2], "put back, and asked again");
+  // Fix it (mark fix): usage.
+  boppy.localVersion = 1;
+  k = boppy.localAsked.length;
+  const fix = await localAsk({ action: "fix" });
+  assert.deepEqual([fix.status, fix.body.sites["field-notes"].fixes], [200, 1]);
+  assert.deepEqual([boppy.localInstalls, tries(k, "mark")], [installs + 2, 2]);
+  // A good run after a task (mark good): usage, and marked all the same.
+  const BASE = "c".repeat(64);
+  boppy.localCheck = { http: 200, base: BASE, clean: true };
+  S.update((s) => s.sessions.push({ id: "ses_local_older", botId: "boppy", chatId, sentVia: "you", title: "Work on field-notes", goal: "x", host: "orgo", status: "done", steps: [], replies: [], createdAt: Date.now(), app: { wsId: WS, name: "field-notes" } }));
+  boppy.localVersion = 1;
+  await H.previewAfterTask("ses_local_older");
+  assert.deepEqual(boppy.locals.get("field-notes--field-notes").good, `${BASE}:1761134500`);
+  assert.equal(boppy.localInstalls, installs + 3);
+  // Open: on the screen asked, not on 99 alone.
+  boppy.localVersion = 1;
+  const o = await localAsk({ action: "open" });
+  assert.deepEqual([o.status, boppy.openedOn.slice(-2)], [200, ["99", String(o.body.display)]]);
+  assert.equal(boppy.localInstalls, installs + 4);
+  // A status with no second line: read again from this Bops' own.
+  boppy.localVersion = 1;
+  const read = await localRead();
+  assert.deepEqual([read.body.sites["field-notes"].auth, boppy.localInstalls], [false, installs + 5]);
+  // Once only: one that stays older (an older Mac at it again at once) is asked twice, never more, and read as it is.
+  boppy.localOld = true;
+  k = boppy.localAsked.length;
+  assert.equal((await localRead()).body.sites["field-notes"].state, "running");
+  assert.equal(tries(k, "status"), 2);
+  boppy.localOld = undefined;
+  // Looked at again after a few minutes, though nothing an older one says came back.
+  const looks = () => ran.filter((r) => r.computerId === "c_boppy" && r.command.startsWith("# bops-local install")).length;
+  const n = looks();
+  await localRead();
+  assert.equal(looks(), n, "not within a few minutes");
+  const now = Date.now;
+  Date.now = () => now() + 4 * 60_000;
+  try {
+    await localRead();
+  } finally {
+    Date.now = now;
+  }
+  assert.equal(looks(), n + 1, "looked at again after");
+  S.update((s) => (s.sessions = s.sessions.filter((x) => x.id !== "ses_local_older")));
+});
+
+await check("Local after a task, its dev server on a port of its own (mismatch: one that ignores $PORT): said where it opened and what to do, never that it runs, and not checked", async () => {
+  notesAgain();
+  boppy.locals?.clear();
+  assert.equal((await localAsk({ action: "start" })).status, 200);
+  boppy.locals.get("field-notes--field-notes").mismatch = 5173;
+  boppy.localCheck = { http: 200, base: "d".repeat(64), clean: true };
+  const checks = boppy.localChecks?.length ?? 0;
+  const k = boppy.localAsked.length;
+  S.update((s) => s.sessions.push({ id: "ses_local_vite", botId: "boppy", chatId, sentVia: "you", title: "Work on field-notes", goal: "x", host: "orgo", status: "done", steps: [], replies: [], createdAt: Date.now(), app: { wsId: WS, name: "field-notes" } }));
+  const m = messages().length;
+  await H.previewAfterTask("ses_local_vite");
+  assert.deepEqual(messages().slice(m).map((x) => [hear(x.text), x.appNote]), [["field-notes's dev server opened on port 5173 instead of its own port, 3000, so its Local isn't at http://localhost:3000. Its dev command has to use $PORT: press Fix it in Preview at the top of this chat, or ask me.", true]]);
+  assert.equal(boppy.localChecks?.length ?? 0, checks, "nothing checked on a port nothing answers");
+  assert.ok(!boppy.localAsked.slice(k).some((x) => x[0] === "mark" || x[0] === "start"), "neither marked nor started again");
+  delete boppy.locals.get("field-notes--field-notes").mismatch;
+  S.update((s) => (s.sessions = s.sessions.filter((x) => x.id !== "ses_local_vite")));
+});
+
+await check("Local after a task: where to watch it is said first, then it's checked (a first page can take a minute and more to build)", async () => {
+  notesAgain();
+  boppy.locals?.clear();
+  assert.equal((await localAsk({ action: "start" })).status, 200);
+  const BASE = "e".repeat(64);
+  let saidThen;
+  Object.defineProperty(boppy, "localCheck", { configurable: true, get: () => ((saidThen = messages().length), { http: 200, base: BASE, clean: true }) });
+  try {
+    S.update((s) => s.sessions.push({ id: "ses_local_first", botId: "boppy", chatId, sentVia: "you", title: "Work on field-notes", goal: "x", host: "orgo", status: "done", steps: [], replies: [], createdAt: Date.now(), app: { wsId: WS, name: "field-notes" } }));
+    const m = messages().length;
+    await H.previewAfterTask("ses_local_first");
+    assert.equal(saidThen, m + 1, "said before the check");
+    assert.equal(hear(messages().at(-1).text), "field-notes's Local is running at http://localhost:3000. Open it with Preview at the top of this chat.");
+    assert.equal(boppy.locals.get("field-notes--field-notes").good, `${BASE}:1761134500`, "and checked good after");
+  } finally {
+    delete boppy.localCheck;
+    S.update((s) => (s.sessions = s.sessions.filter((x) => x.id !== "ses_local_first")));
+  }
+});
+
+await check("A preview open on this Mac follows its Local's port to the same port here: a Local an older bops-local started on another port, started again on its own, moves the forward too; stopped, it closes", async () => {
+  const P = await import(`${root}/lib/server/local-preview.ts`);
+  const net = await import("node:net");
+  const free = () => new Promise((done) => {
+    const sv = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = sv.address();
+      sv.close(() => done(port));
+    });
+  });
+  const [mine, older] = [await free(), await free()];
+  notesAgain();
+  boppy.locals?.clear();
+  await localAsk({ action: "start", port: mine });
+  const key = `${WS}/field-notes/field-notes`;
+  await P.openForward({ key, app: "field-notes", macPort: older, host: "127.0.0.1", port: older });
+  await localRead();
+  // (Opened as the read answers, not waited for.)
+  for (let i = 0; i < 40 && !P.forwardOf(key); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(P.forwardOf(key), { macPort: mine, host: "127.0.0.1", port: mine }, "the same port here as there");
+  assert.equal(P.forwardOn(older), undefined, "the old one closed");
+  await localAsk({ action: "stop" });
+  assert.equal(P.forwardOf(key), undefined, "stopped: closed");
+  await localAsk({ action: "start", port: "auto" });
+});
+
+await check("Preview on this Mac without the tailnet goes through its computer's SSH: Bops' own key made once (0600, never sent) and reused; Orgo asked to turn SSH on only while it's off, so keys the user set there stay; the key added to its authorized_keys once, every other line kept; its host key pinned in Bops' own known_hosts; ssh with that one forward and nothing else; a page through it; the same tunnel for a preview open; the tailnet first when it's up", async () => {
+  const P = await import(`${root}/lib/server/local-preview.ts`);
+  const http = await import("node:http");
+  const net = await import("node:net");
+  const free = () => new Promise((done) => {
+    const sv = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = sv.address();
+      sv.close(() => done(port));
+    });
+  });
+  const pageAt = (p) =>
+    new Promise((done, fail) =>
+      http.get({ host: "127.0.0.1", port: p, path: "/", headers: { host: `localhost:${p}` } }, (res) => {
+        let b = "";
+        res.on("data", (d) => (b += d));
+        res.on("end", () => done(`${res.statusCode} ${b}`));
+      }).on("error", fail),
+    );
+  notesAgain();
+  boppy.locals?.clear();
+  boppy.ssh = undefined;
+  const authorized = join(sshFiles(boppy), "root/.ssh/authorized_keys");
+  rmSync(authorized, { force: true });
+  // Its dev server: one on this Mac, standing in for that port of its computer.
+  const dev = http.createServer((req, res) => res.end(`field notes, asked for ${req.headers.host}`));
+  await new Promise((r) => dev.listen(0, "127.0.0.1", r));
+  const port = await free();
+  sshSays({ hostKey: boppy.hostKey, authorized, ports: { [port]: dev.address().port } });
+  await localAsk({ action: "start", port });
+  const key = `${WS}/field-notes/field-notes`;
+  let n = web.calls.length;
+  const r = await localAsk({ action: "preview" });
+  assert.deepEqual([r.status, r.body.preview], [200, `http://localhost:${port}/`]);
+  // Its key: made once (the preview Orgo turned down before made it), 0600, never sent anywhere.
+  const made = logLines("keygen.log");
+  assert.equal(made.length, 1, "made once, then the same");
+  const keyFile = made[0][made[0].indexOf("-f") + 1];
+  assert.deepEqual(made[0], ["-q", "-t", "ed25519", "-N", "", "-C", "bops", "-f", keyFile]);
+  assert.equal(statSync(keyFile).mode & 0o777, 0o600, "its private key is the user's alone");
+  const pub = readFileSync(`${keyFile}.pub`, "utf8").split(" ").slice(0, 2).join(" ");
+  const secret = readFileSync(keyFile, "utf8");
+  assert.ok(![...web.calls.map((c) => JSON.stringify(c.body ?? null)), ...ran.map((x) => x.command)].some((x) => x.includes("PRIVATE KEY") || x.includes(secret.split("\n")[1])), "never sent");
+  // Orgo: where it is, then (SSH was off) turned on with Bops' public key, then where again.
+  const asked = web.calls.slice(n).filter((c) => c.path === "/api/computers/c_boppy/ssh");
+  assert.deepEqual(asked.map((c) => [c.method, c.body]), [["GET", undefined], ["POST", { public_key: `${pub} bops` }], ["GET", undefined]]);
+  assert.equal(readFileSync(authorized, "utf8"), `${pub} bops\n`, "on its computer once (Orgo wrote it, and Bops found it there)");
+  const known = join(dirname(keyFile), "known_hosts");
+  assert.equal(readFileSync(known, "utf8"), `[${SSH_HOST}]:40022 ${boppy.hostKey}\n`, "its host key pinned for its address");
+  assert.equal(statSync(known).mode & 0o777, 0o600);
+  // ssh: this argv and nothing else.
+  const one = logLines("ssh.log").at(-1);
+  const sock = one.argv[one.argv.indexOf("-L") + 1].split(":")[0];
+  assert.match(sock, /\/bops-ssh-[A-Za-z0-9]+\/\d+\.sock$/);
+  assert.ok(sock.length < 104, "a socket's path fits");
+  assert.deepEqual(one.argv, [
+    "-F", "/dev/null",
+    "-i", keyFile,
+    "-o", "IdentitiesOnly=yes",
+    "-o", "IdentityAgent=none",
+    "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=yes",
+    "-o", `UserKnownHostsFile="${known}"`,
+    "-o", "GlobalKnownHostsFile=/dev/null",
+    "-o", "HostKeyAlgorithms=ssh-ed25519",
+    "-o", "UpdateHostKeys=no",
+    "-o", "ExitOnForwardFailure=yes",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=3",
+    "-o", "ConnectTimeout=10",
+    "-o", "StreamLocalBindUnlink=yes",
+    "-N",
+    "-L", `${sock}:127.0.0.1:${port}`,
+    "-p", "40022",
+    "-l", "root",
+    "--", SSH_HOST,
+  ]);
+  assert.deepEqual(P.forwardOf(key), { macPort: port, host: SSH_HOST, port, via: "ssh" }, "the same port here as there");
+  assert.equal(await pageAt(port), `200 field notes, asked for localhost:${port}`, "a page through it, its Host kept");
+  assert.ok(!JSON.stringify(r.body).includes(SSH_HOST), "its address is never in an answer");
+  // A preview open: the same tunnel, nothing asked again.
+  n = web.calls.length;
+  const k = logLines("ssh.log").length;
+  assert.equal((await localAsk({ action: "preview" })).status, 200);
+  assert.deepEqual([logLines("ssh.log").length, callsSince(n, "POST", /\/ssh$/).length], [k, 0]);
+
+  // Closed with its tab: ssh stopped. SSH on already, with the user's own key: never turned on again, the key added after theirs, once.
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  assert.equal((await localAsk({ action: "unpreview" })).status, 200);
+  assert.equal(P.forwardOf(key), undefined);
+  await until(() => !alive(one.pid));
+  const MINE = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMadeUpKeyOfTheUserForThisTestOnly0000000 me@laptop";
+  writeFileSync(authorized, `${MINE}\n# a note of the user's`);
+  boppy.ssh = { enabled: true, keys: MINE, port: 40022 };
+  n = web.calls.length;
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await localAsk({ action: "preview" })).status, 200);
+    assert.equal(await pageAt(port), `200 field notes, asked for localhost:${port}`);
+    assert.equal((await localAsk({ action: "unpreview" })).status, 200);
+  }
+  assert.deepEqual(callsSince(n, "POST", /\/ssh$/), [], "never turned on again over their keys");
+  assert.equal(readFileSync(authorized, "utf8"), `${MINE}\n# a note of the user's\n${pub} bops\n`, "every line of theirs kept, Bops' once");
+  assert.equal(logLines("keygen.log").length, 1, "the same key all along");
+
+  // The tailnet first, when it's up: an SSH forward open moves to it, its ssh stopped.
+  assert.equal((await localAsk({ action: "preview" })).status, 200);
+  const before = logLines("ssh.log").at(-1).pid;
+  S.update((st) => (st.bots.find((b) => b.id === "boppy").tailnet = { ip: "100.64.0.9", name: "bops-boppy" }));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => (new URL(new Request(input, init).url).host === "100.64.0.9:9299" ? json({ Browser: "Chrome" }) : realFetch(input, init));
+  try {
+    const k2 = logLines("ssh.log").length;
+    assert.equal((await localAsk({ action: "preview" })).status, 200);
+    assert.deepEqual(P.forwardOf(key), { macPort: port, host: "100.64.0.9", port });
+    assert.equal(logLines("ssh.log").length, k2, "no ssh");
+    await until(() => !alive(before));
+  } finally {
+    globalThis.fetch = realFetch;
+    S.update((st) => delete st.bots.find((b) => b.id === "boppy").tailnet);
+    await localAsk({ action: "unpreview" });
+    dev.close();
+  }
+});
+
+await check("A preview through SSH follows its Local to a new port (a tunnel to it, the old one stopped), comes back when ssh drops, and closes on Stop; when SSH can't be had (no address yet, sshd not answering, that port of this Mac in use), its screen instead, said, with nothing left open", async () => {
+  const P = await import(`${root}/lib/server/local-preview.ts`);
+  const http = await import("node:http");
+  const net = await import("node:net");
+  const free = () => new Promise((done) => {
+    const sv = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = sv.address();
+      sv.close(() => done(port));
+    });
+  });
+  const pageAt = (p) =>
+    new Promise((done, fail) =>
+      http.get({ host: "127.0.0.1", port: p, path: "/", headers: { host: `localhost:${p}` } }, (res) => {
+        let b = "";
+        res.on("data", (d) => (b += d));
+        res.on("end", () => done(`${res.statusCode} ${b}`));
+      }).on("error", fail),
+    );
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  notesAgain();
+  boppy.locals?.clear();
+  boppy.ssh = undefined;
+  const authorized = join(sshFiles(boppy), "root/.ssh/authorized_keys");
+  const dev = http.createServer((req, res) => res.end("field notes"));
+  await new Promise((r) => dev.listen(0, "127.0.0.1", r));
+  const [port, moved] = [await free(), await free()];
+  sshSays({ hostKey: boppy.hostKey, authorized, ports: { [port]: dev.address().port, [moved]: dev.address().port } });
+  const key = `${WS}/field-notes/field-notes`;
+  try {
+    await localAsk({ action: "start", port });
+    assert.equal((await localAsk({ action: "preview" })).status, 200);
+    const first = logLines("ssh.log").at(-1);
+    // Its Local started again on another port: a tunnel to that one, on that port here too; the old one stopped.
+    await localAsk({ action: "start", port: moved });
+    await until(() => P.forwardOf(key)?.port === moved, 8000);
+    assert.deepEqual(P.forwardOf(key), { macPort: moved, host: SSH_HOST, port: moved, via: "ssh" });
+    assert.equal(P.forwardOn(port), undefined, "the old one closed");
+    const second = logLines("ssh.log").at(-1);
+    assert.equal(second.argv[second.argv.indexOf("-L") + 1].split(":").slice(1).join(":"), `127.0.0.1:${moved}`);
+    await until(() => !alive(first.pid));
+    assert.equal(await pageAt(moved), "200 field notes");
+    // ssh drops (the computer restarted, the network went): back by itself, the key looked at again first.
+    const runs = boppy.sshKeyRuns;
+    process.kill(second.pid, "SIGKILL");
+    await until(() => logLines("ssh.log").at(-1).pid !== second.pid, 8000);
+    assert.equal(await pageAt(moved), "200 field notes", "a page waits for it");
+    assert.ok(boppy.sshKeyRuns > runs, "its key put back first, should a start have taken it");
+    // Stop: closed, ssh stopped.
+    const third = logLines("ssh.log").at(-1);
+    await localAsk({ action: "stop" });
+    assert.equal(P.forwardOf(key), undefined);
+    await until(() => !alive(third.pid));
+
+    // Why not, said: no address yet; sshd not answering (no forward left, that port free again); this Mac's port in use (Orgo never asked).
+    await localAsk({ action: "start", port });
+    boppy.ssh = { enabled: true, keys: "x", port: 40022, noHost: true };
+    const none = await localAsk({ action: "preview" });
+    assert.deepEqual([none.status, none.body.fallback, none.body.error], [409, "screen", "Its computer has no SSH address yet, so it opens on its screen."]);
+    boppy.ssh = undefined;
+    sshSays({ down: true });
+    const down = await localAsk({ action: "preview" });
+    assert.deepEqual([down.status, down.body.fallback, down.body.error], [409, "screen", "Its computer's SSH didn't answer, so it opens on its screen."]);
+    assert.equal(P.forwardOf(key), undefined);
+    assert.equal(await new Promise((done) => net.connect({ host: "127.0.0.1", port }).once("connect", () => done("open")).once("error", () => done("free"))), "free");
+    sshSays({ hostKey: boppy.hostKey, authorized, ports: { [port]: dev.address().port } });
+    const taken = net.createServer().listen(port, "127.0.0.1");
+    await new Promise((r) => taken.once("listening", r));
+    const n = web.calls.length;
+    const busy = await localAsk({ action: "preview" });
+    assert.deepEqual([busy.status, busy.body.fallback, busy.body.error], [409, "screen", `Port ${port} on this Mac is in use, so it opens on its screen.`]);
+    assert.deepEqual(callsSince(n, "GET", /\/ssh$/), [], "Orgo not asked");
+    taken.close();
+  } finally {
+    await localAsk({ action: "stop" });
+    dev.close();
+  }
+});
+
+await check("Removing an app forgets its Locals on its computer (bops-local forget: each one stopped, its files gone, so its port is free for the next app), closes its previews on this Mac (their ssh too), and removes its working folder there only with its repo, and only its own workspace's; never wakes a computer asleep for it", async () => {
+  const P = await import(`${root}/lib/server/local-preview.ts`);
+  const http = await import("node:http");
+  const dev = http.createServer((req, res) => res.end("field notes"));
+  await new Promise((r) => dev.listen(0, "127.0.0.1", r));
+  const authorized = join(sshFiles(boppy), "root/.ssh/authorized_keys");
+  const del = (body) => ask(AppRoute, "DELETE", "/api/hosted-apps/field-notes", NOTES, { ws: WS, ...body });
+  const FOLDER = "/workspace/apps/field-notes";
+  try {
+    notesAgain();
+    boppy.locals?.clear();
+    boppy.ssh = undefined;
+    await localAsk({ action: "start", port: 3000 });
+    boppy.locals.set("field-notes--notes-admin", { port: 3001, dev: 3001, cmd: "npm run dev", since: 1, stopped: true, env: new Map() });
+    boppy.locals.set("other-app--other-app", { port: 3002, dev: 3002, cmd: "npm run dev", since: 1, stopped: false, env: new Map() });
+    sshSays({ hostKey: boppy.hostKey, authorized, ports: { 3000: dev.address().port } });
+    assert.equal((await localAsk({ action: "preview" })).status, 200);
+    const tunnel = logLines("ssh.log").at(-1);
+    const r = await del({});
+    assert.deepEqual([r.status, r.body], [200, { removed: "field-notes", repo: false }]);
+    assert.deepEqual(boppy.forgets.at(-1), { name: "field-notes", folder: false });
+    assert.deepEqual([...boppy.locals.keys()], ["other-app--other-app"], "its Locals gone, another app's kept");
+    assert.ok(boppy.folders.has(FOLDER), "its folder kept with its repo: it may hold work");
+    assert.equal(P.forwardOf(`${WS}/field-notes/field-notes`), undefined, "its preview here closed");
+    await until(() => {
+      try {
+        process.kill(tunnel.pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    const script = ran.findLast((x) => x.command.startsWith("# bops-local forget ")).command;
+    assert.equal(script.split("\n").at(-1), "/usr/local/bin/bops-local forget field-notes");
+
+    // With its repo: its folder goes too.
+    notesAgain();
+    const all = await del({ repo: true });
+    assert.deepEqual([all.status, all.body], [200, { removed: "field-notes", repo: true }]);
+    assert.deepEqual(boppy.forgets.at(-1), { name: "field-notes", folder: true });
+    assert.ok(!boppy.folders.has(FOLDER), "its folder gone with its repo");
+    assert.match(ran.findLast((x) => x.command.startsWith("# bops-local forget ")).command, new RegExp(`\nif \\[ "\\$there" = '${PROJECT}/field-notes' \\]; then rm -rf ${FOLDER} && echo BOPS_LOCAL_FOLDER=gone; fi$`));
+
+    // Another workspace's app by that name works in that folder: its Locals and folder are left as they are.
+    notesAgain();
+    boppy.folders.set(FOLDER, "9d1e7c0a-4b2f-4e8a-a6c1-2f3b4c5d6e7f/field-notes");
+    boppy.locals.set("field-notes--field-notes", { port: 3000, dev: 3000, cmd: "npm run dev", since: 1, stopped: false, env: new Map() });
+    assert.equal((await del({ repo: true })).status, 200);
+    assert.ok(boppy.locals.has("field-notes--field-notes") && boppy.folders.get(FOLDER).startsWith("9d1e7c0a"), "the other workspace's, kept");
+    boppy.locals.delete("field-notes--field-notes");
+
+    // Its computer asleep: nothing asked of it, not woken.
+    notesAgain();
+    boppy.status = "suspended";
+    const k = ran.length;
+    assert.equal((await del({})).status, 200);
+    assert.equal(ran.slice(k).filter((x) => x.computerId === "c_boppy").length, 0, "no command on it");
+    assert.equal(web.woke?.includes("c_boppy") ?? false, false);
+  } finally {
+    boppy.status = "running";
+    boppy.locals?.delete("other-app--other-app");
+    dev.close();
+    notesAgain();
+  }
+});
+
+await check("A coding task's goal says where things are, in fixed words: Screen, Local (the address bops-local prints, the same everywhere), Preview, Published, the screen rule and the Local rule, and never a port as everyone's", () => {
+  const g = H.appWork("boppy", { app: "field-notes", name: null, change: "A new page." }).goal;
+  hear(g);
+  assert.match(g, /\nWhere things are, in the words to use with Alex:\nScreen: /);
+  assert.match(g, /\nLocal: this site's dev server on this computer, with hot reload, at http:\/\/localhost:<its port>\. Its address is the one bops-local prints, and it stays the same/);
+  assert.match(g, /Never start, stop or restart another site's Local, and never kill a process on a port that isn't your site's\./);
+  assert.match(g, /\nPreview: its fixed link, https:\/\/<12 letters and digits>\.orgo\.dev/);
+  assert.match(g, /\nPublished: its own domain, only when Alex publishes it\./);
+  assert.match(g, /When you tell Alex where to look, say the place and its address/);
+  assert.doesNotMatch(g, /3000/, "no port as everyone's");
+  assert.equal(H.appWork("boppy", { app: "recipe-box", name: null, change: "A new page." }).site, "recipe-box");
 });
 
 await check("Prod's domain, Cloudflare first: a domain typed into Use a domain I own whose zone is in the user's Cloudflare goes in from there, with what Bops would set (its plan, DNS only, written only on the user's word); one whose zone isn't gets the records to copy, as before", async () => {
@@ -5026,7 +6098,10 @@ await check("what members see: kept only while someone has Your Apps at Read, wr
     updatedAt: 9,
     hosting: { botId: "boppy", computerId: "c_secret", projectId: "p_secret", url: "https://seen.orgo.dev" },
     serving: "cs-2",
-    live: { id: "dep-2", at: "cs-2", state: "succeeded", when: 9, error: "SECRET_ERROR_TEXT", url: "https://seen.orgo.dev" },
+    live: { id: "dep-2", at: "cs-2", state: "succeeded", when: 9, error: "SECRET_ERROR_TEXT", url: "https://seen.example" },
+    // Published's address is its domain; its Preview's link beside it.
+    domain: "https://seen.example",
+    preview: { projectId: "p_preview_secret", url: "https://k7p2qxm4wr3d.orgo.dev", label: "k7p2qxm4wr3d", serving: "cs-2", live: null },
     ...o,
   });
   let reads = 0;
@@ -5058,9 +6133,11 @@ await check("what members see: kept only while someone has Your Apps at Read, wr
   await F.seeApps(WS, undefined, readers(), () => t);
   const seen = ws().appsForMembers;
   assert.equal(seen.at, 1_000);
-  assert.deepEqual(seen.apps.seen.sites, [{ name: "seen", url: "https://seen.orgo.dev", serving: "cs-2", live: { id: "dep-2", state: "succeeded", when: 9 } }]);
+  assert.deepEqual(seen.apps.seen.sites, [{ name: "seen", url: "https://seen.example", preview: "https://k7p2qxm4wr3d.orgo.dev", previewLive: null, previewServing: "cs-2", serving: "cs-2", live: { id: "dep-2", state: "succeeded", when: 9 } }]);
   assert.deepEqual(seen.apps.seen.head, { id: "cs-2", message: "Ship it", at: 9 });
-  assert.deepEqual(seen.apps.seen.deploys, [{ id: "dep-2", state: "succeeded", at: "cs-2", rollback: false, when: 9, live: true, canRollback: false, site: "seen" }]);
+  // (The readers here answer the same for both, so the Preview's adds none: each deploy once, Published's first.)
+  assert.deepEqual(seen.apps.seen.deploys, [{ id: "dep-2", state: "succeeded", at: "cs-2", rollback: false, when: 9, live: true, canRollback: false, site: "seen", env: "prod" }]);
+  assert.ok(!JSON.stringify(seen).includes("p_preview_secret"), "never a project id");
   assert.deepEqual(seen.apps.seen.settings, { seen: { port: 3000, install: "npm ci", build: null, start: "npm start" } });
   assert.deepEqual(seen.owned, [{ id: "zone-1", domain: "acme.example" }]);
   const text = JSON.stringify(seen);
@@ -5098,6 +6175,298 @@ await check("what members see: kept only while someone has Your Apps at Read, wr
     w.hostedApps = keptHosted;
     delete w.memberAccess;
   });
+});
+
+await check("what members see of a site's Preview: its link, its state and whether it asks for a password; its password only while someone has Your Apps at Write, read from Orgo again only once Bops set another, never in what bots read", async () => {
+  const F = await import(`${root}/lib/server/apps-for-members.ts`);
+  const LINK = "https://m3q8zt5kw2pd.orgo.dev";
+  const server = { on: true, password: "Mx4tR8q", at: 100 };
+  const app = (o = {}) => ({
+    name: "pv-seen",
+    head: "cs-3",
+    updatedAt: 9,
+    hosting: { botId: "boppy", computerId: "c_secret" },
+    serving: null,
+    live: null,
+    // Published never went out (no domain yet): its Preview is all there is to open.
+    domain: null,
+    preview: { projectId: "p_preview_secret", url: LINK, label: "m3q8zt5kw2pd", serving: "cs-3", live: { id: "dep-p3", at: "cs-3", state: "succeeded", when: 12, error: "SECRET_ERROR_TEXT", url: null }, protected: server.on, passwordAt: server.at },
+    ...o,
+  });
+  const asked = [];
+  const readers = (a = app()) => ({
+    list: async () => ({ apps: [a] }),
+    commits: async () => ({ commits: [], head: null, next: null }),
+    settings: async (_ws, _name, _site, env) => ({ url: null, settings: null, env: [], deploys: env === "preview" ? [{ id: "dep-p3", state: "succeeded", at: "cs-3", rollback: false, when: 12, error: null, live: true, canRollback: false }] : [] }),
+    owned: async () => ({ buy: { open: true }, owned: [], contact: null }),
+    password: async (ws, name, site) => (asked.push([ws, name, site]), { url: LINK, on: server.on, password: server.on ? server.password : null, cookie: null, at: server.at }),
+  });
+  const ws = () => S.getState().workspaces.find((w) => w.id === WS);
+  const site = () => ws().appsForMembers.apps["pv-seen"].sites[0];
+  const level = (apps) => S.update((s) => void (s.workspaces.find((x) => x.id === WS).memberAccess = { "tom@orgo.ai": { others: "none", bots: {}, apps, at: 1 } }));
+  const keptHosted = ws().hostedApps;
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    w.hostedApps = { ...w.hostedApps, "pv-seen": { botId: "boppy", computerId: "c_secret" } };
+    delete w.appsForMembers;
+  });
+  let t = 1_000;
+  // At Read: its link, its newest deploy, what it serves and that it asks for a password; never the password, nor Orgo asked for it.
+  level("read");
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.deepEqual(site(), { name: "pv-seen", url: null, preview: LINK, previewLive: { id: "dep-p3", state: "succeeded", when: 12 }, previewServing: "cs-3", previewProtected: true, serving: null, live: null });
+  assert.deepEqual(ws().appsForMembers.apps["pv-seen"].deploys.map((d) => [d.id, d.env]), [["dep-p3", "preview"]]);
+  assert.equal(asked.length, 0, "nobody at Write: never read");
+  // Someone at Write: the password kept for members (Bops Cloud sends it to Write alone).
+  level("write");
+  t += 10;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal(site().previewPassword, "Mx4tR8q");
+  assert.deepEqual(asked, [[WS, "pv-seen", undefined]]);
+  // Read again with the same password set: Orgo isn't asked for it again.
+  t += 10;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal(asked.length, 1);
+  // A new one (another Preview deploy went live, or the owner made one): read again, and kept.
+  Object.assign(server, { password: "Qw2eR5t", at: 200 });
+  t += 10;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal(site().previewPassword, "Qw2eR5t");
+  assert.equal(asked.length, 2);
+  // Never in what a bot reads of the apps, nor in its line about them.
+  assert.ok(!H.hostedAppsLine("boppy").includes("Qw2eR5t"));
+  for (const m of S.getState().messages) assert.ok(!m.text.includes("Qw2eR5t"), "never in a chat");
+  // Its password turned off: the link alone, nothing said of a password.
+  server.on = false;
+  t += 10;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal("previewProtected" in site() || "previewPassword" in site(), false);
+  // Nobody at Write any more: the password goes from what's kept.
+  Object.assign(server, { on: true, at: 300 });
+  level("read");
+  t += 10;
+  await F.seeApps(WS, undefined, readers(), () => t);
+  assert.equal(site().previewProtected, true);
+  assert.equal("previewPassword" in site(), false);
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    w.hostedApps = keptHosted;
+    delete w.memberAccess;
+    delete w.appsForMembers;
+  });
+});
+
+/* ---------------- More bots on one app, each in a copy of its own ---------------- */
+
+const TEAM = { name: "team-notes" };
+const TEAM_REPO = `${PROJECT}/team-notes`;
+const TEAM_DIR = "/workspace/apps/team-notes";
+const team = () => hostedApps()["team-notes"];
+const teamAsk = (body, opts) => ask(LocalRoute, "POST", "/api/hosted-apps/team-notes/local", TEAM, { ws: WS, ...body }, opts);
+const teamRead = () => ask(LocalRoute, "GET", `/api/hosted-apps/team-notes/local?ws=${WS}&fresh=1`, TEAM);
+// Sam and Kim: two more bots of the workspace on Boppy's computer (they share it).
+S.update((s) => {
+  for (const [id, name] of [["sam", "Sam"], ["kim", "Kim"]]) {
+    if (s.bots.some((b) => b.id === id)) continue;
+    s.bots.push({ id, name, role: "Developer", color: "#7A5AF8", isMain: false, computer: "shared", computerStatus: "ready" });
+    s.chats.push({ id: botChatId(id), kind: "bot", botIds: [id], typing: [] });
+  }
+});
+/** A made-up app on Boppy's computer, Boppy's own, with one commit and no folder or Local there yet. */
+function teamAgain(h = { botId: "boppy", computerId: "c_boppy" }) {
+  central.repos.set(TEAM_REPO, { created_by: { id: "u_alex", name: "Alex" }, created_at: iso(), changesets: [] });
+  commit("team-notes", "Team notes, a first page", { id: "boppy", name: "Boppy" });
+  for (const d of [...boppy.folders.keys()]) if (d === TEAM_DIR || d.startsWith(`${TEAM_DIR}.`)) boppy.folders.delete(d);
+  for (const k of [...(boppy.locals?.keys() ?? [])]) if (k.startsWith("team-notes")) boppy.locals.delete(k);
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    w.hostedApps["team-notes"] = { ...h };
+    s.sessions = s.sessions.filter((x) => !x.id.startsWith("ses_team_"));
+    if (w.botSites) for (const b of ["sam", "kim"]) delete w.botSites[b];
+  });
+  forgetListed();
+}
+const teamTask = (id, botId, extra = {}) =>
+  S.update((s) => s.sessions.push({ id, botId, chatId: botChatId(botId), sentVia: "you", title: "Work on team-notes", goal: "x", host: "orgo", status: "running", steps: [], replies: [], createdAt: Date.now(), app: { wsId: WS, name: "team-notes" }, ...extra }));
+const teamKeys = () => [...(boppy.locals?.keys() ?? [])].filter((k) => k.startsWith("team-notes")).sort();
+
+await check("Two bots on one app: each task readies its own bot's folder (the app's own bot the app's own folder, as it always was; another bot a copy of its own, its own clone, kept on the app's record), cloned the first time and pulled after; each folder's Local on a key and a port of its own", async () => {
+  teamAgain();
+  boppy.locals ??= new Map();
+  teamTask("ses_team_sam", "sam");
+  assert.equal(hear(await H.readyAppForTask("ses_team_sam", "c_boppy")), `Cloned the Ingot repo team-notes into ${TEAM_DIR}.sam`);
+  assert.equal(boppy.folders.get(`${TEAM_DIR}.sam`), TEAM_REPO, "a clone of its own of the app's repo, never another folder's files");
+  assert.match(kinds("c_boppy").filter((k) => k.startsWith("folder ")).at(-1), /^folder team-notes\.sam$/);
+  assert.deepEqual(team(), { botId: "boppy", computerId: "c_boppy", copies: ["sam"] }, "the app stays its own bot's, Sam's copy kept");
+  teamTask("ses_team_boppy", "boppy");
+  assert.equal(await H.readyAppForTask("ses_team_boppy", "c_boppy"), `Cloned the Ingot repo team-notes into ${TEAM_DIR}`);
+  assert.deepEqual(team().copies, ["sam"], "its own bot: the app's own folder, no copy");
+  assert.match(await H.readyAppForTask("ses_team_sam", "c_boppy"), /^Pulled the newest team-notes into \/workspace\/apps\/team-notes\.sam/, "its next run: pulled into its own copy");
+  teamTask("ses_team_kim", "kim");
+  await H.readyAppForTask("ses_team_kim", "c_boppy");
+  assert.deepEqual(team().copies, ["sam", "kim"]);
+  // Their Locals: the app's own on its key as ever, each copy's on a key and a port of its own.
+  assert.equal((await teamAsk({ action: "start" })).status, 200);
+  assert.equal((await teamAsk({ action: "start", bot: "sam" })).status, 200);
+  const all = (await teamAsk({ action: "start", bot: "kim" })).body;
+  assert.deepEqual(boppy.localAsked.filter((x) => x[0] === "start" && x[2] === "team-notes").slice(-3).map((x) => x[1]), ["team-notes", "team-notes.sam", "team-notes.kim"]);
+  assert.deepEqual(teamKeys(), ["team-notes--team-notes", "team-notes.kim--team-notes", "team-notes.sam--team-notes"]);
+  const ports = [all.sites["team-notes"].port, ...all.copies.map((c) => c.sites["team-notes"].port)];
+  assert.equal(new Set(ports).size, 3, `three ports (${ports.join(", ")})`);
+  assert.deepEqual([all.bot, all.copies.map((c) => [c.bot, c.name])], [{ id: "boppy", name: "Boppy" }, [["sam", "Sam"], ["kim", "Kim"]]]);
+  const read = (await teamRead()).body;
+  assert.deepEqual([read.sites["team-notes"].port, read.copies.map((c) => c.sites["team-notes"].port)], [ports[0], ports.slice(1)], "read again: the same");
+  // A bot whose Works on is a site of it, on its computer, works on it too: its line is there before its first task (none started).
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).botSites = { ...(s.workspaces.find((w) => w.id === WS).botSites ?? {}), ivy: { app: "team-notes", site: "team-notes" } }));
+  assert.deepEqual((await teamRead()).body.copies.map((c) => c.bot), ["sam", "kim"], "Ivy works on her own computer: not on this one, so no copy here");
+  S.update((s) => delete s.workspaces.find((w) => w.id === WS).botSites.ivy);
+});
+
+await check("A copy's task brief: its own folder and Local, the pull and commit loop through main (a commit refused as stale: pull, fix any conflict in its own copy, commit again), never another bot's copy; the app's own bot's says where it always did; what bots read of the apps says the same", () => {
+  const sam = H.appWork("sam", { app: "team-notes", name: null, change: "A search box." });
+  const g = hear(sam.goal);
+  assert.match(g, /^Work on Alex's app team-notes\. It's the Ingot repo [^ ]+\/team-notes \([^)]*\), and your working folder on this computer is \/workspace\/apps\/team-notes\.sam, a copy of your own: Bops cloned it there, or pulled the newest main into it \(merged with what you hadn't committed\), as this task started\./);
+  assert.match(g, /bops-local start team-notes\.sam team-notes \(/);
+  assert.match(g, /bops-local status team-notes\.sam and \/root\/\.bops\/local\/team-notes\.sam--team-notes\.log say why/);
+  assert.match(g, /3\. Commit it from the folder: ingot commit -m "<what changed, in one clear line>" \(or the Ingot tools' repo_commit\)\. If Ingot says the commit is stale, someone committed first: run ingot pull, fix any file it lists between its <<<<<<< yours and >>>>>>> theirs markers, check it again, and commit again\. Stale is when Ingot says main has moved on: nothing of yours was written, and the pull merges the new main into your folder\. A commit is refused while a conflict is still there\./, "a stale commit: pull, then commit again");
+  assert.match(g, /\nOther bots work on team-notes at the same time, each in a copy of its own beside this folder, with Locals of its own: work only in your folder and on your Local, never in theirs\. Your changes reach them only through main, and theirs reach you when you pull\. A conflict in your folder is yours to fix there\.\n/);
+  assert.match(g, /never inside \/workspace\/apps\/team-notes\.sam\): git clone "\$\(ingot git-url [^)]+\/team-notes\)" \/workspace\/apps\/team-notes\.sam-git/);
+  assert.equal(team().botId, "boppy", "asking never moves the app");
+  const own = hear(H.appWork("boppy", { app: "team-notes", name: null, change: "A search box." }).goal);
+  assert.match(own, /and its working folder on this computer is \/workspace\/apps\/team-notes: Bops cloned it there/);
+  assert.match(own, /bops-local start team-notes team-notes \(/);
+  assert.match(own, /\nOther bots work on team-notes at the same time/, "others work on it: said to its own bot too");
+  assert.doesNotMatch(own, /team-notes\.sam/);
+  // What bots read of the apps: their own copy, and how copies meet on main.
+  const line = hear(H.hostedAppsLine("sam"));
+  assert.match(line, /team-notes \([^)]*; you work on it in a copy of your own, \/workspace\/apps\/team-notes\.sam, whose Local bops-local start team-notes\.sam <site> runs\)/);
+  assert.match(line, /When more bots work on one app, each works in a copy of its own with Locals of its own, and all commit to the same main: If Ingot says the commit is stale, someone committed first: run ingot pull, [^]* Never change another bot's copy\./);
+  assert.doesNotMatch(H.hostedAppsLine("boppy"), /you work on it in a copy of your own, \/workspace\/apps\/team-notes/);
+});
+
+await check("Local acts pick the bot's copy: stop, Fix it and open on its own task's screen name it; local_app and a task's end use the bot's own; a bot that doesn't work on it acts on the app's own folder's; a bot not of the workspace is refused; its preview here on its own port and key", async () => {
+  const P = await import(`${root}/lib/server/local-preview.ts`);
+  const http = await import("node:http");
+  const dev = http.createServer((req, res) => res.end("team notes"));
+  await new Promise((r) => dev.listen(0, "127.0.0.1", r));
+  try {
+    const before = (await teamRead()).body;
+    const samPort = before.copies.find((c) => c.bot === "sam").sites["team-notes"].port;
+    const homePort = before.sites["team-notes"].port;
+    const stop = await teamAsk({ action: "stop", bot: "sam" });
+    assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "stop"), ["stop", "team-notes.sam", "team-notes"]);
+    assert.deepEqual([stop.body.copies.find((c) => c.bot === "sam").sites["team-notes"].state, stop.body.sites["team-notes"].state], ["stopped", "running"], "the app's own runs on");
+    await teamAsk({ action: "start", bot: "sam" });
+    const fix = await teamAsk({ action: "fix", bot: "sam" });
+    assert.deepEqual(boppy.localAsked.at(-2), ["mark", "team-notes.sam", "team-notes", "fix"]);
+    assert.equal(fix.body.copies.find((c) => c.bot === "sam").sites["team-notes"].fixes, 1);
+    // Open: on the screen of the task working in that same folder.
+    S.update((s) => {
+      for (const [id, b, display] of [["ses_team_live_b", "boppy", 100], ["ses_team_live_s", "sam", 101]]) s.sessions.push({ id, botId: b, chatId: botChatId(b), sentVia: "you", title: "Work on team-notes", goal: "x", host: "orgo", status: "running", display, steps: [], replies: [], createdAt: Date.now(), app: { wsId: WS, name: "team-notes" } });
+    });
+    assert.equal((await teamAsk({ action: "open", bot: "sam" })).body.display, 101, "Sam's copy: on Sam's task's screen");
+    assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "open"), ["open", "team-notes.sam", "team-notes", "101"]);
+    assert.equal((await teamAsk({ action: "open" })).body.display, 100, "the app's own: on its own bot's task's screen");
+    S.update((s) => (s.sessions = s.sessions.filter((x) => !x.id.startsWith("ses_team_live_"))));
+    // A bot that doesn't work on it (Ivy, on her own computer): the app's own folder's, as before copies; a bot that isn't one, refused.
+    await teamAsk({ action: "stop", bot: "ivy" });
+    assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "stop"), ["stop", "team-notes", "team-notes"]);
+    await teamAsk({ action: "start" });
+    const nope = await teamAsk({ action: "start", bot: "nobody" });
+    assert.deepEqual([nope.status, nope.body.error], [404, "There's no bot by that name in this workspace."]);
+    // local_app: each bot its own.
+    assert.equal(hear(await H.localForBot("sam", "team-notes", "status")), `team-notes's Local is running at http://localhost:${samPort}.`);
+    assert.equal(await H.localForBot("boppy", "team-notes", "status"), `team-notes's Local is running at http://localhost:${homePort}.`);
+    await H.localForBot("kim", "team-notes", "stop");
+    assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "stop"), ["stop", "team-notes.kim", "team-notes"]);
+    // A task's end: its bot's copy started and checked, said in its own chat.
+    boppy.localCheck = { http: 200, base: "c".repeat(64), clean: true };
+    S.update((s) => s.sessions.push({ id: "ses_team_done_k", botId: "kim", chatId: botChatId("kim"), sentVia: "you", title: "Work on team-notes", goal: "x", host: "orgo", status: "done", steps: [], replies: [], createdAt: Date.now(), app: { wsId: WS, name: "team-notes" } }));
+    const m = S.getState().messages.length;
+    await H.previewAfterTask("ses_team_done_k");
+    assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "start").slice(0, 3), ["start", "team-notes.kim", "team-notes"]);
+    assert.equal(boppy.localChecks.at(-1), "# bops-local check team-notes.kim team-notes");
+    assert.deepEqual(boppy.localAsked.findLast((x) => x[0] === "mark"), ["mark", "team-notes.kim", "team-notes", "good", "c".repeat(64)]);
+    const kimPort = (await teamRead()).body.copies.find((c) => c.bot === "kim").sites["team-notes"].port;
+    assert.deepEqual(S.getState().messages.slice(m).map((x) => [x.chatId, hear(x.text)]), [[botChatId("kim"), `team-notes's Local is running at http://localhost:${kimPort}. Open it with Preview at the top of this chat.`]]);
+    // Its preview here: its own port, on a key of its own (the app's own folder's forward untouched).
+    sshSays({ hostKey: boppy.hostKey, authorized: join(sshFiles(boppy), "root/.ssh/authorized_keys"), ports: { [samPort]: dev.address().port } });
+    const pre = await teamAsk({ action: "preview", bot: "sam" });
+    assert.deepEqual([pre.status, pre.body.preview], [200, `http://localhost:${samPort}/`]);
+    assert.ok(P.forwardOf(`${WS}/team-notes/team-notes/sam`), "Sam's copy's forward");
+    assert.equal(P.forwardOf(`${WS}/team-notes/team-notes`), undefined, "never the app's own folder's");
+    await teamAsk({ action: "unpreview", bot: "sam" });
+    assert.equal(P.forwardOf(`${WS}/team-notes/team-notes/sam`), undefined);
+  } finally {
+    dev.close();
+    boppy.localCheck = undefined;
+  }
+});
+
+await check("Google sign in, once an address, for a copy's Local too: told in the chat of the bot whose copy it is, kept with its site's", async () => {
+  boppy.localAuth = true;
+  const m = S.getState().messages.length;
+  const read = (await teamRead()).body;
+  await teamRead();
+  boppy.localAuth = false;
+  const told = S.getState().messages.slice(m).filter((x) => /Authorized redirect URIs/.test(x.text));
+  const at = (p) => `http://localhost:${p}`;
+  const samAt = at(read.copies.find((c) => c.bot === "sam").sites["team-notes"].port);
+  assert.deepEqual(told.map((x) => [x.chatId, x.text.split("\n")[0]]).sort(), [
+    [botChatId("boppy"), `team-notes's Local is at ${at(read.sites["team-notes"].port)}. If it signs in with Google, add these two lines to its OAuth client in Google Cloud (Credentials), once:`],
+    [botChatId("kim"), `team-notes's Local is at ${at(read.copies.find((c) => c.bot === "kim").sites["team-notes"].port)}. If it signs in with Google, add these two lines to its OAuth client in Google Cloud (Credentials), once:`],
+    [botChatId("sam"), `team-notes's Local is at ${samAt}. If it signs in with Google, add these two lines to its OAuth client in Google Cloud (Credentials), once:`],
+  ].sort());
+  assert.ok(team().toldGoogle.includes(samAt), "kept with its site's");
+  assert.equal(team().localPort, read.sites["team-notes"].port, "the hint is the app's own folder's");
+});
+
+await check("Cleanups: a bot whose Works on moves off the app has its copy's Local stopped and forgotten (its folder kept); a bot deleted has its Locals forgotten (its folder kept, the app left with the others; the app's own bot's folder's alone); Remove app forgets every copy's and, with its repo, removes every copy of its repo's", async () => {
+  const G = await import(`${root}/lib/server/bot-groups.ts`);
+  const lastForget = () => boppy.localAsked.findLast((x) => x[0] === "forget").filter((x) => x !== undefined);
+  // Works on: Sam on the app, then on none.
+  G.setBotSite("sam", { app: "team-notes", site: "team-notes" });
+  assert.ok(teamKeys().includes("team-notes.sam--team-notes"), "still its own app: nothing goes");
+  G.setBotSite("sam", null);
+  await until(() => !teamKeys().includes("team-notes.sam--team-notes"));
+  assert.deepEqual(lastForget(), ["forget", "team-notes.sam"]);
+  assert.ok(boppy.folders.has(`${TEAM_DIR}.sam`), "its folder kept: it may hold work");
+  assert.deepEqual(team().copies, ["kim"]);
+  assert.ok(teamKeys().includes("team-notes--team-notes") && teamKeys().includes("team-notes.kim--team-notes"), "the others' kept");
+  // A bot deleted (remove.ts deleteBot calls appsBotGone while it's still there): Kim's copy's Locals, never its folder.
+  assert.match(readFileSync(`${root}/lib/server/remove.ts`, "utf8"), /if \(!withWorkspace\) await import\("\.\/hosted-apps"\)\.then\(\(\{ appsBotGone \}\) => appsBotGone\(botId\)\)/);
+  await H.appsBotGone("kim");
+  assert.deepEqual(lastForget(), ["forget", "team-notes.kim"]);
+  assert.deepEqual(teamKeys(), ["team-notes--team-notes"]);
+  assert.ok(boppy.folders.has(`${TEAM_DIR}.kim`));
+  assert.equal(team().copies, undefined, "no copies left");
+  assert.equal(team().botId, "boppy", "the app stays");
+  // The app's own bot deleted (one on a shared computer): its own folder's Locals alone.
+  teamAgain({ botId: "sam", computerId: "c_boppy", copies: ["kim"] });
+  boppy.folders.set(TEAM_DIR, TEAM_REPO);
+  boppy.folders.set(`${TEAM_DIR}.kim`, TEAM_REPO);
+  await teamAsk({ action: "start" });
+  await teamAsk({ action: "start", bot: "kim" });
+  await H.appsBotGone("sam");
+  assert.deepEqual(lastForget(), ["forget", "team-notes", "only"]);
+  assert.deepEqual(teamKeys(), ["team-notes.kim--team-notes"], "Kim's copy's runs on");
+  // Remove app with its repo: every Local, every copy of its repo's, its own folder; another repo's folder by that name stays.
+  teamAgain({ botId: "boppy", computerId: "c_boppy", copies: ["sam"] });
+  for (const d of [TEAM_DIR, `${TEAM_DIR}.sam`, `${TEAM_DIR}.kim`]) boppy.folders.set(d, TEAM_REPO);
+  boppy.folders.set(`${TEAM_DIR}.zed`, "9d1e7c0a-4b2f-4e8a-a6c1-2f3b4c5d6e7f/team-notes");
+  await teamAsk({ action: "start" });
+  await teamAsk({ action: "start", bot: "sam" });
+  const r = await ask(AppRoute, "DELETE", "/api/hosted-apps/team-notes", TEAM, { ws: WS, repo: true });
+  assert.deepEqual([r.status, r.body], [200, { removed: "team-notes", repo: true }]);
+  assert.deepEqual(teamKeys(), [], "every Local of it, every copy's too");
+  assert.deepEqual([...boppy.folders.keys()].filter((d) => d.startsWith(TEAM_DIR)), [`${TEAM_DIR}.zed`], "its folder and every copy of its repo's gone; another workspace's stays");
+  const script = ran.findLast((x) => x.command.startsWith("# bops-local forget team-notes")).command;
+  assert.equal(script.split("\n").at(-1), `if [ "$there" = '${TEAM_REPO}' ]; then rm -rf ${TEAM_DIR} && echo BOPS_LOCAL_FOLDER=gone; fi`);
+  S.update((s) => {
+    s.bots = s.bots.filter((b) => b.id !== "sam" && b.id !== "kim");
+    s.chats = s.chats.filter((c) => c.id !== botChatId("sam") && c.id !== botChatId("kim"));
+  });
+  for (const d of [...boppy.folders.keys()]) if (d.startsWith(TEAM_DIR)) boppy.folders.delete(d);
 });
 
 console.log(`\nhosted apps: ${passed} passed, ${failed} failed`);

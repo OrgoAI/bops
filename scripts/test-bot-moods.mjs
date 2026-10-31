@@ -1,10 +1,12 @@
 // Tests for the bots' moods while they work: which one each bot shows (lib/bot-mood.ts moodOf, from the
-// app's state and the call: speaking, then writing, shy after a thanks, thinking, working, idle), each mood's pose
-// (lib/mascot.ts), the idle and awake pictures (Slack, Telegram and Discord show them: the other bots'
+// app's state and the call: speaking, then coding, writing, shy after a thanks, thinking, working, idle), each
+// mood's pose (lib/mascot.ts), the idle and awake pictures (Slack, Telegram and Discord show them: the other bots'
 // as before, the main bot's as redrawn), the mascots that move and those that only open their eyes
 // (components/app/mascot.tsx, ChatAvatar), the motions in app/globals.css (transform and opacity only,
 // held still with reduced motion), when the call bar says the bot is talking (components/app/call-bar.tsx
-// botTalking), and the blush wearing off on its own (BotMoodsFrom).
+// botTalking), and the blush wearing off on its own (BotMoodsFrom). And coding bots: which bots are coders
+// (codersOf), the coder's mark on every mascot of theirs big enough to read it, and when a thread is coding
+// (codingThread: running on one of the workspace's apps, the user's own ask, where apps show).
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-bot-moods.mjs   (not with --conditions=react-server: these are client components)
@@ -49,8 +51,8 @@ globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} }
 globalThis.matchMedia = () => ({ matches: false });
 globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
 
-const { mascotMarkup, mascotSvg, MOVING_MOODS } = await import(pathToFileURL(`${root}/lib/mascot.ts`).href);
-const { isPraise, moodOf, moodSignals, NO_SIGNALS, SHY_MS } = await import(pathToFileURL(`${root}/lib/bot-mood.ts`).href);
+const { CODER_MIN_SIZE, mascotMarkup, mascotSvg, MOVING_MOODS } = await import(pathToFileURL(`${root}/lib/mascot.ts`).href);
+const { codersOf, codingThread, isPraise, moodOf, moodSignals, NO_SIGNALS, SHY_MS } = await import(pathToFileURL(`${root}/lib/bot-mood.ts`).href);
 const { BotMoods, BotMoodsFrom, CallTalking, Mascot, talkingStore } = await import(pathToFileURL(`${root}/components/app/mascot.tsx`).href);
 const { stateArrived } = await import(pathToFileURL(`${root}/components/app/state-arrival.ts`).href);
 const { ChatAvatar } = await import(pathToFileURL(`${root}/components/app/ui.tsx`).href);
@@ -89,7 +91,7 @@ await test("the idle and awake pictures are exactly what they were (every bot sh
   assert.equal(pictures(["penny", "otto", "rook", "bot", "max", "ivy-2", "writer", "zed"]), "b4d196e8d6593177a46c436ad79a04d5675d63b4d4516a21272202c0af8d8637", "the other bots");
   assert.equal(pictures(["boppy", "sam", "sam-2", "boppy-3"]), "8048cae8c1a81111749d191c79f20445af256ede668eb472eb776856cdfe82eb", "the main bot");
   // Flat: no blush, gloss or shine on the main bot in any mood (but shy, whose blush is the point).
-  for (const mood of ["idle", "awake", ...MOVING_MOODS.filter((m) => m !== "shy")]) assert.doesNotMatch(mascotMarkup("boppy", "#0A0A0A", { mood }).replace(/<g class="mascot-(thought|pencil)[\s\S]*$/, ""), /opacity|#FF8FB8/, mood);
+  for (const mood of ["idle", "awake", ...MOVING_MOODS.filter((m) => m !== "shy")]) assert.doesNotMatch(mascotMarkup("boppy", "#0A0A0A", { mood }).replace(/<g class="mascot-(thought|pencil|laptop)[\s\S]*$/, ""), /opacity|#FF8FB8/, mood);
 });
 
 await test("each moving mood is its own pose, still on its own, with the classes the app's motions use", () => {
@@ -109,6 +111,12 @@ await test("each moving mood is its own pose, still on its own, with the classes
     // Shy: eyes looking down and away, two cheeks glowing (pink on the main bot's black, a deeper rose on a colored body).
     assert.match(of("shy"), /<g transform="translate\(-\.6 \.9\)">/);
     assert.equal(of("shy").match(new RegExp(`<g class="mascot-blush" fill="${id === "boppy" ? "#FF8FB8" : "#E0245E"}">(.*?)</g>`))[1].match(/<ellipse/g).length, 2);
+    // Coding: eyes down toward its laptop (as writing), its cups bouncing as at work, and on the laptop's dark
+    // screen three short lines of code, each typing in on its own delay, with a caret after the last.
+    assert.match(of("coding"), /<g transform="translate\(-\.6 \.9\)">/);
+    assert.equal(of("coding").match(/class="mascot-cup( mascot-cup-r)?"/g).length, 2);
+    assert.equal(of("coding").match(/<rect class="mascot-code-line"[^>]*style="animation-delay:-?[\d.]+s"\/>/g).length, 3);
+    assert.equal(of("coding").match(/class="mascot-caret"/g).length, 1);
     // Working: the awake face and its cups on their own, bouncing, the whole bot bopping.
     assert.match(of("working"), /^<g class="mascot-working">/);
     assert.equal(of("working").match(/class="mascot-cup( mascot-cup-r)?"/g).length, 2);
@@ -118,6 +126,7 @@ await test("each moving mood is its own pose, still on its own, with the classes
       const m = of(mood);
       assert.equal(/mascot-thought/.test(m), mood === "thinking", `${mood}: bubble`);
       assert.equal(/mascot-pencil/.test(m), mood === "writing", `${mood}: pencil`);
+      assert.equal(/mascot-laptop/.test(m), mood === "coding", `${mood}: laptop`);
       assert.equal(/mascot-sound/.test(m), mood === "speaking", `${mood}: sound`);
       assert.equal(/mascot-blush/.test(m), mood === "shy", `${mood}: cheeks`);
       assert.match(m, new RegExp(`^<g class="mascot-${mood}">`));
@@ -133,6 +142,13 @@ await test("the main bot awake is the app icon's \"ooh\": tilted, eyes glancing 
   assert.doesNotMatch(mascotMarkup("boppy", "#0A0A0A", { mood: "idle" }), /rotate|ellipse/);
   assert.match(mascotMarkup("boppy", "#0A0A0A", { mood: "speaking" }), /<ellipse class="mascot-mouth"[^>]*fill="#fff"\/>/);
   assert.doesNotMatch(mascotMarkup("boppy", "#0A0A0A", { mood: "speaking" }), /rotate\(/);
+  // Coding leans toward its laptop as writing leans toward its pencil, looking down, no mouth; the laptop's
+  // lid is its cups' highlighter, or light with its headphones in ink (the dark grey would be lost on its head).
+  const codes = mascotMarkup("boppy", "#0A0A0A", { mood: "coding" });
+  assert.match(codes, /<g transform="rotate\(-5 20 20\)">.*<g transform="translate\(-\.6 \.9\)">/);
+  assert.doesNotMatch(codes, /cy="2[56]\.[68]"/, "no mouth");
+  assert.match(codes, /<g class="mascot-laptop"><rect [^>]*fill="#E9FF3B" stroke="#0A0A0A"/);
+  assert.match(mascotMarkup("boppy", "#0A0A0A", { mood: "coding", accent: false }), /<g class="mascot-laptop"><rect [^>]*fill="#E4E4DE" stroke="#0A0A0A"/);
 });
 
 await test("speaking beats writing beats thinking beats working beats idle", () => {
@@ -263,7 +279,8 @@ await test("the sidebar's rows and the chat's header (ChatAvatar) move, each bot
 await test("the motions: every moving class has one, transform and opacity only, 0.7 to 2 s loops, and none with reduced motion", () => {
   const css = readFileSync(`${root}/app/globals.css`, "utf8");
   const markup = MOVING_MOODS.map((m) => mascotMarkup("max", "#FF9F43", { mood: m })).join("");
-  const classes = [...new Set([...markup.matchAll(/class="([^"]+)"/g)].flatMap((m) => m[1].split(" ")))].filter((c) => c !== "mascot-thought");
+  // The bubble and the laptop only hold what moves in them.
+  const classes = [...new Set([...markup.matchAll(/class="([^"]+)"/g)].flatMap((m) => m[1].split(" ")))].filter((c) => c !== "mascot-thought" && c !== "mascot-laptop");
   // What moves: the class itself, or (the sound arcs) its paths.
   const rule = (c) => css.match(new RegExp(`\\.${c}(?: path)? \\{([^}]*)\\}`))?.[1] ?? "";
   for (const c of classes.filter((c) => c !== "mascot-cup-r")) {
@@ -282,6 +299,12 @@ await test("the motions: every moving class has one, transform and opacity only,
   const paused = css.match(/\n([^{}]*\.mascot-paused \*[^{}]*)\{\s*animation-play-state: paused;\s*\}/)?.[1];
   assert.ok(paused, "resting while the window is hidden");
   for (const c of classes) if (css.includes(`.${c} path {`)) assert.match(paused, new RegExp(`\\.mascot-paused \\.${c} path[ ,]`), `${c}'s paths rest too`);
+  // The code lines type in one after another: each starts a third of the loop after the one above it.
+  const loop = Number(rule("mascot-code-line").match(/animation: mascot-type ([\d.]+)s/)[1]);
+  const starts = [...mascotMarkup("max", "#FF9F43", { mood: "coding" }).matchAll(/class="mascot-code-line"[^>]*animation-delay:(-?[\d.]+)s/g)].map((m) => +(((Number(m[1]) % loop) + loop) % loop).toFixed(2));
+  assert.deepEqual(starts, [0, loop / 3, (2 * loop) / 3].map((x) => +x.toFixed(2)));
+  // Each grows from its left end (its own box), as text types in.
+  assert.match(rule("mascot-code-line"), /transform-box: fill-box;\s*transform-origin: 0 50%;/);
 });
 
 await test("the call's bot talks from its own store, and a word starting or ending wakes only that store's listeners", () => {
@@ -355,6 +378,127 @@ await test("the loading scene sings, looks about and blinks, the window's splash
       assert.ok([",", " {"].some((end) => reduced.includes(`${sel} ${part}${end}`)), `${sel} ${part}: still with reduced motion`);
     }
   }
+});
+
+/* ---------------- Coding bots ---------------- */
+
+// A workspace with apps (open to Orgo's own team): Recipe Box, with a second site, on Max's computer; an older app
+// that lost its home, still naming Ivy; Zed works on Recipe Box's second site, Kay on a site that's gone, Lou on an
+// app that's gone.
+const TEAM = { user: { id: "u1", email: "tess@orgo.ai" }, signedInAt: 1 };
+const apps = (over = {}) => ({
+  account: TEAM,
+  workspace: "ws_main",
+  workspaces: [
+    {
+      id: "ws_main",
+      name: "Main",
+      createdAt: 1,
+      hostedApps: { "recipe-box": { botId: "max", computerId: "comp_a", sites: [{ name: "site-a" }] }, "old-app": { botId: "ivy", computerId: "comp_b", lost: 5 } },
+      botSites: { zed: { app: "recipe-box", site: "site-a" }, kay: { app: "recipe-box", site: "site-b" }, lou: { app: "old-site", site: "old-site" } },
+    },
+  ],
+  bots: ["max", "ivy", "zed", "kay", "lou", "pat"].map((id) => ({ id, name: id, color: "#FF9F43", role: "", isMain: false })),
+  sessions: [],
+  chats: [],
+  ...over,
+});
+const onApp = (botId = "max", extra = {}) => session(botId, "running", { app: { wsId: "ws_main", name: "recipe-box" }, ...extra });
+
+await test("coders: where apps show, a bot whose Works on names a site that's there, or the bot an app's home names", () => {
+  assert.deepEqual([...codersOf(apps())].sort(), ["max", "zed"], "Max holds Recipe Box, Zed works on its site-a");
+  // Not Ivy (its app lost its home), Kay (its site is gone), Lou (its app is gone), Pat (nothing).
+  assert.deepEqual([...codersOf(apps({ account: { user: { id: "u2", email: "sam@example.com" }, signedInAt: 1 } }))], [], "apps not open to the account");
+  assert.deepEqual([...codersOf(apps({ account: undefined }))], [], "signed out");
+  const home = apps();
+  home.workspaces[0].hostedApps["old-app"].lost = undefined;
+  assert.ok(codersOf(home).has("ivy"), "its app home again");
+  // A workspace shared with the user: what its owner's apps (SharedOpen.apps) name, when they gave Your Apps.
+  const shared = { owner: "tess@orgo.ai", wsId: "ws_main", projectId: "p1", name: "Acme", role: "member", levels: {}, apps: { level: "read", at: 1, list: [{ name: "recipe-box", siteNames: ["site-a"] }] } };
+  assert.deepEqual([...codersOf(apps({ account: { user: { id: "u2", email: "sam@example.com" }, signedInAt: 1 }, shared }))].sort(), ["max", "zed"]);
+  assert.deepEqual([...codersOf(apps({ shared: { ...shared, apps: undefined } }))], [], "shared without Your Apps");
+  assert.deepEqual([...codersOf(apps({ shared: { ...shared, owner: "sam@example.com" } }))], [], "an owner apps aren't open to");
+  // Read once, with the rest of the moods.
+  assert.deepEqual([...moodSignals(apps()).coders].sort(), ["max", "zed"]);
+  assert.equal(moodSignals(state()).coders.size, 0);
+  assert.equal(NO_SIGNALS.coders.size, 0);
+});
+
+await test("the coder's mark: an ink pill with </> in highlighter at the top left, still, on top of every mood, never on a picture", () => {
+  for (const id of ["boppy", "max", "otto", "penny"])
+    for (const mood of ["idle", "awake", ...MOVING_MOODS]) {
+      const plain = mascotMarkup(id, "#2EC4B6", { mood });
+      const marked = mascotMarkup(id, "#2EC4B6", { mood, coder: true });
+      assert.ok(marked.startsWith(plain), `${id} ${mood}: the same mascot under it`);
+      const mark = marked.slice(plain.length);
+      const [, x, y, w, ht] = mark.match(/^<g class="coder-mark"><rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="[\d.]+" fill="#1C1C1B" stroke="#fff"\/><path d="[^"]+" fill="none" stroke="#E9FF3B"[^>]*\/><\/g>$/).map(Number);
+      // Top left, clear of the thought bubble and the sound (top right), the pencil and the laptop (bottom left).
+      assert.ok(x + w <= 20 && y + ht <= 12, `${id} ${mood}: at the top left`);
+      assert.doesNotMatch(mark, /mascot-/, "it stays still");
+    }
+  assert.equal(mascotMarkup("max", "#2EC4B6", { coder: false }), mascotMarkup("max", "#2EC4B6"));
+  assert.doesNotMatch(mascotSvg("max", "#2EC4B6", 104) + mascotSvg("boppy", "#0A0A0A", 104, "awake"), /coder-mark/, "the pictures never");
+});
+
+await test("every mascot of a coder wears the mark (BotMoods), at 18 px and up: smaller, it's a smudge", () => {
+  assert.equal(CODER_MIN_SIZE, 18);
+  const sig = moodSignals(apps());
+  for (const [size, shown] of [[13, false], [16, false], [17, false], [18, true], [24, true], [44, true]]) {
+    assert.equal(withMoods(sig, h(Mascot, { botId: "max", color: "#FF9F43", size })).includes('class="coder-mark"'), shown, `${size} px`);
+    assert.equal(withMoods(sig, h(Mascot, { botId: "max", color: "#FF9F43", size, live: true })).includes('class="coder-mark"'), shown, `${size} px, live`);
+  }
+  assert.ok(!withMoods(sig, h(Mascot, { botId: "pat", color: "#FF9F43", size: 44 })).includes("coder-mark"), "only a coder's");
+  assert.ok(!withMoods(NO_SIGNALS, h(Mascot, { botId: "max", color: "#FF9F43", size: 44 })).includes("coder-mark"), "outside the app");
+  // A group's avatar too: each bot by its own.
+  const group = withMoods(sig, h(ChatAvatar, { chat: chat("g1", [], ["max", "pat"]), bots: [{ id: "max", color: "#FF9F43" }, { id: "pat", color: "#60A5FA" }], size: 44 }));
+  assert.equal(group.match(/class="coder-mark"/g).length, 1);
+});
+
+await test("coding: a thread running on one of the workspace's apps, the user's own, nothing in its way, where apps show", () => {
+  const mood = (sessions, over = {}) => moodOf(moodSignals(apps({ sessions, ...over })), "max");
+  assert.equal(mood([onApp()]), "coding");
+  assert.ok(codingThread(onApp(), apps()));
+  // Not yet running, or stopped at something: at work, not coding.
+  assert.equal(mood([onApp("max", { status: "queued" })]), "working", "queued");
+  assert.equal(mood([onApp("max", { status: "starting" })]), "working", "starting");
+  assert.equal(mood([onApp("max", { blocker: { kind: "signin", detail: "Sign in" } })]), "working", "at a sign in only the user can get past");
+  assert.equal(mood([onApp("max", { askWhere: true })]), "idle", "waiting to be told where to run");
+  const ask = { id: "apr_1", threadId: "s-max-running", botId: "max", action: "Deploy", resources: [], preview: "", at: 1 };
+  assert.equal(mood([onApp()], { appApprovals: [ask] }), "idle", "waiting for the user's OK");
+  assert.equal(mood([onApp()], { appApprovals: [{ ...ask, reply: { reply: "once", at: 2 } }] }), "coding", "answered: on again");
+  // Not on an app, or not the user's own ask.
+  assert.equal(mood([session("max", "running")]), "working", "no app");
+  assert.equal(mood([onApp("max", { routineId: "r1" })]), "working", "a routine's run");
+  assert.equal(mood([onApp("max", { fromOutside: true })]), "working", "someone outside Bops started it");
+  // Where the window doesn't show apps, nothing of them: at work.
+  assert.equal(mood([onApp()], { account: { user: { id: "u2", email: "sam@example.com" }, signedInAt: 1 } }), "working", "apps not open to the account");
+  for (const status of ["done", "failed", "stopped"]) assert.equal(mood([onApp("max", { status })]), "idle", status);
+  // Still a thread at work, for whatever reads that.
+  assert.ok(moodSignals(apps({ sessions: [onApp()] })).working.has("max"));
+  assert.ok(!moodSignals(apps({ sessions: [onApp()] })).coding.has("zed"), "only the bot coding");
+});
+
+await test("speaking beats coding beats writing, shy, thinking and working", () => {
+  const at = 1_000_000;
+  const sig = (sessions, extra = {}, call = null) => moodSignals(apps({ sessions, chats: [chat("chat-max", [], ["max"])], ...extra }), call, at);
+  assert.equal(moodOf(sig([onApp()], {}, { botId: "max", speaking: true }), "max"), "speaking");
+  assert.equal(moodOf(sig([onApp("max", { activity: "writing" })]), "max"), "coding", "whatever its caption says");
+  assert.equal(moodOf(sig([onApp(), { ...session("max", "running", { activity: "writing" }), id: "s-max-notes" }]), "max"), "coding", "another thread writing");
+  assert.equal(moodOf(sig([onApp()], { messages: [said("chat-max", "thanks!", at - 500)] }), "max"), "coding", "just thanked");
+  const typing = moodSignals(apps({ sessions: [onApp()], chats: [chat("chat-max", ["max"], ["max"])] }));
+  assert.equal(moodOf(typing, "max", "chat-max"), "coding", "a reply on the way in its own chat");
+  assert.equal(moodOf(typing, "max"), "coding");
+  assert.equal(moodOf(moodSignals(apps({ sessions: [onApp()], liveMoods: { max: { mood: "writing" } } })), "max"), "coding", "what it does elsewhere");
+  assert.equal(moodOf(sig([session("max", "running")]), "max"), "working");
+});
+
+await test("BotMoodsFrom: a coder at work on its app codes, mark and laptop, every mascot of it without being told", () => {
+  const st = apps({ sessions: [onApp()], chats: [chat("chat-max", [], ["max"])], messages: [] });
+  const html = renderToStaticMarkup(h(BotMoodsFrom, { state: st, call: null }, h(Mascot, { botId: "max", color: "#FF9F43", live: true })));
+  assert.ok(html.includes(mascotMarkup("max", "#FF9F43", { mood: "coding", coder: true })));
+  // Not live: awake, with its mark.
+  const still = renderToStaticMarkup(h(BotMoodsFrom, { state: st, call: null }, h(Mascot, { botId: "max", color: "#FF9F43", size: 20 })));
+  assert.ok(still.includes(mascotMarkup("max", "#FF9F43", { mood: "awake", coder: true })));
 });
 
 console.log(`\n${passed} passed`);

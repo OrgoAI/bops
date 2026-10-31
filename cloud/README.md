@@ -128,7 +128,8 @@ id), and a state write saying another device is 403. Its open sockets and stream
 again every 30 seconds (`server.ts watchComputer`): Orgo turning its credential down, or naming another
 computer for it, ends them; a socket also ends at its token's end; a streamed answer (an agent's events)
 outlives its token only while that computer keeps signing in afresh (`computerSeenAt`, under 2 minutes).
-It still reads the user's whole state and spends their AI credit (the identity spec's Q4). orgo-web
+It still reads the user's whole state, all but the Preview passwords kept for members (`computer-scope.ts
+forComputer`), and spends their AI credit (the identity spec's Q4). orgo-web
 answers a profile for an identity token only once `VM_IDENTITY_BOPS_CLOUD_READY=1`, which is set right
 after this is deployed and before `VM_IDENTITY=admins`.
 

@@ -2,7 +2,7 @@ import { isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER
 import { ownerOnlyAsk } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
 import { ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
-import { pairChatId, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
+import { COMPACTED, pairChatId, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
 import type { RemoteMood } from "./live-core";
 
 /**
@@ -50,7 +50,7 @@ function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
   if (isAppAct(act)) return [];
   const thread = (id: string) => d.state.sessions.find((x) => x.id === id);
   const ids = (xs: unknown[]) => xs.flatMap((x) => (typeof x === "string" ? [x] : []));
-  if (act.act === "chat") {
+  if (act.act === "chat" || (act.act === "compact" && "chatId" in act)) {
     const c = d.state.chats.find((x) => x.id === act.chatId);
     return c && Array.isArray(c.botIds) ? ids(c.botIds) : [];
   }
@@ -77,6 +77,12 @@ function landed(d: SharedWsState, messages: Record<string, unknown>[], p: Pendin
     case "dismiss": {
       const t = thread(a.sessionId);
       return !t || t.dismissed === true || !LIVE.has(String(t.status));
+    }
+    // A chat's: its line, by their key. A thread's: once it ran again and ended (its line, or why it couldn't, is in its steps).
+    case "compact": {
+      if ("chatId" in a) return messages.some((m) => m.chatId === a.chatId && mine(m));
+      const t = thread(a.sessionId);
+      return !t || (!LIVE.has(String(t.status)) && Array.isArray(t.steps) && t.steps.some((x) => typeof x?.at === "number" && x.at >= p.at && (x.tool === COMPACTED || x.tool === "note")));
     }
     // An app's: the owner's Mac kept it on the app, done or refused (its `ok` and `said` show there).
     default:
@@ -276,7 +282,7 @@ export class SharedCopy {
     if (!bots.every((id) => levels[id] === "write")) return { status: 403, error: "You can watch this bot, not act for it. Ask the owner for Write.", code: MEMBER_READ_ONLY };
     // What only the owner does, whatever the level (cloud/members.ts botsTouched says the same).
     const onMac = (id: unknown) => typeof id === "string" && c.data.state.sessions.some((x) => x.id === id && x.runsOn === "mac");
-    if ((act.act === "reply" || act.act === "dismiss") && onMac(act.sessionId)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    if ((act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act)) && onMac(act.sessionId)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
     if (act.act === "answer") {
       const a = c.data.state.approvals?.find((x) => x.id === act.askId);
       if (a && ownerOnlyAsk(a.kind)) return { status: 403, error: THEIR_LOGINS, code: MEMBER_OWNER_ONLY };
@@ -468,7 +474,11 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   const routines = (s.routines as unknown as Routine[]).map((r) => (typeof r.last?.error === "string" ? { ...r, last: { ...r.last, error: ownerVoice(r.last.error) } } : r));
   const watches = (s.watches ?? []) as unknown as Watch[];
   // And the owner's calls to a bot (their card: "You: …"), and a bot's line about the owner's credit.
-  const messages = (data.messages as unknown as Message[]).map((x) => {
+  const messages = (data.messages as unknown as Message[]).map((raw) => {
+    // A card of what a task changed in an app (Message.appChange) is the owner's alone, with Restore on their app's
+    // code: Bops Cloud never sends it (cloud/ws-slice.ts MESSAGE), and a copy from anywhere else is read as its words.
+    const { appChange: _card, ...x } = raw;
+    void _card;
     // A note or chip naming a thread's Mac part names it as its title is shown (onTheirMac).
     const m = (x.role === "system" || x.bops) && typeof x.text === "string" ? { ...x, text: onTheirMac(x.text) } : x;
     return m.role === "system" && m.call && typeof m.text === "string"

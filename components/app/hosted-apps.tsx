@@ -34,6 +34,7 @@ import {
   AddAppForm,
   AddDomain,
   AppAddress,
+  LeftOvers,
   AppDeploys,
   AppEnd,
   AppSettingsSection,
@@ -50,6 +51,7 @@ import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
 import { InlineConfirm, undash } from "./side-group";
 import { ago, post } from "./ui";
 import { AppEnvs, LocalSection, openIntent, useLocal } from "./app-envs";
+import { PasswordSection } from "./preview-password";
 import { actLine } from "./shared-apps";
 import type { MemberAppAct } from "@/lib/hosted-apps";
 
@@ -89,13 +91,13 @@ export const AppSite = createContext<string | undefined>(undefined);
 
 /**
  * Which of its environments what's under it is about, for every call it makes (`env` in its query or body; the
- * variables route's `where`): "staging", "local" (its own variables, on its computer), or undefined for Prod, as
- * before there was Staging.
+ * variables route's `where`): "preview", "local" (its own variables, on its computer), or undefined for
+ * Published, as before there was a Preview.
  */
-export const AppEnvCtx = createContext<"staging" | "local" | undefined>(undefined);
+export const AppEnvCtx = createContext<"preview" | "local" | undefined>(undefined);
 
-/** `env` as a query part, or nothing for Prod. */
-export const envQuery = (env?: string) => (env === "staging" ? "&env=staging" : "");
+/** `env` as a query part, or nothing for Published. */
+export const envQuery = (env?: string) => (env === "preview" ? "&env=preview" : "");
 
 /** `site` as a query part, or nothing for the app's own. */
 export const siteQuery = (site?: string) => (site ? `&site=${encodeURIComponent(site)}` : "");
@@ -122,21 +124,33 @@ export const anyDeploying = (a: Pick<HostedApp, "live" | "sites">) => deploying(
 
 /**
  * The app as one of its sites has it (`site`: its name), for what's shown of that site: its newest deploy,
- * what it serves, and its deploy project and address in its hosting. The app itself for its own site.
+ * what it serves, its Preview, its domains and its deploy project in its hosting. The app itself for its own site.
  */
 export function siteView(a: HostedApp, site: HostedSite | undefined): HostedApp {
   if (!site || site.name === a.name) return a;
   const { projectId: _project, url: _url, ...rest } = a.hosting ?? { botId: "", computerId: "" };
   void _project;
   void _url;
-  return { ...a, live: site.live, serving: site.serving, hosting: a.hosting && { ...rest, ...(site.projectId ? { projectId: site.projectId } : {}), ...(site.url ? { url: site.url } : {}) } };
+  const { preview: _p, domain: _d, domains: _ds, ...app } = a;
+  void _p;
+  void _d;
+  void _ds;
+  return {
+    ...app,
+    live: site.live,
+    serving: site.serving,
+    ...(site.preview ? { preview: site.preview } : {}),
+    domain: site.domain ?? null,
+    ...(site.domains ? { domains: site.domains } : {}),
+    hosting: a.hosting && { ...rest, ...(site.projectId ? { projectId: site.projectId } : {}) },
+  };
 }
 
-/** Its public address: the newest deploy's, else the one kept from the first. */
-export const urlOf = (a: HostedApp) => a.live?.url ?? a.hosting?.url ?? null;
+/** Its Published address: its first active domain (never an orgo.dev name: a Published site lives on its domains only). */
+export const urlOf = (a: Pick<HostedApp, "domain">) => a.domain ?? null;
 
-/** What it says where its address would be, when it has none: live with no address yet, or not on the web yet. */
-export const noAddress = (a: Pick<HostedApp, "serving" | "live">, never = "Not on the web yet") => (a.serving || a.live?.state === "succeeded" ? "No address yet" : never);
+/** What it says where its address would be, when it has none: live before with no domain, or no domain yet. */
+export const noAddress = (a: Pick<HostedApp, "serving" | "live">, never = "No domain yet") => (a.serving || a.live?.state === "succeeded" ? "Live, no domain yet" : never);
 
 /** A changeset's short id, as its line shows it (all of it in the tooltip). */
 export const short = (id: string) => id.slice(0, 7);
@@ -226,12 +240,12 @@ export const useSending = () =>
  * Why Deploy can't be pressed for it now (undefined: it can). `at`: a changeset picked from its history, not
  * the newest. `site`: Deploy for that site alone (else every site of it).
  */
-export function whyNot(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: HostedApp, at?: string, site?: HostedSite, env: "staging" | "prod" = "prod") {
+export function whyNot(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: HostedApp, at?: string, site?: HostedSite, env: "preview" | "prod" = "prod") {
   if (!answer.enabled) return answer.why || "Deploying isn't open here.";
   if (!at && !a.head) return "Nothing is committed yet.";
-  // (To Staging: only a deploy running there holds it up.)
-  const busy = env === "staging" ? (site ? !!site.staging && deploying(site.staging) : [a, ...(a.sites ?? [])].some((x) => !!x.staging && deploying(x.staging))) : site ? deploying(site) : anyDeploying(a);
-  if (busy) return env === "staging" ? "The preview is deploying. Wait for it to finish." : "A deploy is running. Wait for it to finish.";
+  // (To the Preview: only a deploy running there holds it up.)
+  const busy = env === "preview" ? (site ? !!site.preview && deploying(site.preview) : [a, ...(a.sites ?? [])].some((x) => !!x.preview && deploying(x.preview))) : site ? deploying(site) : anyDeploying(a);
+  if (busy) return env === "preview" ? "The preview is deploying. Wait for it to finish." : "A deploy is running. Wait for it to finish.";
   if (sending.has(a.name)) return "A deploy is being sent. Wait for it.";
   return undefined;
 }
@@ -336,7 +350,7 @@ const lastRead = new Map<string, HostedAppsAnswer>();
  * The workspace's apps, read again every few seconds while one deploys, whenever `stamp` (appsStamp)
  * changes, else when the window is focused again.
  */
-function useHostedApps(ws: string, stamp = "") {
+export function useHostedApps(ws: string, stamp = "") {
   const [got, setGot] = useState<{ ws: string; answer: HostedAppsAnswer | null; failed: boolean } | null>(null);
   const answer = (got?.ws === ws ? got.answer : null) ?? lastRead.get(ws) ?? null;
   const failed = got?.ws === ws && got.failed && !answer;
@@ -647,7 +661,7 @@ export function HostedAppsList({
                 ) : url ? (
                   <UrlLink url={url} />
                 ) : (
-                  <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{noAddress(a, "Not deployed yet")}</span>
+                  <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{noAddress(a)}</span>
                 )}
                 {a.sites && (
                   <span data-site-count data-tip={a.sites.map((x) => x.name).join(", ")} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
@@ -656,7 +670,7 @@ export function HostedAppsList({
                 )}
                 <span className="flex-1" />
               </div>
-              {/* Its three environments, all on its computer: Local, Staging (where Deploy goes), Prod (Promote to Prod). */}
+              {/* Its three environments, all on its computer: Local, Preview (where Deploy goes), Published (Publish). */}
               <ListedEnvs ws={ws} answer={answer} app={a} onChanged={onChanged} />
               {theirs && (
                 <span data-member-act className={`-mt-1 truncate pl-[26px] pr-2 text-[11.5px] leading-4 ${theirs.ok ? "text-[#9A9A98]" : "text-[#B42318]"}`}>
@@ -715,8 +729,8 @@ export function HostedAppTab({
   const dns = useDomains(ws, name, site, `${shown?.hosting?.projectId ?? ""}:${shown ? (urlOf(shown) ?? "") : ""}`);
   // Its settings and recent deploys, again when a deploy moves it on (the picked site's).
   const settings = useSettings(ws, name, site, `${shown?.hosting?.projectId ?? ""}:${shown?.live?.id ?? ""}:${shown?.live?.state ?? ""}`);
-  // Staging's (its own variables, settings and deploys), read while it's picked.
-  const staging = useSettings(ws, name, site, `${shown?.staging?.projectId ?? ""}:${shown?.staging?.live?.id ?? ""}:${shown?.staging?.live?.state ?? ""}`, "staging", env === "staging");
+  // The Preview's (its own variables, settings and deploys), read while it's picked.
+  const previewSettings = useSettings(ws, name, site, `${shown?.preview?.projectId ?? ""}:${shown?.preview?.live?.id ?? ""}:${shown?.preview?.live?.state ?? ""}`, "preview", env === "preview");
   // The picked site's domains as its Domains section has them (just read, or changed there), on its line in
   // the Sites list too: again after each read of the list, so one that began before a change and lands after
   // it never puts back what was there.
@@ -760,11 +774,12 @@ export function HostedAppTab({
       email={state?.account?.user.email ?? null}
       env={env}
       onEnv={setEnv}
-      staging={staging.answer}
-      onStaging={staging.put}
+      previewSettings={previewSettings.answer}
+      onPreviewSettings={previewSettings.put}
       local={local.answer}
       onLocal={local.put}
       addDomain={intent === "domain"}
+      atHistory={intent === "history"}
     />
   );
 }
@@ -777,7 +792,7 @@ const settingsRead = new Map<string, AppSettingsAnswer>();
  * changes and when the window comes back into focus. `put`: as a change answered them. Never a variable's
  * value: Orgo answers names only.
  */
-function useSettings(ws: string, name: string, site: string | undefined, stamp: string, env?: "staging", on = true) {
+function useSettings(ws: string, name: string, site: string | undefined, stamp: string, env?: "preview", on = true) {
   const key = `${ws}\n${name}\n${site ?? ""}\n${env ?? ""}`;
   const [got, setGot] = useState<{ key: string; answer: AppSettingsAnswer | null } | null>(null);
   const answer = (got?.key === key ? got.answer : null) ?? settingsRead.get(key) ?? null;
@@ -951,11 +966,12 @@ export function HostedAppView({
   email = null,
   env: picked,
   onEnv,
-  staging = null,
-  onStaging = () => {},
+  previewSettings = null,
+  onPreviewSettings = () => {},
   local = null,
   onLocal = () => {},
   addDomain = false,
+  atHistory = false,
 }: {
   ws: string;
   answer: Pick<HostedAppsAnswer, "enabled" | "why">;
@@ -987,16 +1003,27 @@ export function HostedAppView({
   /** Which of its environments the sections are about (none: Prod, kept here when no one listens), and who hears another picked. */
   env?: AppEnv;
   onEnv?: (env: AppEnv) => void;
-  /** Staging's settings, variables' names and recent deploys (null: being read, or none yet). */
-  staging?: AppSettingsAnswer | null;
-  onStaging?: (a: AppSettingsAnswer) => void;
+  /** The Preview's settings, variables' names and recent deploys (null: being read, or none yet). */
+  previewSettings?: AppSettingsAnswer | null;
+  onPreviewSettings?: (a: AppSettingsAnswer) => void;
   /** Its Local, as its computer said (null: not read yet). */
   local?: LocalAnswer | null;
   onLocal?: (a: LocalAnswer) => void;
   /** Add a domain open on Prod, from Domain in Prod's menu on the Apps page. */
   addDomain?: boolean;
+  /** Its History brought into view once it's read, from a change card's View changes (app-change.tsx). */
+  atHistory?: boolean;
 }) {
   const { busy, error, run } = useDeploy(onChanged);
+  // Opened at its History: scrolled to once there's a history to show (a page read later doesn't move it again).
+  const historyBox = useRef<HTMLDivElement>(null);
+  const historyShown = useRef(!atHistory);
+  const historyRead = history !== null;
+  useEffect(() => {
+    if (historyShown.current || !historyRead || !historyBox.current) return;
+    historyShown.current = true;
+    historyBox.current.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [historyRead]);
   const [envMine, setEnvMine] = useState<AppEnv>(addDomain ? "prod" : "prod");
   const env = onEnv ? (picked ?? "prod") : envMine;
   const pickEnv = (x: AppEnv) => (onEnv ? onEnv(x) : setEnvMine(x));
@@ -1019,18 +1046,18 @@ export function HostedAppView({
   // What a deploy waiting or running builds (the newest, when it doesn't say): any site's.
   const going = new Set(
     [app, ...(sites ?? [])]
-      .flatMap((x) => [x, ...(x.staging ? [x.staging] : [])])
+      .flatMap((x) => [x, ...(x.preview ? [x.preview] : [])])
       .filter(deploying)
       .map((x) => x.live?.at ?? online?.head ?? app.head),
   );
-  /** Where a changeset is on Staging: the sites whose Staging serves it (the app, for one with one site). */
-  const stagingSites = (id: string) => (sites ? sites.filter((x) => x.staging?.serving === id).map((x) => x.name) : app.staging?.serving === id ? [app.name] : []);
+  /** Where a changeset is on the Preview: the sites whose Preview serves it (the app, for one with one site). */
+  const previewSites = (id: string) => (sites ? sites.filter((x) => x.preview?.serving === id).map((x) => x.name) : app.preview?.serving === id ? [app.name] : []);
   /** The end of a changeset's line: Live (its site serves it; the ones that do, of more), Deploying, else "Deploy this one". */
   const end = (c: AppCommit) => {
     const on = sites ? servedBy(c.id) : c.id === serving ? [app.name] : [];
-    const st = stagingSites(c.id);
+    const st = previewSites(c.id);
     const chip = st.length ? (
-      <span data-on-staging className="flex shrink-0 items-center gap-1 rounded-full bg-[#EEF2FF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3346A8]">
+      <span data-on-preview className="flex shrink-0 items-center gap-1 rounded-full bg-[#EEF2FF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3346A8]">
         <span className="size-1.5 shrink-0 rounded-full bg-[#5B6BD6]" />
         Preview
       </span>
@@ -1060,7 +1087,7 @@ export function HostedAppView({
     return (
       // Shown as its line is pointed at or reached with the keyboard, so the history reads as a list.
       <span className="flex shrink-0 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
-        <DeployButton label={sites ? "Preview this one, all sites" : "Preview this one"} why={whyNot(answer, app, c.id, undefined, "staging")} busy={busy(c.id, app.name)} onClick={() => void run(c.id, app.name, { ws, action: "deploy", env: "staging", at: c.id })} />
+        <DeployButton label={sites ? "Preview this one, all sites" : "Preview this one"} why={whyNot(answer, app, c.id, undefined, "preview")} busy={busy(c.id, app.name)} onClick={() => void run(c.id, app.name, { ws, action: "deploy", env: "preview", at: c.id })} />
       </span>
     );
   };
@@ -1089,7 +1116,7 @@ export function HostedAppView({
             Work on it
           </button>
         )}
-        <DeployButton primary label={sites ? "Deploy all previews" : "Deploy preview"} why={whyNot(answer, app, undefined, undefined, "staging")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "staging" })} />
+        <DeployButton primary label={sites ? "Deploy all previews" : "Deploy preview"} why={whyNot(answer, app, undefined, undefined, "preview")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "preview" })} />
       </div>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-4 py-3">
         {lost && (
@@ -1111,9 +1138,9 @@ export function HostedAppView({
                   deploy={
                     <DeployButton
                       label="Deploy preview"
-                      why={whyNot(answer, app, undefined, x, "staging")}
+                      why={whyNot(answer, app, undefined, x, "preview")}
                       busy={busy(`site:${x.name}`, app.name)}
-                      onClick={() => void run(`site:${x.name}`, app.name, { ws, action: "deploy", env: "staging", site: x.name })}
+                      onClick={() => void run(`site:${x.name}`, app.name, { ws, action: "deploy", env: "preview", site: x.name })}
                     />
                   }
                 />
@@ -1156,7 +1183,7 @@ export function HostedAppView({
         <AppSite.Provider key={`${siteName ?? app.name}:${env}`} value={siteName}>
           {env === "prod" && (
             <>
-              <AppAddress url={domains?.url ?? settings?.url ?? urlOf(view)} />
+              <AppAddress url={domains?.url ?? settings?.url ?? urlOf(view)} published />
               <Domains ws={ws} app={view} answer={domains} failed={domainsFailed} onDns={onDns} onDomains={onDomains} onDomain={onDomain} onRenewal={onRenewal} email={email} adding={adding} />
               {/* Before its first deploy, there to set where deploying is open (the first save makes its project). */}
               {settings && (settings.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={settings} onSaved={onSettings} />}
@@ -1164,16 +1191,18 @@ export function HostedAppView({
               <AppDeploys ws={ws} app={view} deploys={settings?.deploys ?? []} onChanged={onChanged} log={view.live && <DeployLog key={`${siteName ?? ""}:${view.live.id}`} ws={ws} name={app.name} live={view.live} />} />
             </>
           )}
-          {env === "staging" && (
-            <AppEnvCtx.Provider value="staging">
-              <AppAddress url={staging?.url ?? view.staging?.url ?? null} />
-              {staging && (staging.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={staging} onSaved={onStaging} />}
+          {env === "preview" && (
+            <AppEnvCtx.Provider value="preview">
+              <AppAddress url={previewSettings?.url ?? view.preview?.url ?? null} />
+              <PasswordSection ws={ws} name={app.name} site={siteName} preview={view.preview} />
+              {view.leftOver?.length ? <LeftOvers ws={ws} app={app} onChanged={onChanged} /> : null}
+              {previewSettings && (previewSettings.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={previewSettings} onSaved={onPreviewSettings} />}
               <AppDeploys
                 ws={ws}
-                app={{ ...view, live: view.staging?.live ?? null, serving: view.staging?.serving ?? null }}
-                deploys={staging?.deploys ?? []}
+                app={{ ...view, live: view.preview?.live ?? null, serving: view.preview?.serving ?? null }}
+                deploys={previewSettings?.deploys ?? []}
                 onChanged={onChanged}
-                log={view.staging?.live && <DeployLog key={`staging:${siteName ?? ""}:${view.staging.live.id}`} ws={ws} name={app.name} live={view.staging.live} />}
+                log={view.preview?.live && <DeployLog key={`preview:${siteName ?? ""}:${view.preview.live.id}`} ws={ws} name={app.name} live={view.preview.live} />}
               />
             </AppEnvCtx.Provider>
           )}
@@ -1183,7 +1212,7 @@ export function HostedAppView({
             </AppEnvCtx.Provider>
           )}
         </AppSite.Provider>
-        <div data-history className="flex flex-col">
+        <div ref={historyBox} data-history className="flex scroll-mt-3 flex-col">
           <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">History</span>
           {history === null ? (
             <span className={QUIET}>Reading it…</span>
@@ -1230,7 +1259,8 @@ export function HostedAppView({
  * its domains wrap under its name, past its dot.
  */
 function SiteLine({ site: x, picked, lost, onPick, deploy }: { site: HostedSite; picked: boolean; lost: boolean; onPick: () => void; deploy: ReactNode }) {
-  const url = x.live?.url ?? x.url;
+  // (Its computer gone: its domains went with it.)
+  const url = lost ? null : (x.domain ?? null);
   return (
     <div data-site-line={x.name} className={`relative flex min-w-0 items-start gap-2 rounded-lg px-2 py-1 ${picked ? "bg-[#F2F2F0] shadow-[0_0_0_1px_#E2E2DF]" : "hover:bg-[#F6F6F4]"}`}>
       {/* (Its press covers all of its line, its padding too, under Deploy this site.) */}

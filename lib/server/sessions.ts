@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, BRAINS_ON, CLI_NAMES, computerStaysDown, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, memberOf, memberThread, othersThread, outsideThread, ownerSent, pausedForOk, routineSent, threadRunner, waitsForOk, workBot, workspaceOf, type AppApproval, type Bot, type CliKind, type Routine, type Session, type Takeover, type TaskRoute, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, BRAINS_ON, CLI_NAMES, COMPACTED, computerStaysDown, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, memberOf, memberThread, othersThread, outsideThread, ownerSent, pausedForOk, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitsForOk, workBot, workspaceOf, type AppApproval, type Bot, type CliKind, type MemberSaid, type Routine, type Session, type Takeover, type TaskRoute, type ThreadReply } from "@/lib/types";
 import type { MemberWho } from "@/lib/member-access";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
@@ -33,7 +33,7 @@ import { accountsOf, APP_TOOLS, appsKeyFor, bopsAddress, composioOn, findAppActi
 import { askFor, declined, NeedsOk, Paused, stopAsks, takeAnswer, type AskSpec } from "./permission";
 import { appsNote, placesNote } from "./skills";
 import { copySkillsToComputer, countUse, findSkill, skillsFor, skillsIndexNote, skillsNote, skillText } from "./workspace-skills";
-import { appMcp, appsComputerGone, askDeploy, deployAfterTask, readyAppForTask } from "./hosted-apps";
+import { appMcp, appsComputerGone, askDeploy, changeCardAfterTask, deployAfterTask, previewAfterTask, readyAppForTask } from "./hosted-apps";
 import { DATA_TOOL_NAMES, DATA_TOOLS, dataNote, dataOn, runDataTool } from "./treg";
 import { crmNote } from "./crm";
 import { memberWho, memoryBlock, OWNER_WHO, saveToMemory, scopeOf } from "./memory";
@@ -43,7 +43,7 @@ import { textOwner, textResult } from "./phone";
 import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
-import { RUNNER_SCRUB, runnerFailed, runnerUpFor } from "./runner";
+import { RUNNER_SCRUB, runnerFailed, runnerSince, runnerUpFor } from "./runner";
 import { addMessage, bot, getState, id, leftBehind, ownerLine, ownerName, ownSession, patchSession, pullState, sameState, session, startLanded, stateDevice, stateEpoch, stateReady, update, watchArrivals } from "./store";
 import { handOffRefused } from "./chart";
 import { recordTokens, usageTags } from "./usage";
@@ -55,7 +55,7 @@ import { builtinSkills } from "@/lib/builtin-skills";
 import { watching } from "./presence";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 import { brainById, ensureBrainTools, signInStatus } from "./brains";
-import { alsoSpec, brainName, BrainStopped, cliDriver, cliTurn, closeCli, closeTerminal, limitPick, openRun, openShell, openTerminal, signInWords, stoppedWords } from "./cli-agents";
+import { alsoSpec, brainName, BrainStopped, cliCompact, cliDriver, cliTurn, closeCli, closeTerminal, limitPick, openRun, openShell, openTerminal, signInWords, stoppedWords } from "./cli-agents";
 import { aiOf, hasProfile, isCli, pickAgent, threadAgent, type AgentRun } from "@/lib/agents";
 
 /**
@@ -191,6 +191,13 @@ function sameJob(botId: string, title: string, except?: string) {
     .at(-1);
 }
 
+/**
+ * Whether a thread can take a job asked for on `app` (Session.app, which only work_on_app sets): any job on no app,
+ * but one on an app only a thread on that same app, as only that one has the app's working folder. Work on an app
+ * folded into a plain task about it (one that couldn't do it, with no folder) was lost there.
+ */
+const takesApp = (x: Session, app?: { wsId: string; name: string }) => !app || (x.app?.wsId === app.wsId && x.app?.name === app.name);
+
 /** Older copies of a job that are waiting on the user go quiet once a newer thread has it. */
 function retireCopies(keep: Session) {
   for (const s of getState().sessions)
@@ -208,7 +215,7 @@ function repoint(from: string, to: string) {
 async function sameJobByMeaning(s: Session) {
   // Its siblings (parts of the same request) are other jobs by design.
   const open = getState()
-    .sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && !leftBehind(x) && x.createdAt < s.createdAt && !(s.group && x.group?.id === s.group.id) && x.id !== s.partOf)
+    .sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && !leftBehind(x) && x.createdAt < s.createdAt && !(s.group && x.group?.id === s.group.id) && x.id !== s.partOf && takesApp(x, s.app))
     .slice(-5);
   if (!open.length) return undefined;
   const brief = (g: string) => (g.length > 240 ? `${g.slice(0, 240)}…` : g);
@@ -262,7 +269,8 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", viaB
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
   const same = !fresh && !onWatch ? sameJob(botId, title?.trim() || goal.slice(0, 48)) : undefined;
   // A member's words never reach work on the owner's Mac (member-acts.ts): the same job there gets a thread of its own.
-  if (same && !(member && same.runsOn === "mac")) {
+  // Nor does work on an app go to a thread that isn't on it (takesApp).
+  if (same && !(member && same.runsOn === "mac") && takesApp(same, app)) {
     if (secret)
       update((state) => {
         const x = state.sessions.find((t) => t.id === same.id);
@@ -986,18 +994,63 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
       patchSession(sessionId, (x) => {
         if (x.route) x.route.bumps = (x.route.bumps ?? 0) + 1;
       });
-    // A run a bot's computer ran (a routine's task that needed a sign in, one that failed or was stopped and is
-    // tried again: Stop never makes a thread another Bops's) carries on there, on that computer's runner, while it's
-    // up and the bot still works there, whichever of the user's Macs it's picked up from: a run is never handed from
-    // a computer to the Mac in its middle. The computer is woken for it if it's asleep, and its runner picks it up
-    // when it hears (pickUpQueued).
-    const ranBy = ownSession(s) ? undefined : s.by;
-    const computer = !onRunner() && !live(s) && ranBy ? runnerUpFor(ranBy, s.botId) : null;
-    // Otherwise picked up again here, whichever Bops ran it before: it isn't running there anymore (Session.by).
-    patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined, stopAsked: undefined, by: computer ? ranBy : (stateDevice() ?? undefined) });
-    if (!computer) return void pump();
-    void wakeForUser(computer).then((why) => why && step(sessionId, "note", `Waiting for its computer to wake: ${why}`), () => {});
+    queueAgain(sessionId, s);
   } else steerers.get(sessionId)?.();
+}
+
+/**
+ * A thread that ended, queued to run again (a reply to it, its Compact). A run a bot's computer ran (a routine's task
+ * that needed a sign in, one that failed or was stopped and is tried again: Stop never makes a thread another Bops's)
+ * carries on there, on that computer's runner, while it's up and the bot still works there, whichever of the user's
+ * Macs it's picked up from: a run is never handed from a computer to the Mac in its middle. The computer is woken for
+ * it if it's asleep, and its runner picks it up when it hears (pickUpQueued).
+ */
+function queueAgain(sessionId: string, s: Session) {
+  const computer = carriedOnBy(s);
+  // Otherwise picked up again here, whichever Bops ran it before: it isn't running there anymore (Session.by).
+  patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined, stopAsked: undefined, by: computer ? s.by : (stateDevice() ?? undefined) });
+  if (!computer) return void pump();
+  void wakeForUser(computer).then((why) => why && step(sessionId, "note", `Waiting for its computer to wake: ${why}`), () => {});
+}
+
+/** The computer whose runner carries thread `s` on when it's queued again (queueAgain), or null: this Bops picks it up. */
+function carriedOnBy(s: Session): string | null {
+  const ranBy = ownSession(s) ? undefined : s.by;
+  return !onRunner() && !live(s) && ranBy ? runnerUpFor(ranBy, s.botId) : null;
+}
+
+/**
+ * The first Bops release whose run takes a Compact (run). A computer's runner on an older one runs the thread as one the
+ * user said nothing to: its result said and sent again, or its task done over.
+ */
+const COMPACT_SINCE = "0.0.35";
+
+/**
+ * Compact (the thread's menu): its brain folds what it has so far into a summary of its own, now, where it can be asked
+ * to (lib/types.ts threadCompacts: Claude Code, Bops agent on the computer tool). Not while it runs, nor again with
+ * nothing said since (threadCompactBlocked). It's queued to run once more, and its run asks first (run): a run that only
+ * compacted ends as the thread stood, with a quiet line and nothing in the chat. Not on Bops agent while the AI credit
+ * is used up (as a chat's Compact: chat-summary.ts compactChat), nor on a computer whose runner is on a Bops from before
+ * Compact (COMPACT_SINCE) till it updates. `by`: a member with Write who pressed it (member-acts.ts). Its words for the
+ * window when it can't.
+ */
+export async function compactThread(sessionId: string, by?: MemberSaid): Promise<{ ok: true } | { ok: false; error: string; status: number }> {
+  // (Read first: everything after it reads the thread as it is now.)
+  const out = await creditsOut();
+  const s = session(sessionId);
+  if (!s) return { ok: false, error: "No such thread.", status: 404 };
+  if (!threadCompacts(s)) return { ok: false, error: "This thread's agent doesn't compact on request.", status: 400 };
+  const blocked = threadCompactBlocked(s);
+  if (blocked) return { ok: false, error: blocked, status: 409 };
+  // A CLI agent isn't on AI credit (run).
+  const b = bot(s.botId);
+  if (out && !(b && cliFor(s, b))) return { ok: false, error: OUT_OF_CREDIT, status: 402 };
+  const computer = carriedOnBy(s);
+  if (computer && !runnerSince(computer, COMPACT_SINCE)) return { ok: false, error: "Its computer's Bops needs to update first.", status: 409 };
+  stopped.delete(sessionId);
+  patchSession(sessionId, { compact: { at: Date.now(), ...(by ? { by } : {}), was: { status: s.status, ...(s.error ? { error: s.error } : {}), ...(s.endedAt ? { endedAt: s.endedAt } : {}) } } });
+  queueAgain(sessionId, s);
+  return { ok: true };
 }
 
 /** A screen the computer's ledger says is taken, though Bops thought it free. */
@@ -1738,6 +1791,8 @@ function computerFailed(b: Bot, e: Error, deleted = false, kept = false) {
     emailResult(s, said.id, said.text);
     textResult(s, said.text);
     void deployAfterTask(s.id).catch((err: Error) => console.warn(`[hosted-apps] ${s.id}: ${err.message}`));
+    // Its Local running for the owner to watch, said in its chat (not for one that deploys: that says how it went).
+    void previewAfterTask(s.id).catch((err: Error) => console.warn(`[hosted-apps] ${s.id}: ${err.message}`));
   }
   if (!waiting.length)
     addMessage({
@@ -1871,7 +1926,7 @@ const step = (sessionId: string, tool: string, detail: string, by?: { who?: stri
   patchSession(sessionId, (s) => {
     s.steps.push({ at: Date.now(), tool, detail, ...(by?.who ? { who: by.who } : {}), ...(by?.screen ? { screen: by.screen } : {}) });
   });
-  if (tool !== "setup") captionSoon(sessionId);
+  if (tool !== "setup" && tool !== COMPACTED) captionSoon(sessionId);
 };
 
 /**
@@ -2016,6 +2071,8 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
         : [
             `If a sign-in or verification code page appears, wait about 15 seconds and look again first: Bops may sign you in with a login ${owner} saved in Logins. That happens by itself on the page you're working in (there's no tool for it, so don't look for one, and never type a password yourself). If the page is already open from before, click into it first so Bops sees it. If it's still there after that (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
           ]),
+    // A task asked to "call work_on_app" (words meant for the chat that reached it) said only that it wasn't available.
+    `The chat's tools (work_on_app, start_task, schedule and the rest) aren't yours: if you're asked to call one, do what you can of the ask here, and say plainly that ${owner} can ask for the rest in the chat.`,
     "Finish each turn with a short answer in plain sentences, under 80 words: no tables or headings. Lead with the answer.",
     WRITING,
     ASKING,
@@ -2317,6 +2374,27 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
   };
   return {
     close: () => closeCli(run),
+    // Compact (compactThread), where its CLI takes it: Claude Code's own /compact, never with the briefing around it.
+    compact: driver.compacts
+      ? async () => {
+          const ac = new AbortController();
+          interrupts.set(sessionId, () => ac.abort());
+          if (stopped.has(sessionId)) ac.abort();
+          try {
+            await cliCompact(run, {
+              signal: ac.signal,
+              idleMs: TURN_IDLE_MS,
+              stalled: STALLED,
+              started: (cli) =>
+                patchSession(sessionId, (y) => {
+                  if (y.brainRun) Object.assign(y.brainRun, { cli, started: true });
+                }),
+            });
+          } finally {
+            interrupts.delete(sessionId);
+          }
+        }
+      : undefined,
     turn: async (input: string) => {
       if (!signedIn && x) {
         // Couldn't tell: it goes ahead, and Claude Code says so if it isn't.
@@ -2606,7 +2684,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
   ]
     .filter(Boolean)
     .join("\n\n");
-  return async (input?: string, resume?: AppApproval) => {
+  // `compact`: Compact's step (compactThread), with no message: the model compacts the conversation so far.
+  return async (input?: string, resume?: AppApproval, compact?: boolean) => {
     const ac = new AbortController();
     interrupts.set(sessionId, () => ac.abort());
     // Stopped while this turn was on its way (Stop found no turn to interrupt yet).
@@ -2622,6 +2701,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         apps,
         input,
         resume,
+        ...(compact ? { compact: true as const } : {}),
         signal: ac.signal,
         timeoutMs: TURN_MAX_MS,
         idleMs: TURN_IDLE_MS,
@@ -3031,6 +3111,8 @@ async function run(sessionId: string) {
      * (permission.ts takeAnswer), which this turn answers first and goes on from; then `input` may be none.
      */
     let turn: (input: string | undefined, resume?: AppApproval) => Promise<string>;
+    /** Compact's ask of its brain (compactThread), where it takes one. */
+    let compact: (() => Promise<void>) | undefined;
     if (brain) {
       // Its briefing is an Agents API thread's, made fresh each run, memory included.
       const brief = await brainBrief(s, b, computerId, display, !resuming);
@@ -3038,8 +3120,12 @@ async function run(sessionId: string) {
       closeBrain = onBrainTurns.close;
       // A brain's call that needs the OK is held, never paused (composio.ts held): it has no resume of its own.
       turn = (input) => onBrainTurns.turn(input ?? "");
-    } else if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming, model: bopsModel });
-    else {
+      compact = onBrainTurns.compact;
+    } else if (onComputerTool) {
+      const onTool = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming, model: bopsModel });
+      turn = onTool;
+      compact = async () => void (await onTool(undefined, undefined, true));
+    } else {
       if (!resuming) {
         const route = s.route ?? (await routeTask(b.effort, s.goal, b.id, { model: bopsModel }));
         if (!s.route) {
@@ -3163,8 +3249,32 @@ async function run(sessionId: string) {
     // A computer-tool run left paused at a call whose request is gone (taken out before this Bops read a reply) still
     // owes that call's output: it goes on, the call answered as not run (computer-task.ts settle), never left for good.
     let owesOnly = !resume && !answered && resuming && onComputerTool && !!session(sessionId)!.owed?.some((o) => o.type === "function" && o.output === undefined);
-    let input: string | undefined = resuming ? withMovedNote(sessionId, takeReplies(sessionId), !!resume || owesOnly) : freshStart(sessionId, [moved, lost].filter(Boolean).join("\n\n"));
+    // Compact was pressed (compactThread): its brain is asked first, before what was said meanwhile. One that didn't go
+    // says why in the thread, and the run goes on.
+    const compacting = session(sessionId)!.compact;
+    if (compacting) {
+      patchSession(sessionId, { compact: undefined, activity: "compacting" });
+      try {
+        if (!compact || !resuming) throw new Error(compact ? "there was nothing to compact yet" : "its agent doesn't compact on request here");
+        await compact();
+        step(sessionId, COMPACTED, compacting.by ? `Compacted by ${compacting.by.name}` : "Compacted");
+      } catch (e) {
+        if (stopped.has(sessionId)) throw new Error("Stopped by you");
+        step(sessionId, "note", `Couldn't compact: ${(e as Error).message}`);
+      }
+      // Only to compact, compacted or not: it doesn't go on by itself, whatever it owed (its compaction answered that, or
+      // its next turn does: computer-task.ts settle).
+      if (!unsent(sessionId).length) owesOnly = false;
+    }
+    let turned = false;
+    // (One that couldn't pick its session up, and was only to compact, doesn't start its task over.)
+    let input: string | undefined = resuming
+      ? withMovedNote(sessionId, takeReplies(sessionId), !!resume || owesOnly)
+      : compacting && !unsent(sessionId).length
+        ? undefined
+        : freshStart(sessionId, [moved, lost].filter(Boolean).join("\n\n"));
     while (input || resume || owesOnly) {
+      turned = true;
       owesOnly = false;
       if (stopped.has(sessionId)) throw new Error("Stopped by you");
       // A new turn starts clean; the screen watch raises the blocker again if it's still there.
@@ -3189,6 +3299,11 @@ async function run(sessionId: string) {
     }
     // Ended or taken elsewhere as its last turn finished (letGoOfEnded): no result from here.
     if (letGo.has(sessionId)) throw new Error("Ended elsewhere");
+    // A run that only compacted: the thread stands as it did, and nothing is said in the chat.
+    if (compacting && !turned) {
+      patchSession(sessionId, { status: compacting.was.status, error: compacting.was.error, endedAt: compacting.was.endedAt ?? Date.now(), activity: undefined });
+      return;
+    }
 
     const done = session(sessionId)!;
     // An offer to move it to the Mac goes with the run: tapping it later would do the whole task again there.
@@ -3217,6 +3332,9 @@ async function run(sessionId: string) {
     }
     // A task on an app asked to put it live too: deployed now, once it committed something new (hosted-apps.ts).
     void deployAfterTask(sessionId).catch((e: Error) => console.warn(`[hosted-apps] ${sessionId}: ${e.message}`));
+    void previewAfterTask(sessionId).catch((e: Error) => console.warn(`[hosted-apps] ${sessionId}: ${e.message}`));
+    // What it changed in its app, on a card in its chat with Restore to before this change (once a run, only when it committed).
+    void changeCardAfterTask(sessionId).catch((e: Error) => console.warn(`[hosted-apps] ${sessionId}: ${e.message}`));
     // The part only the user's Mac can do comes next, with what the cloud found.
     if (done.thenOnMac && !done.brainRun?.waits)
       startSession({ botId: b.id, goal: `${done.thenOnMac}\n\nWhat the first part found (in the cloud):\n${done.answer ?? ""}`, title: `${done.title} · on your Mac`, chatId: done.chatId, sentVia: done.sentVia, viaBot: done.sentViaBot, where: "mac" });
@@ -3246,6 +3364,17 @@ async function run(sessionId: string) {
       : credit
         ? OUT_OF_CREDIT
         : (low ?? (e as Error).message);
+    // A Compact its run didn't get to (compactThread), said quietly in the thread, and it can be pressed again. A run that
+    // was only to compact ends as the thread stood, as one that compacted does: nothing in the chat, nor sent anywhere.
+    const compacting = session(sessionId)?.compact;
+    if (compacting) {
+      patchSession(sessionId, { compact: undefined });
+      step(sessionId, "note", `Couldn't compact: ${error}`);
+      if (!unsent(sessionId).length) {
+        patchSession(sessionId, { status: compacting.was.status, error: compacting.was.error, endedAt: compacting.was.endedAt ?? Date.now(), activity: undefined });
+        return;
+      }
+    }
     patchSession(sessionId, { status: "failed", error, endedAt: Date.now(), offerMac: undefined });
     taskEnded(
       session(sessionId) ?? s,
@@ -3280,6 +3409,8 @@ async function run(sessionId: string) {
     }
     // A task on an app asked to put it live too: not deployed, said under its result. Not when the user stopped it.
     if (!stopped.has(sessionId)) void deployAfterTask(sessionId).catch((err: Error) => console.warn(`[hosted-apps] ${sessionId}: ${err.message}`));
+    // What it committed before it stopped (the user's Stop too) is on main all the same: its card, with Restore.
+    void changeCardAfterTask(sessionId).catch((err: Error) => console.warn(`[hosted-apps] ${sessionId}: ${err.message}`));
   } finally {
     try {
       unwatch?.();

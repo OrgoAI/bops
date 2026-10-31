@@ -134,6 +134,8 @@ globalThis.fetch = async (input, init) => {
     const b = JSON.parse(await req.text());
     // An app's build (made-apps.ts) streams its code: answered from its own queue, so it never takes a turn's answer.
     if (b.stream) return (builds.shift() ?? (() => sse([{ type: "response.failed", sequence_number: 1 }])))(b);
+    // The chat's summary (chat-summary.ts), folded after a turn: answered apart, so it never takes a turn's answer.
+    if (String(b.instructions ?? "").startsWith("You keep the running summary")) return json(response("resp_summary", [said("Alex and Boppy talked about the week.")]));
     asked.push(b);
     typingAt.push(!!S?.chat(globalThis.__testChat)?.typing?.includes("boppy"));
     const next = answers.shift();
@@ -379,6 +381,31 @@ await check("the instructions and tools stay the same from turn to turn (prompt 
   await Chat.handleMessage(chatId, "and again");
   assert.equal(asked[n].instructions, typical.instructions);
   assert.equal(JSON.stringify(asked[n].tools), JSON.stringify(typical.tools));
+});
+
+await check("the apps tools' words are fixed text: local_app says no port as everyone's (each site has its own address), work_on_app passes a line pointing at the page verbatim in change; both say a bot works in a copy of its own when other bots work on the app too", () => {
+  const tool = (n) => typical.tools.find((t) => t.name === n);
+  assert.ok(tool("local_app") && tool("work_on_app"), "apps are open here");
+  assert.doesNotMatch(JSON.stringify(tool("local_app")), /3000/);
+  assert.match(tool("local_app").description, /at an address of its own, http:\/\/localhost:<its port>, which it answers with and which stays the same/);
+  assert.match(tool("work_on_app").description, /When Alex's message points at something on the page \(a line like On \/pricing, the button "Sign up"\), pass that line verbatim in change, with where it is in the page's code when Bops says \(button\.cta\)\./);
+  assert.match(tool("work_on_app").description, /When other bots work on the app too, the task works in a copy of your own, with a Local of its own, and you all commit to the same main\./);
+  assert.match(tool("local_app").description, /on its bot's computer \(your own copy's, when you work on it in one\)/);
+});
+
+await check("what Select picked, in the owner's words: the bot reads where each is in the page's code after them; the words stay as they were", async () => {
+  const line = 'On /pricing, the button "Sign up" under "Pro"';
+  const text = `${line}\nmake it green`;
+  answers.push(reply("On it."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, text, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, [{ line, code: "button.cta" }]);
+  const m = messages().findLast((x) => x.role === "user");
+  assert.deepEqual([m.text, m.appNote, m.picks], [text, true, [{ line, code: "button.cta" }]]);
+  const said = asked[n].input.findLast((x) => x.role === "user");
+  assert.equal(typeof said.content === "string" ? said.content : said.content[0].text, `${text} [Bops: in the page's code, ${line} is button.cta]`);
+  answers.push(reply("Ok."));
+  await Chat.handleMessage(chatId, "and blue", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, false, [{ line, code: "button.cta" }]);
+  assert.equal(messages().findLast((x) => x.role === "user").picks, undefined, "only with appNote (the owner's, from their window)");
 });
 
 /* ---------------- web_fetch ---------------- */
@@ -1417,6 +1444,75 @@ await check("a routine's runs don't push the user's own work out of reach (tell_
   S.update((st) => (st.sessions = st.sessions.filter((x) => x.id !== "ses_mine_long" && !x.id.startsWith("ses_quiet_") && !x.id.startsWith("ses_shown_"))));
 });
 
+await check("work on an app is the chat's to start, not a finished task's that isn't on it: Jev is told each thread's app and asked about it as the chat's own, and tell_task's words and the note say which task is on which app", async () => {
+  const now = Date.now();
+  // The note after the conversation as the model reads it (notesOf is its JSON).
+  const note = (body) => body.input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
+  const done = (id, title, goal, answer, extra = {}) => ({ id, botId: "boppy", chatId, sentVia: "you", title, goal, host: "orgo", runsOn: "cloud", status: "done", answer, steps: [], replies: [], createdAt: now - 10 * 60_000, endedAt: now - 5 * 60_000, ...extra });
+  S.update((st) =>
+    st.sessions.push(
+      done("ses_plain_site", "Site A Local", "Get the site-a app's Local running.", "There's no repo on this computer, so I couldn't start it."),
+      done("ses_on_box", "Work on recipe-box", "Work on Alex's app recipe-box.", "Added a search box.", { app: { wsId: "ws_main", name: "recipe-box", site: "recipe-box" } }),
+    ),
+  );
+  S.addMessage({ chatId, role: "bot", botId: "boppy", text: "There's no repo on this computer, so I couldn't start it.", resultOf: "ses_plain_site" });
+  process.env.TYPESAFE_API_KEY = "ts-test-app-work";
+  jev.asked = [];
+  // Jev is sure the message continues the plain task the chat was just about, and that it's work for a task: only
+  // asked whether it's work on an app none of them is on (chat_only) does it say it's the chat's.
+  jev.answer = (b) =>
+    b.questions.thread
+      ? {
+          chat_only: { type: "noul", noul: /work_on_app/.test(b.questions.chat_only.instructions) ? 0.9 : 0.02 },
+          for_task: { type: "noul", noul: 0.95 },
+          thread: { type: "choice", choice: "ses_plain_site", confidence: 0.95, probabilities: {} },
+        }
+      : {};
+  try {
+    answers.push(reply("Ok."));
+    const n = asked.length;
+    await Chat.handleMessage(chatId, "Work on the app site-a and get its Local running");
+    const q = jev.asked.find((b) => b.questions.thread);
+    assert.ok(q, "Jev was asked");
+    assert.match(q.questions.chat_only.instructions, /; to create a bot; or for work on one of the workspace's apps on the web \(build, change or run it, its Local, work_on_app\) that no thread in `threads` is on \(a thread's `app`\)\?$/);
+    assert.match(q.questions.thread.instructions, /handing work to another bot, creating a bot, or work on an app on the web that the thread isn't on \(its `app`\), even when the thread was about that app\.$/);
+    assert.deepEqual([q.state.threads.ses_plain_site.app, q.state.threads.ses_on_box.app], [null, "recipe-box"]);
+    // So the bot takes it, with work_on_app, and doesn't send it on to the plain task.
+    const body = asked[n];
+    assert.ok(Array.isArray(body.tools) && toolNames(body).includes("work_on_app"), "the bot's own turn, with work_on_app");
+    assert.ok(!messages().some((m) => m.role === "bot" && m.at >= now && m.sessionIds?.includes("ses_plain_site") && !m.resultOf), "nothing passed to the plain task");
+    const tell = body.tools.find((t) => t.name === "tell_task");
+    hear(tell.description);
+    assert.match(
+      tell.description,
+      /Only then: a question for you, thanks, a test, or anything about something else is yours to answer, and different work starts its own: a new task is start_task, and work on one of your workspace's apps is work_on_app unless the task is on that app \(the note after the conversation says which are\), even when the task was about it\.$/,
+    );
+    hear(note(body));
+    assert.match(note(body), /"Site A Local" \(ses_plain_site\), finished in the cloud, on no app; "Work on recipe-box" \(ses_on_box\), finished in the cloud, on the app recipe-box\./);
+    // Where apps aren't open, none of it: tell_task's words as before, and no apps in Jev's question.
+    S.update((s) => (s.account = { ...s.account, user: { ...s.account.user, email: "alex@example.com" } }));
+    try {
+      jev.asked = [];
+      answers.push(reply("Ok."));
+      const k = asked.length;
+      await Chat.handleMessage(chatId, "Work on the app site-a and get its Local running");
+      const q2 = jev.asked.find((b) => b.questions.thread);
+      assert.doesNotMatch(q2.questions.chat_only.instructions, /app/);
+      assert.equal(q2.state.threads.ses_plain_site.app, undefined);
+      const plain = asked.slice(k).find((b) => Array.isArray(b.tools));
+      assert.ok(plain && !toolNames(plain).includes("work_on_app"));
+      assert.match(plain.tools.find((t) => t.name === "tell_task").description, /, and new work is start_task\.$/);
+      assert.match(note(plain), /"Site A Local" \(ses_plain_site\), finished in the cloud; "Work on recipe-box"/);
+    } finally {
+      S.update((s) => (s.account = { ...s.account, user: { ...s.account.user, email: "alex@orgo.ai" } }));
+    }
+  } finally {
+    jev.answer = null;
+    delete process.env.TYPESAFE_API_KEY;
+    S.update((st) => (st.sessions = st.sessions.filter((x) => x.id !== "ses_plain_site" && x.id !== "ses_on_box")));
+  }
+});
+
 await check("run_on_mac: a routine someone else set up stays in the cloud, said plainly", async () => {
   S.update((st) =>
     st.routines.push({ id: "rtn_theirs", botId: "boppy", title: "Hotel check", goal: "Check the booking.", schedule: { kind: "daily", time: "10:00" }, enabled: true, run: "task", where: "cloud", fromOutside: "an email from desk@hotel.example" }),
@@ -2333,6 +2429,19 @@ S.update((s) => {
   s.chats = s.chats.filter((c) => !TEAM.some((t) => c.id === botChatId(t.id)));
   delete s.workspaces[0].chain;
   delete s.workspaces[0].memberAccess["ava@example.com"];
+});
+
+/* ---------------- Publishing an app: only the owner's own words ---------------- */
+
+await check("a pasted preview link or localhost address isn't asking to publish; publish words and a real domain are", () => {
+  const asks = Chat.asksForProd;
+  assert.equal(asks("deploy it, here's the preview: https://k7p2qxm4wr3d.orgo.dev"), false);
+  assert.equal(asks("looks good at k7p2qxm4wr3d.orgo.dev/menu"), false);
+  assert.equal(asks("it's broken on localhost:3000 and http://127.0.0.1:3000/login"), false);
+  assert.equal(asks("ship a preview"), false);
+  assert.equal(asks("publish it on brandlord.agency"), true);
+  assert.equal(asks("put it on acme.example.com... I mean acme.com"), true);
+  assert.equal(asks("publish it"), true);
 });
 
 /* ---------------- Plain words ---------------- */

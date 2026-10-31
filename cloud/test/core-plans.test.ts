@@ -655,7 +655,8 @@ test("after a number is given back, the plan's next one goes on the same agent a
   await sweep();
   assert.equal((await line(id))[0].status, "released");
   await notice({ userId: id, tier: "pro_bops", at: at(2000) });
-  const fresh = await until(async () => (await line(id)).find((x) => x.status === "ready"), "a new number");
+  // The number's row is written (ready) a moment before the plan puts it on its agent: wait for both.
+  const fresh = await until(async () => (await line(id)).find((x) => x.status === "ready" && x.agent_id), "a new number on an agent");
   assert.notEqual(fresh.number_id, old.number_id);
   assert.equal(fresh.agent_id, old.agent_id, "on the agent the old number left behind");
   const kept = async () => (await query<{ n: number }>("SELECT count(*)::int AS n FROM bops.cloud_pending WHERE user_id = $1 AND kind = 'agentphone'", [id])).rows[0].n;

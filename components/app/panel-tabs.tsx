@@ -49,7 +49,13 @@ export type PanelTab =
   /** Every app the bots made in a workspace, as tiles (made-apps.tsx). */
   | { id: string; kind: "made-apps"; ws: string }
   /** An app a workspace runs on the web, by its Ingot repo's name (hosted-apps.tsx): its address, history and deploys. */
-  | { id: string; kind: "hosted-app"; ws: string; name: string };
+  | { id: string; kind: "hosted-app"; ws: string; name: string }
+  /**
+   * An app's Local, live beside its bot's chat (preview-tab.tsx): its dev server on its computer, seen at
+   * http://localhost:<its port> on this Mac (`url`), in a session of its own (previewPartition). `bot`: the bot whose
+   * copy of the app it's of (lib/hosted-apps.ts copyBotOf; none: the app's own folder's). Never saved.
+   */
+  | { id: string; kind: "preview"; ws: string; name: string; site?: string; bot?: string; url: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
@@ -65,6 +71,7 @@ export const isReading = (t?: PanelTab) =>
     t.kind === "autopilot" ||
     t.kind === "made-app" ||
     t.kind === "hosted-app" ||
+    t.kind === "preview" ||
     t.kind === "made-apps");
 
 /**
@@ -78,6 +85,29 @@ export function memoryAgain(t: Extract<PanelTab, { kind: "memory" }>, { category
 
 /** Open a link as a tab on the right; null outside the app (links then open in the browser). */
 export const OpenLink = createContext<((url: string, title?: string) => void) | null>(null);
+
+/** What Open preview said when it couldn't show Local beside the chat: why, and whether it opened on the bot's screen instead. */
+export type PreviewOpened = { error?: string; screen?: true; said?: string };
+
+/**
+ * Open an app's Local beside its bot's chat (bops-app.tsx openPreview): its chat, its Local started when it isn't,
+ * and its Preview tab, or its bot's screen when this Mac can't reach it; `bot`: of that bot's copy of the app, in its
+ * chat (none: the app's own folder's, beside its own bot's). Null where there's no panel.
+ */
+export const OpenPreview = createContext<((ws: string, name: string, site?: string, bot?: string) => Promise<PreviewOpened>) | null>(null);
+
+/** A localhost link a bot gave in its chat, opened as its app's preview (else on its screen); null where there's no panel. */
+export const OpenBotLocal = createContext<((botId: string, url: string) => void) | null>(null);
+
+/**
+ * The session an app's preview loads in: its own, per Bops user, workspace, app, site and copy (`bot`: a bot's copy
+ * of the app), so its cookies, storage and service workers never mix with another app's, another site's of it or
+ * another copy's (each on its own localhost port, and cookies don't go by port), a web tab's, or the window's (whose
+ * cookie is on localhost too). The app's own site of its own folder keeps the name it always had, so a sign in there
+ * stays.
+ */
+export const previewPartition = (user: string | undefined, ws: string, app: string, site?: string, bot?: string) =>
+  `persist:bops-preview-${[user || "me", ws, app, ...(site && site !== app ? [site] : []), ...(bot ? [`by_${bot}`] : [])].map((x) => x.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40)).join("-")}`;
 
 /** Whether this is the Mac app (Electron): web pages open in webviews, and apps the bots made run in one of their own (made-apps.tsx). */
 export const electron = () => typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
@@ -152,7 +182,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
   }, [t.id]);
   const b = "botId" in t ? state.bots.find((x) => x.id === t.botId) : undefined;
   // An app on the web is named as its Ingot repo is.
-  const hosted = t.kind === "hosted-app" ? { id: `${t.ws}/${t.name}`, title: t.name } : undefined;
+  const hosted = t.kind === "hosted-app" || t.kind === "preview" ? { id: `${t.ws}/${t.name}`, title: t.name } : undefined;
   // A computer tab says when its bot is working, or when something there needs you. Your Mac's never for
   // the owner's work in a workspace shared with the user: that's the owner's Mac, not the viewer's.
   const working =
@@ -196,7 +226,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
     <div
       onClick={onPick}
       onAuxClick={(e) => e.button === 1 && closable && onClose()}
-      title={t.kind === "web" ? t.url : label}
+      title={t.kind === "web" ? t.url : t.kind === "preview" ? `${label}, ${t.url.replace(/^http:\/\//, "").replace(/\/$/, "")}` : label}
       // Clipped, so what's in a tab stays inside it while it opens up.
       className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-pointer items-center gap-1.5 overflow-hidden rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 transition-[background-color,box-shadow,color] duration-150 ease-out motion-reduce:transition-none [-webkit-app-region:no-drag] ${
         opening ? "motion-tab-in" : ""

@@ -219,6 +219,8 @@ async function answer(m) {
     else out(init);
   }
   const t = "t" + ++n;
+  // Its own /compact, as 2.1.x runs it headless: no turn of the model's, a compact_boundary, then a result with nothing in it.
+  if (text === "/compact") { out({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 41210 } }); out({ type: "result", subtype: "success", is_error: false, result: "", num_turns: 0, total_cost_usd: 0 }); return; }
   if (text.includes("HANG")) { say([{ type: "text", text: "Working on it." }]); await new Promise(() => {}); }
   if (text.includes("DIE") && !existsSync(join(FLAGS, "died"))) { writeFileSync(join(FLAGS, "died"), ""); say([{ type: "text", text: "Starting on it." }]); process.exit(1); }
   if (text.includes("LIMIT")) { out({ type: "result", subtype: "success", is_error: true, result: "Claude AI usage limit reached|1760032800", num_turns: 1, total_cost_usd: 0 }); return; }
@@ -683,6 +685,66 @@ await test("a process that died mid-turn is started again on the same session, a
   assert.ok(details(t1).includes("Starting on it."), "what it said before it died is kept");
 });
 
+/* ---------------- Compact ---------------- */
+
+await test("Compact asks its Claude Code to compact: its own /compact, alone, then the thread stands as it was, with a quiet line and nothing in the chat", async () => {
+  const before = structuredClone(thread(t1));
+  const results = () => S.getState().messages.filter((m) => m.resultOf === t1).length;
+  const had = results();
+  assert.equal(T.threadCompacts(before), true);
+  assert.equal(T.threadCompactBlocked(before), null);
+  const n = runs().length;
+  assert.deepEqual(await X.compactThread(t1), { ok: true });
+  assert.equal(T.threadCompactBlocked(thread(t1)), "Wait for it to finish.", "off while it runs");
+  assert.equal((await X.compactThread(t1)).ok, false, "and not asked twice");
+  const t = await ended(t1, "the compact to end");
+  assert.equal(t.status, before.status, t.error);
+  assert.equal(t.answer, before.answer, "its answer as it was");
+  assert.equal(t.replies.length, before.replies.length);
+  assert.equal(results(), had, "nothing in the chat");
+  assert.equal(runs().length, n + 1);
+  const r = runs().at(-1);
+  assert.equal(r.args[r.args.indexOf("--resume") + 1], sid1, "on its own session");
+  assert.deepEqual(heardBy(r.pid).filter((h) => h.got).map((h) => h.got), ["/compact"], "its own command, alone: no briefing, no note");
+  assert.deepEqual(t.steps.at(-1), { at: t.steps.at(-1).at, tool: "compacted", detail: "Compacted" });
+  assert.equal(t.compact, undefined);
+  assert.equal(T.threadCompactBlocked(t), "Nothing new to compact.");
+  await until(() => heardBy(r.pid).some((h) => "exit" in h), "its process to exit");
+});
+
+await test("a reply sent as it compacts goes in after the compact, in the same run, and its answer is the thread's", async () => {
+  X.replyToSession(t1, "Now update the docs");
+  await ended(t1);
+  assert.equal(T.threadCompactBlocked(thread(t1)), null, "something new since");
+  const n = runs().length;
+  assert.deepEqual(await X.compactThread(t1), { ok: true });
+  X.replyToSession(t1, "Then tidy the readme");
+  const t = await ended(t1);
+  assert.equal(t.status, "done", t.error);
+  assert.equal(runs().length, n + 1, "one process for both");
+  assert.deepEqual(heardBy(runs().at(-1).pid).filter((h) => h.got).map((h) => h.got.split("\n")[0]), ["/compact", "Then tidy the readme"]);
+  assert.equal(t.answer, "Done: Then tidy the readme");
+  assert.ok(t.steps.some((x) => x.tool === "compacted"));
+});
+
+await test("a Claude Code that doesn't take /compact as its compact (no compact_boundary) says it couldn't, and nothing else changes", async () => {
+  // As if the command went to the model as words: an answer, and no compact_boundary.
+  const was = C.claudeDriver.parse;
+  C.claudeDriver.parse = (e) => was(e).filter((x) => x.type !== "compacted");
+  X.replyToSession(t1, "One more check");
+  await ended(t1);
+  try {
+    assert.deepEqual(await X.compactThread(t1), { ok: true });
+    const t = await ended(t1);
+    assert.equal(t.status, "done", t.error);
+    assert.match(t.steps.at(-1).detail, /^Couldn't compact: Claude Code didn't take it as its compact$/);
+    assert.equal(t.steps.at(-1).tool, "note");
+    assert.equal(T.threadCompactBlocked(t), null, "it can be tried again");
+  } finally {
+    C.claudeDriver.parse = was;
+  }
+});
+
 /* ---------------- Its tools ---------------- */
 
 await test("an MCP server that didn't start is said in the thread", async () => {
@@ -919,6 +981,8 @@ await test("a Codex brain runs its thread as a codex exec per message, on the us
   const c = settings(r.args);
   assert.match(c.developer_instructions, /^You are Boppy, the .* bot in Bops\./);
   assert.match(c.developer_instructions, /You run as Codex on this computer, for Bops\..*You have no helpers here/);
+  // Asked to call one of the chat's tools (work_on_app), it says to ask in the chat, not only that it isn't there.
+  assert.match(c.developer_instructions, / The chat's tools \(work_on_app, start_task, schedule and the rest\) aren't yours: if you're asked to call one, do what you can of the ask here, and say plainly that \S+ can ask for the rest in the chat\. /);
   assert.deepEqual(Object.keys(c).sort(), ["developer_instructions", "mcp_servers.browser", "mcp_servers.screen", "model", "model_reasoning_effort", "openai_base_url"]);
   const screen = c["mcp_servers.screen"];
   assert.equal(screen.command, "/opt/bops/venv/bin/python");

@@ -668,9 +668,25 @@ export type SharedApp = {
   /** Its computer went: it needs a new home (a deploy gives it one). */
   lost?: true;
   head?: { id: string; message: string; at: number } | null;
-  sites?: { name: string; url: string | null; serving: string | null; live: { id: string; state: string | null; when: number | null } | null; domains?: { domain: string; status: string }[] }[];
+  /**
+   * `url`: Published's address (none: no domain yet). Its Preview, where members deploy, from an owner's Bops that sends
+   * it: its link, newest deploy and what it serves, whether its link asks for a password, and the password at Write only.
+   */
+  sites?: {
+    name: string;
+    url: string | null;
+    preview?: string | null;
+    previewLive?: { id: string; state: string | null; when: number | null } | null;
+    previewServing?: string | null;
+    previewProtected?: true;
+    previewPassword?: string;
+    serving: string | null;
+    live: { id: string; state: string | null; when: number | null } | null;
+    domains?: { domain: string; status: string }[];
+  }[];
   commits?: { id: string; message: string; author: string; at: number; changes: { added: number; modified: number; deleted: number } }[];
-  deploys?: { id: string; state: string; at: string | null; rollback: boolean; when: number | null; live: boolean; canRollback: boolean; site: string }[];
+  /** `env`: where it went (none: from an owner's Bops before Preview, Published's). Members go back on the Preview only. */
+  deploys?: { id: string; state: string; at: string | null; rollback: boolean; when: number | null; live: boolean; canRollback: boolean; site: string; env?: "preview" | "prod" }[];
   /** Each site's settings: Write only. */
   settings?: Record<string, { port: number | null; install: string | null; build: string | null; start: string | null; health?: string }>;
   acts?: { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; ok: boolean; said?: string; at: number }[];
@@ -702,12 +718,15 @@ export const MESSAGES_PER_CHAT = 200;
 /**
  * What a member with Write does in the owner's workspace (POST /v1/ws/<projectId>/act, cloud/members.ts),
  * from their own Bops: say something in a chat (a bot's 1:1 chat, or a group with every bot at Write),
- * reply in a thread, answer an ask (Allow once, Always allow, Deny with a note), stop threads, or say
- * there's nothing to add. Ids are the owner's, as the member's copy has them.
+ * reply in a thread, answer an ask (Allow once, Always allow, Deny with a note), stop threads, say
+ * there's nothing to add, or Compact a chat or a thread (as saying something there takes). Ids are the
+ * owner's, as the member's copy has them.
  */
 export type MemberAct =
   | { act: "chat"; chatId: string; text: string; replyTo?: string }
   | { act: "reply"; sessionId: string; text: string }
+  | { act: "compact"; chatId: string }
+  | { act: "compact"; sessionId: string }
   | { act: "answer"; askId: string; reply: "once" | "always" | "reject"; message?: string }
   | { act: "stop"; sessionIds: string[] }
   | { act: "dismiss"; sessionId: string }

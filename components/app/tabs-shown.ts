@@ -35,6 +35,8 @@ export function tabsShown(open: PanelTab[], state: AppState, o: { chatBotId: str
       // The Apps home is a workspace's, and an app's tab goes with the app.
       .filter((t) => t.kind !== "made-apps" || (o.apps && t.ws === o.ws))
       .filter((t) => t.kind !== "hosted-app" || (o.apps && t.ws === o.ws))
+      // An app's preview is its workspace's too, and never a shared workspace's (its Local is the owner's).
+      .filter((t) => t.kind !== "preview" || (o.apps && t.ws === o.ws && !state.shared))
       .filter((t) => t.kind !== "made-app" || (o.apps && !state.shared && !!state.madeApps?.some((a) => a.id === t.appId)))
   );
 }

@@ -4,7 +4,9 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { deviceIdOf } from "@/cloud/device";
 import { MAC_WORDS, needsNoComputer, routineOnMac, workBot, type Bot, type Routine, type RunnerState } from "@/lib/types";
+import { appVersion } from "./app-version";
 import { sleptSince } from "./awake";
+import { olderVersion } from "./orgo";
 import { onRunner } from "./persist";
 import { getState, pullState, statePulledAt, update } from "./store";
 import { identityHere, identityVmId, whoAmI } from "./vm-identity";
@@ -457,6 +459,19 @@ export function runnerUpFor(device: string | undefined, botId: string): string |
   const key = id ? runnerKey(id) : undefined;
   if (!id || !key || getState().runners?.[key]?.status !== "running") return null;
   return computerOf({ botId })?.toLowerCase() === id ? id : null;
+}
+
+/**
+ * Whether computer `id`'s runner runs Bops release `since` or a later one (this one's own version when this one is older
+ * still, as a build in development is, so it never holds itself back): what's new in `since` is handed to it only then.
+ * One being upgraded runs the one it had till that's done. False when its version can't be told.
+ */
+export function runnerSince(id: string, since: string): boolean {
+  const here = appVersion()?.replace(/^v/i, "");
+  const floor = here && /^\d+\.\d+\.\d+$/.test(here) && olderVersion(here, since) ? here : since;
+  const key = runnerKey(id);
+  const v = key ? getState().runners?.[key]?.version?.replace(/^v/i, "") : undefined;
+  return !!v && /^\d+\.\d+\.\d+$/.test(v) && !olderVersion(v, floor);
 }
 
 /**

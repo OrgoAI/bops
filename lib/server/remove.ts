@@ -17,6 +17,7 @@ import { routinesRemovedInWorkspace } from "./routine-sync";
 import { forgetBotSettings } from "./bot-settings";
 import { forgetBotSite } from "./bot-groups";
 import { brainsOf, removeBrain } from "./brains";
+import { refold } from "./chat-summary";
 
 /**
  * What a delete leaves behind on this Mac (Settings → Your data, lib/privacy.ts), once its messages, threads or
@@ -130,6 +131,8 @@ export function removeMessages(ids: readonly string[], { forGood = false, labelF
     gone = state.messages.filter((m) => want.has(m.id));
     state.messages = state.messages.filter((m) => !want.has(m.id));
   });
+  // Out of their chat's summary too (chat-summary.ts): it's written again from what's left.
+  refold(gone);
   const { entry, between } = leaveBehind("message", { messages: gone }, forGood, labelFor);
   return { count: gone.length, restore: entry, between };
 }
@@ -209,6 +212,7 @@ export function deleteChats(choice: ClearChoice, { forGood = false, now = Date.n
     state.messages = kept;
     for (const s of going) delete state.screens?.[`${s.botId}:${s.display}`];
   });
+  refold(gone);
   const { entry } = leaveBehind("many", { messages: gone, threads: going.map((s) => ({ session: s, stripped: stripped.get(s.id) ?? [] })) }, forGood, () => clearLabel(choice));
   return { messages: gone.length, threads: going.length, restore: entry };
 }
@@ -263,6 +267,7 @@ export function deleteThreads(sessionIds: readonly string[], { forGood = false }
     state.messages = kept;
     for (const s of going) delete state.screens?.[`${s.botId}:${s.display}`];
   });
+  refold([...gone.values()].flat());
   // For good, many at once: what they left on this Mac goes in one go.
   if (forGood) dropLeft([...gone.values()].flat(), [...ids]);
   else for (const s of going) leaveBehind("thread", { messages: gone.get(s.id)!, session: s, stripped: stripped.get(s.id)! }, false);
@@ -290,8 +295,8 @@ export function deleteGroupChat(chatId: string) {
  * later gets its id while they're kept (bots.ts freeBotId). Its channels go too (channels.ts removeLink:
  * its Telegram or Discord bot stops listening and its token leaves the Keychain; a Slack link leaves Bops
  * Cloud), as they go from Orgo's map with it. The apps it made stay, under its workspace's main bot (their
- * record in Orgo too: made-apps-sync.ts appsToMainBot), as the delete's question says. The main bot can't
- * be deleted.
+ * record in Orgo too: made-apps-sync.ts appsToMainBot), as the delete's question says. Of the apps on the web it
+ * works on (hosted-apps.ts appsBotGone), its Locals go and its working folder stays. The main bot can't be deleted.
  */
 export async function deleteBot(botId: string, withWorkspace = false) {
   const b = bot(botId);
@@ -299,6 +304,8 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   if (b.isMain && !withWorkspace) throw new Error(`${b.name} runs the team and can't be deleted`);
   for (const s of getState().sessions.filter((x) => x.botId === botId && live(x))) stopSession(s.id, `Stopped: ${b.name} was deleted`);
   for (const w of getState().watches?.filter((x) => x.botId === botId) ?? []) await stopWatch(w.id);
+  // The apps it works on, on a computer that stays: its Locals there forgotten (its folder kept, with any work in it), the app left to the others.
+  if (!withWorkspace) await import("./hosted-apps").then(({ appsBotGone }) => appsBotGone(botId)).catch((e: Error) => console.warn(`[remove] ${b.name}'s apps: ${e.message}`));
   // Its secret on the main bot's computer, if it shared that one, goes too.
   await dropGuestKey(botId);
   // On the computer it shares, its own folder (its agents' wrappers, gates, and its OpenCode threads' words) goes

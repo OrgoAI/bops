@@ -182,6 +182,18 @@ export function siteOf(state: { workspaces?: { id: string; botSites?: Record<str
   return x && typeof x.app === "string" && typeof x.site === "string" ? x : undefined;
 }
 
+/**
+ * The bot of workspace `ws` whose site (siteOf) is site `site` of app `app` (the app's own named as the app), if any.
+ * A site no bot has is its app's own bot's (its hosting record's), which the server's siteBot and the Preview tab
+ * (bops-app.tsx: Fix it, Select and Draw ask there) fall back to.
+ */
+export function siteBotOf<B extends Pick<Bot, "id" | "workspaceId">>(state: { bots: B[]; workspaces?: { id: string; botSites?: Record<string, BotSite> }[] }, ws: string, app: string, site: string): B | undefined {
+  return state.bots.find((b) => {
+    const y = workspaceOf(b) === ws ? siteOf(state, b) : undefined;
+    return y?.app === app && y.site === site;
+  });
+}
+
 /** The nine voices calls speak in (OpenAI realtime), the same lib/server/call.ts picks from by name. */
 export const CALL_VOICES = ["cedar", "ash", "echo", "ballad", "verse", "marin", "coral", "shimmer", "sage"] as const;
 export type CallVoice = (typeof CALL_VOICES)[number];
@@ -611,6 +623,30 @@ export function threadRunner(s: Pick<Session, "brainRun" | "onBopsAgent" | "agen
 }
 
 /**
+ * Whether a thread's brain can be asked to compact what it has so far (Compact: lib/server/sessions.ts compactThread),
+ * once it ran: Claude Code (its own /compact), and Bops agent on the Responses API's computer tool (a compaction of its
+ * response chain). Not Codex or OpenCode as Bops runs them (a `codex exec` or `opencode run` for each message, and
+ * neither compacts), nor an Agents API session (OpenAI compacts it itself, and takes no request to). Each compacts by
+ * itself too, as it always did.
+ */
+export function threadCompacts(s: Pick<Session, "brainRun" | "onBopsAgent" | "agentSessionId" | "responseId" | "runsOn">): boolean {
+  const r = threadRunner(s);
+  if (r === "claude") return BRAINS_ON && s.runsOn !== "mac";
+  return r === "agent" && !!s.responseId && !s.agentSessionId && s.runsOn !== "mac";
+}
+
+/** What Compact on a thread waits for, or null when it can go now: not while it runs, and not again with nothing said since the last one. */
+export function threadCompactBlocked(s: Session): string | null {
+  if (live(s) || s.compact) return "Wait for it to finish.";
+  const last = s.steps.findLast((x) => x.tool === COMPACTED);
+  if (last && !s.replies.some((r) => r.at > last.at)) return "Nothing new to compact.";
+  return null;
+}
+
+/** The step a thread's Compact leaves once its brain compacted (sessions.ts run): a quiet line in the thread. */
+export const COMPACTED = "compacted";
+
+/**
  * Which of a bot's tasks its brain runs (sessions.ts run: a task on the user's Mac always runs on Bops agent):
  * all of them, those in the cloud when it picks per task and this Mac can take some ("some"), or none, when
  * its tasks all run on this Mac (bots in this Mac's browsers, or a bot set to work on the user's Mac).
@@ -663,6 +699,32 @@ export type Chat = {
   asking?: Record<BotId, BotId>;
   /** The workspace it belongs to (a bot's own chat follows its bot). Unset means the first one. */
   workspaceId?: string;
+  /** What its bots no longer read whole, summed up (lib/server/chat-summary.ts). Unset: nothing yet. */
+  summary?: ChatSummary;
+};
+
+/**
+ * A chat's summary of the messages its bots no longer read whole (lib/server/chat-summary.ts): the conversation so
+ * far, which a bot reads before the chat's latest messages. Its messages fall out of what the bot reads a few at a time
+ * (chat.ts history) and are folded in as they do; Compact folds in every one up to then, and the bot reads the chat
+ * afresh from after them (`fresh`). A delete of one it holds writes it again from what's left (`rebuild`).
+ */
+export type ChatSummary = {
+  /** The conversation so far, in plain sentences. "" while it's written again (`rebuild`). */
+  text: string;
+  /** When the newest message in it was said (Message.at): it holds the chat's messages up to then. */
+  through: number;
+  /**
+   * When the oldest message it was written from was said, where it left older ones out (written from a long chat's last
+   * messages): a delete of one before then (Keep chats' sweep), or one put back, doesn't touch it. None: from the chat's start.
+   */
+  since?: number;
+  /** Set by Compact: when the newest message it folded in was said. The bot reads the chat from after it. */
+  fresh?: number;
+  /** A message it held was deleted: its text is gone, and it's written again from what's left up to `through`. */
+  rebuild?: true;
+  /** When it was last written. */
+  at: number;
 };
 
 export type Message = {
@@ -687,6 +749,11 @@ export type Message = {
   sessionIds?: string[];
   /** Set on a thread's result: a newer result from the same thread replaces it in the chat (the thread keeps the history). */
   resultOf?: string;
+  /**
+   * Set on the line Compact leaves in a chat (lib/server/chat-summary.ts compactChat): its bots read it afresh from
+   * here, after the chat's summary (Chat.summary), which pressing the line shows. `member` says who pressed it, when it wasn't the owner.
+   */
+  compacted?: true;
   /** Set on the note a voice call leaves in the chat: how long it lasted, and the number it came from if it was a phone call. */
   call?: { seconds: number; phone?: string };
   /** The user sent this by text message to the bot's phone number, or in Slack, Telegram or Discord (the reply goes back the same way). */
@@ -773,6 +840,21 @@ export type Message = {
    * app: …"), so a shared workspace never shows it to anyone but its owner (cloud/ws-slice.ts sharedMessage).
    */
   appNote?: true;
+  /**
+   * Set on the owner's message with what the Preview tab's Select put in it (lib/app-preview.ts picksOf): each line,
+   * in their words, and where that is in the page's code (button.cta), which the bot reads after the message
+   * (chat.ts history) and the window never shows.
+   */
+  picks?: { line: string; code: string }[];
+  /**
+   * Set on Bops' card about what a task on an app on the web changed (lib/server/hosted-apps.ts changeCardAfterTask),
+   * posted as the bot with appNote: the workspace and the app, the changeset it was at before (`from`; null when it had
+   * none yet) and the bot's newest (`to`), that one's first line, how many changesets that is in all and whose they
+   * are, and `restored` once the app was put back as it was at `from` (Restore to before this change). The owner's
+   * alone: a shared workspace never gets it (cloud/ws-slice.ts keeps only the fields it names; shared-core.ts
+   * viewState drops it too), and an older Bops shows the text, which says the same.
+   */
+  appChange?: { ws: string; app: string; from: string | null; to: string; title: string; count: number; authors: string[]; restored?: true };
   /**
    * Bops' own words in the bot's voice (a line it fills in: why a thread stopped, where to run one, a plan's
    * limit), never the model's: a shared workspace reads it in the owner's voice (lib/server/shared-core.ts viewState).
@@ -1042,15 +1124,20 @@ export type Session = {
   procedure?: string;
   /**
    * The app on the web it works on (work_on_app, lib/server/hosted-apps.ts), by workspace and Ingot repo
-   * name: as it starts, the app's working folder is made ready on its computer (/workspace/apps/<name>),
-   * and a brain's thread gets Ingot's MCP tools.
+   * name: as it starts, its bot's working folder of the app is made ready on its computer (/workspace/apps/<name>, or
+   * a copy of the bot's own when it isn't the app's own bot: /workspace/apps/<name>.<copy>), and a brain's thread gets
+   * Ingot's MCP tools.
    * `deployAfter`: the user asked for it to go live too (work_on_app's deploy), so once the task ends done
    * with a new commit, Bops deploys the app itself and says how it went in the chat (hosted-apps.ts
    * deployAfterTask). It's taken off as that deploy goes, so one ask deploys it once at most. `from`: the
    * app's newest commit as the task first started with that ask (null: nothing committed yet), or the one
    * Bops then deployed, which a new commit is told from; unset when Ingot couldn't say.
+   * `site`: the site of it the task works on (its bot's Works on when that's this app's, else the app's own,
+   * named as the app): the Local it runs and checks. `startHead`: the app's newest commit as the task first ran
+   * (null: nothing committed yet), what its changes are told from (hosted-apps.ts changeCardAfterTask); unset when Ingot couldn't say. Both unset on
+   * a task from Bops 0.0.34 or before.
    */
-  app?: { wsId: string; name: string; deployAfter?: true; from?: string | null };
+  app?: { wsId: string; name: string; deployAfter?: true; from?: string | null; site?: string; startHead?: string | null };
   host: Host;
   status: SessionStatus;
   /** X display number of the screen this session holds (99-102), while it holds one. */
@@ -1094,6 +1181,12 @@ export type Session = {
    * answer). The replies that turn took are marked not delivered again, so they go in when it carries on.
    */
   brainRun?: { brainId: string; agentId?: string; kind: CliKind; computerId: string; cli: string; started?: true; waits?: "sign_in" | "limit" | "model" | "down" | "vault"; said?: string };
+  /**
+   * Compact was pressed on it (lib/server/sessions.ts compactThread): it's queued to run once more, its brain asked
+   * first thing to compact what it has so far (threadCompacts), then the replies sent meanwhile, if any. `by`: a member
+   * with Write who pressed it. `was`: how it stood before, which a run that only compacted puts back.
+   */
+  compact?: { at: number; by?: MemberSaid; was: { status: Session["status"]; error?: string; endedAt?: number } };
   /**
    * The agent the thread runs on (BotAgent.id in its bot's profile), its kind and model, given as it began
    * (lib/agents.ts pickAgent) and fixed from then: follow ups stay on it. Each start checks it against the bot's

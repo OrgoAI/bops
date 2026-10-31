@@ -4,25 +4,55 @@
  * signs in with their Orgo key. A bot works on it on its Bops computer, in a working folder at
  * /workspace/apps/<name> made with `ingot clone`, through its brain (Claude Code, Codex, or Bops agent),
  * committing with `ingot commit` or the Ingot MCP tools; two people committing at once can't overwrite
- * each other (a commit names its base; a stale one is refused and `ingot pull` merges). Deploying builds
- * one changeset on that computer with orgo-web's deploy runner, at a public URL (<name>.orgo.dev).
+ * each other (a commit names its base; a stale one is refused and `ingot pull` merges). Several bots of the
+ * workspace on its computer can work on it at once, each in a copy of its own (/workspace/apps/<name>.<copy>,
+ * appCoders), with a Local of its own for each site; all commit to the same main. Deploying builds
+ * one changeset on that computer with orgo-web's deploy runner: first on its Preview, a fixed link of its own
+ * (https://<12 letters and digits>.orgo.dev), then, published, on its own domain only.
  * Imported by the window and the Mac server.
  */
+
+import { siteOf, workBot, workspaceOf, type Bot, type BotSite } from "./types";
 
 export type DeployState = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "superseded";
 
 /**
  * Where an app is worked on and runs, kept on its workspace (Workspace.hostedApps, by repo name): the bot
  * whose computer holds its working folder and runs its site, and once it was first deployed (or its
- * variables were first saved), the deploy project there and its public URL.
+ * variables were first saved), its Published deploy project there. `url`: what Bops 0.0.32 and before kept
+ * of its address; never written now (Published lives on its domains only), kept as it is when there.
  */
 export type AppHosting = {
   botId: string;
   computerId: string;
   projectId?: string;
   url?: string;
+  /**
+   * Its own site's Preview link's label (https://<preview>.orgo.dev), a copy: Orgo keeps the link itself, found
+   * there by its seal (lib/server/app-labels.ts), so this is read only when Orgo has none (its computer gone),
+   * or for a name the owner chose ahead (which has no seal).
+   */
+  preview?: string;
   /** When this Mac last queued a deploy of it (a bot's, or the window's), so a window showing it reads it again. */
   queuedAt?: number;
+  /**
+   * Its own site's Local's port on its computer as Bops last read it (LocalSite.port: http://localhost:<it>), a
+   * hint for a bot's prompt (hostedAppsLine: no computer is asked for one) and for other Macs. Bops 0.0.34 and
+   * before neither read nor keep it.
+   */
+  localPort?: number;
+  /**
+   * Its own site's Local addresses Bops already told the owner to add to Google sign in (http://localhost:<port>),
+   * each told once, in its bot's chat, the first time its Local runs there and the app signs in.
+   */
+  toldGoogle?: string[];
+  /** The owner turned its own site's Preview password off (PreviewSite.protected): Bops sets none for it until they turn it on. */
+  passwordOff?: true;
+  /**
+   * When Bops last set its own site's Preview password, and the Preview deploy live then (null: none yet): one that
+   * goes live after it gets a new password. Orgo keeps the password itself.
+   */
+  passwordSet?: PasswordSet;
   /**
    * More sites of the same repo on the same computer (one repo holding a few apps, each started its own
    * way), in the order they were added. The app's own site is the one above, named as the app; each of
@@ -40,68 +70,182 @@ export type AppHosting = {
    * up): they serve as they were, with their domains, until Remove app takes them down with the rest.
    */
   behind?: AppProjectBehind[];
+  /**
+   * The other bots that work on it on its computer, by id, in the order they first did: each in a copy of its own
+   * there, /workspace/apps/<name>.<copy> (lib/server/hosted-apps.ts copyFor), with Locals of its own, never the
+   * app's own folder, which stays its own bot's (`botId`, unless that bot is listed here: one that had a copy keeps
+   * it when the app passes to it). None while only its own bot works on it. They stay on the computer it leaves.
+   */
+  copies?: string[];
 };
 
 /** A site's deploy project left on a computer the app moved off (AppHosting.behind). */
 export type AppProjectBehind = { site: string; computerId: string; projectId: string };
 
-/** One more site of an app (AppHosting.sites): its name, and once it was made, its deploy project and public URL. */
-export type AppSiteHosting = { name: string; projectId?: string; url?: string };
+/**
+ * One more site of an app (AppHosting.sites): its name, and once it was made, its Published deploy project, and its
+ * Preview link's label (a copy, as AppHosting.preview); its Local's port and the Local addresses told for Google,
+ * as AppHosting.localPort and toldGoogle say of the app's own; its Preview password's, as passwordOff and passwordSet do.
+ */
+export type AppSiteHosting = { name: string; projectId?: string; url?: string; preview?: string; localPort?: number; toldGoogle?: string[]; passwordOff?: true; passwordSet?: PasswordSet };
+
+/** When Bops set a Preview's password (ms), and the id of the Preview deploy live then (null: none yet). */
+export type PasswordSet = { at: number; live: string | null };
 
 /**
- * How many sites an app can have: each is two deploy projects on its computer (Prod's and Staging's), and
+ * How many sites an app can have: each is two deploy projects on its computer (Published's and Preview's), and
  * orgo-web takes 10 a computer (PROJECTS_PER_COMPUTER), which other apps on that computer count toward too
  * (Orgo says so then).
  */
 export const MAX_SITES = 5;
 
-/* ---------------- Its environments: Local, Staging and Prod, all on its computer ---------------- */
+/* ---------------- Its environments: Local, Preview and Published, all on its computer ---------------- */
 
 /**
- * Where an app runs, all three on its bot's own computer (the one AppHosting names), like Vercel's
- * Development, Preview and Production:
- * - "local": its working folder (/workspace/apps/<name>) run as a dev server there, on a port of its own,
- *   started and stopped from Your Apps or by the bot (vm/bin/bops-local). Not public: it opens on the
- *   computer's screen, or from this Mac over the tailnet. Its variables are Staging's, and its own on top.
- * - "staging": a second deploy project of each site on the computer (stagingName: <site>-staging, so its
- *   address is <site>-staging.orgo.dev), with its own variables and settings. Deploy goes here by default.
- * - "prod": each site's own deploy project, as every app had before, and its real domains (Cloudflare
- *   first). Promote puts on it the changeset Staging serves.
- * Nothing of Local or Staging is kept in Bops' state: Staging's projects are found on the computer by their
- * names (so an older Bops, which knows only AppHosting, never loses or changes them), Local's dev servers
- * are written on the computer itself.
+ * Where an app runs, all three on its bot's own computer (the one AppHosting names), as Lovable has them:
+ * - "local": its working folder (/workspace/apps/<name>) run as a dev server there with hot reload, started
+ *   and stopped from Your Apps or by the bot (vm/bin/bops-local); each other bot that works on it has its own
+ *   copy's (LocalAnswer.copies), on ports of their own. Not public: each site has a port of its own
+ *   on its computer (3000, 3001 and on, never another site's there), and its address is http://localhost:<that
+ *   port> everywhere: on the computer's screens, and beside the bot's chat, this Mac forwarding that same port
+ *   to the computer over the tailnet (lib/server/local-preview.ts). AUTH_URL is that address there.
+ * - "preview": a deploy project of each site on the computer, named with a random 12 character label, at
+ *   https://<label>.orgo.dev: one link per site, chosen once and never changed, so Google sign in is set up for
+ *   it once. Deploy goes here. Found on Orgo by the label's seal (lib/server/app-labels.ts).
+ * - "prod" (Published): each site's own deploy project (AppHosting.projectId), served only on its domains
+ *   (Cloudflare first), never on an orgo.dev name Bops shows. Publish puts on it the changeset its Preview serves.
+ * Of Local, Bops' state keeps only hints (each site's port, and the addresses told for Google sign in); of
+ * Preview, only a copy of its label.
  */
-export type AppEnv = "local" | "staging" | "prod";
-export const APP_ENVS: readonly AppEnv[] = ["local", "staging", "prod"];
+export type AppEnv = "local" | "preview" | "prod";
+export const APP_ENVS: readonly AppEnv[] = ["local", "preview", "prod"];
 export const isAppEnv = (v: unknown): v is AppEnv => typeof v === "string" && (APP_ENVS as readonly string[]).includes(v);
+/** One of them; "staging" (what the builds before this one said) is read as "preview" for one release. */
+export const appEnvOf = (v: unknown): AppEnv | undefined => (v === "staging" ? "preview" : isAppEnv(v) ? v : undefined);
 
-/** A site's Staging as Orgo says it: its deploy project on the app's computer (null: none yet), its address, what it serves, its newest deploy. */
-export type StagingSite = { projectId: string | null; url: string | null; serving: string | null; live: HostedApp["live"] };
+/**
+ * A site's Preview as Orgo says it: its deploy project on the app's computer (null: none yet), its link (from
+ * its public URL, so it shows before its first deploy; null: none yet), its label, what it serves, its newest
+ * deploy, and `off` when Orgo turned its link off. `protected`: its link asks for a password (absent: Orgo can't
+ * tell); `passwordAt`: when Bops last set that password, so a window showing it reads it again (PreviewPassword).
+ */
+export type PreviewSite = { projectId: string | null; url: string | null; label: string | null; serving: string | null; live: HostedApp["live"]; off?: true; protected?: boolean; passwordAt?: number };
+
+/**
+ * A site's Preview password (GET /api/hosted-apps/[name]/password?ws=&site=, the Bops window's alone): its link, whether
+ * it asks for one (null: Orgo can't tell, or there's no link yet), the password, the cookie that opens the link
+ * without asking (PASS_COOKIE), which only Bops' own preview view gets (desktop/preview-frames.cjs), and when Bops set
+ * it (`at`, as PreviewSite.passwordAt: a window holding an older one reads it again). The password can be null while
+ * it asks for one: Orgo kept only the cookie's check of it (a new one shows), or the user's key can't read it (`why`,
+ * in words). POST { ws, site?,
+ * action: "new" | "on" | "off" } answers it again: a new password (the link stays; people using the old one need the
+ * new one), or the password on or off for that site (the owner's choice, kept). A new one comes with each Preview
+ * deploy that goes live, too. Never in a bot's chat, and sent to none of the people the workspace is shared with
+ * but those the owner gave Your Apps at Write (AppForMembers.sites[].previewPassword).
+ */
+export type PreviewPassword = { url: string | null; on: boolean | null; password: string | null; cookie: { name: string; value: string } | null; at?: number; why?: string };
+
+/** The cookie orgo-web gives a browser that typed a Preview's password. */
+export const PASS_COOKIE = "__Host-orgo_pass";
+
+/** A deploy project of the app's repo on its computer that's no site's Published or Preview (an older Bops's, a test's): listed, never deployed to. */
+export type LeftOver = { id: string; name: string; port: number | null; url: string | null };
 
 /**
  * A site's Local as its computer said it last: its dev server's state (starting: its port doesn't answer
- * yet; failed: it stopped by itself, `error` its last words), port, the command it runs, when it started,
- * and `url`, where this Mac opens it (over the tailnet; null: it opens on its computer's screen). `env`:
- * the names of its own variables (on top of Staging's, which it reads unless set here).
+ * yet; failed: it stopped by itself, `error` its last words: the last lines of its log, up to LOG_LINES, one a
+ * line, the last one last: localWords says it in one), its port, its dev port, the command it runs,
+ * when it started. `port` is its address, http://localhost:<port>, the same on its computer and on this Mac
+ * (which forwards that same port there): one a site, never another Local's on that computer, assigned there
+ * by bops-local. `devPort` is the one it's meant to have, the same once it was assigned (a Local an older
+ * bops-local started elsewhere runs on `port` until it starts again), from its second line (BOPS_LOCAL_MORE's
+ * dev=; 3000 from a bops-local that doesn't say it). `env`: the names of its own variables
+ * (on top of its Preview's, which it reads unless set here). From bops-local's second line (BOPS_LOCAL_MORE),
+ * each there only when said: `lastGood`, the changeset its folder was last seen good at (its / answered below
+ * 500, its folder clean) and when; `fixes`, Fix it presses since; `auth`, it signs in (next-auth, @auth/* or
+ * better-auth in its package.json); `mismatch`, a port its dev server listens on instead of its own.
  */
 export type LocalSite = {
   state: "running" | "starting" | "stopped" | "failed";
   port: number | null;
+  devPort: number;
   command: string | null;
   since: number | null;
   error: string | null;
-  url: string | null;
   env: string[];
+  lastGood?: { at: string; when: number };
+  fixes?: number;
+  auth?: boolean;
+  mismatch?: number;
 };
 
 /**
- * GET /api/hosted-apps/[name]/local?ws= : every site's Local, by site name (the app's own named as the app).
+ * GET /api/hosted-apps/[name]/local?ws= : every site's Local, by site name (the app's own named as the app), of the
+ * app's own working folder (its own bot's, `bot`, when that bot is still here); and each other bot's that works on it
+ * (appCoders), of its own copy, in `copies` (none when only its own bot does).
  * `asleep`: its computer sleeps, so none runs (nothing was asked of it, so it stays asleep); `why`: it
- * couldn't be asked (no computer, Orgo not answering). POST …/local { ws, action: "start" | "stop" | "open",
- * site?, command? } answers it again: start (its command, or the one it had, or the one its folder says),
- * stop, or open it on its computer's screen (`opened`).
+ * couldn't be asked (no computer, Orgo not answering). POST …/local { ws, action: "start" | "stop" | "open"
+ * | "preview" | "unpreview" | "fix", site?, bot?, command?, port?, start? } answers it again: start (its command, or
+ * the one it had, or the one its folder says; `port` a port of its own, or "auto" for the lowest free one,
+ * none for the one it has), stop, open it on its computer's screen (`opened`, on X display `display`: the
+ * screen its bot's task on it works on, else a free one), preview it on this Mac (`preview`:
+ * http://localhost:<port>/, the same port; refused with `fallback: "screen"` when this Mac can't), or count a
+ * Fix it press (`fix`: the owner's only); each of `bot`'s copy (none: the app's own folder's, as for a bot that
+ * doesn't work on it).
  */
-export type LocalAnswer = { sites: Record<string, LocalSite>; asleep?: true; why?: string; opened?: true };
+export type LocalAnswer = { sites: Record<string, LocalSite>; bot?: { id: string; name: string }; copies?: LocalCopy[]; asleep?: true; why?: string; opened?: true; display?: number; preview?: string };
+
+/** A bot's copy of an app on its computer (LocalAnswer.copies): the bot, its name, and its copy's Locals, by site (none started: {}). */
+export type LocalCopy = { bot: string; name: string; sites: Record<string, LocalSite> };
+
+/**
+ * A bot's Locals of an app in an answer: its copy's, else (none named, the app's own bot, or a bot without a copy
+ * there) the app's own folder's.
+ */
+export const localsOf = (a: LocalAnswer | null | undefined, botId?: string): Record<string, LocalSite> | undefined =>
+  !a ? undefined : ((botId ? a.copies?.find((c) => c.bot === botId)?.sites : undefined) ?? a.sites);
+
+/** Every Local in an answer: the app's own folder's, then each copy's. */
+export const allLocals = (a: LocalAnswer | null | undefined): LocalSite[] => (a ? [...Object.values(a.sites), ...(a.copies ?? []).flatMap((c) => Object.values(c.sites))] : []);
+
+/**
+ * The bots that work on an app of workspace `ws`, each in a working folder of its own on its computer: its own bot
+ * first (AppHosting.botId), then AppHosting.copies, then each bot of the workspace whose Works on (siteOf) is a site
+ * of it and that works on its computer (workBot), in the workspace's order. Never a bot that's gone, nor any for an
+ * app whose computer is gone.
+ */
+export function appCoders(state: { bots: Bot[]; workspaces?: { id: string; hostedApps?: Record<string, AppHosting>; botSites?: Record<string, BotSite> }[] }, ws: string, name: string): string[] {
+  const h = state.workspaces?.find((w) => w.id === ws)?.hostedApps?.[name];
+  if (!h || h.lost) return [];
+  const team = state.bots.filter((b) => workspaceOf(b) === ws);
+  const here = (id: string) => team.some((b) => b.id === id);
+  const linked = team.filter((b) => siteOf(state, b)?.app === name && workBot(b, state.bots).computerId === h.computerId).map((b) => b.id);
+  return [...new Set([h.botId, ...(h.copies ?? []), ...linked])].filter(here);
+}
+
+/**
+ * Whether bot `botId` works on an app in a copy of its own (then its id, else undefined: the app's own folder is its,
+ * or it doesn't work on the app, appCoders): every bot that works on it but its own bot, and that one too when it had
+ * a copy before the app passed to it (AppHosting.copies). Whose Locals the Preview tab and Your Apps show.
+ */
+export function copyBotOf(state: Parameters<typeof appCoders>[0], ws: string, name: string, botId: string | undefined): string | undefined {
+  const h = state.workspaces?.find((w) => w.id === ws)?.hostedApps?.[name];
+  if (!botId || !h || (botId === h.botId && !h.copies?.includes(botId))) return undefined;
+  return appCoders(state, ws, name).includes(botId) ? botId : undefined;
+}
+
+/** How many of a failed Local's last log lines LocalSite.error keeps (the ones that aren't empty), each cut at LOG_LINE. */
+export const LOG_LINES = 6;
+export const LOG_LINE = 300;
+
+/** A failed Local's last words in one line (LocalSite.error's last), for a tooltip or a sentence. */
+export const localWords = (error: string | null | undefined) => error?.split("\n").filter((l) => l.trim()).at(-1) ?? null;
+
+/** A site's Local address: http://localhost:<its port> (its dev port before it ever ran). */
+export const localAddress = (x: Pick<LocalSite, "port" | "devPort">) => `http://localhost:${x.port ?? x.devPort}`;
+
+/** The port a Local had when nothing said (before each site had its own), and the first bops-local assigns. */
+export const DEV_PORT = 3000;
 
 /**
  * A site's name: one an app could have, short enough to be its deploy project's (orgo-web takes 32
@@ -136,8 +280,14 @@ export type HostedApp = {
    * and `serving` say it of the app's own above. Not there for an app with one site.
    */
   sites?: HostedSite[];
-  /** Its own site's Staging (not there when Orgo couldn't be asked). `live`, `serving` and `hosting` above are Prod's. */
-  staging?: StagingSite;
+  /** Its own site's Preview (not there when Orgo couldn't be asked). `live`, `serving` and `hosting` above are Published's. */
+  preview?: PreviewSite;
+  /** Its own site's Published address: https://<its first active domain>, null when it has none (never an orgo.dev name). */
+  domain?: string | null;
+  /** Its own site's domains on Published's port (to say one is waiting for its DNS). */
+  domains?: SiteDomain[];
+  /** Projects of its repo on its computer that are no site's (LeftOver). */
+  leftOver?: LeftOver[];
 };
 
 /**
@@ -145,7 +295,17 @@ export type HostedApp = {
  * and its domains (the ones its computer serves on its port), read with every site's from its computer's
  * list at once; not there when Orgo couldn't say, or wasn't asked (its tab reads them again when it opens).
  */
-export type HostedSite = { name: string; projectId: string | null; url: string | null; serving: string | null; live: HostedApp["live"]; domains?: SiteDomain[]; staging?: StagingSite };
+export type HostedSite = {
+  name: string;
+  projectId: string | null;
+  /** What Bops 0.0.32 kept of its address (never shown for Published now: `domain` is). */
+  url: string | null;
+  serving: string | null;
+  live: HostedApp["live"];
+  domains?: SiteDomain[];
+  preview?: PreviewSite;
+  domain?: string | null;
+};
 
 /** One of a site's domains as its app's Sites list shows it: its name and how it's doing (live, or waiting for its DNS). */
 export type SiteDomain = { domain: string; status: AppDomainStatus };
@@ -186,17 +346,36 @@ export type HostedAppsAnswer = { enabled: boolean; why?: string; apps: HostedApp
  * GET /api/hosted-apps/[name]/logs?ws=&after=&site= answers the newest deploy's { state, log, next, more }.
  *
  * Every route about one site of it (logs, settings, env, dns, domains) takes `site` the same way, in its
- * query or its body: none names the app's own site, as before there were more. Deploy, rollback, logs,
- * settings take `env` the same way ("staging"), and env takes `where` ("staging", or "local": Local's own
- * variables, kept on its computer): none is Prod, as before there was Staging. Deploy from the window sends "staging". "promote" { site?, at? }
- * deploys on Prod the changeset Staging serves (each site's own; `at`, with `site`: the one the window saw,
- * refused when Staging moved on since).
+ * query or its body: none names the app's own site, as before there were more. Rollback, logs and settings
+ * take `env` the same way ("preview"; none is Published, as before there was a Preview), and env takes `where`
+ * ("preview", or "local": Local's own variables, kept on its computer). A deploy goes to the Preview unless it
+ * says env "prod" (the window never does: Publish does that). "promote" { site?, at? } (Publish) deploys on
+ * Published the changeset the Preview serves (each site's own; `at`, with `site`: the one the window saw,
+ * refused when the Preview moved on since, PREVIEW_MOVED; a site with no domain and nothing published yet is
+ * refused, NO_DOMAIN). "reapply" { site? }: Published's own commit built again, with its variables now.
+ * "removeLeftOver" { project }: one of HostedApp.leftOver taken off its computer. "preview" { site?, label? }:
+ * its Preview made now (its link, before any deploy), with `label` when the owner chose it ahead (labelGiven).
+ * "restore" { to }: the whole app (every site shares its repo and working folder) put back as it was at changeset
+ * `to`, as a new changeset on top of main, its working folder on its computer pulled after; the owner's alone, and
+ * refused while a task works on it or its folder has changes nobody committed. Answers { app, restored?, said }
+ * (`restored`: the new changeset; none when it's like that already).
  */
 export type HostedAppAction =
-  | { ws: string; action: "deploy"; at?: string; botId?: string; site?: string; env?: "staging" | "prod" }
+  | { ws: string; action: "deploy"; at?: string; botId?: string; site?: string; env?: "preview" | "prod" }
   | { ws: string; action: "promote"; at?: string; site?: string }
-  | { ws: string; action: "rollback"; deployment: string; site?: string; env?: "staging" | "prod" }
-  | { ws: string; action: "addSite" | "removeSite"; site: string };
+  | { ws: string; action: "reapply"; site?: string }
+  | { ws: string; action: "rollback"; deployment: string; site?: string; env?: "preview" | "prod" }
+  | { ws: string; action: "addSite" | "removeSite"; site: string }
+  | { ws: string; action: "removeLeftOver"; project: string }
+  | { ws: string; action: "preview"; site?: string; label?: string }
+  | { ws: string; action: "restore"; to: string };
+
+/**
+ * GET /api/hosted-apps/[name]?ws=&restore=<to> (the owner's alone), for Restore's question before it's sent: every
+ * changeset on main after `to`, newest first, which a restore to `to` undoes (its first line, who, when), and
+ * `blocked`, why it can't be restored now, in words (a task works on it, it's like that now, Ingot isn't answering).
+ */
+export type AppRestoreConfirm = { later: { id: string; title: string; author: string; at: number }[]; blocked?: string };
 
 /** What removing an app did: `said`, what couldn't be (a domain Orgo kept), in words. */
 export type RemoveAppAnswer = { removed: string; repo: boolean; said?: string };
@@ -300,6 +479,9 @@ export type AppRenewal = {
 /** An app's name: an Ingot repo's (lowercase letters and digits in words joined by hyphens, at most 64). */
 export const isAppName = (s: unknown): s is string => typeof s === "string" && s.length <= 64 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(s);
 
+/** A copy's name (its folder is /workspace/apps/<app>.<copy>, its Locals' keys <app>.<copy>--<site>): as an app's, at most 40. */
+export const isCopyName = (s: unknown): s is string => isAppName(s) && s.length <= 40;
+
 /** A name as it's typed into Add app: lowercase, spaces and underscores as hyphens (the rest is checked, not changed). */
 export const typedAppName = (s: string) => s.toLowerCase().replace(/[\s_]+/g, "-").slice(0, 64);
 
@@ -349,10 +531,10 @@ export type AppSettingsAnswer = {
   env: string[];
   deploys: AppDeploy[];
   said?: string;
-  /** Of Staging's (env=staging): Prod's variables' names, so the window says which Staging doesn't have. */
+  /** Of the Preview's (env=preview): Published's variables' names, so the window says which the Preview doesn't have. */
   prodEnv?: string[];
 };
-export type AppSettingsChange = { ws: string; site?: string; env?: "staging" | "prod"; port?: number | string; install?: string; build?: string; start?: string; health?: string };
+export type AppSettingsChange = { ws: string; site?: string; env?: "preview" | "prod"; port?: number | string; install?: string; build?: string; start?: string; health?: string };
 export type AppEnvChange = { ws: string; site?: string; where?: AppEnv; env: Record<string, string | null> };
 
 /** A variable's name as orgo-web takes it (uppercase shell names); PORT and the shell's own are Orgo's. */
@@ -556,12 +738,29 @@ export type AppsForMembers = {
 export type AppForMembers = {
   /** The newest changeset on main. */
   head: { id: string; message: string; at: number } | null;
-  /** Every site, its own first: HostedSite without its project id. */
-  sites: { name: string; url: string | null; serving: string | null; live: { id: string; state: DeployState | null; when: number | null } | null; domains?: SiteDomain[] }[];
+  /**
+   * Every site, its own first: HostedSite without its project id. `url`: its Published address (its first
+   * active domain, or null; never an orgo.dev name), `preview`: its Preview link (null: none yet), where members
+   * deploy, with its newest deploy (`previewLive`) and what it serves (`previewServing`). `previewProtected`: that
+   * link asks for a password; `previewPassword`: the password, only while someone has Your Apps at Write (Bops
+   * Cloud sends it to them alone: cloud/ws-slice.ts appsFor). Never in a bot's chat or prompt.
+   */
+  sites: {
+    name: string;
+    url: string | null;
+    preview?: string | null;
+    previewLive?: { id: string; state: DeployState | null; when: number | null } | null;
+    previewServing?: string | null;
+    previewProtected?: true;
+    previewPassword?: string;
+    serving: string | null;
+    live: { id: string; state: DeployState | null; when: number | null } | null;
+    domains?: SiteDomain[];
+  }[];
   /** The newest MEMBER_COMMITS changesets on main (AppCommit without `serving`, which `sites[].serving` says). */
   commits: { id: string; message: string; author: string; at: number; changes: AppCommit["changes"] }[];
-  /** The newest MEMBER_DEPLOYS deploys of each site, newest first: AppDeploy without `error`. */
-  deploys: (Omit<AppDeploy, "error"> & { site: string })[];
+  /** The newest MEMBER_DEPLOYS deploys of each site, newest first: AppDeploy without `error`, with where it went (`env`, none: Published's). */
+  deploys: (Omit<AppDeploy, "error"> & { site: string; env?: "preview" | "prod" })[];
   /** Each site's settings (AppProjectSettings), by site: sent to Write only. */
   settings?: Record<string, AppProjectSettings>;
   /** What members did to it, newest first, at most MEMBER_ACTS: who, what, and how it went (named as the member). */

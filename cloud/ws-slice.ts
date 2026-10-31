@@ -179,6 +179,9 @@ const MESSAGE: Spec = {
   crm: { file: true, added: true, changed: true, created: true, undone: true },
   // Bops' own line in its bot's voice (a thread it couldn't finish): a shared workspace reads it as the owner's (lib/server/shared-core.ts viewState).
   bops: true,
+  // Compact's line (lib/server/chat-summary.ts): only the line. The chat's summary is the owner's (Chat.summary isn't in CHAT): it's
+  // written from every message there, some a member isn't shown (a bot hidden from them, the owner's apps).
+  compacted: true,
   // Replies a bot wrote for the owner to send (lib/types.ts ReplyDraft), read only: who and where, the words, and
   // whether they went. Never the account, thread or channel ids they go by, nor a Send in progress or why one failed.
   drafts: [{ id: true, app: true, toName: true, to: true, subject: true, where: true, text: true, sent: { at: true, text: true } }],
@@ -227,9 +230,23 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
 /* ---------------- Your Apps ---------------- */
 
 /** What's shown of each app's own record (lib/hosted-apps.ts AppHosting) is worked out field by field in appsFor; of what the owner's Mac read for members (AppForMembers): */
-const SITE_SEEN: Spec = { name: true, url: true, serving: true, live: { id: true, state: true, when: true }, domains: [{ domain: true, status: true }] };
+const SITE_SEEN = {
+  name: true,
+  url: true,
+  // Its Preview, where members deploy: its link, its newest deploy, what it serves, and whether it asks for a password.
+  preview: true,
+  previewLive: { id: true, state: true, when: true },
+  previewServing: true,
+  previewProtected: true,
+  serving: true,
+  live: { id: true, state: true, when: true },
+  domains: [{ domain: true, status: true }],
+} as const satisfies Spec;
+/** A site at Write (the owner gave them all of Your Apps): its Preview's password too. Never at Read. */
+const SITE_SEEN_WRITE: Spec = { ...SITE_SEEN, previewPassword: true };
 const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
-const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true };
+/** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
+const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
 const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, ok: true, said: true, at: true };
 const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
 /** The most apps a member is shown. */
@@ -240,8 +257,9 @@ const MAX_SHARED_APPS = 30;
  * with apps open to their email (apps-team.ts, as for the owner) and Your Apps at Read or more on an entry that's for
  * their membership now (viewerAccess), in a workspace with apps. Allow lists only: of each app's record its name, its
  * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
- * members (Workspace.appsForMembers) its head, sites, history, deploys and members' acts; each site's settings and the
- * workspace's own domains only at Write. Never its variables, tokens, keys, logs, error text, computer or project ids.
+ * members (Workspace.appsForMembers) its head, sites (each with its Preview's link and state), history, deploys and
+ * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. Never its
+ * variables, tokens, keys, logs, error text, computer or project ids.
  */
 /** Whether a workspace has apps: its owner (the account whose state this is) signs in with an @orgo.ai email (apps-team.ts). */
 export const ownerAppsOpen = (blob: Record<string, unknown> | null | undefined): boolean => {
@@ -272,7 +290,7 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
         ...(typeof host.lost === "number" ? { lost: true } : {}),
         ...(sites.length ? { siteNames: sites } : {}),
         ...(got.head === null ? { head: null } : isObject(got.head) ? { head: keep(got.head, { id: true, message: true, at: true }) } : {}),
-        ...(Array.isArray(got.sites) ? { sites: keep(got.sites, [SITE_SEEN]) } : {}),
+        ...(Array.isArray(got.sites) ? { sites: keep(got.sites, [write ? SITE_SEEN_WRITE : SITE_SEEN]) } : {}),
         ...(Array.isArray(got.commits) ? { commits: keep(got.commits, [COMMIT_SEEN]) } : {}),
         ...(Array.isArray(got.deploys) ? { deploys: keep(got.deploys, [DEPLOY_SEEN]) } : {}),
         ...(Array.isArray(got.acts) ? { acts: keep(got.acts, [ACT_SEEN]) } : {}),

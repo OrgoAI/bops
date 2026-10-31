@@ -8,8 +8,9 @@ import { workspaceOf, type Workspace } from "@/lib/types";
 import { handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
-import { dismissWaiting, replyToSession, stopSession } from "./sessions";
-import { bot, chat, getState, session } from "./store";
+import { compactThread, dismissWaiting, replyToSession, stopSession } from "./sessions";
+import { compactChat } from "./chat-summary";
+import { bot, chat, getState, ownerName, session } from "./store";
 
 /**
  * What a member with Write did in one of the owner's shared workspaces from their own Bops (cloud/members.ts
@@ -17,8 +18,9 @@ import { bot, chat, getState, session } from "./store";
  * Cloud checked it: who they are with orgo-web, and the owner's access for every bot it touches. This checks it
  * again against this state, which may be newer (the owner took a bot down to Read, or removed them, since), and
  * then does it as the owner's own taps would, through the same ways in (chat.ts handleMessage, sessions.ts
- * replyToSession, stopSession and dismissWaiting, permission.ts replyToAsk), with the member named as who said
- * it: the turn is theirs (chat.ts TurnOptions.member), and the owner sees who said what.
+ * replyToSession, stopSession, dismissWaiting and compactThread, chat-summary.ts compactChat, permission.ts
+ * replyToAsk), with the member named as who said it: the turn is theirs (chat.ts TurnOptions.member), and the owner
+ * sees who said what.
  *
  * It's safe to act on as this Mac: only the tunnel can call that route, and this state agrees they have Write. One
  * refused, too late or of a shape this doesn't know is still taken (the event is acked), and dropped with a line in
@@ -37,6 +39,7 @@ function actOf(a: unknown): MemberAct | null {
   if (x.act === "answer") return short(x.askId, 120) && ["once", "always", "reject"].includes(x.reply as string) && (x.message === undefined || (typeof x.message === "string" && x.message.length <= MEMBER_MAX_NOTE)) ? (x as MemberAct) : null;
   if (x.act === "stop") return Array.isArray(x.sessionIds) && x.sessionIds.length > 0 && x.sessionIds.length <= MEMBER_STOP_MAX && x.sessionIds.every((id) => short(id, 120)) ? (x as MemberAct) : null;
   if (x.act === "dismiss") return short(x.sessionId, 120) ? (x as MemberAct) : null;
+  if (x.act === "compact") return short(x.chatId, 120) !== short(x.sessionId, 120) ? (x as MemberAct) : null;
   if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
   return null;
 }
@@ -111,21 +114,23 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
     if (!h || !sitesOfHosting(h, act.app).includes(act.site ?? act.app)) return "no such app";
     return null;
   }
-  switch (act.act) {
+  // Compact: a chat's as saying something there, a thread's as replying in it.
+  const as: MemberAct = act.act === "compact" ? ("chatId" in act ? { act: "chat", chatId: act.chatId, text: "" } : { act: "reply", sessionId: act.sessionId, text: "" }) : act;
+  switch (as.act) {
     case "chat": {
-      const c = chat(act.chatId);
+      const c = chat(as.chatId);
       if (!c || c.id.startsWith("pair:")) return "no such chat";
       if (!c.botIds.every((id) => bot(id) && workspaceOf(bot(id)) === ws.id)) return "no such chat";
       return writesChat(access, c.botIds) ? null : "not at Write";
     }
     case "reply":
     case "dismiss":
-      if (!threadOk(act.sessionId)) return "not at Write";
-      return onMac(act.sessionId) ? "on the owner's Mac" : null;
+      if (!threadOk(as.sessionId)) return "not at Write";
+      return onMac(as.sessionId) ? "on the owner's Mac" : null;
     case "stop":
-      return act.sessionIds.every(threadOk) ? null : "not at Write";
+      return as.sessionIds.every(threadOk) ? null : "not at Write";
     case "answer": {
-      const a = getState().appApprovals?.find((x) => x.id === act.askId);
+      const a = getState().appApprovals?.find((x) => x.id === as.askId);
       if (!a) return "no such ask";
       if (!writes(ws, access, a.botId)) return "not at Write";
       // The owner's Connected apps or keys: theirs alone to allow (member-access.ts ownerOnlyAsk).
@@ -196,6 +201,12 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       dismissWaiting(act.sessionId, `Dismissed by ${who.name}`);
       return;
     }
+    case "compact": {
+      // Not done (a bot answering, nothing new): said in the log, as a refused act is.
+      const done = "chatId" in act ? compactChat(act.chatId, said) : compactThread(act.sessionId, said);
+      void done.then((r) => !r.ok && console.warn(`[members] event ${eventId}: ${r.error}`), warn);
+      return;
+    }
   }
 }
 
@@ -233,9 +244,14 @@ async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, 
   let said: string | undefined;
   let domain: string | undefined;
   try {
-    if (act.act === "deploy") await h.deployApp(p.wsId, act.app, { ...(act.at ? { at: act.at } : {}), ...(act.site ? { site: act.site } : {}) });
-    else if (act.act === "rollback") await h.rollbackApp(p.wsId, act.app, act.deployment, act.site);
-    else if (act.act === "settings") await h.changeSettings(p.wsId, act.app, { port: act.port, install: act.install, build: act.build, start: act.start, health: act.health }, act.site);
+    // (A member's deploy, rollback and settings are the Preview's: publishing is the owner's alone.)
+    if (act.act === "deploy") await h.deployApp(p.wsId, act.app, { ...(act.at ? { at: act.at } : {}), ...(act.site ? { site: act.site } : {}), env: "preview" });
+    else if (act.act === "rollback")
+      await h.rollbackApp(p.wsId, act.app, act.deployment, act.site, "preview").catch((e: unknown) =>
+        // (Not one of the Preview's deploys: Published's, which only the owner rolls back.)
+        Promise.reject((e as { status?: unknown })?.status === 404 && /recent deploys/.test((e as Error)?.message ?? "") ? new Error(`Members roll back its preview only. Ask ${ownerName()} to roll back what's published.`) : e),
+      );
+    else if (act.act === "settings") await h.changeSettings(p.wsId, act.app, { port: act.port, install: act.install, build: act.build, start: act.start, health: act.health }, act.site, "preview");
     else {
       const got = await h.connectDomain(p.wsId, act.app, { zone: act.zone, ...(act.subdomain ? { subdomain: act.subdomain } : {}) }, act.site);
       domain = got.domain?.domain;

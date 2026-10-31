@@ -433,7 +433,8 @@ within a minute of that takes it off. Switched back meanwhile, it's up again as 
 - Events waking a computer: texts, email and Slack still wait for the Mac.
 - Brains on a runner that run on the Mac (Hermes, Claude Code on the Mac).
 - Bops Cloud limiting what a computer reads: its token or key still reads the user's whole Bops state
-  (every bot, routine, thread and workspace, though not the other bots' chat messages), and spends their
+  (every bot, routine, thread and workspace, though not the other bots' chat messages nor the Preview
+  passwords kept for members: cloud/computer-scope.ts forComputer), and spends their
   AI credit (the identity spec's Q4). Its writes are limited (above). OpenAI objects (another bot's agent
   sessions) are the user's, not the computer's.
 - Versioned mirror PUTs (`bops_state_version`): Orgo's mirrors are last writer wins.
@@ -521,5 +522,6 @@ read it. Phase 1 keeps it on every Bops computer (from bops-base 0.1.9 on, wheth
 there) as the fallback for identity. Identity is the narrow, device-bound, revocable credential this
 blocker asked for, written nowhere and good for an hour; phase 2 takes the key off the computers that
 run on it. Until phase 2, a key read off a computer reaches that computer, its bots' routines, Orbit and
-Logins, reads the user's whole Bops state in Bops Cloud (Q4), and writes only what the computer may
+Logins, reads the user's whole Bops state in Bops Cloud but for the Preview passwords kept for members (Q4), and
+writes only what the computer may
 (above).

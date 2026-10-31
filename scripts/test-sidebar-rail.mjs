@@ -221,10 +221,11 @@ await test("the workspace's initial when there's another to switch to, which exp
 
 await test("the app: a 72px rail, its column sliding with the title bar's, and no toggle in the title bar", () => {
   const app = readFileSync(`${root}/components/app/bops-app.tsx`, "utf8");
-  assert.match(app, /"grid-cols-\[72px_minmax\(0,1fr\)\]"/);
-  assert.match(app, /"grid-cols-\[72px_440px_minmax\(0,1fr\)\]"/);
-  assert.match(app, /columns=\{`\$\{columns\} \$\{SLIDE\}`\}/, "the title bar's columns are the grid's");
-  assert.match(app, /className=\{`grid min-h-0 flex-1 \$\{columns\} \$\{SLIDE\}`\}/);
+  assert.match(app, /const sidebarWidth = sidebarOpen \? 340 : 72;/);
+  assert.match(app, /const columns = \{ gridTemplateColumns: gridColumns\(sidebarWidth, wide \? null : chatWidth\) \};/);
+  assert.match(app, /columns=\{columns\}\n\s+slide=\{slide\}/, "the title bar's columns are the grid's");
+  assert.match(app, /className=\{`grid min-h-0 flex-1 \$\{slide\}`\} style=\{columns\}/);
+  assert.match(app, /const slide = edgeDragged \? "" : SLIDE;/, "they slide, except while the chat's edge is dragged");
   assert.match(app, /const SLIDE = "transition-\[grid-template-columns\] duration-200 ease-out motion-reduce:transition-none";/);
   assert.doesNotMatch(app, /Show the sidebar/);
   assert.match(app, /<SidebarRail/);

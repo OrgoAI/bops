@@ -6,6 +6,7 @@ import { ago, holdsScreen, LEFT_FOR_MS, screenNo } from "@/lib/screens";
 import { bot, getState, ownerName } from "./store";
 import { asksNow } from "./chart";
 import { belowOf } from "@/lib/chain";
+import { appsOpen } from "@/lib/apps-access";
 
 /**
  * A bot's computer, in a few lines, for the bot itself: what each screen is doing (its threads,
@@ -100,10 +101,18 @@ export async function computerBriefing(botId: string, opts: { thread?: string; s
     .slice(-3)
     .map((s) => `"${s.title}" (${s.status === "done" ? "done" : "didn't finish"})`);
 
+  // The screen this thread works on, and the rule that goes with it (where apps are open: sites' Locals share the computer).
+  const mineNow = opts.thread ? running.find((s) => s.id === opts.thread && s.display !== undefined) : undefined;
+  const rule = [
+    ...(mineNow ? [`You are on screen ${screenNo(mineNow.display!)}. Open pages only in your own screen's Chrome, never in another screen's.`] : []),
+    ...(appsOpen(state) ? ["Never start, stop or restart another site's Local, and never kill a process on a port that isn't your site's."] : []),
+  ].join(" ");
+
   const ownersMac = await macBriefing(botId);
   return [
     `${shared ? `The computer you share with ${c.name}` : "Your computer"}${mac ? ` (browsers on ${owner}'s Mac)` : ""}, as of now:`,
     ...lines,
+    ...(rule ? [rule] : []),
     ...(waiting.length ? [`Waiting on ${owner}: ${waiting.join("; ")}.`] : []),
     ...(queued.length ? [`Up next: ${queued.join(", ")}.`] : []),
     ...(recent.length ? [`Finished in the last half hour: ${recent.join(", ")}.`] : []),

@@ -10,7 +10,8 @@ import { post } from "./ui";
 /*
  * The sidebar's groups of bots that work on one computer (lib/bot-groups.ts says which, and their names): a small
  * header with the computer's name, how many bots, and a fold; the owner renames it in place. And the site a bot works
- * on: the domain the sidebar says under its name (useSiteDomains), and its settings page's Works on row.
+ * on: the domain the sidebar says under its name (useSiteDomains), a coder's with a </> (CodeMark), and its settings
+ * page's Works on row.
  */
 
 /* ---------------- What's folded, in this window ---------------- */
@@ -216,6 +217,18 @@ export function useSiteDomains(state: AppState): Record<string, string | null> {
     };
   }, [ws, links]);
   return (links !== "[]" && read.get(ws)?.domains) || {};
+}
+
+/**
+ * The small </> before a coder's site in its sidebar row (lib/bot-mood.ts codersOf), the row's line in code's own type
+ * with it: the sign that reads where the mascot's mark is too small to. Only for the eye: the line says the site.
+ */
+export function CodeMark() {
+  return (
+    <span aria-hidden data-code-mark className="mr-1 font-semibold text-ink">
+      {"</>"}
+    </span>
+  );
 }
 
 /* ---------------- Works on, on a bot's settings page ---------------- */

@@ -52,6 +52,8 @@ export type CliEvent =
    * for its sign-in or key ("auth").
    */
   | { type: "result"; ok: boolean; text?: string; stop?: CliStop }
+  /** It compacted its session (Claude Code's compact_boundary): by itself, or as Compact asked (cliCompact). */
+  | { type: "compacted" }
   | { type: "exited"; code: number };
 
 /**
@@ -78,6 +80,8 @@ export type CliDriver = {
   steers: boolean;
   /** What it may not do by itself asks the user through the screen MCP's approve tool (Claude Code's --permission-prompt-tool). */
   asks: boolean;
+  /** It compacts its session when asked (cliCompact): Claude Code's /compact. Codex's exec and OpenCode's run have no such thing. */
+  compacts: boolean;
 };
 
 /** How often a turn reads the CLI's output, and how long an approval waits for the user (the screen MCP gives up at 20 minutes). Mutable for the tests only. */
@@ -170,6 +174,7 @@ export const claudeDriver: CliDriver = {
   newSession: () => crypto.randomUUID(),
   steers: true,
   asks: true,
+  compacts: true,
   prepare: async (computerId) => {
     await ensureClaudeCode(computerId);
     await ensureBrainTools(computerId);
@@ -183,6 +188,7 @@ export const claudeDriver: CliDriver = {
       const servers = (Array.isArray(e.mcp_servers) ? e.mcp_servers : []) as { name?: unknown; status?: unknown }[];
       return [{ type: "started", session: str(e.session_id), failed: servers.filter((x) => x.status === "failed" || x.status === "needs-auth").map((x) => str(x.name) ?? "a server") }];
     }
+    if (e.type === "system" && e.subtype === "compact_boundary") return [{ type: "compacted" }];
     if (e.type === "assistant") {
       const content = ((e.message as { content?: unknown } | undefined)?.content ?? []) as Record<string, unknown>[];
       return (Array.isArray(content) ? content : []).flatMap((c): CliEvent[] => {
@@ -246,6 +252,7 @@ export const codexDriver: CliDriver = {
   newSession: () => crypto.randomUUID(),
   steers: false,
   asks: false,
+  compacts: false,
   prepare: async (computerId) => {
     await ensureCodex(computerId);
     await ensureBrainTools(computerId);
@@ -342,6 +349,7 @@ export const opencodeDriver: CliDriver = {
   newSession: () => `ses_${Array.from(randomBytes(24), (n) => ABC[n % ABC.length]).join("")}`,
   steers: false,
   asks: false,
+  compacts: false,
   prepare: async (computerId) => {
     await ensureOpenCode(computerId);
     await ensureBrainTools(computerId);
@@ -402,6 +410,8 @@ export type CliRun = {
   down: Set<string>;
   /** More arguments for the CLI as it starts (the REAL_CLAUDE test's --max-turns), each a plain word. */
   args?: string[];
+  /** Started afresh by Compact where it should have picked its session up (cliCompact): the next turn's first words get what it lost. */
+  lost?: true;
 };
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
@@ -684,7 +694,8 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
     // Stopped while it was on its way: nothing starts.
     if (t.signal.aborted) await giveUp("Stopped by you");
     if (!run.up) await begin(false);
-    else if (!(await sendCli(run, t.input))) await begin(true);
+    else if (!(await sendCli(run, run.lost ? `${t.context()}\n\n${t.input}` : t.input))) await begin(true);
+    delete run.lost;
     for (;;) {
       if (t.signal.aborted) await giveUp("Stopped by you");
       // Time a tool waited on the user's OK (approveTool) isn't the turn running long, nor stalling.
@@ -762,6 +773,59 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
     }
   } finally {
     t.onSteer(undefined);
+  }
+}
+
+/** What Claude Code is sent to compact its session: its own command, alone, never with Bops' briefing or notes around it (they'd be taken as what to keep). */
+const COMPACT = "/compact";
+
+/**
+ * Compact (sessions.ts compactThread): the thread's CLI folds its session so far into a summary of its own, now. Claude
+ * Code's /compact runs without a turn of the model's: it says compact_boundary, then a result with nothing in it. Its
+ * process is started first when this run hasn't yet; one that began afresh there (the brain's folder lost its session)
+ * has nothing to compact, and its next turn gets what it lost (CliRun.lost). A result without compact_boundary (the
+ * command wasn't taken as one) didn't compact, and says so. Stopped, stuck past `idleMs` or gone, it stops the process.
+ */
+export async function cliCompact(run: CliRun, t: { signal: AbortSignal; idleMs: number; stalled: string; started: (cli: string) => void }): Promise<void> {
+  if (!run.driver.compacts) throw new Error(`${run.name} doesn't compact as Bops runs it`);
+  const giveUp = async (why: string): Promise<never> => {
+    await stopCli(run).catch(() => {});
+    throw new Error(why);
+  };
+  if (t.signal.aborted) throw new Error("Stopped by you");
+  if (!run.up && (await startCli(run)) === "fresh" && run.resume) {
+    run.lost = true;
+    throw new Error("its conversation wasn't on the computer anymore");
+  }
+  if (!(await sendCli(run, COMPACT))) throw new Error(`${run.name} stopped as it started`);
+  let compacted = false;
+  let lastAt = Date.now();
+  for (;;) {
+    if (t.signal.aborted) await giveUp("Stopped by you");
+    if (Date.now() - lastAt > t.idleMs) await giveUp(t.stalled);
+    const r = await readCli(run).catch(() => null);
+    for (const e of r?.events ?? []) {
+      lastAt = Date.now();
+      if (e.type === "started") {
+        const cli = cliId(e.session);
+        if (cli) {
+          run.cli = cli;
+          run.resume = true;
+          t.started(cli);
+        }
+      } else if (e.type === "compacted") compacted = true;
+      else if (e.type === "result") {
+        if (e.stop) throw new BrainStopped(e.stop, e.text ?? "");
+        if (!e.ok) throw new Error(e.text || "it didn't compact");
+        if (!compacted) throw new Error(`${run.name} didn't take it as its compact`);
+        return;
+      }
+    }
+    if (r && !r.alive && !r.more) {
+      run.up = false;
+      throw new Error(`${run.name} stopped${r.err ? ` (${r.err.slice(-160)})` : ""}`);
+    }
+    if (!r?.more) await new Promise((resolve) => setTimeout(resolve, cliTiming.pollMs));
   }
 }
 

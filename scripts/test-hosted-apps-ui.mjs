@@ -30,7 +30,10 @@
 // Then an app's three environments, all on its bot's computer (components/app/app-envs.tsx): Local, Staging and Prod,
 // one line each with its state in a word, where it is, what it serves and its action (Start and Stop, Deploy, Promote
 // to Prod, Roll back and Domain in Prod's menu); under each app on the Apps page; on its tab a line picks what the
-// sections are about (Staging's own settings, variables and deploys; Local's command and its own variables).
+// sections are about (Staging's own settings, variables and deploys; Local's command and its own variables); with more
+// bots on one app, a Local line for each bot's copy, named for its bot, its acts naming that bot. However wide its panel,
+// nothing on a line is drawn over anything else: a row of columns once it's wide, else its place, what it serves and its
+// actions on a first line and its state and where it is wrapping under its name, anything cut short whole in its tooltip.
 //
 // Then Settings' Domains (components/app/workspace-domains.tsx): one line a domain with when it renews and what it's on
 // (registering, retrying in amber, expired), only for Orgo's own team in their own workspace; Get a domain (results in
@@ -101,8 +104,15 @@ const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
 
 let passed = 0;
+let failed = 0;
 const test = async (name, f) => {
-  await f();
+  try {
+    await f();
+  } catch (e) {
+    failed++;
+    console.log(`not ok - ${name}\n${String(e?.stack ?? e).split("\n").slice(0, 6).join("\n")}`);
+    return;
+  }
   passed++;
   console.log(`ok - ${name}`);
 };
@@ -121,7 +131,7 @@ let deployN = 0;
 const live = (state, at, extra = {}) => ({ id: `d_${++deployN}`, at, state, when: min(5), error: null, url: null, ...extra });
 
 const APPS = [
-  app("corner-shop-storefront-with-a-very-long-name-that-is-cut-short", { serving: id("a1"), live: live("succeeded", id("a1"), { url: "https://shop.orgo.dev" }) }),
+  app("corner-shop-storefront-with-a-very-long-name-that-is-cut-short", { serving: id("a1"), live: live("succeeded", id("a1"), { url: "https://shop.example" }), domain: "https://shop.example", domains: [{ domain: "shop.example", status: "active" }] }),
   // The newest deploys while an older one is served, and the newest failed while an older one is.
   app("blog", { serving: id("b2"), live: live("running", id("b3")) }),
   app("menu", { serving: id("c2"), live: live("failed", id("c3"), { error: "npm run build exited with 1" }) }),
@@ -156,14 +166,15 @@ await test("the list: one compact line per app with its state, name and address,
   assert.match(shop, /data-state="succeeded"/);
   assert.match(shop, new RegExp(`data-tip="Live · ${id("a1").slice(0, 7)} · 5m"[^>]*bg-\\[#2BB673\\]`), "a green dot that says it's live, which changeset and since when");
   assert.match(shop, new RegExp(`title="${SHOP}"[^>]*truncate`), "a long name is cut short, all of it in the tooltip");
-  assert.match(shop, /<a href="https:\/\/shop\.orgo\.dev" target="_blank" rel="noreferrer" title="https:\/\/shop\.orgo\.dev"[^>]*>shop\.orgo\.dev<\/a>/, "its address is a link that opens in the browser, shown without https");
+  assert.match(shop, /<a href="https:\/\/shop\.example" target="_blank" rel="noreferrer" title="https:\/\/shop\.example"[^>]*>shop\.example<\/a>/, "its address (its domain) is a link that opens in the browser, shown without https");
+  assert.ok(!html.includes(".orgo.dev"), "never an orgo.dev name for Published");
   assert.match(shop, new RegExp(`data-app-env="prod"[^]*data-app-env-at="true" title="${id("a1")}"[^>]*>${id("a1").slice(0, 7)}<`), "the short id Prod serves, all of it in the tooltip");
   assert.deepEqual(deployIn(shop), { tip: null, disabled: false }, "Deploy (to Staging) can be pressed");
 
   const blog = rowOf(html, "blog");
   assert.match(blog, /data-state="running"/);
   assert.match(blog, new RegExp(`data-tip="Deploying · ${id("b3").slice(0, 7)} · 5m"[^>]*animate-pulse`), "a pulsing dot while it deploys");
-  assert.match(blog, /href="https:\/\/blog\.orgo\.dev"/, "the address kept from its first deploy, while the newest has none yet");
+  assert.ok(blog.split("data-app-envs")[0].includes("Live, no domain yet"), "live before, with no domain: said so, never an orgo.dev name");
   assert.deepEqual(deployIn(blog), { tip: null, disabled: false }, "Staging can be deployed while Prod deploys");
   assert.deepEqual(deployIn(blog, "Publish"), { tip: "It's publishing. Wait for it to finish.", disabled: true }, "no second publish while one runs");
   assert.ok(blog.includes(`>${id("b2").slice(0, 7)}<`) && !blog.includes(`>${id("b3").slice(0, 7)}<`), "the one served, not the one still deploying");
@@ -185,13 +196,13 @@ await test("the list: one compact line per app with its state, name and address,
   // Live with no public address (public URLs off there): not "not deployed".
   const bare = rowOf(list({ enabled: true, apps: [app("bare", { hosting: { ...hosting("bare"), url: undefined }, serving: id("d1"), live: live("succeeded", id("d1")) })] }), "bare");
   const own = bare.split("data-app-envs")[0];
-  assert.ok(own.includes("No address yet") && !own.includes("Not deployed yet"));
+  assert.ok(own.includes("Live, no domain yet") && !own.includes("Not deployed yet"));
 });
 
 await test("the list where hosting isn't open: every Deploy greyed, with why", () => {
   const html = list({ enabled: false, why: "Sign in to Orgo to deploy.", apps: APPS });
   for (const a of APPS) assert.deepEqual(deployIn(rowOf(html, a.name)), { tip: "Sign in to Orgo to deploy.", disabled: true }, a.name);
-  assert.ok(rowOf(html, SHOP).includes("shop.orgo.dev"), "the apps are still listed, with their addresses");
+  assert.ok(rowOf(html, SHOP).includes("shop.example"), "the apps are still listed, with their addresses");
   const vague = list({ enabled: false, apps: [APPS[0]] });
   assert.equal(deployIn(rowOf(vague, SHOP)).tip, "Deploying isn't open here.", "a reason when the server gave none");
 });
@@ -231,12 +242,12 @@ const commitOf = (html, c) => {
   const ends = [html.indexOf("data-commit=", start + 10), html.indexOf("data-older", start), html.indexOf("data-deploy-log", start)].filter((i) => i > start);
   return html.slice(start, ends.length ? Math.min(...ends) : undefined);
 };
-const shopApp = (extra = {}) => app("shop", { serving: id("c3"), live: live("succeeded", id("c3"), { url: "https://shop.orgo.dev" }), ...extra });
+const shopApp = (extra = {}) => app("shop", { serving: id("c3"), live: live("succeeded", id("c3"), { url: "https://shop.example" }), domain: "https://shop.example", domains: [{ domain: "shop.example", status: "active" }], ...extra });
 
 await test("the tab's header: its name, its address (open, copy), Work on it and Deploy to Staging", () => {
   const top = header(tab(shopApp(), { work: { name: "Nova", go: noop } }));
   assert.match(top, /title="shop"[^>]*truncate[^>]*>shop</, "its name, cut short if it must be");
-  assert.match(top, /<a href="https:\/\/shop\.orgo\.dev" target="_blank"[^>]*>shop\.orgo\.dev<\/a>/, "its address opens in the browser");
+  assert.match(top, /<a href="https:\/\/shop\.example" target="_blank"[^>]*>shop\.example<\/a>/, "its address (its domain) opens in the browser");
   assert.match(top, /aria-label="Copy link"/, "and can be copied");
   assert.match(top, new RegExp(`data-tip="Live · ${id("c3").slice(0, 7)} · 5m"`), "its state, in its dot");
   assert.match(top, /data-tip="Opens Nova&#x27;s chat with this typed, not sent"[^>]*>Work on it</, "Work on it, saying it only types");
@@ -284,7 +295,7 @@ await test("the tab's history: one compact line per changeset, the one served ma
   assert.ok(commitOf(tab(shopApp({ serving: null })), id("c3")).includes("data-live"));
 
   // While the newest deploys on Staging, the one served stays Live and the newest's line says Deploying; nothing else goes to Staging meanwhile.
-  const going = tab(shopApp({ staging: { projectId: "p_st", url: "https://shop-staging.orgo.dev", serving: null, live: live("running", id("e5")) } }));
+  const going = tab(shopApp({ preview: { projectId: "p_st", url: "https://k7p2qxm4wr3d.orgo.dev", serving: null, live: live("running", id("e5")) } }));
   assert.ok(commitOf(going, id("e5")).includes(">Deploying<") && !deployIn(commitOf(going, id("e5")), "Preview this one"));
   assert.ok(commitOf(going, id("c3")).includes("data-live"));
   assert.equal(deployIn(commitOf(going, id("a1")), "Preview this one").tip, "The preview is deploying. Wait for it to finish.");
@@ -368,7 +379,7 @@ const RECORDS = [
   rec("srvsip", "SRV", "_sip._tcp", "sip.acme.example", { priority: 10, weight: 5, port: 5060 }),
 ];
 const DOMAINS = {
-  url: "https://calm-fox-1a2b.orgo.dev",
+  url: "https://recipes.example",
   domains: [
     { id: "cd_apex", domain: "acme.example", status: "active", cert: "issued", managed: true, zone: ZONE, publish: [] },
     {
@@ -404,7 +415,7 @@ await test("the tab's address, then its domains: each with how it's doing, Check
   assert.ok(part.includes(">Domains<"), "titled");
   const address = between(html, "data-address-section", "data-domains");
   assert.ok(address.includes(">Address<"), "its address, in a section of its own above them");
-  assert.match(address, /href="https:\/\/calm-fox-1a2b\.orgo\.dev"[^>]*>calm-fox-1a2b\.orgo\.dev<\/a>.*aria-label="Copy link".*data-tip="Orgo names it after the app\. It can&#x27;t be renamed\."[^>]*>Its address on Orgo</, "on orgo.dev, to open and copy, and why it keeps its name");
+  assert.match(address, /href="https:\/\/recipes\.example"[^>]*>recipes\.example<\/a>.*aria-label="Copy link"/, "its domain, to open and copy");
   assert.ok(!part.includes("data-address"), "not again in its domains");
   assert.match(part, /data-add-domain="true"[^>]*>.*Add a domain<\/button>/, "Add a domain under its domains");
   assert.ok(part.indexOf("data-add-domain") < part.indexOf("data-zone="), "above the DNS records");
@@ -462,12 +473,12 @@ await test("the tab's domains with none, while they're read, when they couldn't 
   const neverPage = renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: app("draft", { head: null, hosting: null }), history: HISTORY, onChanged: noop }));
   const never = between(neverPage, "data-domains");
   assert.ok(never.includes("It has no domain of its own yet.") && !never.includes("Reading them") && !never.includes("data-add-domain"), "never deployed: nothing to read, and nothing to point a domain at");
-  assert.ok(!neverPage.includes("data-address") && !neverPage.includes("data-settings") && !neverPage.includes("data-deploys"), "nor an address, settings or deploys: no empty sections");
+  assert.ok(neverPage.includes("No domain yet. Published sites live only on their own domain.") && !neverPage.includes("data-settings") && !neverPage.includes("data-deploys"), "its address says it lives on a domain; no empty settings or deploys");
 
   const readingPage = withDomains(null);
   const reading = between(readingPage, "data-domains");
   assert.match(reading, /class="flex h-8 items-center [^"]*">Reading them…</, "one line the height of a domain's while they're read");
-  assert.ok(readingPage.includes("data-address") && between(readingPage, "data-address-section", "data-domains").includes("shop.orgo.dev"), "its address at once, from the list");
+  assert.ok(readingPage.includes("data-address") && between(readingPage, "data-address-section", "data-domains").includes("shop.example"), "its address (its domain) at once, from the list");
   assert.ok(!reading.includes("data-add-domain"), "Add a domain once they're read");
   assert.ok(!reading.includes("It has no domain"));
   assert.ok(between(withDomains(null, { domainsFailed: "Sign in with Orgo to put apps on the web." }), "data-domains").includes(">Sign in with Orgo to put apps on the web.<"), "why they couldn't be read");
@@ -903,7 +914,7 @@ await test("a form closed: Esc or Cancel back where it was asked, kept from the 
 /* ---------------- Add app, its address, settings, variables, deploys, and adding a domain ---------------- */
 
 const SETTINGS = {
-  url: "https://calm-fox-1a2b.orgo.dev",
+  url: "https://recipes.example",
   settings: { port: 3000, install: null, build: "npm run build", start: null },
   env: ["API_TOKEN", "MODE"],
   deploys: [
@@ -1028,6 +1039,11 @@ async function settingsTab(extra = {}) {
   return m;
 }
 const posts = (from, path) => calls.slice(from).filter((c) => c.method !== "GET" && c.url === path);
+
+/* Buying a domain and Your domains aren't offered on Published now (Cloudflare first, then one the user owns): their code
+   stays, so the tests below look at it with every source shown, then the default is put back. */
+const SRC = await import(pathToFileURL(`${root}/components/app/app-settings.tsx`).href);
+SRC.domainSources.now = ["cloudflare", "own", "buy", "owned"];
 
 await test("Get a new domain: a search, a name picked with its price for its term and after, who it's registered to (filled from what Orgo has of the last one), then the exact charge in Orgo credits and what it renews for, and Buy, which sends that price; nothing bought before Buy; a new price shown to buy at again; once bought, it's checked until it's live", async () => {
   const buys = [];
@@ -1491,6 +1507,28 @@ await test("Add a domain from Cloudflare: From Cloudflare first, above Your doma
   }
 });
 
+SRC.domainSources.now = SRC.PROD_DOMAIN_SOURCES;
+
+await test("Published's Add a domain: Its domain, From Cloudflare first, then Use a domain I own as a small link; no buying, no Your domains; Bops sets its records in Cloudflare as DNS only", async () => {
+  const t = await settingsTab({
+    "/api/hosted-apps/shop/domains": { body: { buy: { open: true }, owned: [{ id: "9f9f9f9f-1111-4222-8333-444455556666", domain: "spare.example", inUse: [] }], contact: AVA, cloudflare: { zones: [{ id: "a".repeat(32), domain: "acme.test", inUse: [] }] } } },
+  });
+  try {
+    await click(t.box.querySelector("[data-add-domain]"));
+    await act(settle);
+    const panel = t.box.querySelector("[data-add-domain-panel]");
+    assert.equal(panel.getAttribute("data-domain-sources"), "cloudflare own");
+    assert.ok(panel.textContent.includes("Its domain") && panel.textContent.includes("From Cloudflare:") && panel.textContent.includes("Bops sets its records in Cloudflare as DNS only."));
+    assert.ok(panel.querySelector('[data-cloudflare-domain="acme.test"]'), "its Cloudflare domains");
+    assert.ok(!panel.querySelector("[data-owned-domain]") && !panel.textContent.includes("Get a new domain"), "no buying, no Your domains");
+    assert.ok(panel.querySelector("[data-own-link]"), "Use a domain I own, a small link");
+    await click(panel.querySelector("[data-own-link]"));
+    assert.ok(t.box.querySelector("[data-own-domain]"), "its form");
+  } finally {
+    await t.done();
+  }
+});
+
 await test("The plan's lines and words, by what it does: Replace and add for records Bops didn't set (Not set by Bops), Make 2 changes for its own (the proxy turned off, one it set before), Verify when all is set, blocked with only Pick another name or Close", () => {
   const theirs = planBox(
     cfPlanOf([
@@ -1748,11 +1786,11 @@ await test("Every word of it plain: no dashes, never Orbit (a record's name like
 
 const A = await import(pathToFileURL(`${root}/components/app/app-settings.tsx`).href);
 const SUITE_SITES = [
-  { name: "suite", projectId: "p_suite", url: "https://suite.orgo.dev", serving: id("c3"), live: live("succeeded", id("c3"), { url: "https://suite.orgo.dev" }) },
-  { name: "suite-admin", projectId: "p_admin", url: "https://suite-admin.orgo.dev", serving: id("b2"), live: live("failed", id("d4"), { error: "npm run build exited with 1", url: "https://suite-admin.orgo.dev" }) },
+  { name: "suite", projectId: "p_suite", url: null, domain: "https://suite.example", serving: id("c3"), live: live("succeeded", id("c3"), { url: "https://suite.example" }) },
+  { name: "suite-admin", projectId: "p_admin", url: null, domain: null, serving: id("b2"), live: live("failed", id("d4"), { error: "npm run build exited with 1" }) },
   { name: "suite-till", projectId: null, url: null, serving: null, live: null },
 ];
-const suiteApp = (extra = {}) => app("suite", { serving: id("c3"), live: SUITE_SITES[0].live, sites: SUITE_SITES, ...extra });
+const suiteApp = (extra = {}) => app("suite", { serving: id("c3"), live: SUITE_SITES[0].live, domain: "https://suite.example", sites: SUITE_SITES, ...extra });
 const suiteTab = (extra = {}) => renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: suiteApp(), history: HISTORY, onChanged: noop, ...extra }));
 
 await test("the list: an app with more sites says how many (their names in the tooltip), Deploy to Staging waits while any of their Staging deploys; one whose computer is gone needs a new home", () => {
@@ -1760,9 +1798,9 @@ await test("the list: an app with more sites says how many (their names in the t
   const row = rowOf(html, "suite");
   assert.match(row, /data-site-count="true" data-tip="suite, suite-admin, suite-till"[^>]*>3 sites</);
   assert.deepEqual(deployIn(row), { tip: null, disabled: false });
-  const busy = rowOf(list({ enabled: true, apps: [suiteApp({ sites: [SUITE_SITES[0], { ...SUITE_SITES[2], staging: { projectId: "p_ts", url: null, serving: null, live: live("running", id("e5")) } }] })] }), "suite");
+  const busy = rowOf(list({ enabled: true, apps: [suiteApp({ sites: [SUITE_SITES[0], { ...SUITE_SITES[2], preview: { projectId: "p_ts", url: null, serving: null, live: live("running", id("e5")) } }] })] }), "suite");
   assert.deepEqual(deployIn(busy), { tip: "The preview is deploying. Wait for it to finish.", disabled: true }, "one of its sites' Staging deploys");
-  assert.match(busy, /data-app-env="staging" data-app-env-state="Deploying"/, "said on Staging's line");
+  assert.match(busy, /data-app-env="preview" data-app-env-state="Deploying"/, "said on Staging's line");
   const gone = rowOf(html, "gone");
   assert.ok(gone.includes(">Needs a new home<") && !gone.includes("<a ") && !gone.includes("Not deployed yet"), "no address, and why");
   assert.match(gone, /data-app-env="prod" data-app-env-state="Needs a new home"/, "Staging and Prod say it too");
@@ -1780,17 +1818,17 @@ await test("the tab of an app with more sites: a list of them with their states,
   assert.deepEqual(deployIn(header(html), "Deploy all previews"), { tip: null, disabled: false }, "the title deploys them all");
   assert.ok(!html.slice(0, html.indexOf("data-sites")).includes(">Deploy preview<"), "never one alone in the title");
   assert.ok(html.indexOf("data-sites") < html.indexOf("data-address-section"), "first, above its address");
-  assert.ok(between(html, "data-address-section", "data-domains").includes("suite.orgo.dev"));
+  assert.ok(between(html, "data-address-section", "data-domains").includes("suite.example"));
   assert.match(commitOf(html, id("c3")), /title="Live on suite"[^>]*>.*>Published: suite</, "served by one of three");
   assert.match(commitOf(html, id("b2")), />Published: suite-admin</);
   assert.ok(!commitOf(html, id("e5")).includes("data-live"));
 
   const admin = suiteTab({ site: "suite-admin", onSite: noop });
   assert.match(between(admin, "data-sites", "data-address-section"), /data-site="suite-admin" aria-pressed="true"/);
-  assert.ok(between(admin, "data-address-section", "data-domains").includes("suite-admin.orgo.dev"), "its address");
+  assert.ok(between(admin, "data-address-section", "data-domains").includes("No domain yet. Published sites live only on their own domain."), "its address: none, never an orgo.dev name");
   assert.ok(admin.includes("The last deploy failed: npm run build exited with 1"), "its deploy failed, not the app's own");
   const till = suiteTab({ site: "suite-till", onSite: noop });
-  assert.ok(!till.includes("data-address-section") && !till.includes("data-deploys"), "never deployed: no address, no deploys");
+  assert.ok(text(till).includes("No domain yet. Published sites live only on their own domain.") && !till.includes("data-deploys"), "never deployed: no domain yet, no deploys");
   assert.ok(!NO_DASHES.test(text(html + admin)));
   assert.ok(!tab(shopApp()).includes("data-sites"), "no row for an app with one site");
 });
@@ -1827,17 +1865,17 @@ await test("the Sites list: one line a site, its state, name and domains (each w
   assert.deepEqual(deployIn(own, "Deploy preview"), { tip: null, disabled: false }, "Deploy this site at its end");
   assert.ok(own.lastIndexOf("Deploy preview") > own.lastIndexOf("older.suite.example"));
   const admin = lineOf(html, "suite-admin");
-  assert.match(admin, /data-site-address="true"[^>]*>suite-admin\.orgo\.dev</, "none: its orgo.dev address");
+  assert.ok(admin.includes("Live, no domain yet") && !admin.includes(".orgo.dev"), "none: live before, no domain yet (never an orgo.dev name)");
   assert.ok(!admin.includes("data-site-domain"));
   assert.match(admin, /bg-\[#B42318\]/, "its own state");
   assert.deepEqual(deployIn(admin, "Deploy preview"), { tip: null, disabled: false });
   const till = lineOf(html, "suite-till");
-  assert.ok(text(till).includes("Not on the web yet") && !till.includes("data-site-address"), "never made: not on the web yet");
-  assert.deepEqual(deployIn(lineOf(suiteTab({ app: suiteApp({ sites: [SUITE_SITES[0], { ...SUITE_SITES[1], staging: { projectId: "p_as", url: null, serving: null, live: live("running", id("e5")) } }, SUITE_SITES[2]] }) }), "suite-admin"), "Deploy preview"), { tip: "The preview is deploying. Wait for it to finish.", disabled: true }, "a line's own Deploy waits for its own Staging's deploy");
+  assert.ok(text(till).includes("No domain yet") && !till.includes("data-site-address"), "never made: no domain yet");
+  assert.deepEqual(deployIn(lineOf(suiteTab({ app: suiteApp({ sites: [SUITE_SITES[0], { ...SUITE_SITES[1], preview: { projectId: "p_as", url: null, serving: null, live: live("running", id("e5")) } }, SUITE_SITES[2]] }) }), "suite-admin"), "Deploy preview"), { tip: "The preview is deploying. Wait for it to finish.", disabled: true }, "a line's own Deploy waits for its own Staging's deploy");
   assert.match(lineOf(html, "suite"), /data-site="suite" aria-pressed="true"/, "the line is the press that picks it");
   assert.match(lineOf(suiteTab({ app: suiteApp({ sites: withSiteDomains() }), site: "suite-admin", onSite: noop }), "suite-admin"), /data-site="suite-admin" aria-pressed="true"/);
   // Its domains not read (Orgo didn't say): its address, as one with none.
-  assert.match(lineOf(suiteTab(), "suite"), /data-site-address="true"[^>]*>suite\.orgo\.dev</);
+  assert.match(lineOf(suiteTab(), "suite"), /data-site-address="true"[^>]*>suite\.example</, "no domains read: its address (its first active domain)");
   // In a narrow panel: its domains wrap under its name, each name cut short rather than past the panel's edge.
   assert.match(own, /^data-site-line="suite" class="relative flex min-w-0 /);
   assert.match(own, /<span class="flex min-w-0 flex-1 flex-wrap items-center[^"]*">/, "its name and domains wrap");
@@ -1943,7 +1981,7 @@ await test("a site picked, clicked: its settings (health too) and variables save
   routes = {
     "/api/hosted-apps": { body: { enabled: true, apps: [suiteApp()] } },
     "/api/hosted-apps/suite/commits": { body: HISTORY },
-    "/api/hosted-apps/suite/dns": { body: { url: "https://suite-admin.orgo.dev", domains: [], zones: [] } },
+    "/api/hosted-apps/suite/dns": { body: { url: null, domains: [], zones: [] } },
     "/api/hosted-apps/suite/settings": (url, init) => ((init.method ?? "GET") === "GET" ? { body: SETTINGS } : { body: SETTINGS }),
     "/api/hosted-apps/suite/env": { body: { env: ["API_TOKEN", "MODE", "NEW_ONE"] } },
     "/api/hosted-apps/suite": { body: { app: suiteApp() } },
@@ -1992,8 +2030,8 @@ await test("a site's line, clicked: it's picked (its sections read with it), the
     "/api/hosted-apps/suite/commits": { body: HISTORY },
     "/api/hosted-apps/suite/dns": (url) =>
       url.includes("site=suite-admin")
-        ? { body: { url: "https://suite-admin.orgo.dev", domains: [{ id: "cd_admin", domain: "admin.suite.example", status: "pending", cert: "pending", managed: false, zone: null, publish: [] }], zones: [] } }
-        : { body: { url: "https://suite.orgo.dev", domains: SITE_DOMAINS[0].map((d, i) => ({ id: `cd_${i}`, ...d, cert: "pending", managed: false, zone: null, publish: [] })), zones: [] } },
+        ? { body: { url: null, domains: [{ id: "cd_admin", domain: "admin.suite.example", status: "pending", cert: "pending", managed: false, zone: null, publish: [] }], zones: [] } }
+        : { body: { url: "https://suite.example", domains: SITE_DOMAINS[0].map((d, i) => ({ id: `cd_${i}`, ...d, cert: "pending", managed: false, zone: null, publish: [] })), zones: [] } },
     "/api/hosted-apps/suite/settings": { body: SETTINGS },
     "/api/hosted-apps/suite": { body: { app: suiteApp() } },
   };
@@ -2004,7 +2042,7 @@ await test("a site's line, clicked: it's picked (its sections read with it), the
     const line = (site) => m.box.querySelector(`[data-site-line="${site}"]`);
     const named = (site) => [...line(site).querySelectorAll("[data-site-domain]")].map((d) => [d.getAttribute("data-site-domain"), d.getAttribute("data-domain-state")]);
     assert.deepEqual(named("suite"), SITE_DOMAINS[0].map((d) => [d.domain, d.status]), "every site's at once, as the list read them");
-    assert.ok(line("suite-admin").textContent.includes("suite-admin.orgo.dev"), "none yet: its address");
+    assert.ok(line("suite-admin").textContent.includes("Live, no domain yet"), "none yet: said so");
     let n = calls.length;
     await click(line("suite-admin").querySelector("[data-site]"));
     await act(settle);
@@ -2012,7 +2050,7 @@ await test("a site's line, clicked: it's picked (its sections read with it), the
     assert.equal(line("suite").querySelector("[data-site]").getAttribute("aria-pressed"), "false");
     assert.ok(calls.slice(n).some((c) => c.url.startsWith("/api/hosted-apps/suite/dns?") && c.url.endsWith("&site=suite-admin")), "its domains read");
     assert.deepEqual(named("suite-admin"), [["admin.suite.example", "pending"]], "the domain its Domains section read, on its line");
-    assert.ok(!line("suite-admin").textContent.includes("suite-admin.orgo.dev"), "its domain in place of its address");
+    assert.ok(!line("suite-admin").textContent.includes("Live, no domain yet"), "its domain in place of that");
     assert.deepEqual(named("suite"), SITE_DOMAINS[0].map((d) => [d.domain, d.status]), "the others as they were");
     n = calls.length;
     await click(button(line("suite-till"), "Deploy preview"));
@@ -2033,11 +2071,11 @@ await test("a site's line as its domains change, clicked: another site picked re
     "/api/hosted-apps/suite/commits": { body: HISTORY },
     "/api/hosted-apps/suite/dns": (url) =>
       url.includes("site=suite-admin")
-        ? { body: { url: "https://suite-admin.orgo.dev", domains: [ADMIN], zones: [] } }
-        : { body: { url: "https://suite.orgo.dev", domains: SITE_DOMAINS[0].map((d, i) => ({ id: `cd_${i}`, ...d, cert: "pending", managed: false, zone: null, publish: [] })), zones: [] } },
+        ? { body: { url: null, domains: [ADMIN], zones: [] } }
+        : { body: { url: "https://suite.example", domains: SITE_DOMAINS[0].map((d, i) => ({ id: `cd_${i}`, ...d, cert: "pending", managed: false, zone: null, publish: [] })), zones: [] } },
     "/api/hosted-apps/suite/settings": { body: SETTINGS },
     "/api/hosted-apps/suite/domains/cd_admin": (url, init) =>
-      init.method === "DELETE" ? { body: { url: "https://suite-admin.orgo.dev", domains: [], zones: [] } } : { body: { domain: { ...ADMIN, status: "active", cert: "issued" }, said: null } },
+      init.method === "DELETE" ? { body: { url: null, domains: [], zones: [] } } : { body: { domain: { ...ADMIN, status: "active", cert: "issued" }, said: null } },
     "/api/hosted-apps/suite": { body: { app: suiteApp({ sites: going }) } },
   };
   const ws = `ws_changes${++tabs}`;
@@ -2057,7 +2095,7 @@ await test("a site's line as its domains change, clicked: another site picked re
     await act(settle);
     assert.equal(lists(n), 1, "the list read again");
     assert.deepEqual(named("suite"), OWN, "what its line said, kept");
-    assert.ok(!line("suite").textContent.includes("suite.orgo.dev"), "never its address in their place");
+    assert.ok(!line("suite").textContent.includes("Live, no domain yet"), "never that in their place");
     assert.deepEqual(named("suite-admin"), [["admin.suite.example", "pending"]], "the one picked: as its Domains section has them");
 
     // Checked, and gone live: on its line at once.
@@ -2075,7 +2113,7 @@ await test("a site's line as its domains change, clicked: another site picked re
     await click([...m.box.querySelectorAll("button")].find((b) => b.textContent === "Remove"));
     assert.equal(calls.at(-1).method, "DELETE");
     assert.deepEqual(named("suite-admin"), [], "gone from its line at once");
-    assert.ok(line("suite-admin").textContent.includes("suite-admin.orgo.dev"), "its address again");
+    assert.ok(line("suite-admin").textContent.includes("Live, no domain yet"), "said so again");
     routes["/api/hosted-apps"] = listed(going);
     n = calls.length;
     await act(async () => {
@@ -2084,7 +2122,7 @@ await test("a site's line as its domains change, clicked: another site picked re
     });
     assert.equal(lists(n), 0, "nothing read since");
     assert.deepEqual(named("suite-admin"), [], "the older read never puts it back");
-    assert.ok(line("suite-admin").textContent.includes("suite-admin.orgo.dev"));
+    assert.ok(line("suite-admin").textContent.includes("Live, no domain yet"));
     assert.equal(m.box.querySelectorAll('[data-domain="admin.suite.example"]').length, 0, "as its Domains section says");
     assert.deepEqual(named("suite"), OWN, "the others as that read says");
   } finally {
@@ -2104,14 +2142,14 @@ await test("Add a site, clicked: its name as its address takes it (as typed), Ad
   try {
     await click(m.box.querySelector("[data-add-site]"));
     const form = m.box.querySelector("[data-add-site-form]");
-    assert.ok(form && form.textContent.includes("Another site from the same code, on the same computer, with its own address, port and variables."));
+    assert.ok(form && form.textContent.includes("Another site from the same code, on the same computer, with its own preview link, domain, port and variables."));
     assert.equal(doc.activeElement.getAttribute("aria-label"), "Site name");
     await type(form.querySelector('input[aria-label="Site name"]'), "Suite Admin");
     assert.equal(form.querySelector('input[aria-label="Site name"]').value, "suite-admin");
     assert.ok(form.textContent.includes("It has a site by that name."), "one it has, said as it's typed");
     assert.equal(button(form, "Add").disabled, true);
     await type(form.querySelector('input[aria-label="Site name"]'), "suite-pos");
-    assert.ok(form.textContent.includes("Its address is suite-pos.orgo.dev once it's live, if no one has it."));
+    assert.ok(form.textContent.includes("It gets a preview link of its own on its first deploy, and lives on its own domain once published."));
     const n = calls.length;
     await submit(form);
     assert.deepEqual(posts(n, "/api/hosted-apps/suite").map((c) => c.body), [{ ws: "ws_end", action: "addSite", site: "suite-pos" }]);
@@ -2731,83 +2769,277 @@ await test("Your Apps in a workspace shared with the user: the apps as the owner
   }
 });
 
+await test("Your Apps shared with the user: each site's Preview, where their Deploy goes, its state and link (up top too); at Write its password with Copy, as the owner sees it, at Read who to ask; Go back on a Preview deploy only; an owner's Bops from before as it was", async () => {
+  const { SharedAppsPage } = await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  const LINK = "https://k7p2qxm4wr3d.orgo.dev";
+  const PASSWORD = "Mx4tR8q";
+  // Published never went out (no domain yet): its Preview is all there is to open.
+  const shop = (site = {}) => ({
+    name: "shop",
+    head: { id: "cs33333", message: "New cart", at: 9 },
+    sites: [{ name: "shop", url: null, preview: LINK, previewLive: { id: "dp3", state: "running", when: 12 }, previewServing: "cs33333", previewProtected: true, serving: null, live: null, ...site }],
+    deploys: [
+      { id: "dp3", state: "running", at: "cs33333", rollback: false, when: 12, live: false, canRollback: false, site: "shop", env: "preview" },
+      { id: "dp2", state: "succeeded", at: "cs22222", rollback: false, when: 10, live: true, canRollback: false, site: "shop", env: "preview" },
+      { id: "dp1", state: "succeeded", at: "cs11111", rollback: false, when: 8, live: false, canRollback: true, site: "shop", env: "preview" },
+      { id: "d1", state: "succeeded", at: "cs11111", rollback: false, when: 7, live: false, canRollback: true, site: "shop", env: "prod" },
+    ],
+  });
+  const state = (level, app) => ({ account: { user: { id: "u-sam", email: "sam@orgo.ai" } }, shared: { projectId: "p", name: "Acme", owner: "Ava", role: "member", wsId: "shared_p", apps: { level, at: Date.now(), list: [app] } }, bots: [], workspaces: [] });
+  /** What an element says, its pieces of text one word apart. */
+  const words = (el) => {
+    const out = [];
+    const walk = (n) => (n.nodeType === 3 ? out.push(n.textContent.trim()) : [...n.childNodes].forEach(walk));
+    walk(el);
+    return out.filter(Boolean).join(" ");
+  };
+  const opened = async (st) => {
+    const m = await mount(h(SharedAppsPage, { state: st }));
+    await click(m.box.querySelector('[data-shared-app="shop"] button[aria-expanded]'));
+    return m;
+  };
+  // Up top: its Preview's state, what it serves and its link.
+  assert.match(renderToStaticMarkup(h(SharedAppsPage, { state: state("read", shop()) })), /Preview · Deploying · cs33333 · https:\/\/k7p2qxm4wr3d\.orgo\.dev/);
+  // At Write: its Preview's line with its link, and the password with Copy (the owner's own look: preview-password.tsx).
+  const w = await opened(state("write", shop({ previewPassword: PASSWORD })));
+  const line = w.box.querySelector("[data-shared-preview]");
+  assert.equal(line.querySelector("a").getAttribute("href"), LINK);
+  assert.match(words(line), /^Preview Deploying https:\/\/k7p2qxm4wr3d\.orgo\.dev Password Mx4tR8q$/);
+  assert.equal(line.querySelector("[data-password-beside] [data-preview-password]").textContent, PASSWORD);
+  assert.ok(line.querySelector('button[aria-label="Copy password"]'));
+  assert.match(words(w.box.querySelector('[data-shared-app="shop"]')), /shop Published Not on the web yet/);
+  // Deploys say where each went, and Go back is on the Preview's only (the owner's Bops refuses a Published one).
+  const back = [...w.box.querySelectorAll("button")].filter((b) => b.textContent === "Go back to this one");
+  assert.equal(back.length, 1, "one Go back");
+  assert.match(back[0].parentElement.textContent, /^Live · Preview · cs11111/);
+  assert.match(w.box.textContent, /Live · Published · cs11111/, "Published's deploy listed, said as Published");
+  await w.done();
+  // At Read: the link, and who to ask for the password; never one.
+  const r = await opened(state("read", shop()));
+  const rl = r.box.querySelector("[data-shared-preview]");
+  assert.match(words(rl), /^Preview Deploying https:\/\/k7p2qxm4wr3d\.orgo\.dev Ask the owner for its password\.$/);
+  assert.equal(rl.querySelector("[data-preview-password]"), null);
+  await r.done();
+  // At Write when the owner's Bops couldn't read it: who to ask too. A link that asks for none: nothing said of a password.
+  const none = await opened(state("write", shop()));
+  assert.match(words(none.box.querySelector("[data-shared-preview]")), /Ask the owner for its password\.$/);
+  await none.done();
+  const open = await opened(state("write", shop({ previewProtected: undefined })));
+  assert.match(words(open.box.querySelector("[data-shared-preview]")), /^Preview Deploying https:\/\/k7p2qxm4wr3d\.orgo\.dev$/);
+  await open.done();
+  // An owner's Bops from before Preview: Published's state and address up top, no Preview line, Go back as before.
+  const before = { name: "shop", url: "https://shop.orgo.dev", sites: [{ name: "shop", url: "https://shop.orgo.dev", serving: "cs22222", live: { id: "d2", state: "succeeded", when: 9 } }], deploys: [{ id: "d1", state: "succeeded", at: "cs11111", rollback: false, when: 8, live: false, canRollback: true, site: "shop" }] };
+  assert.match(renderToStaticMarkup(h(SharedAppsPage, { state: state("write", before) })), /Live · cs22222 · https:\/\/shop\.orgo\.dev/);
+  const old = await opened(state("write", before));
+  assert.equal(old.box.querySelector("[data-shared-preview]"), null);
+  assert.ok(!/Published/.test(old.box.textContent));
+  assert.equal([...old.box.querySelectorAll("button")].filter((b) => b.textContent === "Go back to this one").length, 1);
+  await old.done();
+});
+
 /* ---------------- Local, Staging and Prod, all on the app's computer ---------------- */
 
 const E = await import(pathToFileURL(`${root}/components/app/app-envs.tsx`).href);
-const STAGING = (extra = {}) => ({ projectId: "p_st", url: "https://shop-staging.orgo.dev", serving: id("e5"), live: live("succeeded", id("e5"), { url: "https://shop-staging.orgo.dev" }), ...extra });
-const LOCAL = { sites: { shop: { state: "running", port: 4100, command: "npm run dev", since: min(3), error: null, url: null, env: ["DEBUG"] } } };
+const STAGING = (extra = {}) => ({ projectId: "p_st", url: "https://k7p2qxm4wr3d.orgo.dev", label: "k7p2qxm4wr3d", serving: id("e5"), live: live("succeeded", id("e5"), { url: "https://k7p2qxm4wr3d.orgo.dev" }), ...extra });
+const LOCAL = { sites: { shop: { state: "running", port: 3000, devPort: 3000, command: "npm run dev", since: min(3), error: null, env: ["DEBUG"] } } };
 /** One environment's line (Local, Staging or Prod) in a piece of HTML. */
 const envLine = (html, env) => {
   const start = html.indexOf(`data-app-env="${env}"`);
   if (start < 0) return null;
-  const next = ["local", "staging", "prod"].map((x) => html.indexOf(`data-app-env="${x}"`, start + 10)).filter((i) => i > start);
+  const next = ["local", "preview", "prod"].map((x) => html.indexOf(`data-app-env="${x}"`, start + 10)).filter((i) => i > start);
   return html.slice(start, next.length ? Math.min(...next) : html.indexOf("</div></div>", start) + 12);
 };
 const envsOf = (props) => renderToStaticMarkup(h(E.AppEnvs, { ws: "ws_main", answer: { enabled: true }, sites: [props.app], local: null, onLocal: noop, onChanged: noop, ...props }));
 
-await test("the three environments, one line each, Local, Staging and Prod: each its state in a word, where it is, the changeset it serves, and its one action", () => {
-  const html = envsOf({ app: shopApp({ staging: STAGING() }), local: LOCAL });
-  assert.deepEqual([...html.matchAll(/data-app-env="([a-z]+)"/g)].map((m) => m[1]), ["local", "staging", "prod"], "in that order");
+await test("the three environments, one line each, Local, Preview and Published: each its state in a word, where it is, the changeset it serves, and its actions; Published never an orgo.dev name", () => {
+  const html = envsOf({ app: shopApp({ preview: STAGING() }), local: LOCAL });
+  assert.deepEqual([...html.matchAll(/data-app-env="([a-z]+)"/g)].map((m) => m[1]), ["local", "preview", "prod"], "in that order");
+  assert.ok(html.includes(">Local, Preview and Published<"), "its heading");
   const local = envLine(html, "local");
-  assert.ok(local.includes(">Local<") && local.includes('data-app-env-state="Running"') && local.includes("localhost:4100 on its computer"), "Local: running on its computer, not public");
+  assert.ok(local.includes(">Local<") && local.includes('data-app-env-state="Running"') && local.includes(">localhost:3000<"), "Local: running, seen at localhost:3000");
   assert.ok(local.includes(">Open preview<") && local.includes(">Stop<"), "Open preview and Stop while it runs");
-  const staging = envLine(html, "staging");
-  assert.ok(staging.includes('data-app-env-state="Running"') && staging.includes(">shop-staging.orgo.dev<") && staging.includes(`>${id("e5").slice(0, 7)}<`), "Staging: its own address and what it serves");
-  assert.deepEqual(deployIn(staging), { tip: null, disabled: false }, "Deploy");
+  // Its address is its port, the same on its computer: one an older bops-local started elsewhere shows where it runs.
+  const moved = envLine(envsOf({ app: shopApp(), local: { sites: { shop: { ...LOCAL.sites.shop, port: 3003 } } } }), "local");
+  assert.ok(moved.includes(">localhost:3003<") && !moved.includes("is taken there"), "its own port, the address everywhere");
+  const elsewhere = envLine(envsOf({ app: shopApp(), local: { sites: { shop: { ...LOCAL.sites.shop, state: "starting", port: 3001, devPort: 3001, mismatch: 5173 } } } }), "local");
+  assert.ok(elsewhere.includes(">localhost:3001<") && elsewhere.includes('data-tip="Its dev server listens on 5173 instead of 3001. Make its command use $PORT."'), "a dev server on another port, said, never taken for its address");
+  // Failed: its last line in the tooltip (error keeps its log's last lines, for Fix it).
+  assert.equal(E.localState({ ...LOCAL.sites.shop, state: "failed", error: "> next dev\nError: Cannot find module 'next'" }, LOCAL).tip, "It stopped: Error: Cannot find module 'next'");
+  // An app with more sites, on the Apps page: each running site's own address.
+  const two = { sites: { shop: LOCAL.sites.shop, admin: { ...LOCAL.sites.shop, port: 3001, devPort: 3001 } } };
+  const both = envLine(renderToStaticMarkup(h(E.AppEnvs, { ws: "ws_main", answer: { enabled: true }, app: shopApp(), sites: [shopApp(), { ...shopApp(), name: "admin" }], local: two, onLocal: noop, onChanged: noop })), "local");
+  assert.ok(both.includes(">localhost:3000, :3001<"), "each site's address, the others by their port");
+  assert.ok(both.includes('data-tip="shop at localhost:3000, admin at localhost:3001"'), "and whose is which, on hover");
+  const preview = envLine(html, "preview");
+  assert.ok(preview.includes(">Preview<") && preview.includes('data-app-env-state="Running"') && preview.includes(">k7p2qxm4wr3d.orgo.dev<") && preview.includes(`>${id("e5").slice(0, 7)}<`), "Preview: its fixed link and what it serves");
+  assert.deepEqual(deployIn(preview), { tip: null, disabled: false }, "Deploy");
   const prod = envLine(html, "prod");
-  assert.ok(prod.includes(">shop.orgo.dev<") && prod.includes(`>${id("c3").slice(0, 7)}<`), "Prod: its address and what it serves");
+  assert.ok(prod.includes(">Published<") && prod.includes(">shop.example<") && prod.includes(`>${id("c3").slice(0, 7)}<`), "Published: its domain and what it serves");
+  assert.ok(!prod.includes(".orgo.dev"), "never an orgo.dev name");
   assert.deepEqual(deployIn(prod, "Publish"), { tip: null, disabled: false }, "Publish: the preview serves another changeset");
-  assert.match(prod, /data-prod-menu="true" aria-label="More for Published" aria-haspopup="menu" aria-expanded="false"/, "Roll back and Domain in its menu");
-  // Promote waits for something to promote, and for Prod.
+  assert.match(prod, /data-prod-menu="true" aria-label="More for Published" aria-haspopup="menu" aria-expanded="false"/, "Roll back, Apply variables and Domain in its menu");
+  // Publish waits for something to publish, and for Published.
   const none = envLine(envsOf({ app: shopApp() }), "prod");
   assert.deepEqual(deployIn(none, "Publish"), { tip: "The preview isn't live yet. Deploy a preview first.", disabled: true });
-  const same = envLine(envsOf({ app: shopApp({ staging: STAGING({ serving: id("c3") }) }) }), "prod");
+  const same = envLine(envsOf({ app: shopApp({ preview: STAGING({ serving: id("c3") }) }) }), "prod");
   assert.deepEqual(deployIn(same, "Publish"), { tip: "What's published is the preview already.", disabled: true });
-  const busy = envLine(envsOf({ app: shopApp({ staging: STAGING(), live: live("running", id("e5")) }) }), "prod");
+  const busy = envLine(envsOf({ app: shopApp({ preview: STAGING(), live: live("running", id("e5")) }) }), "prod");
   assert.deepEqual(deployIn(busy, "Publish"), { tip: "It's publishing. Wait for it to finish.", disabled: true });
   assert.match(busy, /data-app-env-state="Deploying"/);
+  // No domain: never live, Not published with Connect a domain; pending, waiting for DNS with Publish; live before, Live, no domain yet.
+  const fresh = envLine(envsOf({ app: app("fresh", { serving: null, live: null, preview: STAGING() }) }), "prod");
+  assert.ok(fresh.includes('data-app-env-state="Not published"') && fresh.includes(">No domain yet<") && fresh.includes(">Connect a domain<"), "never live, no domain");
+  const waiting = envLine(envsOf({ app: app("fresh", { serving: null, live: null, preview: STAGING(), domains: [{ domain: "fresh.example", status: "pending" }] }) }), "prod");
+  assert.ok(waiting.includes(">fresh.example, waiting for DNS<") && deployIn(waiting, "Publish")?.disabled === false, "a pending domain is enough to publish");
+  const legacy = envLine(envsOf({ app: shopApp({ preview: STAGING(), domain: null, domains: [] }) }), "prod");
+  assert.ok(legacy.includes('data-app-env-state="Running"') && legacy.includes(">Live, no domain yet<") && deployIn(legacy, "Publish")?.disabled === false, "live before: publishes without a domain");
   // Each state's word.
-  const failed = envLine(envsOf({ app: shopApp({ staging: STAGING({ live: live("failed", id("e5"), { error: "npm run build exited with 1" }) }) }) }), "staging");
+  const failed = envLine(envsOf({ app: shopApp({ preview: STAGING({ live: live("failed", id("e5"), { error: "npm run build exited with 1" }) }) }) }), "preview");
   assert.match(failed, /data-tip="Its last deploy failed: npm run build exited with 1"[^>]*bg-\[#B42318\]/);
   assert.match(failed, /data-app-env-state="Failed"/);
-  assert.match(envLine(envsOf({ app: shopApp() }), "staging"), /data-app-env-state="Not deployed yet"[^]*A link to share once deployed/);
+  assert.match(envLine(envsOf({ app: shopApp() }), "preview"), /data-app-env-state="Not deployed yet"[^]*Gets a link of its own on its first deploy/);
+  const off = envLine(envsOf({ app: shopApp({ preview: STAGING({ off: true }) }) }), "preview");
+  assert.ok(off.includes('data-app-env-state="Off"') && off.includes('data-tip="Orgo turned its link off."') && !off.includes('href="https://k7p2qxm4wr3d.orgo.dev"'), "Off: its link not clickable");
   const words = (local) => envLine(envsOf({ app: shopApp(), local }), "local").match(/data-app-env-state="([^"]+)"/)[1];
   assert.deepEqual(
     [words(null), words({ sites: {} }), words({ sites: {}, asleep: true }), words({ sites: { shop: { ...LOCAL.sites.shop, state: "starting" } } }), words({ sites: { shop: { ...LOCAL.sites.shop, state: "failed", error: "Cannot find module next" } } })],
     ["Reading…", "Stopped", "Stopped", "Starting", "Failed"],
   );
   assert.match(envLine(envsOf({ app: shopApp(), local: { sites: {}, asleep: true } }), "local"), /data-tip="Its computer is asleep, so nothing runs there\. Start wakes it\."/);
-  // From this Mac over the tailnet: a link, no Open.
-  const near = envLine(envsOf({ app: shopApp(), local: { sites: { shop: { ...LOCAL.sites.shop, url: "http://100.64.0.7:4100/" } } } }), "local");
-  assert.ok(near.includes('href="http://100.64.0.7:4100/"') && near.includes(">Open preview<"));
+  assert.ok(envLine(envsOf({ app: shopApp(), local: { sites: {} } }), "local").includes(">Runs its working folder with hot reload<"));
   assert.ok(!NO_DASHES.test(text(html)) && !/orbit/i.test(text(html)), "plain words");
 });
 
 await test("the Apps page: every app with its three lines under it; the lines of an app with more sites say all of them", () => {
-  const html = list({ enabled: true, apps: [shopApp({ staging: STAGING() }), suiteApp()] });
+  const html = list({ enabled: true, apps: [shopApp({ preview: STAGING() }), suiteApp()] });
   const shop = rowOf(html, "shop");
-  assert.deepEqual([...shop.matchAll(/data-app-env="([a-z]+)"/g)].map((m) => m[1]), ["local", "staging", "prod"]);
+  assert.deepEqual([...shop.matchAll(/data-app-env="([a-z]+)"/g)].map((m) => m[1]), ["local", "preview", "prod"]);
   assert.ok(shop.indexOf("data-app-envs") > shop.indexOf(">shop<"), "under its line");
   const suite = rowOf(html, "suite");
   assert.match(envLine(suite, "prod"), /data-app-env-state="Failed"/, "one of its sites failed");
-  assert.match(envLine(suite, "staging"), /data-app-env-state="Not deployed yet"/);
+  assert.match(envLine(suite, "preview"), /data-app-env-state="Not deployed yet"/);
+});
+
+await test("more bots on one app: a Local line for each bot's copy, named for its bot (its own folder's too, named for its own bot), each with its own address and Start, Open preview and Stop, which name that bot", async () => {
+  const COPIES = {
+    sites: LOCAL.sites,
+    bot: { id: "nova", name: "Nova" },
+    copies: [
+      { bot: "sam", name: "Sam", sites: { shop: { ...LOCAL.sites.shop, port: 3001, devPort: 3001 } } },
+      { bot: "kim", name: "Kim", sites: {} },
+    ],
+  };
+  const html = envsOf({ app: shopApp({ preview: STAGING() }), local: COPIES });
+  assert.deepEqual([...html.matchAll(/data-app-env="([a-z]+)"(?: data-app-env-bot="([a-z]+)")?/g)].map((m) => m[2] ?? m[1]), ["local", "sam", "kim", "preview", "prod"], "its own folder's first, then each copy's, then Preview and Published");
+  const lines = html.split('data-app-env="').slice(1, 4);
+  assert.deepEqual(lines.map((l) => /data-local-bot="true"[^>]*>([^<]+)</.exec(l)?.[1]), ["Nova", "Sam", "Kim"], "each named for its bot");
+  assert.ok(lines[0].includes(">localhost:3000<") && lines[1].includes(">localhost:3001<"), "each its own address");
+  assert.ok(lines[2].includes('data-app-env-state="Stopped"') && lines[2].includes(">Its own copy of the code<") && buttonsIn(lines[2]).includes("Start"), "one not started: Start");
+  assert.deepEqual([buttonsIn(lines[0]), buttonsIn(lines[1])], [["Open preview", "Stop"], ["Open preview", "Stop"]]);
+  assert.ok(!envsOf({ app: shopApp(), local: LOCAL }).includes("data-local-bot"), "one bot alone: no names, as before");
+  assert.ok(!NO_DASHES.test(text(html)), "plain words");
+  // Clicked: each line's acts name its bot; Open preview opens that bot's copy beside its chat.
+  const { OpenPreview } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  routes = { "/api/hosted-apps/shop/local": { body: COPIES } };
+  const asked = [];
+  const m = await mount(h(OpenPreview.Provider, { value: async (...a) => (asked.push(a), {}) }, h(E.AppEnvs, { ws: "ws_copies", answer: { enabled: true }, app: shopApp(), sites: [shopApp()], local: COPIES, onLocal: noop, onChanged: noop })));
+  try {
+    const n = calls.length;
+    await click(button(m.box.querySelector('[data-app-env-bot="kim"]'), "Start"));
+    await click(button(m.box.querySelector('[data-app-env-bot="sam"]'), "Stop"));
+    await click(button(m.box.querySelector('[data-app-env="local"]:not([data-app-env-bot])'), "Stop"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/shop/local").map((c) => c.body), [{ ws: "ws_copies", action: "start", bot: "kim" }, { ws: "ws_copies", action: "stop", bot: "sam" }, { ws: "ws_copies", action: "stop" }]);
+    await click(button(m.box.querySelector('[data-app-env-bot="sam"]'), "Open preview"));
+    await click(button(m.box.querySelector('[data-app-env="local"]:not([data-app-env-bot])'), "Open preview"));
+    assert.deepEqual(asked, [["ws_copies", "shop", undefined, "sam"], ["ws_copies", "shop", undefined, undefined]]);
+  } finally {
+    await m.done();
+  }
+});
+
+/** A piece of HTML in a DOM, to look into; an element's classes. */
+const domOf = (html) => {
+  const box = doc.createElement("div");
+  box.innerHTML = html;
+  return box;
+};
+const classes = (el) => (el?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+
+await test("narrow or wide, nothing on a line drawn over anything: a row of columns once its panel is wide, else its place, what it serves and its actions on a first line and its state and where it is wrapping under its name; anything cut short whole in its tooltip; a bot's copy's line and its own folder's say whose they are", () => {
+  const COPIES = { sites: LOCAL.sites, bot: { id: "nova", name: "Nova" }, copies: [{ bot: "sam", name: "Sam", sites: { shop: { ...LOCAL.sites.shop, port: 3001, devPort: 3001 } } }, { bot: "kim", name: "Kim", sites: {} }] };
+  const listed = (props) => envsOf({ compact: true, ...props });
+  const kinds = {
+    "with copies": listed({ app: shopApp({ preview: STAGING() }), local: COPIES }),
+    "its tab, with copies": envsOf({ app: shopApp({ preview: STAGING() }), local: COPIES, picked: "prod", onPick: noop }),
+    "one bot": listed({ app: shopApp({ preview: STAGING() }), local: LOCAL }),
+    "live, no domain yet": listed({ app: shopApp({ preview: STAGING(), domain: null, domains: [] }), local: { sites: {} } }),
+    "waiting for DNS": listed({ app: app("fresh", { serving: null, live: null, preview: STAGING(), domains: [{ domain: "fresh.example", status: "pending" }] }) }),
+    "its link off": listed({ app: shopApp({ preview: STAGING({ off: true }) }) }),
+    "needs a new home": listed({ app: app("gone", { hosting: { botId: "nova", computerId: "c9", lost: 1 } }) }),
+    "more sites": renderToStaticMarkup(h(E.AppEnvs, { compact: true, ws: "ws_main", answer: { enabled: true }, app: shopApp(), sites: [shopApp(), { ...shopApp(), name: "admin" }], local: { sites: { shop: LOCAL.sites.shop, admin: { ...LOCAL.sites.shop, port: 3001, devPort: 3001 } } }, onLocal: noop, onChanged: noop })),
+  };
+  for (const [kind, html] of Object.entries(kinds)) {
+    const box = domOf(html);
+    assert.ok(classes(box.querySelector("[data-app-envs]")).includes("@container"), `${kind}: its lines read the width they have, not the window's`);
+    assert.ok(![...box.querySelectorAll("[class]")].some((el) => classes(el).some((c) => /^(?:@[\w-]+:)?(?:absolute|fixed)$/.test(c))), `${kind}: nothing placed over another column`);
+    const lines = [...box.querySelectorAll("[data-app-env]")];
+    const wide = lines.some((l) => l.querySelector("[data-local-bot]")) ? "@2xl:w-[134px]" : "@2xl:w-[84px]";
+    for (const line of lines) {
+      const is = `${kind}, ${line.getAttribute("data-app-env")}${line.getAttribute("data-app-env-bot") ? ` of ${line.getAttribute("data-app-env-bot")}` : ""}`;
+      const place = line.querySelector("[data-app-env-place]");
+      const where = line.querySelector("[data-app-env-where]");
+      const at = line.querySelector("[data-app-env-at]");
+      // Its pieces side by side on a line that wraps, none inside another: its place, its state and where it is, what it serves, its actions.
+      assert.ok(classes(line).includes("flex-wrap") && !classes(line).some((c) => /^h-\d/.test(c)), `${is}: a line that wraps, never a fixed height`);
+      assert.deepEqual([...line.children].slice(0, at ? 3 : 2), at ? [place, where, at] : [place, where], `${is}: its pieces in order`);
+      // Narrow, its place takes what's left of the first line; wide, a column as wide on every line, so their states line up.
+      for (const c of ["min-w-0", "flex-1", "@2xl:flex-none", wide]) assert.ok(classes(place).includes(c), `${is}: its place, ${c}`);
+      // Narrow, its state and where it is wrap on a line of their own under its name; wide, a column between its name and what it serves.
+      for (const c of ["order-last", "basis-full", "flex-wrap", "min-w-0", "pl-3.5", "@2xl:order-none", "@2xl:basis-0", "@2xl:grow", "@2xl:flex-nowrap", "@2xl:pl-0"]) assert.ok(classes(where).includes(c), `${is}: where it is, ${c}`);
+      const state = where.firstElementChild;
+      assert.equal(state.textContent, line.getAttribute("data-app-env-state"), `${is}: its state first`);
+      assert.ok(classes(state).includes("@2xl:w-[112px]") && classes(state).includes("@2xl:shrink-0"), `${is}: its state a column when wide`);
+      if (at) assert.ok(classes(at).includes("shrink-0") && at.getAttribute("title"), `${is}: what it serves, whole, all of it in its tooltip`);
+      // Anything that can be cut short can shrink, and has all of it in its tooltip.
+      for (const el of line.querySelectorAll("[class]")) {
+        if (!classes(el).includes("truncate")) continue;
+        assert.ok(classes(el).includes("min-w-0"), `${is}: "${el.textContent}" shrinks`);
+        assert.ok(el.getAttribute("title") || el.getAttribute("data-tip"), `${is}: "${el.textContent}" in its tooltip`);
+      }
+      // Its words cut short show whole in their tooltips (a state's own tooltip says more of it).
+      for (const el of where.querySelectorAll("[data-tip]")) if (el !== state && !el.hasAttribute("data-local-where")) assert.equal(el.getAttribute("data-tip"), el.textContent, `${is}: "${el.textContent}"`);
+    }
+  }
+  // With more bots: each Local line says whose it is in its place (Local · Nova), its own folder's too; a copy's note where it is.
+  const box = domOf(kinds["with copies"]);
+  const said = (el) => text(el.innerHTML).replace(/\s+/g, " ").trim();
+  const locals = [...box.querySelectorAll('[data-app-env="local"]')];
+  assert.deepEqual(locals.map((l) => said(l.querySelector("[data-app-env-place]"))), ["Local · Nova", "Local · Sam", "Local · Kim"]);
+  assert.deepEqual(locals.map((l) => l.querySelector("[data-app-env-place] [data-local-bot]").getAttribute("title")), ["Nova", "Sam", "Kim"], "each name whole in its tooltip");
+  assert.ok(locals.every((l) => !l.querySelector("[data-app-env-where] [data-local-bot]")), "never squeezed in with where it is");
+  assert.deepEqual(locals.map((l) => said(l.querySelector("[data-app-env-where]"))), ["Running localhost:3000", "Running localhost:3001", "Stopped Its own copy of the code"]);
+  assert.deepEqual(locals.map((l) => buttonsIn(l.outerHTML)), [["Open preview", "Stop"], ["Open preview", "Stop"], ["Start"]], "its actions on its first line");
+  // The Preview line: its link where it is, what it serves a piece of its own after it.
+  const preview = box.querySelector('[data-app-env="preview"]');
+  assert.ok(preview.querySelector('[data-app-env-where] a[title="https://k7p2qxm4wr3d.orgo.dev"]') && preview.querySelector("[data-app-env-at]").parentNode === preview, "the link and the changeset apart");
+  assert.ok(!NO_DASHES.test(said(box)) && !/orbit/i.test(said(box)), "plain words");
 });
 
 await test("clicked: Deploy sends to Staging, Promote to Prod sends what Staging serves, Local's Start and Stop go to its computer, Roll back asks first then puts Prod's earlier deploy back, Domain opens the app's tab at Add a domain", async () => {
   routes = {
-    "/api/hosted-apps/shop": (url, init) => ({ body: { app: shopApp({ staging: STAGING() }), ...(JSON.parse(init.body).action === "promote" ? { said: "shop-admin has no preview live, so it stays as published before." } : {}) } }),
+    "/api/hosted-apps/shop": (url, init) => ({ body: { app: shopApp({ preview: STAGING() }), ...(JSON.parse(init.body).action === "promote" ? { said: "shop-admin has no preview live, so it stays as published before." } : {}) } }),
     "/api/hosted-apps/shop/local": (url, init) => ({ body: init.method === "POST" ? { sites: { shop: { ...LOCAL.sites.shop, state: JSON.parse(init.body).action === "stop" ? "stopped" : "running" } } } : LOCAL }),
     "/api/hosted-apps/shop/settings": { body: SETTINGS },
   };
   const opened = [];
   let local = null;
   const m = await mount(
-    h(H.OpenHostedApp.Provider, { value: (ws, name) => opened.push([ws, name]) }, h(E.AppEnvs, { ws: "ws_click", answer: { enabled: true }, app: shopApp({ staging: STAGING() }), sites: [shopApp({ staging: STAGING() })], local: { sites: {} }, onLocal: (a) => (local = a), onChanged: noop })),
+    h(H.OpenHostedApp.Provider, { value: (ws, name) => opened.push([ws, name]) }, h(E.AppEnvs, { ws: "ws_click", answer: { enabled: true }, app: shopApp({ preview: STAGING() }), sites: [shopApp({ preview: STAGING() })], local: { sites: {} }, onLocal: (a) => (local = a), onChanged: noop })),
   );
   try {
     let n = calls.length;
-    await click(button(m.box.querySelector('[data-app-env="staging"]'), "Deploy"));
-    assert.deepEqual(posts(n, "/api/hosted-apps/shop").map((c) => c.body), [{ ws: "ws_click", action: "deploy", env: "staging" }]);
+    await click(button(m.box.querySelector('[data-app-env="preview"]'), "Deploy"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/shop").map((c) => c.body), [{ ws: "ws_click", action: "deploy", env: "preview" }]);
     n = calls.length;
     await click(button(m.box.querySelector('[data-app-env="prod"]'), "Publish"));
     assert.deepEqual(posts(n, "/api/hosted-apps/shop").map((c) => c.body), [{ ws: "ws_click", action: "promote", site: "shop", at: id("e5") }], "with the changeset the window saw on its preview");
@@ -2835,13 +3067,13 @@ await test("clicked: Deploy sends to Staging, Promote to Prod sends what Staging
   }
 });
 
-await test("its tab: the three lines under its title, a line pressed picks what the sections are about; Staging's own address, settings, variables (what Prod has that it doesn't, said) and deploys, read with env=staging; Local's command and its own variables, saved on its computer", async () => {
-  const SET_STAGING = { url: "https://shop-staging.orgo.dev", settings: { port: 3001, install: null, build: "npm run build", start: null }, env: ["API_TOKEN"], prodEnv: ["API_TOKEN", "SENTRY_DSN"], deploys: SETTINGS.deploys.slice(0, 1) };
+await test("its tab: the three lines under its title, a line pressed picks what the sections are about; Staging's own address, settings, variables (what Prod has that it doesn't, said) and deploys, read with env=preview; Local's command and its own variables, saved on its computer", async () => {
+  const SET_STAGING = { url: "https://k7p2qxm4wr3d.orgo.dev", settings: { port: 3001, install: null, build: "npm run build", start: null }, env: ["API_TOKEN"], prodEnv: ["API_TOKEN", "SENTRY_DSN"], deploys: SETTINGS.deploys.slice(0, 1) };
   routes = {
-    "/api/hosted-apps": { body: { enabled: true, apps: [shopApp({ staging: STAGING() })] } },
+    "/api/hosted-apps": { body: { enabled: true, apps: [shopApp({ preview: STAGING() })] } },
     "/api/hosted-apps/shop/commits": { body: HISTORY },
     "/api/hosted-apps/shop/dns": { body: DOMAINS },
-    "/api/hosted-apps/shop/settings": (url) => ({ body: url.includes("env=staging") ? SET_STAGING : SETTINGS }),
+    "/api/hosted-apps/shop/settings": (url) => ({ body: url.includes("env=preview") ? SET_STAGING : SETTINGS }),
     "/api/hosted-apps/shop/local": { body: LOCAL },
     "/api/hosted-apps/shop/env": (url, init) => ({ body: { env: Object.keys(JSON.parse(init.body).env) } }),
   };
@@ -2852,14 +3084,14 @@ await test("its tab: the three lines under its title, a line pressed picks what 
     assert.ok(tab().innerHTML.indexOf("data-app-envs") < tab().innerHTML.indexOf("data-address-section"), "the three lines above the sections");
     assert.ok(m.box.querySelector('[data-app-env="prod"][data-app-env-picked="true"]'), "Prod picked at first");
     assert.ok(m.box.querySelector("[data-domains]"), "Prod's domains");
-    assert.ok(tab().querySelector('[data-commit="' + id("e5") + '"] [data-on-staging]'), "the history marks what Staging serves");
+    assert.ok(tab().querySelector('[data-commit="' + id("e5") + '"] [data-on-preview]'), "the history marks what Staging serves");
     // Staging.
     let n = calls.length;
-    await click(m.box.querySelector('[data-app-env="staging"] button[aria-pressed]'));
+    await click(m.box.querySelector('[data-app-env="preview"] button[aria-pressed]'));
     await act(settle);
-    assert.ok(calls.slice(n).some((c) => c.url.includes("/settings?") && c.url.includes("env=staging")), "its settings read with env=staging");
+    assert.ok(calls.slice(n).some((c) => c.url.includes("/settings?") && c.url.includes("env=preview")), "its settings read with env=preview");
     assert.ok(!m.box.querySelector("[data-domains]"), "no domains on Staging");
-    assert.ok(m.box.querySelector("[data-address-section]").textContent.includes("shop-staging.orgo.dev"));
+    assert.ok(m.box.querySelector("[data-address-section]").textContent.includes("k7p2qxm4wr3d.orgo.dev"));
     assert.equal(m.box.querySelector("[data-lacks]").textContent, "The published app has SENTRY_DSN. The preview doesn't yet: add it here if the preview needs it.");
     // Its variable saved as Staging's.
     await click(m.box.querySelector("[data-add-env]"));
@@ -2868,12 +3100,21 @@ await test("its tab: the three lines under its title, a line pressed picks what 
     await type(f.querySelector('input[aria-label="Value"]'), "dsn-for-staging");
     n = calls.length;
     await submit(f);
-    assert.deepEqual(posts(n, "/api/hosted-apps/shop/env").map((c) => [c.body.where, c.body.env]), [["staging", { SENTRY_DSN: "dsn-for-staging" }]], "as Staging's");
+    assert.deepEqual(posts(n, "/api/hosted-apps/shop/env").map((c) => [c.body.where, c.body.env]), [["preview", { SENTRY_DSN: "dsn-for-staging" }]], "as the Preview's");
     // Local.
     await click(m.box.querySelector('[data-app-env="local"] button[aria-pressed]'));
     await act(settle);
     const local = m.box.querySelector("[data-local-section]");
-    assert.ok(local && local.textContent.includes("It isn't on the web"), "Local's section");
+    assert.ok(local && local.textContent.includes("Runs its working folder with hot reload, at localhost:3000 here and on its computer."), "Local's section");
+    assert.equal(local.querySelector("[data-local-port]").value, "3000", "its port, as its computer gave it");
+    // Untouched: its port stays; cleared: a free one (never 3000 as such); typed: that one.
+    for (const [typed, port] of [[null, undefined], ["", "auto"], ["3005", 3005]]) {
+      if (typed !== null) await type(local.querySelector("[data-local-port]"), typed);
+      n = calls.length;
+      await submit(local.querySelector("[data-local-command]"));
+      await act(settle);
+      assert.deepEqual(posts(n, "/api/hosted-apps/shop/local").map((c) => c.body.port), [port], `port ${typed}`);
+    }
     assert.equal(local.querySelector('input[aria-label="Its command"]').value, "npm run dev");
     assert.ok(local.querySelector("[data-local-vars]").textContent.includes("Local reads the preview's variables"));
     assert.ok(local.querySelector('[data-env-name="DEBUG"]'), "its own variables by name");
@@ -2890,32 +3131,77 @@ await test("its tab: the three lines under its title, a line pressed picks what 
   }
 });
 
-await test("Open preview: Local beside the bot's chat, in the panel's own tab from this Mac over the tailnet, else on its computer's screen, which the panel then shows", async () => {
-  const { OpenLink } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
-  routes = { "/api/hosted-apps/shop/local": (url, init) => ({ body: { sites: { shop: { ...LOCAL.sites.shop } }, ...(JSON.parse(init.body).action === "open" ? { opened: true } : {}) } }) };
-  const links = [];
+await test("Each site's preview in a session of its own on this Mac (cookies don't go by port): the app's own site keeps the name it always had; on its screen, the screen it opened on", async () => {
+  const { previewPartition } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  assert.equal(previewPartition("u_1", "ws_main", "shop"), "persist:bops-preview-u_1-ws_main-shop", "as before");
+  assert.equal(previewPartition("u_1", "ws_main", "shop", "shop"), "persist:bops-preview-u_1-ws_main-shop", "its own site: the same");
+  assert.equal(previewPartition("u_1", "ws_main", "shop", "shop-admin"), "persist:bops-preview-u_1-ws_main-shop-shop_admin");
+  assert.notEqual(previewPartition("u_1", "ws_main", "shop", "admin"), previewPartition("u_1", "ws_main", "shop"));
+  // A bot's copy of it: a session of its own too (another port of localhost), its own folder's as before.
+  assert.equal(previewPartition("u_1", "ws_main", "shop", undefined, "sam-2"), "persist:bops-preview-u_1-ws_main-shop-by_sam_2");
+  assert.equal(previewPartition("u_1", "ws_main", "shop", "shop-admin", "sam"), "persist:bops-preview-u_1-ws_main-shop-shop_admin-by_sam");
+  assert.match(readFileSync(`${root}/components/app/preview-tab.tsx`, "utf8"), /const partition = previewPartition\(user, ws, name, site, copy\);/, "the tab passes its site and its copy");
+  assert.match(readFileSync(`${root}/components/app/preview-tab.tsx`, "utf8"), /createElement\("webview", \{ ref: setView, src, partition,/);
+  // When this Mac can't reach its computer, the panel shows the screen it opened on (its bot's task's, else a free one).
+  assert.match(readFileSync(`${root}/components/app/bops-app.tsx`, "utf8"), /showScreen\(copy \?\? h\.botId, on\.display \?\? 99\)/);
+});
+
+await test("Open preview: the app's preview beside its bot's chat (bops-app.tsx openPreview); when this Mac can't reach its computer, on its screen, said under the line; with no panel, on its computer's screen", async () => {
+  const { OpenPreview } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  routes = { "/api/hosted-apps/shop/local": (url, init) => ({ body: { sites: { shop: { ...LOCAL.sites.shop } }, ...(JSON.parse(init.body).action === "open" ? { opened: true, display: 101 } : {}) } }) };
+  const asked = [];
   const bots = [];
-  const near = { sites: { shop: { ...LOCAL.sites.shop, url: "http://100.64.0.7:4100/" } } };
-  const view = (local) =>
-    h(OpenLink.Provider, { value: (url, title) => links.push([url, title]) }, h(E.OpenBotComputer.Provider, { value: (id) => bots.push(id) }, h(E.AppEnvs, { ws: "ws_prev", answer: { enabled: true }, app: shopApp(), sites: [shopApp()], local, onLocal: noop, onChanged: noop })));
-  const a = await mount(view(near));
+  let answer = {};
+  const view = (local, withPanel = true) => {
+    const envs = h(E.AppEnvs, { ws: "ws_prev", answer: { enabled: true }, app: shopApp(), sites: [shopApp()], local, onLocal: noop, onChanged: noop });
+    const inner = h(E.OpenBotComputer.Provider, { value: (id, screen) => bots.push([id, screen]) }, envs);
+    return withPanel ? h(OpenPreview.Provider, { value: async (ws, name, site) => (asked.push([ws, name, site]), answer) }, inner) : inner;
+  };
+  const a = await mount(view(LOCAL));
   try {
     const n = calls.length;
     await click(button(a.box.querySelector('[data-app-env="local"]'), "Open preview"));
-    assert.deepEqual(links, [["http://100.64.0.7:4100/", "shop preview"]], "in a tab beside the chat");
-    assert.equal(calls.length, n, "nothing asked of its computer");
+    await act(settle);
+    assert.deepEqual(asked, [["ws_prev", "shop", undefined]], "the app's preview, beside its bot's chat");
+    assert.equal(calls.length, n, "nothing more asked from here");
+    answer = { screen: true, said: "This Mac can't reach its computer, so it opens on its screen." };
+    await click(button(a.box.querySelector('[data-app-env="local"]'), "Open preview"));
+    await act(settle);
+    assert.ok(a.box.textContent.includes("This Mac can't reach its computer, so it opens on its screen."), "said under the line");
   } finally {
     await a.done();
   }
-  const b = await mount(view(LOCAL));
+  const b = await mount(view(LOCAL, false));
   try {
     const n = calls.length;
     await click(button(b.box.querySelector('[data-app-env="local"]'), "Open preview"));
     assert.deepEqual(posts(n, "/api/hosted-apps/shop/local").map((c) => c.body), [{ ws: "ws_prev", action: "open" }], "on its computer's screen");
-    assert.deepEqual(bots, ["nova"], "and the panel shows that computer");
+    assert.deepEqual(bots, [["nova", 101]], "and the panel shows that computer at the screen it opened on");
   } finally {
     await b.done();
   }
 });
 
-console.log(`\n${passed} passed`);
+await test("the Preview tab's wiring (bops-app.tsx): its bot and chat, the owner's own only, its links read as the apps change, On its screen at the screen the server said; the composer bridge around the chat and the panel, and the message box that takes it", () => {
+  const src = readFileSync(`${root}/components/app/bops-app.tsx`, "utf8");
+  const tab = src.slice(src.indexOf("<PreviewTab"), src.indexOf("/>", src.indexOf("<PreviewTab")));
+  assert.match(tab, /bot=\{appBot && appChat \? \{ name: appBot\.name, chatId: appChat \} : undefined\}/, "its bot, with a chat to ask in");
+  assert.match(tab, /own=\{!state\.shared\}/, "Fix it, Select and Draw: the owner's own workspace only");
+  assert.match(tab, /apps=\{appsStamp\(state, t\.ws\)\}/, "its Preview link and domains read again as the apps change");
+  assert.match(tab, /onScreen=\{\(display\) => h\?\.botId && showScreen\(t\.bot \?\? h\.botId, display \?\? 99\)\}/, "the screen the server opened it on (its copy's bot's computer)");
+  assert.match(tab, /copy=\{t\.bot\}/, "the bot whose copy it's of");
+  assert.match(src, /const appBot = h && !h\.lost \?/, "never a bot whose computer is gone");
+  assert.match(src, /const composerBridge = useComposerBridgeHost\(\(id\) => \{\s*setChatId\(id\);\s*setThreadId\(null\);\s*setComposing\(false\);\s*setNewThreadFor\(null\);\s*setFocus\(false\);\s*\}\);/, "its chat comes up with its box in view, the panel left as it is");
+  const open = src.indexOf("<ComposerBridgeProvider value={composerBridge}>");
+  const close = src.indexOf("</ComposerBridgeProvider>");
+  assert.ok(open > 0 && open < src.indexOf("{chatColumn}") && src.indexOf("{chatColumn}") < close && open < src.indexOf("<PreviewTab") && src.indexOf("<PreviewTab") < close, "around the chat and the panel both");
+  const chat = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
+  assert.match(chat, /listen && !state\.shared \? listen\(c\.id,/, "the chat's own box takes what's for it (never in a shared workspace)");
+  assert.match(chat, /\.\.\.\(aboutApp \? \{ appNote: true \} : \{\}\)/, "and the message that goes with it is tagged appNote");
+  const route = readFileSync(`${root}/app/api/chats/[chatId]/messages/route.ts`, "utf8");
+  assert.match(route, /const aboutApp = appNote === true && fromBopsWindow\(request\) && !sharedOpen\(\) && appsOwnShown\(getState\(\)\);/, "appNote only from the owner's own window, where their apps show");
+  assert.match(route, /picked, aboutApp, aboutApp \? picksOf\(picks, text\?\.trim\(\) \?\? ""\) : undefined\);/, "what Select picked, only with appNote");
+});
+
+console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
+process.exit(failed ? 1 : 0);
