@@ -34,10 +34,16 @@ export type OrgoPlan = {
   deal?: boolean;
   /**
    * The user's one free Bops computer (orgo-web's bops_free, not counted in `inUse`): its id, or null
-   * while there's none (Bops makes it next, for a main bot). Unknown when Orgo didn't say (an Orgo
-   * from before free Bops computers): then every computer is on the plan, as before.
+   * while there's none (Bops makes it next, for a main bot). Unknown when Orgo didn't say: an Orgo
+   * from before free Bops computers, where every computer is on the plan as before, or one that
+   * didn't answer (limitsUnread).
    */
   freeComputerId?: string | null;
+  /**
+   * Orgo didn't answer for the counts, the memory and the free Bops computer (compute-limits failed or
+   * timed out, or the user owns no workspace to ask about): unknown for now, not missing from Orgo.
+   */
+  limitsUnread?: true;
   /**
    * The Bops plan's computers, when the Bops plan decides them (Bops Cloud's plan limits are on, and
    * Orgo counts them: compute-limits' bops_computers_limit): the plan, how many Bops computers it
