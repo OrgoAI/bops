@@ -471,9 +471,22 @@ assert.equal((await L.makeOwnComputer(nova(), main(), "nova-e")).id, "c-nova");
 assert.deepEqual(calls.at(-1).body, { name: "nova-e" });
 assert.equal(nova().computer, "own");
 assert.equal(S.getState().messages.length, notes, "nothing to say");
-// ...and when both fail, the error is Orgo's, as before (not the plan's).
-onPlan("startup_v2", 4, 1, { replies: { ...FORK, "POST /api/computers/inst-main/fork": () => json(500, { error: "insufficient memory" }), "POST /api/computers/c-main/clone": () => json(500, { error: "boom" }) } });
-await assert.rejects(L.makeOwnComputer(nova(), main(), "nova-f"), { message: "the cloud server it has to share with the main bot's computer is full right now" });
+// ...when the host is full (the fork short of memory) and the clone fails too: a fresh computer from the template, on the plan.
+onPlan("startup_v2", 4, 1, {
+  replies: {
+    ...FORK,
+    "POST /api/computers/inst-main/fork": () => json(500, { error: "insufficient memory" }),
+    "POST /api/computers/c-main/clone": () => json(500, { error: "boom" }),
+    "POST /api/computers": () => json(201, { id: "c-nova-fresh", name: "nova-f", status: "creating" }),
+  },
+});
+assert.equal((await L.makeOwnComputer(nova(), main(), "nova-f")).id, "c-nova-fresh");
+assert.equal(calls.at(-1).body.name, "nova-f");
+assert.ok(calls.at(-1).body.template_ref, "from the Bops template");
+assert.equal(nova().computer, "own");
+// ...and when that fails too, the error is Orgo's, as before (not the plan's).
+onPlan("startup_v2", 4, 1, { replies: { ...FORK, "POST /api/computers/inst-main/fork": () => json(500, { error: "insufficient memory" }), "POST /api/computers/c-main/clone": () => json(500, { error: "boom" }), "POST /api/computers": () => json(500, { error: "boom" }) } });
+await assert.rejects(L.makeOwnComputer(nova(), main(), "nova-g"), { message: "the cloud server it has to share with the main bot's computer is full right now" });
 
 // Orgo can't be asked about the plan: nothing holds the copy back, and Orgo decides.
 onPlan("startup_v2", 4, 4, {
