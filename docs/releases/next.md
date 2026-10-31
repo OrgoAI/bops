@@ -1,3 +1,0 @@
-- Drag the line between the chat and the computer to resize them.
-- Long chats keep a summary, so bots remember what came before.
-- Compact in a chat's menu starts the chat fresh from its summary.
