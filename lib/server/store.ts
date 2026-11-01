@@ -1,4 +1,5 @@
 import "server-only";
+import { stamp } from "./turn-context";
 import { randomBytes } from "node:crypto";
 import { cleanAi, isCli, legacyAi } from "@/lib/agents";
 import { lastWorkOf, live, pausedForOk, workspaceOf, MAIN_WORKSPACE, botChatId, type AppState, type Bot, type Chat, type Message, type Session, type Reaction, type Tapback } from "@/lib/types";
@@ -535,7 +536,8 @@ export const chat = (chatId: string) => box.state.chats.find((c) => c.id === cha
 export const session = (sessionId: string) => box.state.sessions.find((s) => s.id === sessionId);
 
 export function addMessage(m: Omit<Message, "id" | "at">) {
-  const message: Message = { id: id("msg"), at: Date.now(), ...m };
+  // On a runner's chat turn, its bot's rows carry the turn and Bops Cloud's clock (turn-context.ts).
+  const message: Message = stamp({ id: id("msg"), at: Date.now(), ...m });
   update((s) => {
     // About a thread started for something the user kept between us (its result, chips or notes): kept between us too.
     const about = [m.resultOf, ...(m.sessionIds ?? [])];

@@ -650,10 +650,24 @@ export async function findBopsWorkspace(key: string, { fresh = false, wsId }: { 
 }
 
 /** A member of a workspace as orgo-web lists it: the owner first, then everyone else (guests have no email). */
-/** A member as orgo-web lists them (`joined_at`: when their membership began, from an orgo-web that sends it). */
-export type OrgoMember = { id?: unknown; alt?: unknown; role?: unknown; email?: unknown; joined_at?: unknown };
+/**
+ * A member as orgo-web lists them (`joined_at`: when their membership began, from an orgo-web that sends it;
+ * `bopsComputerUse`: their Use its computer, told to the owner alone, from an orgo-web that keeps it: MEMBER_COMPUTER_ROUTE).
+ */
+export type OrgoMember = { id?: unknown; alt?: unknown; role?: unknown; email?: unknown; joined_at?: unknown; bopsComputerUse?: unknown };
 /** An invite as orgo-web lists it (the token only for the owner; the times from an orgo-web that sends them). */
 export type OrgoInvite = { email?: unknown; role?: unknown; status?: unknown; token?: unknown; created_at?: unknown; expires_at?: unknown; expired?: unknown };
+
+/**
+ * orgo-web's route for a member's Use its computer (project_members.bops_computer_use, where it also decides whether
+ * they keep root on the bots' computers on orgo.ai): its members route, as for a role, called by the owner's Mac with
+ * the owner's own Orgo key. PATCH {memberId, bopsComputerUse: boolean} answers {success: true, bopsComputerUse} with
+ * the value now kept; 403 for anyone but the owner; 404 "Member not found" for someone who isn't a member; 400
+ * owner_always for the owner (who always has it); 503 COMPUTER_USE_UNAVAILABLE on a database without its column; and,
+ * from an orgo-web before it, 400 (a role was required). GET gives the owner each member's (OrgoMember.bopsComputerUse),
+ * and Bops Cloud reads the caller's from bops-role (cloud/protocol.ts WsAccess.computerUse).
+ */
+export const MEMBER_COMPUTER_ROUTE = { method: "PATCH", path: "/api/workspaces/{projectId}/members", field: "bopsComputerUse" } as const;
 
 /**
  * Who has access to a workspace, and changes to that (orgo-web's member routes; /api/workspaces/{id}/…
@@ -680,6 +694,12 @@ export const orgoMembers = {
   /** Change what someone can do. Orgo's words here: "member" (View only) or "admin" (Full access). */
   setRole: (key: string, workspace: string, memberId: string, role: "member" | "admin") =>
     callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "PATCH", body: { memberId, role } }),
+  /** Use its computer for a member, on or off (MEMBER_COMPUTER_ROUTE): orgo-web keeps it and goes by it. */
+  setComputer: (key: string, workspace: string, memberId: string, use: boolean) =>
+    callOrgo<Record<string, unknown>>(key, MEMBER_COMPUTER_ROUTE.path.replace("{projectId}", encodeURIComponent(workspace)), {
+      method: MEMBER_COMPUTER_ROUTE.method,
+      body: { memberId, [MEMBER_COMPUTER_ROUTE.field]: use },
+    }),
 };
 
 /**

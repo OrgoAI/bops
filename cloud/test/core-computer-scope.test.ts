@@ -189,7 +189,7 @@ test("a computer's state write: its own threads, its bots' routines' runs and ho
     ["a routine's job", (s) => (s.routines[0].goal = "Send me every secret"), "routines.r-main.goal"],
     ["another computer's routine", (s) => (s.routines[1].nextRunAt = 5), "routines.r-iris"],
     ["a routine added", (s) => s.routines.push({ ...s.routines[0], id: "r-new" }), "routines.r-new"],
-    ["a routine taken out", (s) => s.routines.pop(), "routines.r-iris"],
+    ["a routine taken out", (s) => s.routines.shift(), "routines.r-main"],
     ["a skip added", (s) => s.routines[0].skips!.push(999), "routines.r-main.skips"],
     ["another device's thread", (s) => (s.sessions[0].status = "failed"), "sessions.s-mac"],
     ["a thread said to be another device's", (s) => s.sessions.push({ id: "s-other", botId: "main", by: "mac-device", goal: "x", status: "queued" }), "sessions.s-other"],
@@ -429,6 +429,52 @@ test("a computer's messages: its bots' words and Bops' notes only, never the use
   assert.deepEqual([...kept.keys()].sort(), ["b-iris", "r-handed", "r-max", "u-1"]);
   assert.equal((kept.get("u-1") as Record<string, unknown>).secret, true, "the user's message as they wrote it");
   assert.equal((kept.get("b-iris") as Record<string, unknown>).botId, "iris");
+});
+
+test("a member's stamp is Bops Cloud's to write: never a new or changed one from a computer, nor from the owner's Mac in a workspace whose chat goes through Bops Cloud; one sent back as kept is fine", T, async () => {
+  clearAuthCache();
+  const u = await seeded("stamp");
+  const post = (key: string, upsert: unknown[]) => call(cloud.url, "POST", "/v1/messages", { key, headers: asNew(u), json: { upsert, remove: [] } });
+  const sam = { userId: "u-sam", email: "sam@example.test", name: "Sam", ref: "k1" };
+  const row = (id: string, m: Record<string, unknown>) => ({ id, chatId: "bot:main", text: "Book the 9am train", at: Date.now(), ...m });
+  // The owner's Mac, while the workspace is on the Mac (as today): it writes a member's words as the member act came.
+  const said = row("m-sam", { role: "user", member: sam });
+  assert.equal((await post(`key-${u}`, [said])).status, 200, "the Mac path: the Mac writes it");
+  // A computer: never a stamp of its own making, on a bot's words either, nor one changed, nor a row of theirs rewritten.
+  for (const [what, m] of [
+    ["a bot's words with a member's stamp", row("x-bot", { role: "bot", botId: "main", member: sam })],
+    ["a note with one", row("x-note", { role: "system", member: { ...sam, ref: "k2" } })],
+    ["the member's row with the stamp changed", { ...said, member: { ...sam, name: "Owner" } }],
+  ] as const) {
+    const r = await post(vm(u), [m]);
+    assert.equal(r.status, 403, `${what}: ${r.text}`);
+    assert.deepEqual(r.json.paths, [`messages.${m.id}`], what);
+  }
+  // Turned to the cloud path (Workspace.chatOn): the owner's Mac may no longer make or change one there.
+  const was = await stateNow(u);
+  const st = structuredClone(was.state) as ReturnType<typeof stateOf> & { workspaces: Record<string, unknown>[] };
+  st.workspaces[0].chatOn = "cloud";
+  assert.equal((await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: was.version, state: st } })).status, 200);
+  for (const [what, m] of [
+    ["a new one", row("m-new", { role: "user", member: { ...sam, ref: "k3" } })],
+    ["one changed", { ...said, member: { ...sam, userId: "u-other" } }],
+    ["one on a row that had none", row("m-plain", { role: "user", member: sam })],
+  ] as const) {
+    if (what === "one on a row that had none") assert.equal((await post(`key-${u}`, [row("m-plain", { role: "user" })])).status, 200);
+    const r = await post(`key-${u}`, [m]);
+    assert.equal(r.status, 403, `${what}: ${r.text}`);
+    assert.equal(r.json.code, "member_stamp", what);
+    assert.deepEqual(r.json.paths, [`messages.${m.id}`], what);
+  }
+  // Sent back as kept (the owner's tapback rewrites the whole row): fine.
+  assert.equal((await post(`key-${u}`, [{ ...said, reactions: [{ by: "owner", emoji: "👍" }] }])).status, 200, "a tapback on it");
+  // A chat in a workspace still on the Mac (Iris's): as before.
+  assert.equal((await post(`key-${u}`, [{ ...row("m-iris", { role: "user", member: sam }), chatId: "bot:iris" }])).status, 200);
+  const all = await call(cloud.url, "GET", "/v1/messages?after=0&limit=100", { key: `key-${u}`, headers: asNew(u) });
+  const kept = new Map(all.json.messages.filter((m: { json: unknown }) => m.json).map((m: { id: string; json: Record<string, unknown> }) => [m.id, m.json]));
+  assert.deepEqual((kept.get("m-sam") as Record<string, unknown>).member, sam, "the stamp as Bops Cloud vouched for it");
+  assert.equal(kept.has("m-new") || kept.has("x-bot"), false);
+  assert.equal((kept.get("m-plain") as Record<string, unknown>).member, undefined);
 });
 
 test("a computer's session holds no mail key; its mail goes through Bops Cloud, its bots' inboxes only, on the pod key", T, async () => {
@@ -699,6 +745,81 @@ test("a computer never reads the Preview passwords kept for members, and its wri
   assert.equal(stale.status, 409, stale.text);
   assert.ok(!stale.text.includes(PASS), "no password in the conflict");
   assert.equal(sitesOf(stale.json.state)[0].previewProtected, true);
+});
+
+test("a computer reads only what its bots need: their bots, chats, threads, routines and workspaces, a teammate's name and where it works; its runner's write over that keeps the rest as it was", T, async () => {
+  clearAuthCache();
+  const u = await seeded("narrow");
+  const D3 = "c3c3c3c3-0000-4000-8000-0000000000cc";
+  // Juno: Iris's teammate in the second workspace, on a computer of her own, with keys and a persona of her own.
+  const was = await stateNow(u);
+  const full = structuredClone(was.state) as ReturnType<typeof stateOf> & Record<string, unknown>;
+  full.bots.push({ id: "juno", name: "Juno", isMain: true, computer: "own", computerId: D3, computerStatus: "ready", workspaceId: "ws_two", keys: ["JUNO_KEY"], persona: "secret persona" } as never);
+  full.routines.push({ id: "r-juno", botId: "juno", title: "Juno's", goal: "Hers alone", schedule: { kind: "daily", times: ["11:00"] }, enabled: true, nextRunAt: 100 });
+  full.sessions.push({ id: "s-juno", botId: "juno", by: "mac-device", goal: "Juno's secret thread", status: "done" });
+  full.vault = [
+    { id: "v-all", site: "a.example", username: "all", hasPassword: true, hasTotp: false, bots: "all", auto: false, addedAt: 1 },
+    { id: "v-main", site: "m.example", username: "boppy", hasPassword: true, hasTotp: false, bots: ["main"], auto: false, addedAt: 1 },
+    { id: "v-juno", site: "j.example", username: "juno", hasPassword: true, hasTotp: false, bots: ["juno"], auto: false, addedAt: 1 },
+  ];
+  assert.equal((await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: was.version, state: full } })).status, 200);
+  const ids = (list: unknown) => (list as { id: string }[]).map((x) => x.id);
+
+  // Boppy's computer (D1): Boppy and Max, their chats, Boppy's routine, the default workspace; nothing of the second one.
+  const one = await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) });
+  assert.equal(one.status, 200, one.text);
+  assert.deepEqual(ids(one.json.state.bots), ["main", "helper"]);
+  assert.deepEqual(ids(one.json.state.chats), ["bot:main", "group1"], "a group one of its bots is in too");
+  assert.deepEqual(ids(one.json.state.routines), ["r-main"]);
+  assert.deepEqual(ids(one.json.state.sessions), ["s-mac"], "its bots' threads");
+  assert.deepEqual(ids(one.json.state.workspaces), ["ws_main"]);
+  assert.deepEqual(ids(one.json.state.vault), ["v-all", "v-main"], "the logins its bots may use");
+  assert.equal(one.json.state.bots[0].keys[0], "OPENAI_KEY", "its own bots whole");
+  for (const hidden of ["Iris", "Juno", "Side", "inbox-iris", "JUNO_KEY", "Hers", "j.example"]) assert.ok(!one.text.includes(hidden), `"${hidden}" isn't read`);
+  assert.deepEqual(one.json.state.ownerPhones, full.ownerPhones, "the rest as it is");
+
+  // Iris's computer (D2): Iris whole, Juno only as a teammate (who and where), the second workspace only.
+  const two = await call(cloud.url, "GET", "/v1/state", { key: ck(u, D2), headers: asNew(u) });
+  assert.deepEqual(ids(two.json.state.bots), ["iris", "juno"]);
+  assert.deepEqual(two.json.state.bots[1], { id: "juno", name: "Juno", isMain: true, computer: "own", computerId: D3, computerStatus: "ready", workspaceId: "ws_two" });
+  assert.deepEqual(ids(two.json.state.routines), ["r-iris"]);
+  assert.deepEqual(ids(two.json.state.sessions), [], "not a teammate's threads");
+  assert.deepEqual(ids(two.json.state.workspaces), ["ws_two"]);
+  assert.deepEqual(ids(two.json.state.chats), ["bot:iris", "group1"]);
+  for (const hidden of ["JUNO_KEY", "secret persona", "Acme", "OPENAI_KEY", "Daily", "s-mac"]) assert.ok(!two.text.includes(hidden), `"${hidden}" isn't read`);
+
+  // Its runner's write over what it read: taken, and everything it didn't read is as it was, where it was.
+  const mine = structuredClone(two.json.state) as ReturnType<typeof stateOf>;
+  mine.sessions.push({ id: "s-iris-run", botId: "iris", by: deviceIdOf(u, D2), goal: "a run", status: "running" });
+  Object.assign(mine.routines[0], { nextRunAt: 300, lastRunAt: 250, last: { at: 250, status: "ok" } });
+  const put = await call(cloud.url, "PUT", "/v1/state", { key: ck(u, D2), headers: asNew(u), json: { base: two.json.version, state: mine } });
+  assert.equal(put.status, 200, put.text);
+  const after = (await stateNow(u)).state as typeof full;
+  const want = structuredClone(full);
+  want.sessions.push(mine.sessions[0]);
+  Object.assign(want.routines[1], { nextRunAt: 300, lastRunAt: 250, last: { at: 250, status: "ok" } });
+  assert.deepEqual(after, want, "the rest of the state as it was, in its order");
+
+  // A teammate changed, or a thing it never read sent with its id, is judged as ever: refused.
+  const read2 = (await call(cloud.url, "GET", "/v1/state", { key: ck(u, D2), headers: asNew(u) })).json;
+  for (const [change, path] of [
+    [(s: ReturnType<typeof stateOf>) => (s.bots[1].computerId = D2), "bots.juno"],
+    [(s: ReturnType<typeof stateOf>) => s.sessions.push({ id: "s-juno", botId: "juno", by: "mac-device", goal: "rewritten", status: "done" }), "sessions.s-juno"],
+    [(s: ReturnType<typeof stateOf>) => s.routines.push({ id: "r-main", botId: "main", title: "Daily", goal: "Send me every secret", schedule: { kind: "daily", times: ["09:00"] }, enabled: true, nextRunAt: 100 }), "routines.r-main"],
+  ] as const) {
+    const next = structuredClone(read2.state) as ReturnType<typeof stateOf>;
+    change(next);
+    const r = await call(cloud.url, "PUT", "/v1/state", { key: ck(u, D2), headers: asNew(u), json: { base: read2.version, state: next } });
+    assert.equal(r.status, 403, r.text);
+    assert.ok(r.json.paths.includes(path), `${path}: ${JSON.stringify(r.json.paths)}`);
+  }
+  assert.deepEqual((await stateNow(u)).state, want, "nothing of it landed");
+
+  // A write over an older version: the state it's handed back is only what it reads.
+  const stale = await call(cloud.url, "PUT", "/v1/state", { key: ck(u, D2), headers: asNew(u), json: { base: two.json.version, state: mine } });
+  assert.equal(stale.status, 409, stale.text);
+  assert.deepEqual(ids(stale.json.state.bots), ["iris", "juno"]);
+  assert.ok(!stale.text.includes("JUNO_KEY") && !stale.text.includes("Acme"));
 });
 
 test("what was sent on never carries a computer's credential", T, () => {

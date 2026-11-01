@@ -95,6 +95,9 @@ export async function startRunner() {
   await import("./routines");
   const { startActivityBeat } = await import("./free-hours");
   startActivityBeat();
+  // The chat turns Bops Cloud owes this computer, in a workspace whose chat goes through it (runner-chat.ts).
+  const { startRunnerChat } = await import("./runner-chat");
+  startRunnerChat();
   // The Mac's health check waits for this line (runner-install.ts HEALTH_SCRIPT): it has the state and runs.
   console.log(`[runner] running the routines of the bots on ${runnerComputer()}`);
 }

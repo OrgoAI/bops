@@ -14,13 +14,13 @@ import {
   type Person,
   type SeatsError,
 } from "@/lib/members";
-import { accessKey, accessOf, cleanAccess, currentFor, isAccessLevel, timeOf, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
+import { accessKey, accessOf, cleanAccess, currentFor, fitComputer, isAccessLevel, isComputerUse, timeOf, usesComputer, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
 import { PEOPLE_CAPS } from "@/lib/plan-includes";
-import { MAIN_WORKSPACE, runnerKeyMade } from "@/lib/types";
+import { MAIN_WORKSPACE, runnerKeyMade, workspaceOf } from "@/lib/types";
 import { trackServerEvent } from "./analytics";
 import { reachableFromComputers } from "./composio";
 import { computerToolOn } from "./computer-task";
-import { findBopsWorkspace, orgoMembers, type OrgoInvite, type OrgoMember } from "./orgo";
+import { findBopsWorkspace, MEMBER_COMPUTER_ROUTE, orgoMembers, type OrgoInvite, type OrgoMember } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import { onRunner } from "./persist";
 import { getState, stateInCloud } from "./store";
@@ -48,6 +48,13 @@ import { setMemberAccess } from "./workspaces";
  * when Orgo no longer lists them or lists them as joined since it was set, as the sheet or the Mac's look
  * at the runners reads (forgetGone). Each entry says when it was set, and whether with an invite, so Bops
  * Cloud shows it only for the membership it was set for (member-access.ts currentFor).
+ *
+ * Use its computer is orgo-web's to keep (it decides root on the bots' computers on orgo.ai, and Bops Cloud goes by
+ * it), so a change to it goes to orgo-web first (orgoMembers.setComputer) and is kept here only once orgo-web took it;
+ * one orgo-web turns down changes nothing, the bots picked with it neither. The copy here follows orgo-web's list too
+ * (followComputer), and the sheet shows orgo-web's where it says. It comes with Write (fitComputer): access that leaves
+ * someone no Write turns it off there too. An invite never has it: there's no member to give it to yet, so the owner
+ * turns it on once they've joined. Nobody has it until the owner turns it on.
  */
 
 /** A route's answer: its status and JSON. */
@@ -229,12 +236,43 @@ function forgetGone(wsId: string, before: MemberAccessMap | undefined, json: Rec
   }
 }
 
-/** What the sheet shows of an entry: the bots and Your Apps (left out while it isn't set), never when it was set. */
-const levelsOf = (a: MemberAccess): MemberAccess => ({ others: a.others, bots: a.bots, ...(isAccessLevel(a.apps) ? { apps: a.apps } : {}) });
+/**
+ * Use its computer as orgo-web keeps it, which its list gives the owner (each member's bopsComputerUse): the copy kept
+ * here follows it, so the sheet shows what orgo-web goes by, and an off kept here that orgo-web no longer has (set there,
+ * or someone removed on orgo.ai and back) never holds Bops Cloud or this Mac back. Only for a member the list says it of
+ * (an orgo-web before it says it of nobody), on an entry kept before Orgo was asked and still the same one (one a change
+ * kept meanwhile is newer than the list), and never an entry made for it: someone with no bots kept has no Write.
+ */
+function followComputer(wsId: string, before: MemberAccessMap | undefined, json: Record<string, unknown>) {
+  if (!before || !Array.isArray(json.members)) return;
+  const now = accessMapOf(wsId);
+  for (const m of json.members as OrgoMember[]) {
+    if (!m || typeof m !== "object" || m.role === "owner" || typeof m.bopsComputerUse !== "boolean") continue;
+    const use = m.bopsComputerUse;
+    const id = str(m.id);
+    for (const key of [accessKey({ email: str(m.email) }), id ? `user:${id}` : null]) {
+      const entry = key ? before[key] : undefined;
+      if (!key || !entry || now?.[key] !== entry || usesComputer(entry) === use) continue;
+      setMemberAccess(wsId, key, { ...entry, computer: use ? "use" : "none" }, { ...(typeof entry.at === "number" ? { at: entry.at } : {}), ...(entry.invite ? { invite: true } : {}) });
+    }
+  }
+}
+
+/**
+ * What the sheet shows of an entry: the bots, Your Apps (left out while it isn't set) and Use its computer (left out
+ * while off, and always for an invite, which never has it), never when it was set.
+ */
+const levelsOf = (a: MemberAccess, { invite = false } = {}): MemberAccess => ({
+  others: a.others,
+  bots: a.bots,
+  ...(isAccessLevel(a.apps) ? { apps: a.apps } : {}),
+  ...(!invite && usesComputer(a) ? { computer: "use" as const } : {}),
+});
 
 /**
  * Orgo's list as the sheet shows it: the user, everyone else by name, and the invites newest first,
- * each with their access to the bots as kept (`access`: none for someone not there).
+ * each with their access to the bots as kept (`access`: none for someone not there), and a member's Use
+ * its computer as orgo-web says it, when it does.
  */
 function listOf(json: Record<string, unknown>, workspace: string, access: MemberAccessMap | undefined) {
   const members = (Array.isArray(json.members) ? json.members : []).filter((m): m is OrgoMember => !!m && typeof m === "object");
@@ -246,7 +284,10 @@ function listOf(json: Record<string, unknown>, workspace: string, access: Member
     .map((m) => {
       const email = str(m.email);
       const id = str(m.id)!;
-      return { id, name: str(m.alt) ?? email ?? "Guest", ...(email ? { email } : {}), role: roleOf(m.role), guest: !email, access: levelsOf(accessOf(access, { email, id })) };
+      const kept = accessOf(access, { email, id });
+      // Use its computer as orgo-web keeps it, where its list says (to the owner): what it goes by, over the copy here.
+      const shown: MemberAccess = typeof m.bopsComputerUse === "boolean" ? { ...kept, computer: m.bopsComputerUse ? "use" : "none" } : kept;
+      return { id, name: str(m.alt) ?? email ?? "Guest", ...(email ? { email } : {}), role: roleOf(m.role), guest: !email, access: levelsOf(shown) };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
   const now = Date.now();
@@ -262,7 +303,7 @@ function listOf(json: Record<string, unknown>, workspace: string, access: Member
         expiresAt,
         expired: i.expired === true || (expiresAt !== null && expiresAt <= now),
         ...(token ? { link: `${orgoOrigin()}/accept-invite?token=${encodeURIComponent(token)}&project_id=${encodeURIComponent(workspace)}` } : {}),
-        access: levelsOf(accessOf(access, { email })),
+        access: levelsOf(accessOf(access, { email }), { invite: true }),
       };
       return { invite, at: msOf(i.created_at) ?? expiresAt ?? 0 };
     })
@@ -303,6 +344,7 @@ async function load(key: string, { fresh = false } = {}): Promise<Loaded> {
     if (got.status !== 200) return { kind: "refused", answer: got.status === 403 ? no(403, "NOT_OWNER", WORDS.notOwner) : no(502, "ORGO_ERROR", WORDS.orgoLoadError) };
     const workspace = found.id;
     forgetGone(wsId, before, got.json);
+    followComputer(wsId, before, got.json);
     const { you, people, invites } = listOf(got.json, workspace, accessMapOf(wsId));
     // Adding people waits whenever orgo-web didn't give seats it holds the workspace to (seatsOf).
     const { seats, seatsError } = seatsOf(got.json);
@@ -374,8 +416,11 @@ export async function othersCanUse(key: string, projectId: string): Promise<bool
   const before = accessMapOf(wsId);
   const got = (await orgoMembers.list(key, projectId)) as Got;
   if (!got || got.status !== 200) return null;
-  // Bot access kept for anyone it no longer lists goes, as the sheet's read does.
-  if (!onRunner()) forgetGone(wsId, before, got.json);
+  // Bot access kept for anyone it no longer lists goes, and Use its computer follows orgo-web's, as the sheet's read does.
+  if (!onRunner()) {
+    forgetGone(wsId, before, got.json);
+    followComputer(wsId, before, got.json);
+  }
   // Who's there, not what they may see of the bots.
   const { people, invites } = listOf(got.json, projectId, undefined);
   return people.length > 0 || invites.some((i) => !i.expired);
@@ -386,7 +431,8 @@ export async function othersCanUse(key: string, projectId: string): Promise<bool
  * workspace that keeps any, with an Orgo workspace of its own, read at the Mac's look at the runners
  * (runner-install.ts, every 10 minutes at most). Someone removed on orgo.ai or from a Mac still on
  * v0.0.29 (its sheet talks to Orgo itself), or who left on their own, so never finds their old bots
- * again when they come back. Never on a runner, and never in the way: a list Orgo didn't give changes nothing.
+ * again when they come back. Use its computer follows orgo-web's on the same read (followComputer). Never on a runner,
+ * and never in the way: a list Orgo didn't give changes nothing.
  */
 export async function forgetGoneMembers(key: string): Promise<void> {
   if (onRunner()) return;
@@ -395,7 +441,9 @@ export async function forgetGoneMembers(key: string): Promise<void> {
     const wsId = sheetWs(w.orgoProjectId);
     const before = accessMapOf(wsId);
     const got = (await orgoMembers.list(key, w.orgoProjectId).catch(() => null)) as Got;
-    if (got?.status === 200) forgetGone(wsId, before, got.json);
+    if (got?.status !== 200) continue;
+    forgetGone(wsId, before, got.json);
+    followComputer(wsId, before, got.json);
   }
 }
 
@@ -433,6 +481,33 @@ const roleIn = (v: unknown): MemberRole | null => (v === "viewer" || v === "admi
 const memberIdIn = (v: unknown) => (typeof v === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(v) ? v : null);
 /** Bot access from the sheet, made safe to keep (cleanAccess): undefined when none was sent, null when it isn't access. */
 const accessIn = (v: unknown) => (v === undefined ? undefined : cleanAccess(v));
+/** An invite's access: never Use its computer (orgo-web keeps it on a membership, and there's none yet), so "use" is kept as off. */
+const inviteAccess = (a: MemberAccess | null | undefined) => (a && a.computer === "use" ? { ...a, computer: "none" as const } : a);
+/** The ids of the bots in Bops workspace `wsId`: what Write is counted on (fitComputer). */
+const botIdsOf = (wsId: string) => getState().bots.filter((b) => workspaceOf(b) === wsId).map((b) => b.id);
+
+/**
+ * Use its computer on or off for a member, in orgo-web (MEMBER_COMPUTER_ROUTE), with the owner's key: null once orgo-web
+ * took it, else why not in the app's words. Taken only when its answer says the value it now keeps is this one. One
+ * that can't keep it yet (a database without its column, 503 COMPUTER_USE_UNAVAILABLE; an orgo-web before it, which
+ * wants a role, 400; or an answer without the value) is "not yet"; "Member not found" is someone no longer there.
+ */
+async function computerInOrgo(key: string, workspace: string, memberId: string, use: boolean): Promise<Answer | null> {
+  const got = (await orgoMembers.setComputer(key, workspace, memberId, use)) as Got;
+  const said = str(got?.json?.error) ?? "";
+  const code = str(got?.json?.code);
+  if (!got) return no(502, "COMPUTER_UNCHANGED", WORDS.computerUnreachable);
+  if (done(got)) {
+    const kept = got.json?.[MEMBER_COMPUTER_ROUTE.field];
+    return kept === use ? null : typeof kept === "boolean" ? no(502, "COMPUTER_UNCHANGED", WORDS.computerUnchanged) : no(503, "COMPUTER_NOT_READY", WORDS.computerNotReady);
+  }
+  if (got.status === 401) return no(401, "SIGNED_OUT", WORDS.rejected, { why: "rejected" });
+  if (got.status === 403) return no(403, "NOT_OWNER", WORDS.notOwner);
+  if (got.status === 404 && /member not found/i.test(said)) return no(404, "GONE", WORDS.gone);
+  if (got.status === 400 && code === "owner_always") return no(400, "SELF", ACCESS_WORDS.yours);
+  if (got.status === 400 || (got.status === 503 && code === "COMPUTER_USE_UNAVAILABLE")) return no(503, "COMPUTER_NOT_READY", WORDS.computerNotReady);
+  return no(502, "COMPUTER_UNCHANGED", WORDS.computerUnchanged);
+}
 
 /**
  * The bots an invite still waiting gives (the team chart's Make it theirs, and its Undo), without sending it again:
@@ -443,7 +518,7 @@ async function changeInviteAccess(body: { invite?: unknown; access?: unknown }):
   const who = await signedIn();
   if ("status" in who) return who;
   const email = emailOf(body.invite);
-  const access = accessIn(body.access);
+  const access = inviteAccess(accessIn(body.access));
   if (!email || access === undefined) return no(400, "BAD_REQUEST", WORDS.whatToSend);
   if (access === null) return no(400, "BAD_ACCESS", WORDS.whatToSend);
   const sheet = await sheetFor(who.key);
@@ -466,7 +541,7 @@ export async function invite(body: { email?: unknown; role?: unknown; access?: u
   if ("status" in who) return who;
   const email = emailOf(body.email);
   const role = roleIn(body.role);
-  const access = accessIn(body.access);
+  const access = inviteAccess(accessIn(body.access));
   if (!email) return no(400, "BAD_EMAIL", WORDS.badEmail);
   if (!role) return no(400, "BAD_ROLE", WORDS.whatToSend);
   if (access === null) return no(400, "BAD_ACCESS", WORDS.whatToSend);
@@ -502,8 +577,10 @@ export async function invite(body: { email?: unknown; role?: unknown; access?: u
  * PATCH /api/members {memberId, role?, access?}: change what someone can do, either or both. `role`, on
  * the bots' computers: View only always, Full access when it's on. `access`, to this workspace's bots:
  * kept under the key of the member as Orgo lists them now (their email, or a guest's user id), never one
- * the window sent, and only once Orgo took the role, when there's one. {invite, access} (no memberId): an
- * invite still waiting gets these bots without being sent again (changeInviteAccess).
+ * the window sent, and only once Orgo took the role, when there's one, and Use its computer when it changes
+ * (computerInOrgo: turned down, nothing of `access` is kept, except an off orgo-web can't keep yet, kept here all the
+ * same). A role with a change to Use its computer is refused: the window sends them apart. {invite, access} (no memberId): an invite still
+ * waiting gets these bots without being sent again (changeInviteAccess).
  */
 export async function changeAccess(body: { memberId?: unknown; role?: unknown; access?: unknown; invite?: unknown }): Promise<Answer> {
   if (body.invite !== undefined && body.memberId === undefined) return changeInviteAccess(body);
@@ -518,6 +595,9 @@ export async function changeAccess(body: { memberId?: unknown; role?: unknown; a
   if (role === "admin" && full !== "on") return counted(fullAccessRefused(full));
   let where: Where;
   let keys: { key: string; idKey?: string } | undefined;
+  // Their entry kept now, and Use its computer as it is now: orgo-web's, as the sheet shows it (listOf), else the copy here.
+  let had: MemberAccess | undefined;
+  let hadUse = false;
   if (access) {
     const sheet = await sheetFor(who.key);
     if ("status" in sheet) return sheet;
@@ -528,18 +608,37 @@ export async function changeAccess(body: { memberId?: unknown; role?: unknown; a
     if (!key) return no(400, "NO_ACCESS_KEY", ACCESS_WORDS.noKey);
     where = sheet;
     keys = { key, ...(key !== `user:${person.id}` ? { idKey: `user:${person.id}` } : {}) };
+    had = accessOf(accessMapOf(sheet.wsId), person);
+    hadUse = usesComputer(person.access);
   } else {
     const found = await workspaceFor(who.key);
     if ("status" in found) return found;
     where = found;
+  }
+  // Use its computer as it will be, decided before anything is sent: a role and a change to it in one request is refused
+  // (the window sends them apart), so a role Orgo took never stands with an access change it then turned down.
+  let next: MemberAccess | undefined;
+  let use: boolean | undefined;
+  if (access && keys) {
+    // Use its computer as sent, else as it is now (off kept as off), and off once there's no Write left (it comes with Write).
+    const computer = isComputerUse(access.computer) ? access.computer : hadUse ? "use" : isComputerUse(had?.computer) ? "none" : undefined;
+    next = fitComputer({ ...access, ...(computer ? { computer } : {}) }, botIdsOf(where.wsId));
+    use = next.computer === undefined || (next.computer === "use") === hadUse ? undefined : next.computer === "use";
+    if (role && use !== undefined) return no(400, "BAD_REQUEST", WORDS.whatToSend);
   }
   if (role) {
     const got = (await orgoMembers.setRole(who.key, where.workspace, memberId, role === "viewer" ? "member" : "admin")) as Got;
     if (!done(got)) return counted(refusalOf(got));
     trackServerEvent("bops_member_access_changed", { to_role: role });
   }
-  if (access && keys) {
-    setMemberAccess(where.wsId, keys.key, access);
+  if (next && keys) {
+    if (use !== undefined) {
+      const refused = await computerInOrgo(who.key, where.workspace, memberId, use);
+      // Off where orgo-web can't keep it yet (a database without its column, an orgo-web before it): Bops Cloud then goes
+      // by the copy here, so off is kept here all the same. Only ever off: on waits for orgo-web.
+      if (refused && !(use === false && "code" in refused.body && refused.body.code === "COMPUTER_NOT_READY")) return refused;
+    }
+    setMemberAccess(where.wsId, keys.key, next);
     // Kept by their email from now on: an entry from when Orgo listed them by id alone never shows through.
     if (keys.idKey) setMemberAccess(where.wsId, keys.idKey, null);
   }

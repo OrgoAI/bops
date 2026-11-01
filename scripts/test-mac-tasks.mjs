@@ -20,6 +20,7 @@
 // or the Keychain. macOS only (the sandbox is macOS's).
 // Usage: node --conditions=react-server scripts/test-mac-tasks.mjs
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire, registerHooks, syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
@@ -76,6 +77,15 @@ registerHooks({
   },
 });
 const scratch = mkdtempSync(join(tmpdir(), "bops-test-mac-tasks-"));
+// Whatever the test started from its folder goes with it, also when an assertion fails or it's stopped
+// (Ctrl-C, kill): a stand-in left running would run on forever.
+const sweep = () => {
+  try {
+    execFileSync("pkill", ["-f", "--", scratch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")]);
+  } catch {}
+};
+process.on("exit", sweep);
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) process.on(signal, () => process.exit(code));
 process.chdir(scratch);
 process.env.HOME = join(scratch, "home");
 mkdirSync(process.env.HOME);
@@ -94,8 +104,8 @@ async function until(check, what, ms = 15_000) {
 
 // Each run prints one line: its arguments, the environment Codex would read its sign-in from, and what
 // it could do from where it runs (a shell, osascript, the user's files, writing in its home, /tmp and
-// its working folder). `exec-server` stays up until it's stopped, as the real one does; anything else
-// ends at once. A run outside the sandbox can also write to the log, which must stay empty.
+// its working folder). `exec-server` stays up until it's stopped, as the real one does, or until the test
+// is gone (it's left to launchd then); anything else ends at once. A run outside the sandbox can also write to the log, which must stay empty.
 const bin = join(scratch, "bin");
 mkdirSync(bin);
 const codexLog = join(scratch, "codex.log");
@@ -124,7 +134,7 @@ const probes = {
 const run = { args: process.argv.slice(2), home: e.CODEX_HOME ?? null, key: e.CODEX_API_KEY ?? null, cdp: e.BOPS_CDP_PORT ?? null, cwd: process.cwd(), probes };
 try { fs.appendFileSync(${JSON.stringify(codexLog)}, JSON.stringify(run) + "\\n"); } catch {}
 console.log(JSON.stringify(run));
-if (process.argv[2] === "exec-server") setInterval(() => {}, 1 << 30);
+if (process.argv[2] === "exec-server") setInterval(() => process.ppid === 1 && process.exit(0), 1000);
 `,
   { mode: 0o755 },
 );

@@ -479,6 +479,41 @@ await check("a silent stream is taken for dead, and another workspace starts ove
   assert.equal(cloud.calls.length, 3, "stopped is stopped");
 });
 
+await check("a bot's computer waking to answer (Bops Cloud's turn) shows until its turn moves on, with its chat's typing", async () => {
+  const streams = [];
+  const { sub, clock, rm } = subscriber(() => {
+    const s = {};
+    streams.push(s);
+    return s;
+  });
+  sub.start("ws_acme");
+  await settle();
+  const turn = (state) => `event: turn\ndata: ${JSON.stringify({ type: "turn", id: "t1", chatId: "bot:max", botId: "max", messageId: "m1", state, by: "cloud", at: 0 })}\n\n`;
+  const mood = (m) => `event: mood\ndata: ${JSON.stringify({ type: "mood", botId: "max", chatId: "bot:max", mood: m, ttl: 30, by: "cloud", at: 0 })}\n\n`;
+  streams[0].push(`event: snapshot\ndata: {"moods":[]}\n\n${turn("waking")}${mood("thinking")}`);
+  await settle();
+  assert.deepEqual(rm.forApp(), { max: { mood: "thinking", chatId: "bot:max", waking: true } });
+  const { withRemoteTyping } = await import(`${root}/lib/types.ts`);
+  const chat = { id: "bot:max", botIds: ["max"], typing: [] };
+  assert.deepEqual(withRemoteTyping(chat, rm.forApp()).typing, ["max"], "its chat shows it typing");
+  assert.equal(withRemoteTyping({ id: "bot:dana", botIds: ["dana"], typing: [] }, rm.forApp()).typing.length, 0, "not another chat");
+  assert.equal(withRemoteTyping(chat, undefined), chat, "the same chat when there's none to add");
+  // Its computer took it: thinking, no longer waking; done: nothing.
+  streams[0].push(turn("thinking"));
+  await settle();
+  assert.deepEqual(rm.forApp(), { max: { mood: "thinking", chatId: "bot:max" } });
+  streams[0].push(`${turn("done")}${mood("idle")}`);
+  await settle();
+  assert.deepEqual(rm.forApp(), {});
+  // Waking with no more word from Bops Cloud: gone after its turn's deadline.
+  streams[0].push(turn("waking"));
+  await settle();
+  assert.equal(rm.forApp().max?.waking, true);
+  await clock.advance(10 * 60_000 + 1000);
+  assert.deepEqual(rm.forApp(), {});
+  sub.stop();
+});
+
 await check("a routine's change goes to Live while it runs, and nowhere when it doesn't", () => {
   const got = [];
   liveRoutine("ws_main", "rt_1", "added");

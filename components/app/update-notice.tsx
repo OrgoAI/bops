@@ -8,14 +8,15 @@ import { useEffect, useState } from "react";
  * automatically" on (Settings → This Mac, UpdateSettings below), so the notice only turns up once it's
  * ready, with Restart to install it (quitting installs it too). With the switch off it says the version
  * is out, with Download, then that it's downloading, then ready. A download the user waited for that
- * didn't finish says so, with Try again. A copy of Bops that can't replace itself (opened from the DMG
+ * didn't finish says so, with Try again; one that ran out of disk space says that, and how much to free,
+ * whether the user waited for it or not (desktop/updates.cjs, SPACE_NEEDED). A copy of Bops that can't replace itself (opened from the DMG
  * or Downloads) sends the user to bops.bot, as before. What's new in it shows under the line when the
  * release says (docs/releases); put away, it stays away for that version. In a browser there's no Mac
  * app to ask, so it never shows.
  */
 
 type UpdatePhase = "available" | "downloading" | "ready" | "manual";
-type UpdateInfo = { version: string; notes?: string[]; phase?: UpdatePhase; asked?: boolean; failed?: boolean } | null;
+type UpdateInfo = { version: string; notes?: string[]; phase?: UpdatePhase; asked?: boolean; failed?: boolean; why?: string } | null;
 type UpdateAuto = { auto: boolean; canSelfUpdate: boolean } | null;
 type Update = {
   info(): Promise<UpdateInfo>;
@@ -51,8 +52,10 @@ export function UpdateButton({ onOpen }: { onOpen: () => void }) {
       ? `Bops ${info.version} is ready to install`
       : phase === "downloading"
         ? `Bops ${info.version} is downloading`
-        : phase === "available" && info.failed
-          ? "The download didn't finish"
+        : phase === "available" && info.failed && info.why === "space"
+          ? "Not enough space on this Mac to update"
+          : phase === "available" && info.failed
+            ? "The download didn't finish"
           : `Bops ${info.version} is out`;
   return (
     <button
@@ -107,6 +110,10 @@ export function UpdateCard({ info, late, onDismiss }: { info: UpdateInfo; late: 
             <span className="font-medium text-ink">Bops {info.version} is ready.</span>
           ) : phase === "downloading" ? (
             <span className="font-medium text-ink">Bops {info.version} is downloading.</span>
+          ) : phase === "available" && info.failed && info.why === "space" ? (
+            <>
+              <span className="font-medium text-ink">Not enough space on this Mac to update.</span> Bops needs about 2 GB free.
+            </>
           ) : phase === "available" && info.failed ? (
             <span className="font-medium text-ink">The download didn&apos;t finish.</span>
           ) : phase === "available" ? (

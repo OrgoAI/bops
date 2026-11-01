@@ -642,5 +642,20 @@ check("a bot's settings page settings (Workspace.botSettings): two Macs setting 
   });
 }
 
+{
+  const AVA = "ava@example.com";
+  const ws = (e) => [{ id: "x", memberAccess: { [AVA]: e } }];
+  check("Use its computer: an older sheet's rewrite drops it, the merge puts it back; turned off stays off", () => {
+    const put = M.keepAppsLevels(ws({ others: "none", bots: { boppy: "write" }, at: 150 }), [ws({ others: "none", bots: { boppy: "write" }, at: 100, computer: "use" })]);
+    assert.equal(put[0].memberAccess[AVA].computer, "use");
+    const off = M.keepAppsLevels(ws({ others: "none", bots: { boppy: "write" }, at: 150, computer: "none" }), [ws({ others: "none", bots: { boppy: "write" }, at: 100, computer: "use" })]);
+    assert.equal(off[0].memberAccess[AVA].computer, "none", "off is never taken for one dropped");
+    const fresh = M.keepAppsLevels(ws({ others: "none", bots: {}, invite: true, at: 300 }), [ws({ others: "none", bots: {}, at: 100, computer: "use" })]);
+    assert.equal(fresh[0].memberAccess[AVA].computer, undefined, "invited again on an older Bops starts fresh");
+    const both = M.keepAppsLevels(ws({ others: "none", bots: {}, at: 150 }), [ws({ others: "none", bots: {}, at: 100, apps: "read", computer: "use" })]);
+    assert.deepEqual([both[0].memberAccess[AVA].apps, both[0].memberAccess[AVA].computer], ["read", "use"], "Your Apps and it, both");
+  });
+}
+
 console.log(`state merge: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

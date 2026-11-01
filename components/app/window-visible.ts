@@ -17,3 +17,20 @@ export const useWindowVisible = () =>
     () => document.visibilityState !== "hidden",
     () => true,
   );
+
+const subscribeFocus = (changed: () => void) => {
+  window.addEventListener("focus", changed);
+  window.addEventListener("blur", changed);
+  return () => {
+    window.removeEventListener("focus", changed);
+    window.removeEventListener("blur", changed);
+  };
+};
+
+/** Whether the app's window is the one in front (it can be on show behind another app's and not be). */
+export const useWindowFocused = () =>
+  useSyncExternalStore(
+    subscribeFocus,
+    () => document.hasFocus(),
+    () => true,
+  );

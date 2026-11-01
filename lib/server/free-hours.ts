@@ -5,6 +5,7 @@ import { orgoKey } from "./orgo-auth";
 import { onPostgres, onRunner } from "./persist";
 import { postOrgo } from "./plan";
 import { getState, ownSession, stateTooNew } from "./store";
+import { turnsRunning } from "./turn-context";
 
 /**
  * Free's Bops computer runs 10 hours a month, and Orgo suspends it after 15 minutes nobody uses it
@@ -34,6 +35,8 @@ const g = globalThis as unknown as { bopsActivityBeat?: NodeJS.Timeout; bopsActi
  */
 function inUse(): boolean {
   const s = getState();
+  // A chat turn a runner answers now (runner-chat.ts): its computer mustn't sleep mid answer.
+  if (turnsRunning()) return true;
   return s.sessions.some((x) => x.runsOn !== "mac" && (x.status === "starting" || x.status === "running") && ownSession(x)) || s.takeover?.display !== undefined;
 }
 

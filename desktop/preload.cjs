@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld("bopsMac", {
     retry: () => ipcRenderer.invoke("startup-retry"),
     logs: () => ipcRenderer.invoke("startup-logs"),
   },
-  // A newer release ({ version, notes, phase, asked, failed } or null), as it changes. Bops downloads it
+  // A newer release ({ version, notes, phase, asked, failed, why } or null), as it changes. Bops downloads it
   // itself (quietly, unless the user turned that off in Settings) and Restart installs it; a copy that
   // can't replace itself sends the user to bops.bot (desktop/main.cjs, "New versions").
   update: {

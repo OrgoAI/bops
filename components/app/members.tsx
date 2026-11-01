@@ -2,13 +2,14 @@
 
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { trackEvent } from "@/lib/analytics";
-import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, inviteDefault, isAccessLevel, levelOf, type AccessLevel, type MemberAccess } from "@/lib/member-access";
+import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, computerSummary, fitComputer, inviteDefault, isAccessLevel, levelOf, usesComputer, writesAny, type AccessLevel, type MemberAccess } from "@/lib/member-access";
 import { appsOwnShown } from "@/lib/apps-access";
 import {
   ACCESS_TIPS,
   APPS_TIPS,
   APPS_WORDS,
   CLOUD_SHARES_APPS,
+  COMPUTER_WORDS,
   emailOf,
   FULL_ACCESS_IN_BOPS,
   ROLE_LINES,
@@ -351,15 +352,15 @@ function useOlderBops(ask: boolean) {
 /** A person's line under their name: their bots, then Your Apps where the sheet shows it. */
 function useSummary() {
   const { shown } = useContext(AppsScope);
-  return (access: MemberAccess, ids: string[]) => [accessSummary(access, ids), shown && appsSummary(access)].filter(Boolean).join(" · ");
+  return (access: MemberAccess, ids: string[]) => [accessSummary(access, ids), shown && appsSummary(access), computerSummary(access)].filter(Boolean).join(" · ");
 }
 
 /**
  * `access` with one bot at `level`, or (`botId` null) every bot at `level`, new ones too. A bot at the
- * level of the rest isn't named, as cleanAccess keeps it, so the same access always looks the same. Your Apps stays.
+ * level of the rest isn't named, as cleanAccess keeps it, so the same access always looks the same. Your Apps and Use its computer stay.
  */
 export function withLevel(access: MemberAccess, botId: string | null, level: AccessLevel): MemberAccess {
-  const apps = access.apps ? { apps: access.apps } : {};
+  const apps = { ...(access.apps ? { apps: access.apps } : {}), ...(access.computer ? { computer: access.computer } : {}) };
   if (botId === null) return { others: level, bots: {}, ...apps };
   const bots: Record<string, AccessLevel> = Object.fromEntries(Object.entries(access.bots).filter(([id]) => id !== botId));
   if (level !== access.others) bots[botId] = level;
@@ -369,18 +370,27 @@ export function withLevel(access: MemberAccess, botId: string | null, level: Acc
 /** `access` with Your Apps at `level`, the bots as they are. */
 export const withApps = (access: MemberAccess, level: AccessLevel): MemberAccess => ({ ...access, apps: level });
 
+/** `access` with Use its computer on or off ("none" is sent, so the server turns off what it kept), the rest as it is. */
+export const withComputer = (access: MemberAccess, on: boolean): MemberAccess => ({ ...access, computer: on ? "use" : "none" });
+
 /**
  * Which bots someone sees, like an API key's permissions: a row for every bot at once, bots made later
  * included (`others`), then one row per bot, each None, Read or Write. Picking on the first row sets every
  * bot to it too, and single bots can differ after: then the first row's level is only the new bots', shown
  * lighter, named so for a screen reader, and picking it again sets every bot to it. One line a row, names
- * cut short. Under the rows, what each level means (ACCESS_TIPS).
+ * cut short. Under the rows, what each level means (ACCESS_TIPS). Use its computer comes with Write: taking away
+ * someone's last Write turns it off too (fitComputer), and an invite (`invite`) never has it until they've joined.
  */
-export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; value: MemberAccess; onChange: (next: MemberAccess) => void; disabled?: boolean }) {
+export function BotAccess({ bots, value, onChange, disabled, invite }: { bots: Bot[]; value: MemberAccess; onChange: (next: MemberAccess) => void; disabled?: boolean; invite?: boolean }) {
   const mixed = bots.some((b) => levelOf(value, b.id) !== value.others);
   const scope = useContext(AppsScope);
+  const ids = bots.map((b) => b.id);
   // Your Apps comes with a bot: none seen, nothing of the workspace opens for them.
   const hasBot = value.others !== "none" || bots.some((b) => levelOf(value, b.id) !== "none");
+  // Use its computer comes with Write: someone who can't chat never sets a bot going there.
+  const writes = writesAny(value, ids);
+  const computerOn = !invite && usesComputer(value);
+  const pickLevel = (botId: string | null, level: AccessLevel) => onChange(fitComputer(withLevel(value, botId, level), ids));
   return (
     <div data-bot-access className="flex flex-col gap-2">
       <div className="flex max-h-[250px] flex-col overflow-y-auto rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
@@ -391,7 +401,7 @@ export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; va
           tip={mixed ? `Bots you make later: ${ACCESS_LABELS[value.others]}. Pick here to set every bot below too.` : "Sets every bot below, and bots you make later."}
           level={value.others}
           loose={mixed}
-          onPick={(level) => onChange(withLevel(value, null, level))}
+          onPick={(level) => pickLevel(null, level)}
           disabled={disabled}
         />
         {bots.map((b) => (
@@ -400,7 +410,7 @@ export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; va
             icon={<Mascot botId={b.id} color={b.color} size={16} />}
             name={b.name}
             level={levelOf(value, b.id)}
-            onPick={(level) => onChange(withLevel(value, b.id, level))}
+            onPick={(level) => pickLevel(b.id, level)}
             disabled={disabled}
           />
         ))}
@@ -423,6 +433,14 @@ export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; va
           {!hasBot ? APPS_WORDS.needsBot : APPS_WORDS.notYet}
         </span>
       )}
+      {/* Use its computer: a scope of its own, as Your Apps is (lib/member-access.ts MemberAccess.computer), only with Write on a bot, never on an invite. */}
+      <div data-computer-access className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+        {/* On without Write (a bot deleted under them, or orgo-web's list says so): shown as on, and it can only be turned off. */}
+        <ComputerRow on={computerOn} onChange={(on) => onChange(withComputer(value, on))} disabled={disabled || invite} onLocked={!writes} />
+      </div>
+      <span data-computer-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
+        {invite ? COMPUTER_WORDS.afterJoin : writes ? COMPUTER_WORDS.legend : computerOn ? COMPUTER_WORDS.onWithoutWrite : COMPUTER_WORDS.needsWrite}
+      </span>
       <ul data-access-levels className="flex flex-col gap-0.5 px-1 text-[12px] leading-4 text-[#6B6B6B]">
         {ACCESS_LEVELS.map((level) => (
           <li key={level}>
@@ -437,6 +455,43 @@ export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; va
         </span>
       )}
     </div>
+  );
+}
+
+/** Use its computer's row: Off or On, as small as a bot's levels, each saying on hover what it lets them do. `onLocked`: On can't be picked (it can still be turned off). */
+function ComputerRow({ on, onChange, disabled, onLocked }: { on: boolean; onChange: (on: boolean) => void; disabled?: boolean; onLocked?: boolean }) {
+  const dim = disabled || (onLocked && !on);
+  return (
+    <div className="flex h-[30px] shrink-0 items-center gap-2">
+      <ComputerMark />
+      <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-ink">{COMPUTER_WORDS.row}</span>
+      <div role="radiogroup" aria-label={COMPUTER_WORDS.row} className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[2px] ${dim ? "opacity-50" : ""}`}>
+        {[false, true].map((value) => (
+          <button
+            key={String(value)}
+            type="button"
+            role="radio"
+            aria-checked={on === value}
+            disabled={disabled || (value && onLocked && !on)}
+            data-tip={value ? COMPUTER_WORDS.onTip : COMPUTER_WORDS.offTip}
+            onClick={() => on !== value && onChange(value)}
+            className={`rounded-full px-2 py-0.5 text-[11.5px] leading-4 ${on === value ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+          >
+            {value ? COMPUTER_WORDS.on : COMPUTER_WORDS.off}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Use its computer's mark, as big as a bot's: a screen on its stand. */
+function ComputerMark() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+      <rect x="2" y="3" width="12" height="8" rx="1.5" fill="none" stroke="#9A9A98" strokeWidth="1.3" />
+      <path d="M6 13.5h4M8 11v2.5" stroke="#9A9A98" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
   );
 }
 
@@ -757,7 +812,7 @@ function InviteForm({
           <BotsToggle open={choosing} label={scopeShown ? "Choose access" : "Choose bots"} onClick={() => setChoosing((x) => !x)} />
         </span>
       )}
-      {bots && choosing && <BotAccess bots={bots} value={access} onChange={setChosen} disabled={busy} />}
+      {bots && choosing && <BotAccess bots={bots} value={access} onChange={setChosen} disabled={busy} invite />}
       <RoleLine role={picked} />
     </form>
   );
@@ -873,6 +928,7 @@ function WhoHasAccess({ info, bots, act }: { info: Ready; bots: Bot[] | null; ac
  * Someone with access: who, which bots they see, and what they can do on the computers. Under Bots, every
  * bot change is saved at once (PATCH {memberId, access}), one at a time with the newest last, and shown
  * as picked while it saves; one that's turned down goes back to what was saved, with why under the row.
+ * Use its computer goes to orgo-web first (lib/server/members.ts): one orgo-web turns down stays as it was, the same way.
  * View only applies at once; Full access asks first. In the View only release their role is words, and
  * Full access has a Make View only on hover. Remove asks first too. Until taking Full access away also
  * changes the computers' passwords (FULL_ACCESS_IN_BOPS), Remove and View only say that a password they
@@ -914,7 +970,7 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
       const r = await act("PATCH", { memberId: p.id, access: send });
       if (r.status !== 200) {
         queued.current = null;
-        setError(errorOf(r, "Couldn't change their bots. Try again."));
+        setError(errorOf(r, usesComputer(send) !== usesComputer(from) ? "Couldn't change Use its computer. Try again." : "Couldn't change their bots. Try again."));
         break;
       }
       const read = r.read?.state === "ready" ? r.read.people.find((x) => x.id === p.id) : undefined;

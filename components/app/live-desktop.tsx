@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { afterVncClose, STREAM_RETRY_MS, type StreamPlan } from "@/lib/rtc";
 import { Mascot } from "./mascot";
 import { RtcDesktop, rtcWorthTrying } from "./rtc-desktop";
-import { useWindowVisible } from "./window-visible";
+import { useWindowFocused, useWindowVisible } from "./window-visible";
 
 // noVNC reports a screen's connection coming and going (couldn't connect yet, dropped, didn't say
 // goodbye, data still arriving while it closes) as console errors. Bops handles all of those itself (it waits, retries, falls back), and in
@@ -44,7 +44,8 @@ export type Transport = "udp" | "vnc";
  * streamed through Orgo (?screen=) also goes by how Orgo closed it (afterVncClose): a screen Orgo can't
  * stream falls back at once and for good, one Orgo couldn't reach just then is tried again, and a
  * refused password gets one try with a fresh one. Thumbnails always use VNC: Orgo encodes at most two
- * WebRTC streams per computer. While the window is hidden a while, the screen rests (nothing streams).
+ * WebRTC streams per computer. While the window is hidden a while, or behind another app with nothing
+ * going on on the screen, the screen rests (nothing streams) and shows its last picture.
  *
  * A thumbnail of a screen that's also live in full on the page (the one open, or one kept warm for a cut)
  * copies that view's picture instead (Mirror): the same screen isn't streamed and decoded twice.
@@ -91,6 +92,8 @@ type LiveDesktopProps = {
   thumbnail?: boolean;
   /** Whose screen it is, for the loading state ("Opening Sam's screen…"). */
   bot?: { id: string; name: string; color: string };
+  /** Something's going on on this screen (a task on it, or the user driving it): it streams whenever the window is on show. */
+  busy?: boolean;
 };
 
 /** One view's own stream. `quiet`: no loading state for the first few seconds (a thumbnail's copied picture is still up). */
@@ -103,6 +106,7 @@ function LiveStream({
   onSize,
   thumbnail,
   bot,
+  busy,
   quiet,
 }: LiveDesktopProps & { quiet?: boolean }) {
   const [plan, setPlan] = useState<StreamPlan | null>(null);
@@ -122,18 +126,18 @@ function LiveStream({
   const sized = useRef(onSize);
   // What's on show right now, for a thumbnail of this screen to copy: WebRTC's video, VNC's canvas, or nothing.
   const root = useRef<HTMLDivElement>(null);
-  const showing = useRef<"video" | "canvas" | null>(null);
+  const showing = useRef<"video" | "canvas:not([data-still])" | null>(null);
   useEffect(() => {
     failed.current = onFail;
     sized.current = onSize;
-    showing.current = rtc === "live" ? "video" : vncUp ? "canvas" : null;
+    showing.current = rtc === "live" ? "video" : vncUp ? "canvas:not([data-still])" : null;
   });
   // A full view, once live, lends its picture to the thumbnail of the same screen until it's gone. While
   // it reconnects or rests there's nothing to copy, and the thumbnail keeps what it copied last.
   const [lent, setLent] = useState(false);
   useEffect(() => {
     if (thumbnail || !lent) return;
-    return showLive(`${botId}:${display}`, () => (showing.current ? (root.current?.querySelector(showing.current) ?? null) : null));
+    return showLive(`${botId}:${display}`, () => drawing(root.current, showing.current));
   }, [thumbnail, lent, botId, display]);
   // Live at least once on this mount: after that a drop is retried here rather than handed to onFail.
   const ever = useRef(false);
@@ -143,14 +147,22 @@ function LiveStream({
   // VNC ended while WebRTC was still being tried (with its close code, when it had one): what follows
   // waits for WebRTC, which may yet show the screen.
   const vncDown = useRef<{ code?: number } | null>(null);
-  // The window hidden a while (a thumbnail 10 seconds, the open screen a minute): the stream is let go, and
-  // what drawing it holds with it, and a fresh plan connects again once the window is back.
+  // The window hidden a while (a thumbnail 10 seconds, the open screen a minute), or on show behind another
+  // app's with nothing going on on this screen (no task on it, nobody driving): the stream is let go, and
+  // what drawing it holds with it, and a fresh plan connects again once the window is back in front or
+  // work starts here. The last picture stays up as a still meanwhile, until the stream is live again.
   const visible = useWindowVisible();
+  const focused = useWindowFocused();
+  const away = !visible || (!focused && !busy && !interactive);
   const [resting, setResting] = useState(false);
+  const still = useRef<HTMLCanvasElement>(null);
+  const [stilled, setStilled] = useState(false);
   useEffect(() => {
-    if (visible) return;
+    if (!away) return;
     const t = setTimeout(
       () => {
+        const from = drawing(root.current, showing.current);
+        setStilled(!!from && !!still.current && copyPicture(still.current, from, devicePixelRatio));
         setResting(true);
         setVncUp(false);
         setRtc("off");
@@ -163,7 +175,13 @@ function LiveStream({
       clearTimeout(t);
       setResting(false);
     };
-  }, [visible, thumbnail]);
+  }, [away, thumbnail]);
+  // The still goes once the live picture has faded in over it.
+  useEffect(() => {
+    if (!connected || !stilled) return;
+    const t = setTimeout(() => setStilled(false), 600);
+    return () => clearTimeout(t);
+  }, [connected, stilled]);
 
   useEffect(() => {
     if (resting) return;
@@ -254,15 +272,15 @@ function LiveStream({
     if (down) afterVnc(down.code);
   }
 
-  // Past a few seconds, the loading state says so.
+  // Past a few seconds, the loading state says so (not while it rests: nothing's on its way then).
   useEffect(() => {
-    if (connected) return;
+    if (connected || resting) return;
     const t = setTimeout(() => setSlow(true), 8000);
     return () => {
       clearTimeout(t);
       setSlow(false);
     };
-  }, [connected, botId, display]);
+  }, [connected, resting, botId, display]);
 
   const transport: Transport | undefined = rtc === "live" ? "udp" : vncUp ? "vnc" : undefined;
   return (
@@ -300,10 +318,22 @@ function LiveStream({
           />
         </div>
       )}
-      {!connected && !(quiet && !slow) && <Waking thumbnail={!!thumbnail} bot={bot} text={stage === "reconnecting" ? "Reconnecting…" : slow ? "Taking a little longer than usual…" : stage === "opening" ? "Opening the screen…" : bot ? `Reaching ${bot.name}'s computer…` : "Reaching the computer…"} />}
+      {/* The still, over the stream until it's live again. Laid out (unseen) from when the view may rest, so it can be drawn at the view's size. */}
+      {(away || stilled) && (
+        <canvas
+          ref={still}
+          aria-hidden
+          data-still
+          className={`pointer-events-none absolute ${thumbnail ? "inset-x-0 top-0 block h-auto w-full" : "inset-0 h-full w-full object-contain"} ${stilled ? "" : "invisible"}`}
+        />
+      )}
+      {!connected && !(quiet && !slow) && !(stilled && (resting || !slow)) && <Waking thumbnail={!!thumbnail} bot={bot} text={stage === "reconnecting" ? "Reconnecting…" : slow ? "Taking a little longer than usual…" : stage === "opening" ? "Opening the screen…" : bot ? `Reaching ${bot.name}'s computer…` : "Reaching the computer…"} />}
     </div>
   );
 }
+
+/** What a view draws into right now, by the selector it's showing with (its still never counts), or nothing. */
+const drawing = (root: HTMLElement | null, showing: string | null) => (showing ? (root?.querySelector<HTMLVideoElement | HTMLCanvasElement>(showing) ?? null) : null);
 
 /** What a full view draws into right now (WebRTC's video or VNC's canvas), or nothing while it's not showing. */
 type Picture = () => HTMLVideoElement | HTMLCanvasElement | null;

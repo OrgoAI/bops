@@ -159,6 +159,22 @@ export const APPS_WORDS = {
  */
 export const CLOUD_SHARES_APPS = false;
 
+/**
+ * The People sheet's words for Use its computer (lib/member-access.ts MemberAccess.computer): whether what someone says
+ * may wake the bots' computers and run there. Bots run there as the computer's administrator, so they can too.
+ */
+export const COMPUTER_WORDS = {
+  row: "Use its computer",
+  off: "Off",
+  on: "On",
+  offTip: "They can chat, but what they say never wakes a computer or runs on one.",
+  onTip: "What they say can wake the bots' computers and run there as their administrator.",
+  legend: "Use its computer lets them wake the bots' computers and run anything there as administrator. Turn it on only for people you trust with those computers.",
+  needsWrite: "Give them Write on a bot first. Using its computer comes with Write.",
+  onWithoutWrite: "They can't write to any bot now, so turn this off. Using its computer comes with Write.",
+  afterJoin: "You can turn on Use its computer once they've joined.",
+};
+
 export const ACCESS_TIPS: Record<AccessLevel, string> = {
   none: "Can't see this bot in Bops. On orgo.ai they still see its computer.",
   read: "Sees everything this bot does, including your chats with it.",
@@ -206,4 +222,7 @@ export const WORDS = {
   whatToSend: "Say who to add, and what they can do.",
   sharedOpen: "A workspace shared with you is open. Open one of your own to choose which bots people see.",
   alreadyIn: (email: string) => `${email} already has access.`,
+  computerUnreachable: "Couldn't reach Orgo, so Use its computer stayed as it was. Try again.",
+  computerUnchanged: "Orgo couldn't change Use its computer just now, so it stayed as it was. Try again in a minute.",
+  computerNotReady: "Orgo can't change Use its computer yet, so it stayed as it was.",
 };

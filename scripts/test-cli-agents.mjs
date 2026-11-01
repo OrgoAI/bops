@@ -128,6 +128,15 @@ if (process.argv[2] === "--render") {
 }
 
 const scratch = mkdtempSync(join(tmpdir(), "bops-test-cli-agents-"));
+// Whatever the test started from its folder goes with it, also when an assertion fails or it's stopped
+// (Ctrl-C, kill): a stand-in left running would run on forever.
+const sweep = () => {
+  try {
+    execFileSync("pkill", ["-f", "--", scratch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")]);
+  } catch {}
+};
+process.on("exit", sweep);
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) process.on(signal, () => process.exit(code));
 process.chdir(scratch);
 process.env.HOME = join(scratch, "home");
 mkdirSync(process.env.HOME);
@@ -171,6 +180,9 @@ const RUNS = ${JSON.stringify(RUNS)}, HEARD = ${JSON.stringify(HEARD)}, FLAGS = 
 const args = process.argv.slice(2);
 const pid = process.pid;
 appendFileSync(RUNS, JSON.stringify({ pid, at: Date.now(), args, env: process.env, cwd: process.cwd() }) + "\\n");
+// Gone with the test, however it ended (a stand-in left hanging would run on forever).
+const TEST = ${process.pid};
+setInterval(() => { try { process.kill(TEST, 0); } catch (e) { if (e.code === "ESRCH") process.exit(0); } }, 1000).unref();
 const heard = (x) => appendFileSync(HEARD, JSON.stringify({ pid, at: Date.now(), ...x }) + "\\n");
 const D = process.env.CLAUDE_CONFIG_DIR ?? join(process.env.HOME ?? "/", ".claude");
 if (args[0] === "--version") { console.log("2.1.292 (Claude Code)"); process.exit(0); }
@@ -263,6 +275,9 @@ const RUNS = ${JSON.stringify(CODEX_RUNS)}, HEARD = ${JSON.stringify(HEARD)}, FL
 const args = process.argv.slice(2);
 const pid = process.pid;
 appendFileSync(RUNS, JSON.stringify({ pid, ppid: process.ppid, at: Date.now(), args, env: process.env, cwd: process.cwd() }) + "\\n");
+// Gone with the test, however it ended (a stand-in left hanging would run on forever).
+const TEST = ${process.pid};
+setInterval(() => { try { process.kill(TEST, 0); } catch (e) { if (e.code === "ESRCH") process.exit(0); } }, 1000).unref();
 const heard = (x) => appendFileSync(HEARD, JSON.stringify({ pid, at: Date.now(), ...x }) + "\\n");
 if (args[0] === "--version") { console.log("codex-cli 0.160.0"); process.exit(0); }
 const resume = args[1] === "resume";

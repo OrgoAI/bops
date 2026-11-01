@@ -754,6 +754,254 @@ console.log("ok - bot access: invite, send again, cleaned");
 }
 console.log("ok - Your Apps: kept, kept when not sent, never None unpicked, only with a bot, Read once for everyone already here");
 
+/* ---------------- 10d. Use its computer: the copy kept, and never on an invite ---------------- */
+{
+  const raw = (k) => rawKept()[k];
+  W.setMemberAccess(sheetWs(), "dee@example.com", { others: "none", bots: { boppy: "write" } });
+  assert.equal("computer" in raw("dee@example.com"), false, "off unless turned on");
+  W.setMemberAccess(sheetWs(), "dee@example.com", { others: "none", bots: { boppy: "write" }, computer: "use" });
+  assert.equal(raw("dee@example.com").computer, "use");
+  W.setMemberAccess(sheetWs(), "dee@example.com", { others: "write", bots: {} });
+  assert.deepEqual([raw("dee@example.com").computer, raw("dee@example.com").others], ["use", "write"], "kept when not sent");
+  W.setMemberAccess(sheetWs(), "dee@example.com", { others: "write", bots: {}, computer: "none" });
+  assert.equal(raw("dee@example.com").computer, "none", "turned off: kept as off, so a merge never takes it for one dropped");
+  W.setMemberAccess(sheetWs(), "dee@example.com", null);
+  // An invite never has it (orgo-web keeps it on a membership, and there's none yet): "use" is kept as off, and orgo-web isn't asked.
+  n = calls.length;
+  r = await route("PATCH", { invite: "lee@example.com", access: { ...lee, computer: "use" } });
+  assert.equal(r.status, 200);
+  assert.equal(raw("lee@example.com").computer, "none", "an invite's access: off");
+  r = await route("POST", { email: "lee@example.com", role: "viewer", access: { ...lee, computer: "use" } });
+  assert.equal(r.status, 200);
+  assert.equal(raw("lee@example.com").computer, "none", "nor sent again with it");
+  assert.ok(!calls.slice(n).some((c) => c.path.includes("/computer")), "orgo-web never asked for an invite");
+  r = await route("PATCH", { invite: "lee@example.com", access: { ...lee, computer: "root" } });
+  assert.equal(raw("lee@example.com").computer, "none", "not a value: the one kept stays");
+  // One kept from before reads as off on the sheet while it's an invite.
+  S.update((st) => void (st.workspaces.find((w) => w.id === sheetWs()).memberAccess["lee@example.com"].computer = "use"));
+  r = await get();
+  assert.equal("computer" in ((r.body.invites.find((i) => i.email === "lee@example.com") ?? {}).access ?? {}), false, "an invite reads as off");
+  S.update((st) => void delete st.workspaces.find((w) => w.id === sheetWs()).memberAccess["lee@example.com"].computer);
+}
+console.log("ok - Use its computer: the copy kept when not sent, off kept as off, never on an invite");
+
+/* ---------------- 10e. Use its computer for a member: orgo-web first, kept only once it took it ---------------- */
+{
+  const O = await import(`${root}/lib/server/orgo.ts`);
+  const raw = (k) => rawKept()[k];
+  const MEMBERS_PATH = `/api/workspaces/${WS}/members`;
+  const PATCH_MEMBERS = `PATCH ${MEMBERS_PATH}`;
+  // orgo-web as it is (PATCH ./members {memberId, bopsComputerUse} answers the value it now keeps); a role change as before.
+  const orgoUse = new Map();
+  const orgoPatch = (c) =>
+    c.body.bopsComputerUse === undefined ? json(200, { success: true }) : (orgoUse.set(c.body.memberId, c.body.bopsComputerUse), json(200, { success: true, bopsComputerUse: c.body.bopsComputerUse }));
+  const withComputer = () => ({ ...usual(), [PATCH_MEMBERS]: orgoPatch });
+  const asked = (from) => calls.slice(from).filter((c) => c.method === "PATCH" && c.path === MEMBERS_PATH && c.body?.bopsComputerUse !== undefined);
+  const sheetComputer = async (id) => (await get()).body.people.find((p) => p.id === id).access.computer;
+  replies = withComputer();
+  assert.deepEqual(O.MEMBER_COMPUTER_ROUTE, { method: "PATCH", path: "/api/workspaces/{projectId}/members", field: "bopsComputerUse" }, "the route in one place");
+
+  // Turned on: orgo-web is told first, with the owner's key, then the copy is kept and the sheet reads it back.
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: { boppy: "write" }, computer: "use" } });
+  assert.deepEqual(r, { status: 200, body: { ok: true } });
+  assert.deepEqual(
+    calls.slice(n).map((c) => `${c.method} ${c.path}`),
+    ["GET /api/workspaces", `GET ${MEMBERS_PATH}`, PATCH_MEMBERS],
+  );
+  assert.deepEqual([calls.at(-1).body, calls.at(-1).auth], [{ memberId: "u-jamie", bopsComputerUse: true }, `Bearer ${KEY}`], "{memberId, bopsComputerUse: true}, with the signed-in key");
+  assert.equal(raw("jamie@example.com").computer, "use");
+  assert.equal(await sheetComputer("u-jamie"), "use");
+  // Bots changed with it still on, or sent without it: orgo-web isn't asked again, and it stays on.
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: { boppy: "write", otto: "read" }, computer: "use" } });
+  assert.equal(r.status, 200);
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: { boppy: "write" } } });
+  assert.equal(r.status, 200);
+  assert.equal(asked(n).length, 0, "unchanged: orgo-web not asked");
+  assert.equal(raw("jamie@example.com").computer, "use");
+
+  // orgo-web turns it down: it stays as it was, the bots picked with it too, and the sheet says why in the app's words.
+  const before = structuredClone(raw("jamie@example.com"));
+  const off = { others: "none", bots: { boppy: "write", rook: "read" }, computer: "none" };
+  for (const [reply, status, code, error] of [
+    [() => json(500, { error: "x" }), 502, "COMPUTER_UNCHANGED", M.WORDS.computerUnchanged],
+    [() => json(403, { error: "Only project owners can change what members can do" }), 403, "NOT_OWNER", M.WORDS.notOwner],
+    [() => json(404, { error: "Member not found" }), 404, "GONE", M.WORDS.gone],
+    [() => json(404, { error: "Project not found" }), 502, "COMPUTER_UNCHANGED", M.WORDS.computerUnchanged],
+    [() => json(400, { error: "The owner can always use the workspace’s computers.", code: "owner_always" }), 400, "SELF", "You always have every bot."],
+    [() => json(503, { error: "Database unavailable" }), 502, "COMPUTER_UNCHANGED", M.WORDS.computerUnchanged],
+    // An answer that keeps the other value isn't taken.
+    [() => json(200, { success: true, bopsComputerUse: true }), 502, "COMPUTER_UNCHANGED", M.WORDS.computerUnchanged],
+    [offline, 502, "COMPUTER_UNCHANGED", M.WORDS.computerUnreachable],
+  ]) {
+    replies[PATCH_MEMBERS] = reply;
+    r = await route("PATCH", { memberId: "u-jamie", access: off });
+    assert.deepEqual([r.status, r.body.code, r.body.error], [status, code, error], `${code} (${status})`);
+    assert.deepEqual(raw("jamie@example.com"), before, `${code}: nothing kept`);
+  }
+  for (const e of [M.WORDS.computerUnchanged, M.WORDS.computerUnreachable, M.WORDS.computerNotReady]) noDashes(e);
+  // orgo-web that can't keep it yet (a database without its column, an orgo-web from before it that wants a role, an
+  // answer without the value): Bops Cloud goes by the copy here then, so off is kept here all the same, and on waits.
+  const { at: beforeAt, ...beforeLevels } = before;
+  const putBack = () => W.setMemberAccess(sheetWs(), "jamie@example.com", beforeLevels, { at: beforeAt });
+  for (const reply of [
+    () => json(503, { error: "Orgo can’t save who may use the computers yet. Try again later.", code: "COMPUTER_USE_UNAVAILABLE" }),
+    () => json(400, { error: "memberId and role are required" }),
+    () => json(200, { success: true }),
+  ]) {
+    replies[PATCH_MEMBERS] = reply;
+    n = calls.length;
+    r = await route("PATCH", { memberId: "u-jamie", access: off });
+    assert.deepEqual(r, { status: 200, body: { ok: true } }, "off where orgo-web can't keep it: kept here");
+    assert.deepEqual(asked(n).map((c) => c.body.bopsComputerUse), [false], "orgo-web asked first");
+    assert.deepEqual([raw("jamie@example.com").computer, raw("jamie@example.com").bots], ["none", off.bots]);
+    r = await route("PATCH", { memberId: "u-jamie", access: { ...off, computer: "use" } });
+    assert.deepEqual([r.status, r.body.code, r.body.error], [503, "COMPUTER_NOT_READY", M.WORDS.computerNotReady], "on waits for orgo-web");
+    assert.equal(raw("jamie@example.com").computer, "none", "on not kept");
+    putBack();
+  }
+  // Their last Write taken away there: the bots go down and it goes off here, nothing held back.
+  replies[PATCH_MEMBERS] = () => json(400, { error: "memberId and role are required" });
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "read", bots: {} } });
+  assert.equal(r.status, 200);
+  assert.deepEqual([raw("jamie@example.com").others, raw("jamie@example.com").computer], ["read", "none"]);
+  putBack();
+  assert.deepEqual(raw("jamie@example.com"), before, "as it was before");
+  replies = withComputer();
+  // Turned off: orgo-web first (bopsComputerUse: false), then kept as off.
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", access: off });
+  assert.equal(r.status, 200);
+  assert.deepEqual(asked(n).map((c) => c.body), [{ memberId: "u-jamie", bopsComputerUse: false }]);
+  assert.deepEqual([raw("jamie@example.com").computer, raw("jamie@example.com").bots], ["none", { boppy: "write", rook: "read" }]);
+  assert.equal(await sheetComputer("u-jamie"), undefined, "off reads as nothing on the sheet");
+  assert.equal(orgoUse.get("u-jamie"), false);
+
+  // It comes with Write: taking away their last Write turns it off in orgo-web too, sent with it or not.
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: { boppy: "write" }, computer: "use" } });
+  assert.equal(orgoUse.get("u-jamie"), true);
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: { boppy: "read" }, computer: "use" } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(asked(n).map((c) => c.body.bopsComputerUse), [false], "Read only: off");
+  assert.deepEqual([raw("jamie@example.com").computer, raw("jamie@example.com").bots], ["none", { boppy: "read" }]);
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: { boppy: "write" }, computer: "use" } });
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "read", bots: {} } });
+  assert.deepEqual(asked(n).map((c) => c.body.bopsComputerUse), [false], "not sent, and no Write left: off");
+  assert.equal(raw("jamie@example.com").computer, "none");
+  // Write on a bot the workspace doesn't have counts for nothing; Write on every bot (new ones too) does.
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: { gone: "write" }, computer: "use" } });
+  assert.equal(asked(n).length, 0, "no Write on a bot it has: not turned on");
+  assert.equal(raw("jamie@example.com").computer, "none");
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "write", bots: {}, computer: "use" } });
+  assert.equal(raw("jamie@example.com").computer, "use");
+  // Taking away their last Write when orgo-web turns that down: nothing changes, they keep Write and it.
+  replies[PATCH_MEMBERS] = () => json(500, { error: "x" });
+  r = await route("PATCH", { memberId: "u-jamie", access: { others: "read", bots: {} } });
+  assert.deepEqual([r.status, r.body.code], [502, "COMPUTER_UNCHANGED"]);
+  assert.deepEqual([raw("jamie@example.com").others, raw("jamie@example.com").computer], ["write", "use"]);
+  replies = withComputer();
+  // A role change goes as before, on its own: orgo-web isn't asked about the computer.
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", role: "viewer" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(calls.slice(n).filter((c) => c.method === "PATCH").map((c) => c.body), [{ memberId: "u-jamie", role: "member" }]);
+  // A role and a change to Use its computer in one request: refused before anything is sent (the window sends them apart).
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", role: "viewer", access: { others: "write", bots: {}, computer: "none" } });
+  assert.deepEqual([r.status, r.body.code], [400, "BAD_REQUEST"]);
+  assert.ok(!calls.slice(n).some((c) => c.method === "PATCH"), "neither the role nor the computer sent");
+  assert.equal(raw("jamie@example.com").computer, "use", "unchanged");
+
+  // A guest: by their Orgo user id, kept under it.
+  r = await route("PATCH", { memberId: "u-guest", access: { others: "write", bots: {}, computer: "use" } });
+  assert.equal(r.status, 200);
+  assert.deepEqual([calls.at(-1).path, calls.at(-1).body], [MEMBERS_PATH, { memberId: "u-guest", bopsComputerUse: true }]);
+  assert.equal(raw("user:u-guest").computer, "use");
+  // The user themselves, or someone Orgo doesn't list: orgo-web never asked.
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-owner", access: { others: "write", bots: {}, computer: "use" } });
+  assert.deepEqual([r.status, r.body.code], [400, "SELF"]);
+  r = await route("PATCH", { memberId: "u-nobody", access: { others: "write", bots: {}, computer: "use" } });
+  assert.deepEqual([r.status, r.body.code], [404, "GONE"]);
+  assert.equal(asked(n).length, 0);
+  W.setMemberAccess(sheetWs(), "jamie@example.com", null);
+  W.setMemberAccess(sheetWs(), "user:u-guest", null);
+  replies = usual();
+}
+console.log("ok - Use its computer for a member: orgo-web first, kept once it took it, unchanged when it didn't, off with their last Write");
+
+/* ---------------- 10f. Use its computer as orgo-web's list says it: the sheet shows it, the copy follows ---------------- */
+{
+  const raw = (k) => rawKept()[k];
+  const MEMBERS_PATH = `/api/workspaces/${WS}/members`;
+  // orgo-web's list as it gives the owner: each member's bopsComputerUse (none from an orgo-web before it).
+  const says = (byId) => ({ ...list, members: MEMBERS.map((m) => (m.id in byId ? { ...m, bopsComputerUse: byId[m.id] } : m)) });
+  const shown = (body, id) => body.people.find((p) => p.id === id).access.computer;
+  const asked = (from) => calls.slice(from).filter((c) => c.method === "PATCH" && c.body?.bopsComputerUse !== undefined);
+  const saved = list;
+  replies = usual();
+  W.setMemberAccess(sheetWs(), "jamie@example.com", { others: "none", bots: { boppy: "write" }, computer: "none" });
+  W.setMemberAccess(sheetWs(), "user:u-guest", { others: "write", bots: {}, computer: "use" });
+  const jamieAt = raw("jamie@example.com").at;
+  const guestAt = raw("user:u-guest").at;
+
+  // An orgo-web before it says nothing: the copy is the sheet's, unchanged.
+  r = await get();
+  assert.deepEqual([shown(r.body, "u-jamie"), shown(r.body, "u-guest")], [undefined, "use"]);
+  assert.deepEqual([raw("jamie@example.com").computer, raw("user:u-guest").computer], ["none", "use"]);
+
+  // orgo-web says the other way round for both: the sheet shows orgo-web's, and the copy follows, keeping when it was set.
+  list = says({ "u-jamie": true, "u-guest": false, "u-sam": true });
+  r = await get();
+  assert.deepEqual([shown(r.body, "u-jamie"), shown(r.body, "u-guest")], ["use", undefined]);
+  assert.deepEqual([raw("jamie@example.com").computer, raw("user:u-guest").computer], ["use", "none"]);
+  assert.deepEqual([raw("jamie@example.com").at, raw("user:u-guest").at], [jamieAt, guestAt], "when it was set stays");
+  assert.deepEqual(raw("jamie@example.com").bots, { boppy: "write" }, "the bots stay");
+  // Someone with nothing kept: shown as orgo-web says, and no entry is made for it.
+  assert.equal(shown(r.body, "u-sam"), "use");
+  assert.equal(raw("sam@example.com"), undefined, "nothing made");
+
+  // A change decides against orgo-web's: on there already, so turning it on (or sending bots alone) asks nothing.
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-sam", access: { others: "none", bots: { boppy: "write" } } });
+  assert.equal(r.status, 200);
+  assert.equal(asked(n).length, 0, "already on in orgo-web: not asked");
+  assert.equal(raw("sam@example.com").computer, "use", "kept as orgo-web has it");
+  W.setMemberAccess(sheetWs(), "sam@example.com", null);
+
+  // An entry changed while Orgo was asked is newer than the list: it's left as the change kept it.
+  list = says({ "u-jamie": false });
+  replies[`GET ${MEMBERS_PATH}`] = () => (W.setMemberAccess(sheetWs(), "jamie@example.com", { others: "write", bots: {}, computer: "use" }), json(200, list));
+  r = await get();
+  assert.deepEqual([raw("jamie@example.com").computer, raw("jamie@example.com").others], ["use", "write"], "the newer change stands");
+  replies = usual();
+  // The next read follows orgo-web again.
+  r = await get();
+  assert.equal(raw("jamie@example.com").computer, "none");
+
+  // The Mac's look at the runners follows it too (forgetGoneMembers), on a workspace tied to its Orgo one.
+  const tied = S.getState().workspaces.find((w) => w.id === sheetWs()).orgoProjectId;
+  S.update((st) => void (st.workspaces.find((w) => w.id === sheetWs()).orgoProjectId = WS));
+  list = says({ "u-jamie": true });
+  const Ms = await import(`${root}/lib/server/members.ts`);
+  await Ms.forgetGoneMembers(KEY);
+  assert.equal(raw("jamie@example.com").computer, "use");
+  S.update((st) => {
+    const w = st.workspaces.find((x) => x.id === sheetWs());
+    if (tied === undefined) delete w.orgoProjectId;
+    else w.orgoProjectId = tied;
+  });
+
+  list = saved;
+  W.setMemberAccess(sheetWs(), "jamie@example.com", null);
+  W.setMemberAccess(sheetWs(), "user:u-guest", null);
+}
+console.log("ok - Use its computer as orgo-web's list says it: shown on the sheet, the copy follows unless changed meanwhile, nothing made");
+
 // Changing: access only, by the member as Orgo lists them; never a key the window sent.
 n = calls.length;
 r = await route("PATCH", { memberId: "u-jamie", email: "sam@example.com", key: "sam@example.com", access: { others: "none", bots: { boppy: "read" } } });

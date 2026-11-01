@@ -80,6 +80,12 @@ export const config = {
    */
   planSecret: () => env("BOPS_CLOUD_PLAN_SECRET"),
   /**
+   * The secret Bops Cloud signs its asks to wake a bot's computer with (POST <orgo>/api/internal/bops/wake, turns.ts): the
+   * same BOPS_CLOUD_WAKE_SECRET on both sides, 32+ random bytes. Unset: a computer with no runner listening isn't woken for
+   * chat, and its turn waits until it's up or runs out of time.
+   */
+  wakeSecret: () => env("BOPS_CLOUD_WAKE_SECRET"),
+  /**
    * What a plan includes (BOPS_PLAN_LIMITS=1): phone numbers and emails as BOPS_TIERS says (Free
    * none, Pro 1, Max up to 5), so a purchase past the plan's is refused (proxy.ts) and the app makes
    * no inbox past it. Off (the default): anyone may, as before plans. Paid plans get their main bot's

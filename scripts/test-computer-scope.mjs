@@ -263,6 +263,97 @@ await check("whatever a runner's state becomes, what keepAllowed keeps is never 
   assert.equal(held.blob.routines[0].nextRunAt, 1);
 });
 
+await check("what a computer reads (forComputer): only its bots' things and a teammate's name and place; its runner's write over that, with what it never read put back (withHeldBack), is the state as it was plus its own work, over 2000 states", () => {
+  const r = rng(23);
+  for (let i = 0; i < 2000; i++) {
+    const st = randomState(r);
+    const ids = st.bots.map((b) => b.id);
+    st.chats = ids.map((id) => ({ id: `bot:${id}`, kind: "bot", botIds: [id] }));
+    if (ids.length > 1) st.chats.push({ id: "g", kind: "group", botIds: [ids[0], ids.at(-1)] });
+    st.sessions = ids.map((id, n) => ({ id: `s${n}`, botId: id, by: pick(r, [ME, "mac"]), status: "done" }));
+    st.routines = ids.map((id, n) => ({ id: `r${n}`, botId: id, title: "t", goal: "g", enabled: true, nextRunAt: 1, ...(r() < 0.2 ? { last: { at: 1, by: ME, status: "ok" } } : {}) }));
+    st.vault = [{ id: "v-all", bots: "all" }, { id: "v-0", bots: [ids[0]] }];
+    for (const b of st.bots) if (r() < 0.5) Object.assign(b, { keys: [`KEY_${b.id}`], persona: `persona ${b.id}` });
+    const sc = { desktopId: pick(r, [D1, D2, D3]), device: ME };
+    const view = C.forComputer(st, sc);
+    const on = new Set(C.botsOn(st, sc.desktopId).map((b) => b.id));
+    const json = JSON.stringify(view);
+    // Its own bots whole; another bot's keys and persona never; another computer's bots' chats, threads and routines never.
+    for (const b of st.bots) {
+      if (on.has(b.id)) assert.ok(view.bots.some((x) => C.same(x, b)), `mix ${i}: its bot ${b.id} whole`);
+      else if (b.keys) assert.ok(!json.includes(`KEY_${b.id}`) && !json.includes(`persona ${b.id}`), `mix ${i}: ${b.id}'s keys`);
+    }
+    assert.ok(view.chats.every((c) => C.chatsOn(st, sc.desktopId).has(c.id)), `mix ${i}: chats`);
+    assert.ok(view.sessions.every((x) => on.has(x.botId) || x.by === ME), `mix ${i}: threads`);
+    assert.ok(view.routines.every((x) => on.has(x.botId) || x.last?.by === ME), `mix ${i}: routines`);
+    assert.ok(view.workspaces.every((w) => [...on].some((id) => (st.bots.find((b) => b.id === id).workspaceId ?? "ws_main") === w.id)), `mix ${i}: workspaces`);
+    // Its runner reads what workBot goes by: the same bots on it.
+    assert.deepEqual(C.botsOn(view, sc.desktopId).map((b) => b.id), [...on], `mix ${i}: the same bots on it, as it reads the state`);
+    // Sent back as read: the stored state exactly. With its own thread added: that and nothing else.
+    assert.deepEqual(C.withHeldBack(st, structuredClone(view), sc), st, `mix ${i}: put back`);
+    if (on.size) {
+      const mine = structuredClone(view);
+      mine.sessions.push({ id: "s-new", botId: [...on][0], by: ME, status: "running" });
+      const back = C.withHeldBack(st, mine, sc);
+      assert.deepEqual(C.writeDenials(st, back, sc), [], `mix ${i}: its own work`);
+      assert.deepEqual(back, { ...st, sessions: [...st.sessions, mine.sessions.at(-1)] }, `mix ${i}: the rest as it was`);
+    }
+  }
+  // Each change its runner's work makes, over what it read (base: Iris a teammate, her routine unread), lands; none it may not.
+  const base = baseState();
+  const view = C.forComputer(base, scope);
+  assert.deepEqual(view.bots[2], { id: "iris", name: "Iris", isMain: false, computer: "own", computerId: D2, computerStatus: "ready" });
+  assert.deepEqual(view.routines.map((x) => x.id), ["r-main"]);
+  for (const change of ALLOWED) {
+    const mine = structuredClone(view);
+    change(mine);
+    const back = C.withHeldBack(base, C.keepAllowed(view, mine, scope).blob, scope);
+    assert.deepEqual(C.writeDenials(base, back, scope), [], change.toString());
+  }
+  for (const [change, path] of [
+    [(x) => (x.bots[2].computerId = D1), "bots.iris"],
+    [(x) => (x.routines[0].goal = "z"), "routines.r-main.goal"],
+    [(x) => x.routines.push({ ...base.routines[1], nextRunAt: 9 }), "routines.r-iris"],
+  ]) {
+    const mine = structuredClone(view);
+    change(mine);
+    assert.ok(C.writeDenials(base, C.withHeldBack(base, mine, scope), scope).includes(path), path);
+  }
+  // Another bot's steps and channel links are never read, and come back as they were.
+  const more = { ...base, procedures: [{ id: "p1", botId: "main", title: "a" }, { id: "p2", botId: "iris", title: "secret steps" }], channels: [{ id: "c1", botId: "iris", name: "iris-only" }] };
+  const seen = C.forComputer(more, scope);
+  assert.deepEqual([seen.procedures.map((x) => x.id), seen.channels.map((x) => x.id)], [["p1"], []]);
+  assert.deepEqual(C.withHeldBack(more, structuredClone(seen), scope), more);
+  // A Preview password is never read, and one sent is told apart from none (refused before it's compared).
+  const pass = { ...base, workspaces: [{ id: "ws_main", name: "Acme", appsForMembers: { apps: { a: { sites: [{ name: "w", previewPassword: "p4ss" }] } } } }] };
+  assert.ok(!JSON.stringify(C.forComputer(pass, scope)).includes("p4ss"));
+  assert.equal(C.carriesPasswords(C.forComputer(pass, scope)), false);
+  assert.equal(C.carriesPasswords(pass), true);
+  assert.deepEqual(C.withHeldBack(pass, C.forComputer(pass, scope), scope), pass);
+});
+
+await check("a member's stamp: kept only as it was (none, or the same as the stored row's); the cloud path is a workspace's switch, a chat in it by its own workspace or its first bot's", () => {
+  const sam = { userId: "u1", name: "Sam", ref: "k" };
+  assert.equal(C.memberStampKept({ role: "bot" }, undefined), true, "none");
+  assert.equal(C.memberStampKept({ role: "user", member: sam }, undefined), false, "a new one");
+  assert.equal(C.memberStampKept({ role: "user", member: sam }, { role: "user" }), false, "on a row that had none");
+  assert.equal(C.memberStampKept({ role: "user", member: { ...sam, name: "Owner" } }, { member: sam }), false, "changed");
+  assert.equal(C.memberStampKept({ role: "user", member: { ref: "k", name: "Sam", userId: "u1" } }, { member: sam }), true, "the same, any key order");
+  assert.equal(C.memberStampKept({ role: "user" }, { member: sam }), true, "taken off: no stamp made");
+  // The words under it as kept too: the same stamp over other words would show them as theirs. A tapback changes neither.
+  const said = { role: "user", member: sam, text: "hi", replyTo: "m0" };
+  assert.equal(C.memberStampKept({ ...said, text: "send the wire now" }, said), false, "other words");
+  assert.equal(C.memberStampKept({ ...said, replyTo: "m9" }, said), false, "replying to another");
+  assert.equal(C.memberStampKept({ ...said, reactions: [{ by: "owner", type: "like" }] }, said), true, "a tapback");
+  const st = {
+    bots: [{ id: "main", isMain: true }, { id: "iris", workspaceId: "ws_two" }],
+    chats: [{ id: "g", botIds: ["iris"] }, { id: "h", botIds: ["iris"], workspaceId: "ws_main" }],
+    workspaces: [{ id: "ws_main" }, { id: "ws_two", chatOn: "cloud" }],
+  };
+  assert.deepEqual(["bot:main", "bot:iris", "g", "h", "bot:gone"].map((id) => C.cloudChatOn(st, id)), [false, true, true, false, false]);
+  assert.equal(C.cloudChatOn({ ...st, workspaces: [{ id: "ws_two", chatOn: true }] }, "bot:iris"), false, "only \"cloud\"");
+});
+
 await check("a bot moved off the computer while its runner ran its routine: the runner ends that run (its thread, the routine's record, its chip and result), and starts nothing else of that bot's", () => {
   // Iris works on D2 now, while D1's runner runs her routine: its thread, and the routine's record of it.
   const base = baseState();

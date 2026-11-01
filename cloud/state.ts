@@ -7,10 +7,11 @@ import { accountDeleted, query, sweepDeletedUsers, tx } from "./db.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { afterStateUpload } from "./plans.ts";
 import { appVersionOf, olderThan } from "./app-version.ts";
-import { botIdsOn, carriesPasswords, chatsOn, computersMessage, forComputer, runsBy, threadsOf, withHeldBack, writeDenials } from "./computer-scope.ts";
+import { botIdsOn, carriesPasswords, chatsOn, cloudChatOn, computersMessage, forComputer, memberStampKept, runsBy, threadsOf, withHeldBack, writeDenials } from "./computer-scope.ts";
 import {
   BOPS_DEVICE_HEADER,
   COMPUTER_NOT_ALLOWED,
+  MEMBER_STAMP,
   BOPS_PROTOCOL_HEADER,
   BOPS_STATE_LEVEL_HEADER,
   BOPS_USER_HEADER,
@@ -29,6 +30,7 @@ import {
 import { dropOlderMac, notifyMac } from "./tunnel.ts";
 import { messagesWritten, stateWritten } from "./live.ts";
 import { forgetTelemetryChoice } from "./analytics.ts";
+import { keepChatOn, nudgeRunners, recheckTurns, routedWorkspaces, turnRowsMayWrite } from "./turns.ts";
 
 /**
  * The app's state, kept here for each user (protocol.ts, "The app's state in Bops Cloud"). Owner: edge builder.
@@ -143,11 +145,13 @@ async function liveMessages(userId: string): Promise<Record<string, unknown>[]> 
  * The user's Mac hears that their state changed (it reads what did). Best effort, after the write. With
  * `messages` (the chats written into, by whom), the workspaces watched live that hold them hear it too.
  */
-function announce(userId: string, messages?: { chats: string[]; by: string | null }) {
+export function announce(userId: string, messages?: { chats: string[]; by: string | null }) {
   void head(userId)
     .then((h) => {
       notifyMac(userId, { t: "state", version: h.version, seq: h.seq });
       if (messages) messagesWritten(userId, messages.chats, h.seq, messages.by);
+      // A runner listening for turns reads it now too (one waiting on an OK hears the answer: turns.ts).
+      nudgeRunners(userId);
     })
     .catch(() => {});
 }
@@ -331,7 +335,7 @@ async function removeMessages(c: pg.PoolClient, userId: string, ids: string[]) {
  * that finished after the delete. Read under the lock, which the delete takes too, so a write waiting on
  * it while the delete runs finds the user gone once it gets it.
  */
-async function lockUser(c: pg.PoolClient, userId: string) {
+export async function lockUser(c: pg.PoolClient, userId: string) {
   await c.query(
     `INSERT INTO bops.app_state (user_id, state, version) SELECT $1, '{}'::jsonb, 0
      WHERE NOT EXISTS (SELECT 1 FROM bops.deleted_users WHERE user_id = $1)
@@ -347,7 +351,7 @@ async function lockUser(c: pg.PoolClient, userId: string) {
 }
 
 /** The blob on the user's locked row, as kept. */
-async function lockedState(c: pg.PoolClient, userId: string): Promise<Record<string, unknown>> {
+export async function lockedState(c: pg.PoolClient, userId: string): Promise<Record<string, unknown>> {
   const r = await c.query<{ state: Record<string, unknown> | null }>("SELECT state FROM bops.app_state WHERE user_id = $1", [userId]);
   return r.rows[0]?.state ?? {};
 }
@@ -513,8 +517,8 @@ const get: Route = {
     if (row) requireLevel(req, row.protocol);
     if (!row || row.empty) throw new HttpError(404, "No state saved yet", v2 ? { version: row?.version ?? 0, seq: await lastSeq(user!.id) } : undefined);
     if (v2) {
-      // A computer's runner reads it without what's kept for members alone (computer-scope.ts forComputer).
-      const body: CloudState = { version: row.version, seq: await lastSeq(user!.id), protocol: row.protocol, writer: row.writer, state: user!.computer ? forComputer(row.state) : row.state };
+      // A computer's runner reads only what its bots need, without what's kept for members alone (computer-scope.ts forComputer).
+      const body: CloudState = { version: row.version, seq: await lastSeq(user!.id), protocol: row.protocol, writer: row.writer, state: user!.computer ? forComputer(row.state, user!.computer) : row.state };
       return sendZipped(req, res, 200, body);
     }
     // A build from before: the whole state, its messages back in.
@@ -555,12 +559,22 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
       const sent = JSON.parse(json) as Record<string, unknown>;
       if (carriesPasswords(sent)) throw notForComputer(["workspaces"]);
       const stored = await lockedState(c, user.id);
-      // What it read without (forComputer) is put back first: it sends the workspaces as it read them.
-      const next = withHeldBack(stored, sent);
+      // What it read without (forComputer) is put back first: it sends what it read as it read it.
+      const next = withHeldBack(stored, sent, user.computer);
       const denied = writeDenials(stored, next, user.computer);
       if (denied.length) throw notForComputer(denied);
       json = toJson(next);
       written = next;
+    } else {
+      // The switch of each workspace's chat as Bops Cloud keeps it (turns.ts keepChatOn): a Bops from before drops it.
+      const routed = await routedWorkspaces(c, user.id);
+      if (routed) {
+        const kept = keepChatOn(written, routed);
+        if (kept !== written) {
+          written = kept;
+          json = toJson(blobOf(kept));
+        }
+      }
     }
     const r = await c.query<{ version: string }>(
       `UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, protocol = GREATEST(protocol, $3), writer = $4, updated_at = now() WHERE user_id = $1 RETURNING version`,
@@ -571,7 +585,7 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   });
   if (version === null) {
     const now = await readRow(user.id);
-    const body: CloudStateConflict = { error: "Your Bops changed on another Mac", code: STATE_CONFLICT, version: now?.version ?? 0, state: now && user.computer ? forComputer(now.state) : (now?.state ?? {}) };
+    const body: CloudStateConflict = { error: "Your Bops changed on another Mac", code: STATE_CONFLICT, version: now?.version ?? 0, state: now && user.computer ? forComputer(now.state, user.computer) : (now?.state ?? {}) };
     return sendZipped(req, res, 409, body);
   }
   sendJson(res, 200, { version });
@@ -583,6 +597,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   // A paid plan that waited to know the main bot is set up now (plans.ts).
   afterStateUpload(user.id);
   forgetTelemetryChoice(user.id);
+  // Who may have their messages run on the bots' computers may have changed: turns of anyone who may not end now.
+  if (!user.computer) void recheckTurns(user.id).catch((e: Error) => console.warn(`[state] turns recheck: ${e.message}`));
 }
 
 /** A build from before: its whole state, messages and all, the Mac's own `version` kept as given. */
@@ -669,6 +685,7 @@ const postMessages: Route = {
     const seq = await tx(async (c) => {
       requireLevel(req, (await lockUser(c, user!.id)).protocol);
       if (user!.computer) await computerMayWrite(c, user!, msgs, remove as string[]);
+      else await stampsMayWrite(c, user!, msgs);
       await upsertMessages(c, user!.id, msgs);
       await removeMessages(c, user!.id, remove as string[]);
       return lastSeq(user!.id, c);
@@ -684,7 +701,8 @@ const postMessages: Route = {
  * threads and routines' runs of its own in theirs (computer-scope.ts computersMessage: their bot may have
  * moved off it since the run began, and a run's words may come after its end is recorded): each new one,
  * and each it changes or removes as it's kept, must be one. Never the user's words or another bot's, so a
- * key read off a computer can't speak for them. Else 403.
+ * key read off a computer can't speak for them. One that carries a turn's id (its answer to a message Bops Cloud
+ * took) only while its device holds or last held that turn (turns.ts turnRowsMayWrite). Else 403.
  */
 async function computerMayWrite(c: pg.PoolClient, user: CloudUser, msgs: Msg[], remove: string[]) {
   const state = await lockedState(c, user.id);
@@ -697,12 +715,35 @@ async function computerMayWrite(c: pg.PoolClient, user: CloudUser, msgs: Msg[], 
   const kept = ids.length
     ? (await c.query<{ id: string; chat_id: string; json: Record<string, unknown> | null }>("SELECT id, chat_id, json FROM bops.chat_messages WHERE user_id = $1 AND id = ANY($2::text[])", [user.id, ids])).rows
     : [];
+  const was = new Map(kept.map((k) => [k.id, k.json]));
   const refused = [
     ...msgs.filter((m) => !computersMessage({ ...(JSON.parse(m.json) as Record<string, unknown>), chatId: m.chatId }, bots, chats, threads, runs)).map((m) => m.id),
+    // Never a member's stamp it made or changed (computer-scope.ts memberStampKept): only Bops Cloud says a member said it.
+    ...msgs.filter((m) => !memberStampKept(JSON.parse(m.json) as Record<string, unknown>, was.get(m.id))).map((m) => m.id),
     // One already taken out holds only its chat.
     ...kept.filter((k) => (k.json ? !computersMessage({ ...k.json, chatId: k.chat_id }, bots, chats, threads, runs) : !chats.has(k.chat_id))).map((k) => k.id),
+    // A turn's answer only from the device that holds or held its claim, never before its message (turns.ts).
+    ...(await turnRowsMayWrite(c, user.id, user.computer!.device, msgs)),
   ];
   if (refused.length) throw notForComputer([...new Set(refused)].map((id) => `messages.${id}`));
+}
+
+/**
+ * The owner's own write (a Mac, the phone's Bops): in a chat of a workspace whose people's words go through Bops Cloud
+ * (computer-scope.ts cloudChatOn), never a member's stamp it made or changed (memberStampKept), as for a computer: Bops
+ * Cloud is the only one that says a member said it there. A row sent back with its stamp as kept (a tapback rewrites
+ * it whole) is fine, and so is anything in a workspace still on the owner's Mac. Else 403 MEMBER_STAMP.
+ */
+async function stampsMayWrite(c: pg.PoolClient, user: CloudUser, msgs: Msg[]) {
+  const stamped = msgs.map((m) => ({ m, json: JSON.parse(m.json) as Record<string, unknown> })).filter((x) => x.json.member !== undefined);
+  if (!stamped.length) return;
+  const state = await lockedState(c, user.id);
+  const there = stamped.filter((x) => cloudChatOn(state, x.m.chatId));
+  if (!there.length) return;
+  const kept = (await c.query<{ id: string; json: Record<string, unknown> | null }>("SELECT id, json FROM bops.chat_messages WHERE user_id = $1 AND id = ANY($2::text[])", [user.id, there.map((x) => x.m.id)])).rows;
+  const was = new Map(kept.map((k) => [k.id, k.json]));
+  const refused = there.filter((x) => !memberStampKept(x.json, was.get(x.m.id))).map((x) => `messages.${x.m.id}`);
+  if (refused.length) throw new HttpError(403, "Only Bops Cloud says someone you shared with said something here.", { code: MEMBER_STAMP, paths: refused.slice(0, 20) });
 }
 
 /**

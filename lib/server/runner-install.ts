@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, type RunnerState } from "@/lib/types";
+import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, workspaceOf, type AppState, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { forgetGoneMembers, othersCanUse } from "./members";
 import { giveAppsRead } from "./workspaces";
@@ -43,6 +43,15 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
  * same version built again replaces it only when this Mac set it up last (a dev Mac). One that's up and
  * set up again (a new release) stays up, with its routines, until the new one starts in its place
  * (RunnerState.upgrading); a try that doesn't get that far leaves it as it was.
+ *
+ * A workspace someone else can use whose chat goes through Bops Cloud (Workspace.chatOn "cloud", the per workspace
+ * switch, off by default) keeps its computers' runners, so the bots answer there with no Mac open: only a computer
+ * whose bots are all of that one workspace (sharedRunnerOk: one that also serves a private workspace never is), and
+ * only on the computer's own Orgo identity (an hour long, held to its bots by Bops Cloud), never the account's key.
+ * A computer with a key on it, or whose identity doesn't answer, has none (install), a runner it had on a key is
+ * stopped first and its key revoked, and the way back never gives it a key (stillRuns). Runners are set up only by
+ * an owner's Mac (this look is a Mac loop, and the bundle ships inside the Mac app): the owner's Mac must open a Bops
+ * with this change once before any computer of a shared workspace gets its runner, and again for each newer runner.
  *
  * Its computer's Orgo identity (vm-identity.ts) comes first on the runner, and its key is the fallback
  * wherever identity doesn't reach. This release (the identity spec's phase 1) gives every computer its
@@ -371,6 +380,8 @@ type Box = {
   answersAsked?: Map<string, Set<string>>;
   /** Tests: phase 2 on (IDENTITY_ONLY). */
   identityOnly?: boolean;
+  /** Computers someone else can use that keep their runner on identity alone (sharedRunnerOk), as the last look found them. */
+  shared?: Set<string>;
 };
 const g = globalThis as unknown as { __bopsRunnerInstall?: Box };
 const box: Box = (g.__bopsRunnerInstall ??= { lookedAt: 0, retry: new Map(), busy: new Set() });
@@ -583,14 +594,37 @@ async function lookDown(id: string): Promise<"down" | "up" | undefined> {
   return waits ? "down" : undefined;
 }
 
-/** One computer that should have a runner: set up, kept as it is, or (someone else can use its workspace) stopped. */
+/**
+ * Whether a computer someone else can use keeps its runner: every bot on it is of one workspace, and that workspace's
+ * chat goes through Bops Cloud (Workspace.chatOn "cloud"). Its people can use what the bots on it can (they may be
+ * root there), so a computer that also serves another workspace's bots, a private one or one shared with others,
+ * never does. The runner then signs in with its computer's identity alone (install, stillRuns).
+ */
+export function sharedRunnerOk(s: Pick<AppState, "bots" | "workspaces">, id: string): boolean {
+  const on = s.bots.filter((b) => workBot(b, s.bots).computerId?.toLowerCase() === id.toLowerCase());
+  const spaces = new Set(on.map((b) => workspaceOf(b)));
+  if (spaces.size !== 1) return false;
+  return s.workspaces?.find((w) => w.id === [...spaces][0])?.chatOn === "cloud";
+}
+
+/**
+ * One computer that should have a runner: set up, kept as it is, or (someone else can use its workspace) stopped.
+ * Someone else can, in a workspace whose chat goes through Bops Cloud (sharedRunnerOk): kept, on its identity alone.
+ */
 async function keepUp(id: string, w: Wanted, key: string, me: string) {
   if (box.busy.has(id)) return;
+  let shared = false;
   for (const p of w.projects) {
     const others = await othersCanUse(key, p);
     // Not known now: nothing is set up or stopped, but its computer is still looked at (lookDown).
     if (others === null) return void (await lookDown(id));
     if (!others) continue;
+    shared = true;
+    // Kept, on its identity alone: unless a runner of its signs in with a key (one Bops gave, or one it came with), or
+    // hasn't said what it signs in with (a runner from before auth=), stopped first.
+    const had = runnerOf(id);
+    const keyed = !!had && (runnerKeyMade(had) || (had.status !== "failed" && (had.auth === "key" || had.auth === undefined)));
+    if (sharedRunnerOk(getState(), id) && !keyed) continue;
     // Stopped (and the key Bops gave it revoked), then said why. Once: a computer isn't asked again for nothing.
     const x = runnerOf(id);
     if (x && (x.status !== "failed" || runnerKeyMade(x))) await stop(id, key, STOPPED.full);
@@ -603,8 +637,11 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
     if (runnerOf(id)?.error !== FULL_ACCESS) failed(id, FULL_ACCESS, null, me, false);
     // Seen here, so looked at again each time without asking the computer anything: set up as soon as they're gone.
     box.retry.delete(id);
+    box.shared?.delete(id);
     return;
   }
+  if (shared) (box.shared ??= new Set()).add(id);
+  else box.shared?.delete(id);
   const down = await lookDown(id);
   if (down === "down") return;
   const x = runnerOf(id);
@@ -635,7 +672,7 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
   if ((await orgo.computer(id).catch(() => null))?.status !== "running") return;
   box.busy.add(id);
   try {
-    await install(id, bundle, key, me);
+    await install(id, bundle, key, me, shared);
   } finally {
     box.busy.delete(id);
   }
@@ -646,7 +683,7 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
  * up, and keeps its routines, until the new one is started in its place: a try that goes wrong before
  * that (its computer didn't answer, the files didn't upload) leaves it as it was, to be tried again later.
  */
-async function install(id: string, bundle: Bundle, key: string, me: string) {
+async function install(id: string, bundle: Bundle, key: string, me: string, shared = false) {
   const s = getState();
   const orgoAt = orgoOrigin();
   const cloudAt = cloudUrl();
@@ -660,7 +697,8 @@ async function install(id: string, bundle: Bundle, key: string, me: string) {
   if (upgrade) mark(id, { ...before, upgrading: { version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now() } });
   else mark(id, { status: "installing", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(before) });
   const dirName = `${bundle.version}-${bundle.buildId}`;
-  const phase2 = identityOnly();
+  // Someone else can use it (sharedRunnerOk): its identity alone, as in phase 2 and stricter.
+  const phase2 = identityOnly() || shared;
   const probe = await orgo.bash(id, probeScript(dirName, { ident: phase2 }), 60).catch(() => null);
   if (!probe) return fail("its computer didn't answer");
   const said = (k: string) => new RegExp(`^${k}=(.*)$`, "m").exec(probe.output)?.[1]?.trim() ?? "";
@@ -683,6 +721,8 @@ async function install(id: string, bundle: Bundle, key: string, me: string) {
   const ident = phase2 ? said("ident") : "";
   const hadKey = said("key") === "yes";
   if (ident === "403") return fail(FULL_ACCESS);
+  // Someone else can use it: never a key on it (theirs to read as root), and nothing without its identity.
+  if (shared && (hadKey || ident !== "200")) return fail(FULL_ACCESS);
   const onIdentity = ident === "200";
   if (!hadKey && !onIdentity) {
     const given = await giveKey(id, key);
@@ -879,8 +919,16 @@ async function stillRuns(id: string, me: string, key: string): Promise<boolean |
   const up = /\b(RUNNING|STARTING|BACKOFF)\b/.test(got.output);
   const auth = authIn(got.output);
   const ident = said("ident");
+  // Someone else can use it (sharedRunnerOk): never given a key on the way back, and one found on it stops the runner.
+  if (box.shared?.has(id)) {
+    if (said("key") === "yes") {
+      await stop(id, key, STOPPED.full);
+      failed(id, FULL_ACCESS, null, me, false);
+      return false;
+    }
+  }
   // No key and no identity it can use, or a key in its files that isn't its own (it says none: orgo-auth.ts): its own from Orgo.
-  if (ident !== "403" && ((said("key") === "no" && (ident !== "200" || auth === "none")) || (said("key") === "yes" && auth === "none"))) return wayBack(id, me, key, up);
+  else if (ident !== "403" && ((said("key") === "no" && (ident !== "200" || auth === "none")) || (said("key") === "yes" && auth === "none"))) return wayBack(id, me, key, up);
   const x = runnerOf(id);
   if (up) {
     if (x?.status === "running" && auth && x.auth !== auth) mark(id, { ...x, auth });
@@ -974,6 +1022,7 @@ export const runnerInstallForTests = {
     box.busy.clear();
     box.asked?.clear();
     box.answersAsked?.clear();
+    box.shared?.clear();
     box.identityOnly = undefined;
   },
   retryAt: (id: string) => box.retry.get(id)?.at,

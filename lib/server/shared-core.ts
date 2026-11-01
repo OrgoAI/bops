@@ -1,8 +1,8 @@
-import { isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
+import { isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
 import { ownerOnlyAsk } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
 import { ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
-import { COMPACTED, pairChatId, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
+import { COMPACTED, pairChatId, workBot, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
 import type { RemoteMood } from "./live-core";
 
 /**
@@ -42,6 +42,8 @@ export const ACT_TOO_LONG = "That's too long to send. Make it shorter.";
 /** What Bops Cloud says of what only the owner does (MEMBER_OWNER_ONLY): the same words, from the copy. */
 const ON_THEIR_MAC = "This runs on the owner's Mac. Only the owner can tell it more.";
 const THEIR_LOGINS = "This uses the owner's apps or keys. Only the owner can answer it.";
+/** What Bops Cloud says of what acts on a bot's computer without Use its computer (MEMBER_NO_COMPUTER): the same words. */
+const NO_COMPUTER = "This runs on the bot's computer, and the owner hasn't let you use it.";
 const LIVE = new Set(["running", "queued", "starting"]);
 
 /** The bots an act touches, as the copy has them: none when what it names is gone. */
@@ -287,6 +289,18 @@ export class SharedCopy {
       const a = c.data.state.approvals?.find((x) => x.id === act.askId);
       if (a && ownerOnlyAsk(a.kind)) return { status: 403, error: THEIR_LOGINS, code: MEMBER_OWNER_ONLY };
       if (a && onMac(a.threadId)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    }
+    // Work on a bot's computer: only with Use its computer (cloud/members.ts computerAct says the same). Stop still ends it.
+    if (!c.data.state.computer) {
+      const onComputer = (id: unknown) => typeof id === "string" && c.data.state.sessions.some((x) => x.id === id && x.runsOn !== "mac");
+      const hasComputer = (id: unknown) => {
+        const b = c.data.state.bots.find((x) => x.id === id) as Bot | undefined;
+        return !!b && b.runsOn !== "mac" && !!workBot(b, c.data.state.bots as Bot[]).computerId;
+      };
+      const a = act.act === "answer" ? c.data.state.approvals?.find((x) => x.id === act.askId) : undefined;
+      const touches =
+        act.act === "reply" || act.act === "dismiss" ? onComputer(act.sessionId) : act.act === "compact" ? "sessionId" in act && onComputer(act.sessionId) : !!a && (typeof a.threadId === "string" ? onComputer(a.threadId) : hasComputer(a.botId));
+      if (touches) return { status: 403, error: NO_COMPUTER, code: MEMBER_NO_COMPUTER };
     }
     return null;
   }
@@ -598,6 +612,8 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ownBots,
       more: data.more,
       levels: s.levels ?? {},
+      // Use its computer, when the owner turned it on for them (cloud/ws-slice.ts computerUseOf).
+      ...(s.computer === "use" ? { computer: true } : {}),
       ...(data.you ? { you: data.you } : {}),
       // Your Apps, when the owner gave it (cloud/ws-slice.ts appsFor), and what the user did to them that hasn't landed.
       ...(s.apps ? { apps: s.apps } : {}),

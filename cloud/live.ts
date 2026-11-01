@@ -126,7 +126,7 @@ export function liveScope(blob: Record<string, unknown>, ws: string, viewer: Sli
 
 /**
  * `event` as a stream held to `scope` hears it, or null when it isn't one of theirs: a mood, thread or
- * call of a bot they don't see, a routine that isn't one of their bots' (or not in the owner's state
+ * call of a bot they don't see (a turn's too, or one in a chat they don't see), a routine that isn't one of their bots' (or not in the owner's state
  * yet: the "state" that follows tells them), or a kind of event this doesn't know. Everything of a bot
  * they see is theirs to hear, every thread of it included. A "state" carries the fingerprint of their
  * own view, so a copy that's still theirs isn't read again for nothing. One that says messages were
@@ -143,6 +143,9 @@ export function scoped(scope: LiveScope, event: LiveEventOut, chats?: readonly s
       return scope.bots.has(event.botId) ? event : null;
     case "routine":
       return scope.routines.has(event.id) ? event : null;
+    // Where a turn of chat through Bops Cloud stands (turns.ts): only of a bot they see, in a chat they see.
+    case "turn":
+      return scope.bots.has(event.botId) && scope.chats.has(event.chatId) ? event : null;
     case "state":
       if (event.hash !== undefined) return { ...event, hash: scope.hash };
       return !chats || chats.some((c) => c === "" || scope.chats.has(c)) ? event : null;

@@ -254,6 +254,8 @@ export function ComputerView({
   const grid = tiles.length > 1;
   const following = auto && !grid;
   const acting = (d: number) => working.includes(d) && now - lastAct(d) < FRESH_MS;
+  // A task on the screen, or the user driving it: its stream stays up with Bops behind another app.
+  const busyOn = (d: number) => working.includes(d) || (!!state.takeover && here(state.takeover.botId) && state.takeover.display === d);
   const cutLabel = (d: number) => {
     const w = watchOn(d);
     if (w?.alert && !holding.has(d)) return `${w.site}: ${w.alert.text}`;
@@ -447,6 +449,7 @@ export function ComputerView({
               botId={b.id}
               bot={b}
               display={d}
+              busy={busyOn(d)}
               interactive={interactive && on && !grid}
               onFail={() => showOtherwise(d)}
               onSize={(w, h) => setAspect((x) => (x[b.id] === w / h ? x : { ...x, [b.id]: w / h }))}
@@ -819,7 +822,8 @@ export function ComputerView({
           <span className="flex-1" />
           {follow?.on ? (
             <span className="flex shrink-0 items-center gap-1.5" title={`Bops shows the screen being worked on, and cuts to one that needs ${you}. Pick one to stay on it.`}>
-              <span className="size-1.5 animate-pulse rounded-full" style={{ background: botBezel(b) }} />
+              {/* It pulses while there's action to follow; a still dot otherwise (a pulse redraws the window all the time). */}
+              <span className={`size-1.5 rounded-full ${working.length ? "animate-pulse" : ""}`} style={{ background: botBezel(b) }} />
               {grid ? `Watching ${working.length} things at once` : "Following the action"}
             </span>
           ) : follow ? (
@@ -887,6 +891,7 @@ export function ComputerView({
                         botId={b.id}
                         bot={b}
                         display={d}
+                        busy={busyOn(d)}
                         interactive={false}
                         thumbnail
                         // Only Orgo saying the screen can't stream moves it to screenshots; a thumbnail that

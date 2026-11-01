@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
-import { accessOf, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
+import { accessOf, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
 import type { SharedApp, SharedApps, SharedGroup, SharedWsSlice, WsRole } from "./protocol.ts";
 
 /**
@@ -205,9 +205,10 @@ export function chatWsOf(byId: Map<unknown, Record<string, unknown>>) {
 /**
  * Who a slice is for: the owner sees all of the workspace; anyone else (an admin or a member) only what
  * the owner gave them, found by their email (any case) or, for a guest with none, their Orgo user id, and
- * only when it was given for their membership now, begun at `joinedAt` (member-access.ts currentFor).
+ * only when it was given for their membership now, begun at `joinedAt` (member-access.ts currentFor). `computerUse`:
+ * their Use its computer as orgo-web said it (WsAccess.computerUse), when it did.
  */
-export type SliceViewer = { role: WsRole; email?: string; id: string; joinedAt?: number };
+export type SliceViewer = { role: WsRole; email?: string; id: string; joinedAt?: number; computerUse?: boolean };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
 
@@ -224,7 +225,29 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
   const o = isObject(kept) && currentFor(kept, viewer.joinedAt) ? kept : {};
   const bots: Record<string, AccessLevel> = Object.create(null);
   if (isObject(o.bots)) for (const [id, level] of Object.entries(o.bots)) bots[id] = isAccessLevel(level) ? level : "none";
-  return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}) };
+  return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(usesComputer(o) ? { computer: "use" as const } : {}) };
+}
+
+/**
+ * Whether what `viewer` says in the workspace may wake its bots' computers and run there (Use its computer): the owner
+ * always; anyone else as orgo-web says it (`viewer.computerUse`, which keeps it and goes by it on orgo.ai too), unless
+ * the owner's state has it turned off for them ("none": the owner's Mac turns it off in orgo-web first, so this only
+ * closes the moments before orgo-web's notice lands, and a turn taken before it). From an orgo-web that doesn't say,
+ * the owner's state alone (member-access.ts MemberAccess.computer). The owner's state counts only on an entry that's
+ * for their membership now (currentFor). What Bops Cloud goes by before it owes a turn to a computer or wakes one for
+ * someone's words, and on each claim, beat, pause and resume after (turns.ts memberStill).
+ */
+export function computerUseOf(workspace: Record<string, unknown> | null, viewer: SliceViewer): boolean {
+  if (viewer.role === "owner") return true;
+  const kept = keptComputer(workspace, viewer);
+  return typeof viewer.computerUse === "boolean" ? viewer.computerUse && kept !== "none" : kept === "use";
+}
+
+/** Use its computer as the owner's state keeps it for `viewer` ("use", "none", or undefined when never set), on an entry for their membership now. */
+function keptComputer(workspace: Record<string, unknown> | null, viewer: SliceViewer): unknown {
+  const map = isObject(workspace?.memberAccess) ? (workspace.memberAccess as MemberAccessMap) : undefined;
+  const kept: unknown = accessOf(map, viewer);
+  return isObject(kept) && currentFor(kept, viewer.joinedAt) ? kept.computer : undefined;
 }
 
 /* ---------------- Your Apps ---------------- */
@@ -487,6 +510,9 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     // What they may do with each bot shown, so their window opens what Write lets them do (lib/shared.ts canAct).
     // Part of the fingerprint: the owner moving a bot from Read to Write, or back, gives them a new one.
     ...(access ? { levels: Object.fromEntries(s.bots.map((b) => [String(b.id), levelOf(access, String(b.id)) === "write" ? ("write" as const) : ("read" as const)])) } : {}),
+    // Use its computer, for someone the owner turned it on for (computerUseOf: as orgo-web says it), so their window says
+    // whether their words run on the bots' computers. Part of the fingerprint: turning it on or off gives them a new one.
+    ...(access && computerUseOf(s.workspace, viewer) ? { computer: "use" as const } : {}),
     // Your Apps, for someone given it (appsFor): part of the fingerprint, so a deploy landing gives them a new one.
     ...(access && apps ? { apps } : {}),
     ...(groups ? { groups } : {}),

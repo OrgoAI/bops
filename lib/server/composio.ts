@@ -66,7 +66,8 @@ const live: Live = (g.bopsComposio2 ??= { sessions: new Map(), tools: new Map() 
 /**
  * Composio on the key in use. Through Bops Cloud the user's Orgo key goes as a Bearer token (how the
  * cloud knows who it is) and as the SDK's key, which the cloud swaps for its own; the SDK's own
- * usage reports stay off, since this Mac reaches Composio only through the cloud.
+ * usage reports stay off, since this Mac reaches Composio only through the cloud. No client asks npm
+ * for a newer SDK (each new one did, and logged "Upgrade available").
  */
 function cx() {
   const via = cloudProxy("composio");
@@ -75,8 +76,8 @@ function cx() {
   live.sessions.clear();
   live.tagged?.clear();
   live.client = via
-    ? new Composio({ apiKey: via.key, baseURL: via.url, defaultHeaders: { Authorization: `Bearer ${via.key}`, ...appHeaders() }, allowTracking: false })
-    : new Composio({ apiKey: process.env.COMPOSIO_API_KEY });
+    ? new Composio({ apiKey: via.key, baseURL: via.url, defaultHeaders: { Authorization: `Bearer ${via.key}`, ...appHeaders() }, allowTracking: false, disableVersionCheck: true })
+    : new Composio({ apiKey: process.env.COMPOSIO_API_KEY, disableVersionCheck: true });
   live.clientKey = key;
   return live.client;
 }
@@ -95,7 +96,7 @@ function cxFor(botId?: string, app?: string) {
   if (!c) {
     if (live.tagged.size > 200) live.tagged.clear();
     const tags = { ...(botId ? { [USAGE_BOT_HEADER]: botId } : {}), ...(app ? { [USAGE_APP_HEADER]: app } : {}) };
-    c = new Composio({ apiKey: via.key, baseURL: via.url, defaultHeaders: { Authorization: `Bearer ${via.key}`, ...tags, ...appHeaders() }, allowTracking: false });
+    c = new Composio({ apiKey: via.key, baseURL: via.url, defaultHeaders: { Authorization: `Bearer ${via.key}`, ...tags, ...appHeaders() }, allowTracking: false, disableVersionCheck: true });
     live.tagged.set(k, c);
   }
   return c;

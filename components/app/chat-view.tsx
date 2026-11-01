@@ -4,7 +4,7 @@ import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { alwaysScope, toDo } from "@/lib/permission";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
+import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, withRemoteTyping, workBot, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenBotLocal, OpenLink, OpenPreview } from "./panel-tabs";
@@ -12,7 +12,7 @@ import { appCoders } from "@/lib/hosted-apps";
 import { appsShown } from "@/lib/apps-access";
 import { appsOwnShown } from "@/lib/apps-access";
 import { crmOpen } from "@/lib/crm-access";
-import { answersAsk, canAct, isViewerOwn, OWNER_ONLY_LINE, ownerWho, readOnly, saidBy, saidName, writesThread } from "@/lib/shared";
+import { answersAsk, canAct, computerLine, isViewerOwn, OWNER_ONLY_LINE, ownerWho, readOnly, saidBy, saidName, writesThread } from "@/lib/shared";
 import { memberAct } from "./shared-act";
 import { MEMBER_STOP_MAX } from "@/cloud/protocol";
 import { CrmNote } from "./crm";
@@ -256,7 +256,7 @@ function Inline({ text }: { text: string }) {
 
 export function ChatView({
   state,
-  chat: c,
+  chat: given,
   wide,
   lookingAt,
   onOpenThread,
@@ -299,6 +299,10 @@ export function ChatView({
   prefill?: { chatId: string; text: string; at: number } | null;
   onPrefilled?: () => void;
 }) {
+  // Who's typing: also a bot answering on its computer, or whose computer is waking to (lib/types.ts withRemoteTyping).
+  const c = withRemoteTyping(given, state.liveMoods);
+  // In a shared workspace, over the message box: whether what they say runs on the chat's bots' computers (lib/shared.ts computerLine).
+  const computerSaid = state.shared ? computerLine(state, c.botIds.flatMap((id) => state.bots.filter((b) => b.id === id && b.runsOn !== "mac" && !!workBot(b, state.bots).computerId))) : null;
   // The agent picked in the message box for the threads the next messages start (new-thread.tsx AgentChipPick):
   // this chat's, in this window only, until changed. Null: the bot's Default.
   const [agentPicks, setAgentPicks] = useState<Record<string, string>>({});
@@ -794,9 +798,12 @@ export function ChatView({
             const tb = state.bots.find((x) => x.id === b);
             // Waiting on a teammate's answer: "Asking ● Max…" over the typing dots.
             const asking = c.asking?.[b] ? state.bots.find((x) => x.id === c.asking![b]) : undefined;
+            // Its computer waking up to answer (Bops Cloud's turn: cloud/turns.ts).
+            const waking = state.liveMoods?.[b]?.waking && state.liveMoods[b].chatId === c.id;
             // Rises in when the bot starts typing; one already typing as the chat opens is just there.
             return (
               <RiseIn key={b} fresh={!seen.has(typingKey(b))} className="flex flex-col gap-1 self-start">
+                {waking && tb && !asking && <span className="pl-3 text-[12.5px] leading-4 text-[#9A9A98]">Waking up {tb.name}&apos;s computer…</span>}
                 {asking && (
                   <span className="flex items-center gap-1.5 pl-3 text-[12.5px] leading-4 text-[#9A9A98]">
                     Asking
@@ -896,6 +903,12 @@ export function ChatView({
           </Fold>
 
           {picked && solo && !readOnly(state, c.botIds) && <div className="px-3 pb-1.5 text-[12px] leading-4 text-[#6B6B6B]">{pickLine(picked, solo, state)}</div>}
+          {/* In a shared workspace: whether what they say runs on the bots' computers (Use its computer). Bots with none answer as before. */}
+          {state.shared && !readOnly(state, c.botIds) && computerSaid && (
+            <div data-computer-line className="px-3 pb-1.5 text-[12px] leading-4 text-[#6B6B6B]">
+              {computerSaid}
+            </div>
+          )}
           {readOnly(state, c.botIds) ? (
             <ReadOnlyLine state={state} botIds={c.botIds} />
           ) : ticking ? (

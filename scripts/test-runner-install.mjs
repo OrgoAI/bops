@@ -1335,6 +1335,84 @@ await check("phase 2: the key Bops gave is taken back only once the new build ru
 
 /* ---------------- The commands as shell ---------------- */
 
+await check("a shared workspace whose chat goes through Bops Cloud keeps its runner, on its computer's identity alone: never a key given, none on it, one up on a key stopped first, the way back never gives one; a computer that serves another workspace too never does", async () => {
+  const cloudPath = () => (state.workspaces[0].chatOn = "cloud");
+  // Shared and on the cloud path, identity answering: set up with no key, saying it runs on identity.
+  reset();
+  orgo.full = true;
+  cloudPath();
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().keyMade, runner().auth], ["running", undefined, "identity"]);
+  assert.equal(keyCalls("PUT"), 0, "never the account's key");
+  assert.ok(orgo.bash.find((b) => b.command.includes('echo "current=$c"')).command.includes(I.IDENT_LINE), "the probe asks identity, phase 2 or not");
+  noSecrets();
+  // The way back, for a runner that lost its identity: no key given, ever (its routines wait).
+  orgo.ident = "503";
+  orgo.auth = "none";
+  orgo.overdue = true;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 0, "no key on the way back");
+  // A key found on it later (a template's, say) while its runner runs on identity: stopped when the Mac asks, and said why.
+  orgo.auth = "identity";
+  orgo.ident = "200";
+  T.reset();
+  await I.lookAtRunners();
+  assert.equal(runner().status, "running");
+  pc(C1).key = true;
+  T.reset();
+  const asked = orgo.bash.length;
+  await I.lookAtRunners();
+  assert.ok(orgo.bash.slice(asked).some((b) => /^supervisorctl status bops-runner/.test(b.command)), "asked whether it still runs");
+  assert.deepEqual([runner().status, runner().error], ["failed", "someone else can use this workspace"]);
+  assert.equal(pc(C1).program, false, "taken off its computer");
+  assert.equal(keyCalls("PUT"), 0);
+
+  // Identity not answering (orgo-web still refusing shared workspaces), or a key on it: no runner, no key.
+  for (const [ident, key] of [["403", false], ["000", false], ["200", true]]) {
+    reset();
+    orgo.full = true;
+    cloudPath();
+    orgo.ident = ident;
+    orgo.auth = "identity";
+    pc(C1).key = key;
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().error], ["failed", "someone else can use this workspace"], `ident=${ident} key=${key}`);
+    assert.equal(keyCalls("PUT"), 0, `ident=${ident} key=${key}`);
+    assert.ok(!bashText().includes("__BOPS_INSTALLED__"), `ident=${ident} key=${key}`);
+  }
+
+  // One up on the key Bops gave, before the workspace was shared and turned to the cloud path: stopped first (the key
+  // revoked), then set up again on identity alone.
+  reset();
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().keyMade], ["running", true]);
+  orgo.full = true;
+  cloudPath();
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error, runner().keyMade], ["failed", "someone else can use this workspace", undefined]);
+  assert.equal(keyCalls("DELETE"), 1, "its key revoked");
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().keyMade, runner().auth], ["running", undefined, "identity"], "then on identity alone");
+  assert.equal(keyCalls("PUT"), 1, "only the first, before it was shared");
+
+  // Off the cloud path (the switch off, as by default): as before, no runner and nothing sent.
+  reset();
+  orgo.full = true;
+  orgo.ident = "200";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error, orgo.bash.length], ["failed", "someone else can use this workspace", 0]);
+  // A computer whose bots are of two workspaces (one private) never qualifies, the cloud path on or not.
+  assert.equal(I.sharedRunnerOk({ ...state, workspaces: [{ id: "ws_main", chatOn: "cloud" }] }, C1), true);
+  const two = { workspaces: [{ id: "ws_main", chatOn: "cloud" }, { id: "ws_two", chatOn: "cloud" }], bots: [...state.bots, { id: "rex", isMain: true, workspaceId: "ws_two", computer: "shared" }, { id: "free", isMain: true, freeComputer: true, computerId: C1 }] };
+  two.bots[0] = { ...two.bots[0], computerId: undefined, computer: "shared" };
+  assert.equal(I.sharedRunnerOk(two, C1), false, "the free computer serving two workspaces");
+  assert.equal(I.sharedRunnerOk({ ...state, workspaces: [{ id: "ws_main" }] }, C1), false, "the switch off");
+});
+
 await check("every command it sends is shell that parses, and the wrapper too", () => {
   const scripts = [
     I.installScript({ name: BUNDLE, sha256: SHA, version: "0.0.29", buildId: "buildA1" }, I.wrapperScript({ computerId: C1, timeZone: "America/New_York", orgo: "https://orgo.example", cloud: "https://bops.example/api" })),

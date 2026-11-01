@@ -1,6 +1,7 @@
 import { picksOf } from "@/lib/app-preview";
 import { appsOwnShown } from "@/lib/apps-access";
 import { handleMessage } from "@/lib/server/chat";
+import { sendsThroughCloud, sendThroughCloud } from "@/lib/server/cloud-chat";
 import { uploadPath } from "@/lib/server/uploads";
 import { clearChat, deletePicked, removeMessages, type Removed } from "@/lib/server/remove";
 import { sharedOpen } from "@/lib/server/shared";
@@ -36,6 +37,13 @@ export async function POST(request: Request, ctx: RouteContext<"/api/chats/[chat
   if (!text?.trim() && !pics.length) return Response.json({ error: "empty message" }, { status: 400 });
   const picked = typeof agent === "string" && fromBopsWindow(request) ? agent : undefined;
   const aboutApp = appNote === true && fromBopsWindow(request) && !sharedOpen() && appsOwnShown(getState());
+  // A workspace whose chat goes through Bops Cloud: written there, and answered on the bot's computer (lib/server/cloud-chat.ts).
+  const words = text?.trim() ?? "";
+  if (words && !sharedOpen() && sendsThroughCloud(chatId, { images: pics.length, lookingAt: typeof lookingAt === "string" ? lookingAt : undefined, appNote: aboutApp, picks: picks !== undefined })) {
+    const how = await sendThroughCloud(chatId, words, replyTo);
+    if (how === "sent") return Response.json({ ok: true });
+    if (how === "failed") return Response.json({ error: "That didn't reach Bops Cloud. Try again." }, { status: 502 });
+  }
   void handleMessage(chatId, text?.trim() ?? "", replyTo, pics, undefined, undefined, undefined, undefined, typeof lookingAt === "string" ? lookingAt : undefined, undefined, picked, aboutApp, aboutApp ? picksOf(picks, text?.trim() ?? "") : undefined);
   return Response.json({ ok: true });
 }

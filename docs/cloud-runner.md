@@ -174,6 +174,8 @@ the routine's next run waits for it. Only a computer deleted ends it.
    Mac. The Mac looks first at what Orgo's members list shows (any other member, View only too, or an
    invite still open); Orgo, which counts a live share link too, has the last word (409
    `full_access_member`). Neither is waited on: each look asks again.
+   The one exception is a shared workspace whose chat goes through Bops Cloud (`Workspace.chatOn`
+   "cloud", a switch per workspace, off by default): see "Shared workspaces on the cloud path" below.
 2. The server bundle the app ships (`scripts/server-bundle.sh`, run by `scripts/release.sh`: the
    release build, stripped and checked for leaked secrets, in `Resources/runner`; on a dev Mac the
    newest in `dist-runner/`) goes up through Orgo's file uploads to `/opt/bops/runner/incoming`. One
@@ -432,10 +434,10 @@ within a minute of that takes it off. Switched back meanwhile, it's up again as 
   through a runner.
 - Events waking a computer: texts, email and Slack still wait for the Mac.
 - Brains on a runner that run on the Mac (Hermes, Claude Code on the Mac).
-- Bops Cloud limiting what a computer reads: its token or key still reads the user's whole Bops state
-  (every bot, routine, thread and workspace, though not the other bots' chat messages nor the Preview
-  passwords kept for members: cloud/computer-scope.ts forComputer), and spends their
-  AI credit (the identity spec's Q4). Its writes are limited (above). OpenAI objects (another bot's agent
+- A spend cap per computer: its token or key spends the user's AI credit (the identity spec's Q4). What it
+  reads is held to its bots' part of the state (their bots, chats, threads, routines and workspaces, a
+  teammate's name and where it works; never another workspace, another computer's bots' messages or the
+  Preview passwords kept for members: cloud/computer-scope.ts forComputer). Its writes are limited (above). OpenAI objects (another bot's agent
   sessions) are the user's, not the computer's.
 - Versioned mirror PUTs (`bops_state_version`): Orgo's mirrors are last writer wins.
 - A runner making new computers while the Mac is closed: the map and the runners catch up when the Mac
@@ -477,7 +479,80 @@ This app puts them back at its 10 minute look (`routine-sync.ts` mendRoutineCopi
 on this version is up; orgo-web has to keep a routine's stored `run` and `on_mac` when a body doesn't
 send them (release steps).
 
+## Shared workspaces on the cloud path
+
+A workspace someone else can use, once its chat goes through Bops Cloud (`Workspace.chatOn` "cloud"), keeps
+a runner on its computers so its bots answer with no Mac open (`runner-install.ts` sharedRunnerOk, keepUp):
+
+- Only a computer whose bots are all of that one workspace. One that also serves another workspace's bots
+  (a private one, or the free computer shared by several) gets no runner: that workspace's people could
+  use what those bots can.
+- Only on the computer's own Orgo identity (an hour long, held by Bops Cloud to the bots on it). Bops never
+  gives it the account's key, not when setting it up and not on the way back; a computer with a key on it,
+  or whose identity doesn't answer (orgo-web answers `workspace_shared` until it allows identity in shared
+  workspaces), has none: "Couldn't start: someone else can use this workspace". A runner it had on a key is
+  stopped first and the key Bops gave revoked, then set up again on identity.
+- What the runner reads in Bops Cloud is mostly its bots' part of the state (`cloud/computer-scope.ts`
+  forComputer: not yet narrowed are held news, the owner's phones and emails, the Macs, screens and the
+  connected apps' account names), and only Bops Cloud writes a member's stamp on a message, or the words
+  under one (memberStampKept).
+- Who may wake its computer and run there with a message: the owner, and each person the owner turned
+  Use its computer on for in People. orgo-web keeps it (`project_members.bops_computer_use`: the owner's Mac
+  sets it there first with `PATCH /api/workspaces/<id>/members {memberId, bopsComputerUse}`, `lib/server/orgo.ts`
+  MEMBER_COMPUTER_ROUTE, then keeps its copy in `MemberAccess.computer`, which also follows orgo-web's members
+  list), Bops Cloud goes by orgo-web's answer (bops-role `computerUse`), and orgo-web lets the same people keep
+  root on the computer on orgo.ai. It comes with Write, and an invite can't have it until they've joined. Without it a member also can't tell its
+  threads more or answer their asks (only Stop). Bots with no computer, or set to work on the Mac, answer
+  members at Write as before.
+- Anyone with root on the computer holds its identity, so they could do what its runner does (read its
+  bots' chats, write as them, spend AI credit). That's why orgo-web keeps the project's members without Use
+  its computer off its computers on orgo.ai while `VM_IDENTITY_SHARED` applies
+  (`lib/vm-identity/shared-control.ts`), and why the turn fence (a row tagged with a turn, only from its
+  device) holds only for a runner nobody else controls.
+
+**Chat on the runner.** With the workspace's chat through Bops Cloud (`cloud/README.md` "Chat through Bops
+Cloud"), the runner's "chat" loop (`lib/server/runner-chat.ts`) listens on `GET /v1/runner/live` and answers
+each message Bops Cloud owes its computer, members' and the owner's, with the same turn the Mac runs
+(`chat.ts` answerMessage) in the turn's context (`turn-context.ts`: its rows carry the turn and Bops Cloud's
+clock; the first tool that can't be done twice is said at once). It makes sure it's on its own computer
+before it claims one, counts its computer in use while it answers, and stops a turn Bops Cloud takes back.
+A turn paused for an OK goes on as itself from the answer. On a runner's turn the bot isn't offered what
+waits for the owner's Mac (routines, watches, skills, new bots, pages, pictures, apps, handing work to a
+teammate) and is told so. A runner from before this loop never hears a turn: its computer is woken, and the
+turn ends with "didn't wake up in time" until the owner's Mac has put the new runner on it.
+
+**The owner's Mac must open a Bops with this change once.** Runners are set up and upgraded only by an
+owner's Mac (this is a Mac loop, and the runner ships inside the Mac app), so no computer of a shared
+workspace gets its runner, and no runner gets a newer build, until the owner opens the updated Bops on one
+of their Macs. After that one open the computer answers with every Mac closed. Until then a turn for it
+ends after about three minutes with "Max's computer is on, but it can't answer chats yet".
+
+**Every Mac of the owner's must be on this Bops before the switch goes on.** An older Mac takes the shared
+workspace's runners down again (and revokes their keys), answers members by the old rules, and drops
+`Workspace.chatOn` from its saves (Bops Cloud puts that back). Bops Cloud keeps only the newest version an
+account said, so turning the switch on checks the asking Bops (409 `chat_needs_update` below
+`CLOUD_CHAT_MIN_VERSION`), not every Mac: staff check the rest before they `force` it.
+
+**Use its computer starts off for everyone already in a workspace.** Once the owner's Mac updates, members'
+messages to bots with a computer get the "hasn't let you use" note until the owner turns it on for them in
+People, switch or not. Say so in the release notes.
+
 ## Release steps
+
+Chat through Bops Cloud for a shared workspace (one workspace first), in this order:
+
+1. orgo-web: the wake route and shared identity (`VM_IDENTITY_SHARED` stays `off`), with
+   `BOPS_CLOUD_WAKE_SECRET` set on both sides, and Use its computer (migration 20261145
+   `project_members.bops_computer_use`, the members route's `bopsComputerUse` and bops-role's `computerUse`).
+   Until orgo-web can keep it (an orgo-web before it, or its database before the migration), turning Use its
+   computer on in People says "Orgo can't change Use its computer yet" and stays off.
+2. Bops Cloud: migration `0015_chat_turns.sql`, then the deploy (the switch is off for every workspace).
+3. The Mac release (`CLOUD_CHAT_MIN_VERSION`), with the note on Use its computer above; the owner turns it
+   on for the people who should have it.
+4. The owner opens the updated Bops on every Mac of theirs once (runners set up on identity, the chat loop).
+5. orgo-web: `VM_IDENTITY_SHARED=admins` (staff owners) once the routes that reach a computer have been
+   audited (orgo-web CLAUDE.md), then the switch for the workspace (`POST /v1/internal/chat-routing`, or the
+   owner's Bops).
 
 Before this Bops ships (identity: the identity spec's rollout, `vm-identity-spec.md` 5):
 
@@ -522,6 +597,6 @@ read it. Phase 1 keeps it on every Bops computer (from bops-base 0.1.9 on, wheth
 there) as the fallback for identity. Identity is the narrow, device-bound, revocable credential this
 blocker asked for, written nowhere and good for an hour; phase 2 takes the key off the computers that
 run on it. Until phase 2, a key read off a computer reaches that computer, its bots' routines, Orbit and
-Logins, reads the user's whole Bops state in Bops Cloud but for the Preview passwords kept for members (Q4), and
+Logins, reads its bots' part of the user's Bops state in Bops Cloud (cloud/computer-scope.ts forComputer), and
 writes only what the computer may
 (above).

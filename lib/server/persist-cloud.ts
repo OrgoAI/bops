@@ -11,6 +11,7 @@ import {
   BOPS_PROTOCOL_HEADER,
   BOPS_USER_HEADER,
   COMPUTER_NOT_ALLOWED,
+  MEMBER_STAMP,
   STATE_CONFLICT,
   STATE_LEVEL,
   STATE_PROTOCOL,
@@ -563,8 +564,10 @@ export function cloudStore({ get, replace, touch, went }: StateAccess): Persiste
       if (!batch.upsert.length && !batch.remove.length) return;
       const r = await call<{ seq: number }>(sync, "/v1/messages", { method: "POST", body: { upsert: batch.upsert.map(forCloud), remove: batch.remove } });
       const no = r.body as unknown as { code?: unknown; paths?: unknown } | null;
-      if (r.status === 403 && scope && no?.code === COMPUTER_NOT_ALLOWED && Array.isArray(no.paths)) {
-        // Refused anyway (a newer Bops Cloud's rules): those stay here, the rest go.
+      // Refused anyway (a newer Bops Cloud's rules; for the owner's Mac, a member's stamp in a workspace whose chat goes
+      // through Bops Cloud, which only it writes: MEMBER_STAMP): those stay here, the rest go, so one row never holds
+      // up every message after it.
+      if (r.status === 403 && ((scope && no?.code === COMPUTER_NOT_ALLOWED) || (!scope && no?.code === MEMBER_STAMP)) && Array.isArray(no.paths)) {
         const ids = new Set(no.paths.filter((x): x is string => typeof x === "string" && x.startsWith("messages.")).map((x) => x.slice("messages.".length)));
         if (ids.size) {
           for (const m of batch.upsert) if (ids.has(m.id)) hold(m);

@@ -167,6 +167,31 @@ export function computersMessage(m: Blob, bots: Set<string>, chats: Set<string>,
   );
 }
 
+/**
+ * Whether a message written over the row kept by its id (`kept`, its JSON; none for a new one) keeps that row's member
+ * stamp (Message.member: someone the owner gave Write said it, as Bops Cloud vouched): it carries none, or the same
+ * one. A new or changed stamp is Bops Cloud's alone to write (cloud/members.ts), never a computer's (state.ts
+ * computerMayWrite), nor an owner's Mac's in a workspace whose chat goes through Bops Cloud (cloudChatOn), and neither
+ * changes the words under one or what they reply to. One sent back as it was (a tapback rewrites the whole row) is fine.
+ */
+export const memberStampKept = (m: Blob, kept: Blob | null | undefined): boolean =>
+  m.member === undefined ||
+  // The words under the stamp, and what they reply to, as kept too: a stamp kept over other words would show them as theirs.
+  (isObject(kept) && kept.member !== undefined && same(m.member, kept.member) && m.text === kept.text && (m.replyTo ?? null) === (kept.replyTo ?? null));
+
+/**
+ * Whether the chat `chatId` is in a workspace whose people's words go through Bops Cloud first (Workspace.chatOn:
+ * "cloud", the per workspace switch, off by default): its own workspace, else its first bot's; a bot's own chat
+ * (bot:<id>) its bot's. Then only Bops Cloud writes a member's stamp there (memberStampKept).
+ */
+export function cloudChatOn(state: Blob, chatId: string): boolean {
+  const bots = listOf(state.bots);
+  const chat = listOf(state.chats).find((c) => c.id === chatId);
+  const first = chat ? (Array.isArray(chat.botIds) ? chat.botIds[0] : undefined) : chatId.startsWith("bot:") ? chatId.slice(4) : undefined;
+  const ws = str(chat?.workspaceId) ?? workspaceOf(bots.find((b) => b.id === first));
+  return listOf(state.workspaces).some((w) => w.id === ws && w.chatOn === "cloud");
+}
+
 /* ---------------- What its bots may use ---------------- */
 
 export type Level = "read" | "act";
@@ -553,27 +578,127 @@ function withoutPasswords(w: unknown): Blob | null {
   return held ? { ...(w as Blob), appsForMembers: { ...seen, apps } } : null;
 }
 
+/** What of a teammate (a bot of the same workspace as one on the computer, not on it itself) its runner reads: who it is and where it works, never its keys, access, persona or sessions. */
+const TEAMMATE = ["id", "name", "role", "color", "isMain", "workspaceId", "computer", "computerId", "freeComputer", "computerStatus", "runsOn", "phone", "email", "phoneLine", "mail"] as const;
+const teammateOf = (b: Blob): Blob => Object.fromEntries(TEAMMATE.filter((k) => k in b).map((k) => [k, b[k]]));
+
 /**
- * The state as a computer reads it (cloud/state.ts: GET /v1/state, and a write's 409): without each site's Preview
- * password the owner's Mac keeps for members at Your Apps Write (Workspace.appsForMembers, lib/hosted-apps.ts
- * AppForMembers). A bot runs as root on its computer and a web page can steer it, and a runner never needs them
- * (lib/server/apps-for-members.ts seeApps is the owner's Mac's alone).
+ * What a computer reads of each list of the state (forComputer): for each item, what it reads of it, or null when
+ * it reads none of it. Lists not named here, and every other key, it reads as they are.
  */
-export function forComputer(state: Blob): Blob {
-  const list = state.workspaces;
-  if (!Array.isArray(list) || !list.some((w) => withoutPasswords(w))) return state;
-  return { ...state, workspaces: list.map((w) => withoutPasswords(w) ?? w) };
+function readers(state: Blob, scope: Scope): Record<string, (x: Blob) => Blob | null> {
+  const on = botsOn(state, scope.desktopId);
+  const bots = new Set(on.map((b) => b.id as string));
+  const chats = chatsOn(state, scope.desktopId);
+  const runs = runsBy(state, scope.device);
+  // Its bots' workspaces: their teammates (who they hand off to, the main bot they send mail from) and the workspace itself.
+  const spaces = new Set(on.map(workspaceOf));
+  const all = listOf(state.bots);
+  // Every main bot holding the free computer (lib/types.ts freeComputer): what workBot goes by for a main bot that shares one.
+  const free = new Set(all.filter((b) => b.isMain && b.freeComputer && b.computerId).map((b) => b.id as string));
+  const own = (x: Blob) => (x.by === scope.device || x.askedBy === scope.device ? x : null);
+  const ofItsBots = (x: Blob) => (bots.has(x.botId as string) ? x : null);
+  return {
+    bots: (b) => (bots.has(b.id as string) ? b : spaces.has(workspaceOf(b)) || free.has(b.id as string) ? teammateOf(b) : null),
+    chats: (c) => (chats.has(c.id as string) ? c : null),
+    sessions: (x) => ofItsBots(x) ?? own(x),
+    routines: (r) => ofItsBots(r) ?? (runs.has(r.id as string) ? r : null),
+    appApprovals: (a) => ofItsBots(a) ?? own(a),
+    watches: ofItsBots,
+    madeApps: ofItsBots,
+    // Its bots' steps and channel links: another bot's (another workspace's, a teammate's) are none of its business.
+    procedures: ofItsBots,
+    channels: ofItsBots,
+    // A saved login only its bots may use (VaultLogin.bots): every bot's, or one of its bots named.
+    vault: (l) => (l.bots === "all" || (Array.isArray(l.bots) && l.bots.some((id) => typeof id === "string" && bots.has(id))) ? l : null),
+    // Its bots' workspaces only, without the Preview passwords kept for members.
+    workspaces: (w) => (spaces.has(w.id as string) ? (withoutPasswords(w) ?? w) : null),
+  };
+}
+
+/** A list as a computer reads it (readers): the items it reads, each as it reads it. The same list when that's all of it, as it is. */
+function readList(list: unknown, read: (x: Blob) => Blob | null): unknown {
+  if (!Array.isArray(list)) return list;
+  let changed = false;
+  const out: unknown[] = [];
+  for (const x of list) {
+    const r = isObject(x) ? read(x) : x;
+    if (r !== x) changed = true;
+    if (r !== null) out.push(r);
+  }
+  return changed ? out : list;
+}
+
+/**
+ * The state as a computer reads it (cloud/state.ts: GET /v1/state, and a write's 409): only what the bots on it
+ * need (botsOn, across every workspace one of them is in), never the rest of its user's Bops. A bot runs as root on
+ * its computer and a web page can steer it, and a computer in a workspace shared with others is theirs to use too
+ * (lib/server/runner-install.ts keepUp): so its bots, its bots' chats (chatsOn), their threads and its own, their
+ * routines and the runs of its own (runsBy), their watches, made apps and requests for the user's OK and its own,
+ * the saved logins they may use, their workspaces, and of each other bot of those workspaces (and of a main bot
+ * holding the free computer) who it is and where it works (TEAMMATE): what workBot, a hand-off and a main bot's
+ * mail go by. Never another workspace, another workspace's bots, chats, threads or routines, or a teammate's keys,
+ * access or persona. Nor the Preview password of each site the owner's Mac keeps for members at Your Apps Write
+ * (Workspace.appsForMembers, lib/hosted-apps.ts AppForMembers): a runner never needs them (lib/server/apps-for-members.ts
+ * seeApps is the owner's Mac's alone), nor another bot's procedures or channel links. Everything else is as it is
+ * (the account, the owner, its usage, and not narrowed yet: held news (digest, whose items have no id to put back by),
+ * the owner's phones and emails, the Macs, screens and the connected apps' account names). A write puts back what this left out (withHeldBack). With no
+ * scope, only the passwords are left out.
+ */
+export function forComputer(state: Blob, scope?: Scope): Blob {
+  if (!scope) {
+    const list = state.workspaces;
+    if (!Array.isArray(list) || !list.some((w) => withoutPasswords(w))) return state;
+    return { ...state, workspaces: list.map((w) => withoutPasswords(w) ?? w) };
+  }
+  const out: Blob = { ...state };
+  for (const [k, read] of Object.entries(readers(state, scope))) if (k in state) out[k] = readList(state[k], read);
+  return out;
 }
 
 /** Whether a computer's write carries a Preview password: refused, never compared, so a right guess isn't told from a wrong one. */
-export const carriesPasswords = (state: Blob): boolean => forComputer(state) !== state;
+export const carriesPasswords = (state: Blob): boolean => Array.isArray(state.workspaces) && state.workspaces.some((w) => withoutPasswords(w) !== null);
 
 /**
- * A computer's write with what forComputer left out put back from `stored`, the blob it was written over: it may
- * not change workspaces, and sends them as it read them, so when they match the stored ones without the passwords
- * they're the stored ones. Otherwise as sent, and writeDenials refuses "workspaces" as ever.
+ * A list a computer wrote (`sent`) over the one kept (`stored`), with what it didn't read (readers) put back: each
+ * item it read and sent back as it read it is the kept one (a teammate whole, a workspace with its passwords), and
+ * each it never read goes back where it was. One it sent with the id of one it never read stays as sent, for
+ * writeDenials to judge (a computer can't write there). Others as sent.
  */
-export function withHeldBack(stored: Blob, next: Blob): Blob {
-  if (!Array.isArray(stored.workspaces) || !Array.isArray(next.workspaces)) return next;
-  return same(forComputer({ workspaces: stored.workspaces }).workspaces, next.workspaces) ? { ...next, workspaces: stored.workspaces } : next;
+function heldBackList(stored: unknown[], sent: unknown[], read: (x: Blob) => Blob | null): unknown[] {
+  const kept = byId(stored);
+  const sentIds = new Set(listOf(sent).map((x) => x.id as string));
+  const out: unknown[] = sent.map((x) => {
+    const s = isObject(x) && typeof x.id === "string" ? kept.get(x.id) : undefined;
+    const r = s ? read(s) : null;
+    return s && r !== null && same(r, x) ? s : x;
+  });
+  stored.forEach((x, i) => {
+    if (isObject(x) && typeof x.id === "string" && read(x) === null && !sentIds.has(x.id)) out.splice(Math.min(i, out.length), 0, x);
+  });
+  return out;
+}
+
+/**
+ * A computer's write with what forComputer left out put back from `stored`, the blob it was written over (the same
+ * version it read): a list it sent as it read it is the stored one, and what it never read of a list goes back as it
+ * was (heldBackList), so writeDenials judges only what it changed. Otherwise as sent: a workspace changed, or one
+ * sent with its passwords (carriesPasswords), is refused as ever. With no scope, the workspaces only, as they were
+ * read without their passwords.
+ */
+export function withHeldBack(stored: Blob, next: Blob, scope?: Scope): Blob {
+  if (!scope) {
+    if (!Array.isArray(stored.workspaces) || !Array.isArray(next.workspaces)) return next;
+    return same(forComputer({ workspaces: stored.workspaces }).workspaces, next.workspaces) ? { ...next, workspaces: stored.workspaces } : next;
+  }
+  const out: Blob = { ...next };
+  for (const [k, read] of Object.entries(readers(stored, scope))) {
+    if (!Array.isArray(stored[k])) continue;
+    const view = readList(stored[k], read);
+    if (view === stored[k]) continue;
+    if (!(k in next)) out[k] = stored[k];
+    else if (same(view, next[k])) out[k] = stored[k];
+    else if (Array.isArray(next[k])) out[k] = heldBackList(stored[k] as unknown[], next[k] as unknown[], read);
+  }
+  return out;
 }
