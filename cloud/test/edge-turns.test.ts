@@ -464,7 +464,12 @@ test("the owner's own message goes through Bops Cloud too, only in a one bot cha
     assert.deepEqual([no.status, ((await no.json()) as { code: string }).code], [409, "chat_not_in_cloud"], why);
   }
   // A computer can't send as the owner.
-  assert.equal((await runner(s.owner, s.desktop, "/v1/chats/bot:max/send", { key: "owner-key-0003", text: "hi" })).status, 403);
+  assert.equal((await runner(s.owner, s.desktop, "/v1/chats/bot:max/send", { key: "owner-key-0003", text: "hi" })).status, 403);  // As a Mac sends it (lib/server/cloud-chat.ts encodes the chat id: "bot%3Amax"): the same chat.
+  const enc = await send(encodeURIComponent("bot:max"), { key: "owner-key-0001e", text: "hello again" });
+  assert.equal(enc.status, 200, await enc.clone().text());
+  assert.equal(((await enc.json()) as { message: { chatId: string } }).message.chatId, "bot:max");
+  // Not a chat id once decoded: no such route.
+  assert.equal((await send("bot%2Fmax", { key: "owner-key-0001f", text: "x" })).status, 404);
 });
 
 test("a bot on the owner's Mac: Bops Cloud writes the message, the Mac is handed it to answer, and the chat says so while the Mac is away", async () => {

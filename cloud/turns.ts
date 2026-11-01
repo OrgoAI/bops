@@ -832,7 +832,20 @@ const runnerTurn: Route = {
 
 /* ---------------- The owner's own messages ---------------- */
 
-const SEND_PATH = /^\/v1\/chats\/([A-Za-z0-9_:.@-]{1,120})\/send$/;
+const SEND_PATH = /^\/v1\/chats\/([^/]{1,360})\/send$/;
+const CHAT_ID = /^[A-Za-z0-9_:.@-]{1,120}$/;
+/** The chat id of a send's path, decoded (a Mac sends it as encodeURIComponent does: "bot%3Amax"), or undefined. */
+const sentChat = (pathname: string): string | undefined => {
+  const raw = SEND_PATH.exec(pathname)?.[1];
+  if (!raw) return undefined;
+  let id: string;
+  try {
+    id = decodeURIComponent(raw);
+  } catch {
+    return undefined;
+  }
+  return CHAT_ID.test(id) ? id : undefined;
+};
 
 /**
  * POST /v1/chats/<chatId>/send (ChatSendBody): the owner's Bops says something in a one bot chat of a workspace whose
@@ -844,7 +857,7 @@ const send: Route = {
   path: "/v1/chats/*",
   auth: "user",
   handle: async (req, res, { user, url }) => {
-    const chatId = SEND_PATH.exec(url.pathname)?.[1];
+    const chatId = sentChat(url.pathname);
     if (!chatId) throw new HttpError(404, "Not found");
     checkUser(req, user!, true);
     const body = await readJson<Record<string, unknown> | null>(req, MEMBER_MAX_TEXT * 6 + 4096).catch(() => null);
