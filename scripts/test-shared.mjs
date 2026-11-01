@@ -1619,6 +1619,8 @@ const writeState = (o = {}) => {
     { id: "apr-ava", botId: "ava", chatId: "bot:ava", threadId: "s-ava", action: "Send an email", resources: ["x@acme.test"], preview: "to: x@acme.test", kind: "email", at: 4 },
   ];
   d.state.levels = { boppy: o.boppy ?? "write", ava: "read" };
+  // Use its computer (cloud/ws-slice.ts): what a reply to a thread on the bot's computer, or an answer to its asks, takes.
+  if (o.computer !== false) d.state.computer = "use";
   return d;
 };
 const writeView = (d = writeState(), acts = []) => viewState(own(), { ...listed, wsId: WS }, d, {}, acts);
@@ -1669,6 +1671,15 @@ await check("Write: a bot at Write has the composer, its thread's reply, and its
   assert.equal(callAllowed("POST", "/api/workspaces/shared"), true);
   assert.equal(callAllowed("POST", "/api/apps/approvals"), false);
   assert.equal(callAllowed("POST", "/api/drafts/send"), false);
+});
+
+await check("Write without Use its computer: a reply, Nothing to add or an answer for work on the bot's computer is refused here first, with why; Stop still goes", async () => {
+  const copy = new SharedCopy(fakeRead({ status: 200, body: writeState({ computer: false }) }).read);
+  await copy.open(listed);
+  const why = "This runs on the bot's computer, and the owner hasn't let you use it.";
+  for (const act of [{ act: "reply", sessionId: "s1", text: "more" }, { act: "dismiss", sessionId: "s1" }, { act: "answer", askId: "apr-boppy", reply: "once" }])
+    assert.deepEqual(copy.refusal(act), { status: 403, error: why, code: "member_no_computer" }, act.act);
+  assert.equal(copy.refusal({ act: "stop", sessionIds: ["s1"] }), null);
 });
 
 await check("Write: what the viewer did shows as theirs at once, says how it stands, and gives way to the owner's copy", async () => {

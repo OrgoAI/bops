@@ -1,16 +1,16 @@
 import "server-only";
-import { isAppAct, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
+import { isAppAct, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
-import { accessOf, appsLevelOf, cleanName, currentFor, levelOf, ownerOnlyAsk, permits, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
+import { accessOf, appsLevelOf, cleanName, currentFor, levelOf, noUseNote, ownerOnlyAsk, permits, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
 import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
-import { workspaceOf, type Workspace } from "@/lib/types";
-import { handleMessage } from "./chat";
+import { workBot, workspaceOf, type Message, type Workspace } from "@/lib/types";
+import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
 import { compactThread, dismissWaiting, replyToSession, stopSession } from "./sessions";
 import { compactChat } from "./chat-summary";
-import { bot, chat, getState, ownerName, session } from "./store";
+import { addMessage, bot, chat, getState, ownerName, pullState, session } from "./store";
 
 /**
  * What a member with Write did in one of the owner's shared workspaces from their own Bops (cloud/members.ts
@@ -20,7 +20,12 @@ import { bot, chat, getState, ownerName, session } from "./store";
  * then does it as the owner's own taps would, through the same ways in (chat.ts handleMessage, sessions.ts
  * replyToSession, stopSession, dismissWaiting and compactThread, chat-summary.ts compactChat, permission.ts
  * replyToAsk), with the member named as who said it: the turn is theirs (chat.ts TurnOptions.member), and the owner
- * sees who said what.
+ * sees who said what. A chat from someone the owner hasn't let use the bots' computers (Use its computer) is kept with a
+ * note that the bot won't answer it, and no turn runs for them, as Bops Cloud does in a workspace whose chat goes through
+ * it; telling work on a computer more, or answering its asks, is refused (cloud/members.ts says so first). Bots with no
+ * computer, or set to work on this Mac, answer as before. In a workspace whose chat goes through Bops Cloud, a message
+ * for a bot on this Mac comes written already (MemberActPayload.stored): it's answered, never added; and this Mac never
+ * adds a member's words there itself (only Bops Cloud stamps them).
  *
  * It's safe to act on as this Mac: only the tunnel can call that route, and this state agrees they have Write. One
  * refused, too late or of a shape this doesn't know is still taken (the event is acked), and dropped with a line in
@@ -91,7 +96,8 @@ function ofApp(sessionId: string | undefined): boolean {
 
 /** Why it's not done, or null when it may be: worked out from this state, as Bops Cloud did from its copy. */
 function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | null {
-  if (!Number.isFinite(p.at) || Date.now() - p.at > MEMBER_ACT_MS) return "too late";
+  // A message Bops Cloud wrote already waits longer for this Mac: the chat says the bot answers once it opens.
+  if (!Number.isFinite(p.at) || Date.now() - p.at > (p.stored ? STORED_ACT_MS : MEMBER_ACT_MS)) return "too late";
   const ws = getState().workspaces?.find((w) => w.id === p.wsId);
   if (!ws) return "no such workspace";
   const kept = accessOf(ws.memberAccess, { email: who.email, id: who.userId });
@@ -106,6 +112,9 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
   // A thread on the owner's Mac: a member's words never reach work there (it has the owner's own apps, browsers and
   // logins), so no reply, Nothing to add or answer to its asks. Stop still ends it.
   const onMac = (id: string | undefined) => !!id && session(id)?.runsOn === "mac";
+  // Work on a bot's computer, where the bot is root: only with Use its computer (stop still ends it).
+  const computer = mayUse(p, who);
+  const onComputer = (id: string | undefined) => !!id && !!session(id) && session(id)!.runsOn !== "mac";
   // An app's: Your Apps at Write, while apps are open to them and to the owner, an app and site of the workspace's.
   if (isAppAct(act)) {
     if (!appsOpen(getState())) return "apps aren't open";
@@ -126,7 +135,8 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
     case "reply":
     case "dismiss":
       if (!threadOk(as.sessionId)) return "not at Write";
-      return onMac(as.sessionId) ? "on the owner's Mac" : null;
+      if (onMac(as.sessionId)) return "on the owner's Mac";
+      return !computer && onComputer(as.sessionId) ? "no computer" : null;
     case "stop":
       return as.sessionIds.every(threadOk) ? null : "not at Write";
     case "answer": {
@@ -136,6 +146,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
       // The owner's Connected apps or keys: theirs alone to allow (member-access.ts ownerOnlyAsk).
       if (ownerOnlyAsk(a.kind)) return "the owner's apps or keys";
       if (onMac(a.threadId)) return "on the owner's Mac";
+      if (!computer && (a.threadId ? onComputer(a.threadId) : hasComputer(a.botId))) return "no computer";
       return apps || !ofApp(a.threadId) ? null : "an app's ask";
     }
   }
@@ -176,8 +187,22 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
   const warn = (e: Error) => console.warn(`[members] event ${eventId}: ${e.message}`);
   switch (act.act) {
     case "chat": {
+      // Written by Bops Cloud already (a workspace whose chat goes through it, a bot on this Mac): answered, never added.
+      if (p.stored && typeof p.messageId === "string") return void answerStored(p, who, act.chatId, p.messageId, said, eventId).catch(warn);
       // The same act again (an ack that was lost): their words are there already.
       if (getState().messages.some((m) => m.chatId === act.chatId && m.member?.ref === p.key)) return;
+      // Switched to Bops Cloud since it was queued: only Bops Cloud stamps a member's words there now (it would refuse this
+      // Mac's row, MEMBER_STAMP), so it's dropped, and their window says it didn't go.
+      if (cloudChatHere(p.wsId)) return void console.warn(`[members] event ${eventId}: not done (the workspace's chat goes through Bops Cloud now)`);
+      // Not let use its computer (Use its computer, as this state says it), for a bot that has one: their words stay,
+      // with a note, and nothing runs for them.
+      if (!mayUse(p, who) && chatUsesComputer(act.chatId)) {
+        addMessage({ chatId: act.chatId, role: "user", text: act.text, member: { ...said, noUse: true } });
+        const c = chat(act.chatId);
+        const name = c?.botIds.length === 1 ? (bot(c.botIds[0])?.name ?? "The bot") : "The bots";
+        addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: noUseNote(ownerName(), who.name, name) });
+        return;
+      }
       void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, said).catch(warn);
       return;
     }
@@ -208,6 +233,65 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       return;
     }
   }
+}
+
+/** Whether a bot works on a computer of its own (not on this Mac): what Use its computer gates. */
+function hasComputer(botId: string): boolean {
+  const b = bot(botId);
+  return !!b && b.runsOn !== "mac" && !!workBot(b, getState().bots).computerId;
+}
+
+/** Whether a chat's answer would use a bot's computer (any of its bots has one). */
+const chatUsesComputer = (chatId: string) => (chat(chatId)?.botIds ?? []).some(hasComputer);
+
+/** Whether a workspace's chat goes through Bops Cloud (Workspace.chatOn, mirrored from its switch). */
+const cloudChatHere = (wsId: string) => getState().workspaces?.some((w) => w.id === wsId && w.chatOn === "cloud") ?? false;
+
+/**
+ * Whether the member may have their words run on the bots' computers (Use its computer): as Bops Cloud vouched for them
+ * (MemberActPayload.computer, from what orgo-web keeps: cloud/ws-slice.ts computerUseOf), unless this state has it
+ * turned off for them since, on their entry for their membership now ("none": the owner's Mac turned it off in
+ * orgo-web, and this state may be newer than Bops Cloud's word).
+ */
+function mayUse(p: MemberActPayload, who: MemberWho): boolean {
+  if (p.computer !== true) return false;
+  const ws = getState().workspaces?.find((w) => w.id === p.wsId);
+  const kept = accessOf(ws?.memberAccess, { email: who.email, id: who.userId });
+  return !(currentFor(kept, p.joinedAt) && kept.computer === "none");
+}
+
+/** Messages Bops Cloud wrote that this Mac answered (or is answering) since it started: an event handed again isn't answered twice. */
+const answered = new Set<string>();
+/** Each chat's stored answers, one after another (two side by side would each read the other's reply as its own). */
+const inChat = new Map<string, Promise<void>>();
+
+/**
+ * A member's message Bops Cloud wrote already, for a bot on this Mac or a group (a workspace whose chat goes through
+ * Bops Cloud): read until it's here, then answered as theirs (chat.ts answerMessage), once, one at a time per chat.
+ * Checked again here: Bops Cloud took it up to a day ago, and the owner may have changed who may since.
+ */
+function answerStored(p: MemberActPayload, who: MemberWho, chatId: string, messageId: string, said: NonNullable<Message["member"]>, eventId: string): Promise<void> {
+  if (answered.has(messageId)) return Promise.resolve();
+  answered.add(messageId);
+  const run = (inChat.get(chatId) ?? Promise.resolve()).then(() => answerOne(p, who, chatId, messageId, said, eventId));
+  const settled = run.catch(() => {});
+  inChat.set(chatId, settled);
+  void settled.then(() => inChat.get(chatId) === settled && inChat.delete(chatId));
+  return run;
+}
+
+async function answerOne(p: MemberActPayload, who: MemberWho, chatId: string, messageId: string, said: NonNullable<Message["member"]>, eventId: string) {
+  const ws = getState().workspaces?.find((w) => w.id === p.wsId);
+  const access = accessOf(ws?.memberAccess, { email: who.email, id: who.userId });
+  const c = chat(chatId);
+  if (!c || !currentFor(access, p.joinedAt) || !writesChat(access, c.botIds)) return void console.warn(`[members] event ${eventId}: not done (not at Write now)`);
+  if (!mayUse(p, who) && chatUsesComputer(chatId)) return void console.warn(`[members] event ${eventId}: not done (no computer now)`);
+  for (let i = 0; i < 3 && !getState().messages.some((m) => m.id === messageId); i++) await pullState();
+  if (!getState().messages.some((m) => m.id === messageId)) return void console.warn(`[members] event ${eventId}: its message isn't here`);
+  // A bot of this chat said something after it: answered already (this Mac before a restart).
+  const at = getState().messages.find((m) => m.id === messageId)!.at;
+  if (getState().messages.some((m) => m.chatId === chatId && m.role === "bot" && m.at > at)) return;
+  await answerMessage(chatId, messageId, said);
 }
 
 /** What a refused act on an app says, on the app where the member sees it (and the owner's rows). */

@@ -1,6 +1,6 @@
 import "server-only";
 import { appsOpen } from "@/lib/apps-access";
-import { cleanAccess, isAccessLevel, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
+import { cleanAccess, isAccessLevel, isComputerUse, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
 import { chainWithout, cleanChain, leadOf, type Chain, type ChainBot } from "@/lib/chain";
 import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type AppState, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
 import { cleanFavorites } from "@/lib/favorites";
@@ -329,7 +329,7 @@ export function setFavorites(workspaceId: string, list: unknown) {
 export const currentWorkspaceId = () => getState().workspace ?? MAIN_WORKSPACE;
 
 const sameAccess = (a: MemberAccess, b: MemberAccess) =>
-  a.others === b.others && a.apps === b.apps && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
+  a.others === b.others && a.apps === b.apps && a.computer === b.computer && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
 
 /** `map` without `key`'s entry. */
 const without = (map: MemberAccessMap, key: string): MemberAccessMap => Object.fromEntries(Object.entries(map).filter(([k]) => k !== key));
@@ -361,7 +361,10 @@ export function setMemberAccess(workspaceId: string, key: string, access: Member
   // Your Apps: what was sent, else the level kept (a save that sends only bots keeps it). Never a level nobody picked:
   // one not set yet is left so, for giveAppsRead (an entry from before the scope) and the sheet ("not set").
   const apps = isAccessLevel(clean?.apps) ? clean.apps : isAccessLevel(kept?.apps) ? kept.apps : undefined;
-  const withApps: MemberAccess | null = clean && { ...clean, ...(apps ? { apps } : {}) };
+  // Use its computer: what was sent ("use" on, "none" off), else what was kept (missing reads as off). Kept as "none" once
+  // turned off, so a merge tells it from an entry an older Bops rewrote without it (state-merge.ts keepAppsLevels).
+  const computer = isComputerUse(clean?.computer) ? clean.computer : isComputerUse(kept?.computer) ? kept.computer : undefined;
+  const withApps: MemberAccess | null = clean && { others: clean.others, bots: clean.bots, ...(apps ? { apps } : {}), ...(computer ? { computer } : {}) };
   const keep: MemberAccess | null = withApps && showsAny(withApps) ? { ...withApps, at: how.at ?? Date.now(), ...(how.invite ? { invite: true as const } : {}) } : null;
   if (keep ? kept && sameAccess(keep, kept) && !!kept.invite === !!keep.invite && (how.at === undefined || kept.at === how.at) : !kept) return;
   if (keep) ensureMain();

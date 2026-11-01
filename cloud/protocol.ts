@@ -159,6 +159,11 @@ export const ACCOUNT_DELETED = "account_deleted";
  * its user may (phone, mail, Slack, numbers, backups, notices, the tunnel...), or sent another device.
  */
 export const COMPUTER_NOT_ALLOWED = "computer_not_allowed";
+/**
+ * 403 on POST /v1/messages: the owner's own write made or changed a member's stamp (Message.member) in a chat of a
+ * workspace whose people's words go through Bops Cloud (Workspace.chatOn "cloud"): only Bops Cloud writes one there.
+ */
+export const MEMBER_STAMP = "member_stamp";
 
 /** GET /v1/state: the blob (no `messages`), its version (the cloud's count, bumped on every write) and the newest message write's seq. 404 when there's none yet. */
 export type CloudState = { version: number; seq: number; protocol: number; writer: string | null; state: Record<string, unknown> };
@@ -594,7 +599,17 @@ export type LivePublish = { ws: string; events: LiveEventIn[] };
  */
 export type LiveEventOut =
   | (LiveEventIn & { by: string; at: number })
-  | { type: "state"; hash?: string; seq?: number; by: string; at: number };
+  | { type: "state"; hash?: string; seq?: number; by: string; at: number }
+  | LiveTurn;
+/**
+ * Where a turn owed in a workspace whose chat goes through Bops Cloud stands (cloud/turns.ts), published by Bops Cloud
+ * alone ("cloud"), to every stream of that workspace that sees its bot and chat: owed (its message is in, an answer is
+ * coming), waking (its computer is being woken), thinking (its computer took it), paused (it waits for someone's OK),
+ * done, failed (`note` says why, in words for the chat: it's written there as a note too). An app that doesn't know it
+ * leaves it out.
+ */
+export type LiveTurn = { type: "turn"; id: string; chatId: string; botId: string; messageId: string; state: TurnShown; note?: string; by: string; at: number };
+export type TurnShown = "owed" | "waking" | "thinking" | "paused" | "done" | "failed";
 export type LiveSnapshot = { moods: { botId: string; chatId?: string; mood: LiveMood; ttl: number; by: string }[] };
 
 /**
@@ -610,8 +625,13 @@ export type LiveSnapshot = { moods: { botId: string; chatId?: string; mood: Live
  */
 export type WsRole = "owner" | "admin" | "member";
 export const WS_ROLES: readonly WsRole[] = ["owner", "admin", "member"];
-/** `joinedAt`: when the caller's membership began, from an orgo-web that says it (member-access.ts currentFor). */
-export type WsAccess = { role: WsRole; ownerUserId: string; bopsWsId: string | null; name: string; joinedAt?: number };
+/**
+ * `joinedAt`: when the caller's membership began, from an orgo-web that says it (member-access.ts currentFor).
+ * `computerUse`: whether the owner let them use the bots' computers (Use its computer), from an orgo-web that keeps it
+ * (project_members.bops_computer_use, set by the owner's Mac: lib/server/orgo.ts MEMBER_COMPUTER_ROUTE). Bops Cloud goes
+ * by it (cloud/ws-slice.ts computerUseOf); an orgo-web from before it sends none, and the owner's state says instead.
+ */
+export type WsAccess = { role: WsRole; ownerUserId: string; bopsWsId: string | null; name: string; joinedAt?: number; computerUse?: boolean };
 /** The code a project with no Bops workspace of its own is refused with (one "bops" project would show every workspace). */
 export const WS_NOT_SHAREABLE = "not_shareable";
 
@@ -637,6 +657,12 @@ export type SharedWsSlice = {
   approvals?: Record<string, unknown>[];
   /** For anyone but the owner: their level for each bot shown ("read" or "write"). None for the owner (every bot is theirs). */
   levels?: Record<string, "read" | "write">;
+  /**
+   * For anyone but the owner, "use" when the owner let them use the bots' computers (cloud/member-access.ts
+   * MemberAccess.computer): what they say may wake a bot's computer and run there, as its administrator. Unset when
+   * it doesn't, for the owner (always theirs), and from a Bops Cloud before the permission.
+   */
+  computer?: "use";
   /**
    * The workspace's apps on the web, for someone given Your Apps at Read or more (cloud/ws-slice.ts appsFor), as the owner's
    * Mac last read them. None for the owner (their own page reads them), for anyone else without Read, and from a Bops
@@ -748,9 +774,19 @@ export type MemberActBody = { key: string; act: MemberAct };
  * did it, as Bops Cloud vouched for them (cloud/member-access.ts MemberWho); `joinedAt` when their
  * membership began, as orgo-web said it (member-access.ts currentFor).
  */
-export type MemberActPayload = { projectId: string; wsId: string; member: { userId: string; email?: string; name: string }; joinedAt?: number; key: string; at: number; act: MemberAct };
-/** 202. `macOn`: the owner's Bops is connected now (false: it waits up to MEMBER_ACT_MS for it). */
-export type MemberActAnswer = { ok: true; macOn: boolean };
+/**
+ * `computer`: Bops Cloud found the owner let them use the bots' computers (Use its computer, cloud/ws-slice.ts computerUseOf)
+ * when it took the act. `stored`: a chat act Bops Cloud wrote already (`messageId`), in a workspace whose chat goes through
+ * it, for a bot with no computer: the owner's Mac answers that message, and adds none.
+ */
+export type MemberActPayload = { projectId: string; wsId: string; member: { userId: string; email?: string; name: string }; joinedAt?: number; key: string; at: number; act: MemberAct; computer?: true; stored?: true; messageId?: string };
+/**
+ * 202. `macOn`: the owner's Bops is connected now (false: it waits up to MEMBER_ACT_MS for it). In a workspace whose chat
+ * goes through Bops Cloud (cloud/turns.ts), a chat act is written at once: `stored` with the message's id (`messageId`)
+ * and its turn's (`turn`, none when no answer is owed: the owner hasn't let them use the bot's computer), and `macOn`
+ * true, so an app from before says "Sending…" until it lands (as it does at once).
+ */
+export type MemberActAnswer = { ok: true; macOn: boolean; stored?: true; messageId?: string; turn?: string };
 /** 403: a bot the act touches is at Read for the caller (or a group has one that is). */
 export const MEMBER_READ_ONLY = "member_read_only";
 /**
@@ -759,6 +795,11 @@ export const MEMBER_READ_ONLY = "member_read_only";
  * (member-access.ts ownerOnlyAsk).
  */
 export const MEMBER_OWNER_ONLY = "member_owner_only";
+/**
+ * 403: what they asked for runs on the bot's computer (telling a thread there more, saying there's nothing to add,
+ * folding it up, or answering one of its asks), and the owner hasn't turned on Use its computer for them.
+ */
+export const MEMBER_NO_COMPUTER = "member_no_computer";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
 export const NOT_WAITING = "not_waiting";
 /** 403: the caller is the workspace's owner, who acts in their own Bops. */
@@ -772,3 +813,58 @@ export const MEMBER_MAX_NOTE = 2000;
 export const MEMBER_STOP_MAX = 20;
 /** How long an act waits for the owner's Bops to open: an older one is dropped, never done late. */
 export const MEMBER_ACT_MS = 10 * 60_000;
+/** How long a message Bops Cloud wrote already (MemberActPayload.stored) waits for the owner's Mac to answer it. */
+export const STORED_ACT_MS = 24 * 3600_000;
+
+/**
+ * Chat through Bops Cloud (cloud/turns.ts). A workspace switched to it (bops.chat_routing, off by default) has every
+ * message someone says in a one bot chat written by Bops Cloud first: a member's (POST /v1/ws/<id>/act), and the
+ * owner's own from their Bops (POST /v1/chats/<chatId>/send, ChatSendBody). It checks who may (the owner always; a
+ * member with Write on the bot, and Use its computer for an answer), writes the message once by its key, and owes the
+ * answer as a turn: the runner on the bot's computer hears it on its own stream (GET /v1/runner/live, RunnerTurnEvent),
+ * claims it (RunnerClaim), beats while it runs and says it's done. Bops Cloud wakes the computer when no runner listens.
+ * Every viewer hears the message, the answer and where the turn stands (LiveTurn) on the stream they already watch.
+ */
+/** What the owner's Bops sends: its own key for the message (its id is "msg_o_<key>"), the words, and the message it replies to. */
+export type ChatSendBody = { key: string; text: string; replyTo?: string };
+/** 200: the message as written (the same on a retry with the key), and its turn (none: no answer owed here: a bot with no computer, which the Mac answers). */
+export type ChatSendAnswer = { ok: true; message: Record<string, unknown>; turn?: string };
+/** 409: this chat doesn't go through Bops Cloud (its workspace isn't switched, it's a group, or its bot has no computer): the Mac answers it as before. */
+export const CHAT_NOT_IN_CLOUD = "chat_not_in_cloud";
+/** 409: a message with that id is someone else's. */
+export const MESSAGE_TAKEN = "message_taken";
+/**
+ * 409 on turning a workspace's chat to Bops Cloud: the owner's Bops is older than CLOUD_CHAT_MIN_VERSION (or hasn't said
+ * its version). An older Mac takes the runners down and answers members' messages by the old rules, so it waits.
+ */
+export const CHAT_NEEDS_UPDATE = "chat_needs_update";
+/** The first Bops whose Mac keeps to chat through Bops Cloud (runners kept up on identity, Use its computer, stored messages). */
+export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
+/** On a runner's stream, an event "turn": answer this message (`seq`: its write, so the runner reads messages up to it first). */
+export type RunnerTurnEvent = { id: string; messageId: string; chatId: string; botId: string; seq: number };
+/** On a runner's stream, an event "turn-cancel": stop that turn and write nothing more for it (its member was removed, or it was taken back). */
+export type RunnerCancelEvent = { id: string };
+/** Who said the message a turn answers, when a member did (Bops Cloud vouched): what the bot is told, and checked again as it claims. */
+/** `computerUse`: what orgo-web said of their Use its computer when the message was taken (WsAccess.computerUse), which the turn goes by after. */
+export type TurnMember = { userId: string; email?: string; name: string; ref: string; joinedAt?: number; projectId?: string; computerUse?: boolean };
+/**
+ * POST /v1/runner/turns/<id>/claim, answered 200: the turn is this runner's until it stops beating. `now`: Bops Cloud's
+ * clock, which the answer's times are taken from (a computer's own can lag after it wakes); `humanAt` the message's
+ * time, which its rows come after. 409 another turn of the chat runs first, or it's taken; 410 it's over (refused now).
+ */
+export type RunnerClaim = { ok: true; now: number; turn: { id: string; messageId: string; chatId: string; botId: string; humanAt: number; seq: number; member?: TurnMember } };
+/** POST /v1/runner/turns/<id>/beat: still running, every 30 seconds; `tools` once it did something that can't be done twice. 409: it isn't this runner's any more (stop). */
+export type RunnerBeat = { phase: "model" | "tools" };
+/** POST /v1/runner/turns/<id>/done: how it ended. paused: waiting for an OK (`approvalId`); `react`: its tapback on the message (only Bops Cloud writes on a person's row). */
+export type RunnerDone = { state: "done" | "paused" | "failed"; approvalId?: string; note?: string; react?: string };
+/**
+ * POST /v1/runner/turns/<id>/resume {approvalId}: a turn paused for an OK goes on once the OK is answered, only for that
+ * request (the one its pause named), only on the runner that paused it, and only while whoever said the message still
+ * may (else 409, and the turn ends). 200 gives Bops Cloud's clock and the message's time again, so it needs nothing the
+ * runner kept in memory (an upgrade or a restart in between is fine).
+ */
+export type RunnerResume = { ok: true; now: number; humanAt: number };
+/** The most a runner keeps a turn without a beat. */
+export const TURN_LEASE_MS = 90_000;
+/** How often a runner beats. */
+export const TURN_BEAT_MS = 30_000;

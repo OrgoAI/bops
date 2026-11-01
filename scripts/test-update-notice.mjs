@@ -1,7 +1,7 @@
 // Tests for the update notice and its Settings switch (components/app/update-notice.tsx): the line and the
 // button for each phase (ready: Restart; out: Download; a download that didn't finish: Try again; one the
 // user asked for: downloading, no button; one downloading unasked: nothing; a copy that can't update
-// itself, or an app from before phases: bops.bot), what's new under it, and no dashes in any of it.
+// itself, or an app from before phases: bops.bot; out of disk space: says so, Try again), what's new under it, and no dashes in any of it.
 //
 // The .tsx file is compiled with the TypeScript in node_modules as it loads, and rendered to HTML.
 // Usage: node scripts/test-update-notice.mjs   (not with --conditions=react-server: these are client components)
@@ -61,6 +61,12 @@ test("out: Download", () => {
 test("a download that didn't finish: Try again", () => {
   const s = shown({ ...base, phase: "available", failed: true });
   assert.equal(s.line, "The download didn't finish.");
+  assert.equal(s.button, "Try again");
+});
+
+test("out of disk space: says so and how much to free, with Try again", () => {
+  const s = shown({ ...base, phase: "available", failed: true, why: "space" });
+  assert.equal(s.line, "Not enough space on this Mac to update. Bops needs about 2 GB free.");
   assert.equal(s.button, "Try again");
 });
 

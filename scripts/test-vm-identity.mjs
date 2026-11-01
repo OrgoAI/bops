@@ -34,7 +34,7 @@ const FAKES = {
   awake: ["awakeSince", "sleptSince"],
   usage: ["recordUsage"],
   "workspace-skills": ["folderKey", "moveWorkspaceFolder"],
-  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn", "watchIdentity", "WHO_AM_I_EVERY_MS"], "orgo-sign-in": ["authStatus"], "free-hours": ["startActivityBeat"], routines: [] } : {}),
+  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn", "watchIdentity", "WHO_AM_I_EVERY_MS"], "orgo-sign-in": ["authStatus"], "free-hours": ["startActivityBeat"], "runner-chat": ["startRunnerChat"], routines: [] } : {}),
 };
 const VALUES = { runner: { IDENTITY_EVERY_MS: 300000, WHO_AM_I_EVERY_MS: 60000 } };
 registerHooks({
@@ -187,6 +187,7 @@ if (START) {
   globalThis.__fake.runner = { checkIdentity: async () => "same", runnerComputer: () => C1, startRunsOn: () => globalThis.__fake.started.push("runs-on"), watchIdentity: async () => {} };
   globalThis.__fake["orgo-sign-in"] = { authStatus: async () => ((ready = true), {}) };
   globalThis.__fake["free-hours"] = { startActivityBeat: () => globalThis.__fake.started.push("in-use") };
+  globalThis.__fake["runner-chat"] = { startRunnerChat: () => globalThis.__fake.started.push("chat") };
   globalThis.__bopsRunnerNoAuthMs = 30;
 
   await check("with no credential a runner waits (auth: none) instead of stopping, and starts once a key file is there", async () => {
@@ -211,7 +212,7 @@ if (START) {
     assert.ok(lines.some((l) => l.startsWith("[runner] waiting: no Orgo identity and no ORGO_API_KEY")), "says why it waits");
     assert.ok(!lines.some((l) => /not starting/.test(l)), "never stops for it");
     assert.ok(vmm.seen.filter((r) => r.url.startsWith("/orgo/v1/identity/token")).length >= 2, "identity asked again while it waits");
-    assert.deepEqual(globalThis.__fake.started, ["runs-on", "routines", "in-use"]);
+    assert.deepEqual(globalThis.__fake.started, ["runs-on", "routines", "in-use", "chat"]);
     assert.equal(A.orgoKey(), "sk_given_later");
     assert.ok(lines.at(-1).startsWith("[runner] running the routines"));
     clearInterval(globalThis.__bopsRunnerIdentity);

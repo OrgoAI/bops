@@ -17,6 +17,12 @@
  * guest (joined with a link, no email) is kept as "user:<their Orgo user id>". Imported by Bops Cloud
  * and, through lib/member-access.ts, the window and the Mac server, so it imports nothing.
  *
+ * Use its computer (`computer`): whether what they say can wake the bot's computer and run there, where the bot is its
+ * administrator (root), so they can too. Off unless the owner turns it on for them; the owner always has it. Without it
+ * they still chat at Write, but Bops Cloud never runs or wakes a computer for their words (usesComputer). orgo-web holds
+ * it (lib/server/orgo.ts MEMBER_COMPUTER_ROUTE) and Bops Cloud goes by what orgo-web says (ws-slice.ts computerUseOf); `computer` here is
+ * the copy the People sheet shows, set right after orgo-web took it. Not for an invite: there's no member to give it to yet.
+ *
  * Each entry says when the owner's Mac set it (`at`), and whether it was set with an invite not yet taken
  * (`invite`): it's for the membership that began then (currentFor). Someone removed or gone without the
  * Mac seeing it (on orgo.ai, from a Mac on v0.0.29, leaving on their own) who comes back later, by any
@@ -34,9 +40,24 @@ export const ACCESS_LABELS: Record<AccessLevel, string> = { none: "None", read: 
  * workspaces.ts giveAppsRead), or dropped by an older Bops's save (lib/server/state-merge.ts keepAppsLevels puts it
  * back). Only with a bot: an entry is kept only while it shows one (workspaces.ts showsAny).
  */
-export type MemberAccess = { others: AccessLevel; bots: Record<string, AccessLevel>; at?: number; invite?: true; apps?: AccessLevel };
+export type MemberAccess = { others: AccessLevel; bots: Record<string, AccessLevel>; at?: number; invite?: true; apps?: AccessLevel; computer?: ComputerUse };
+/**
+ * Use its computer (MemberAccess.computer): "use" lets what they say wake the bots' computers and run there, as their
+ * administrator; "none", or missing (never set), doesn't.
+ */
+export type ComputerUse = "use" | "none";
+export const isComputerUse = (v: unknown): v is ComputerUse => v === "use" || v === "none";
+/** Whether someone may use the bots' computers (MemberAccess.computer): only when the owner turned it on for them (fails closed). The owner has no entry and always may (ws-slice.ts computerUseOf). */
+export const usesComputer = (a: { computer?: unknown } | null | undefined): boolean => a?.computer === "use";
 /** Everyone's, by accessKey. */
 export type MemberAccessMap = Record<string, MemberAccess>;
+
+/** Whether an entry gives Write on a bot: `others` at write, or one of `botIds` (the workspace's bots) at write. What Use its computer comes with. */
+export const writesAny = (access: MemberAccess, botIds: readonly string[]) => access.others === "write" || botIds.some((id) => levelOf(access, id) === "write");
+
+/** `access` with Use its computer turned off ("none") when it gives Write on no bot: someone who can't chat never sets a bot going on its computer. */
+export const fitComputer = (access: MemberAccess, botIds: readonly string[]): MemberAccess =>
+  usesComputer(access) && !writesAny(access, botIds) ? { ...access, computer: "none" } : access;
 
 export const NO_ACCESS: MemberAccess = { others: "none", bots: {} };
 /** The most bots one person's entry names (a workspace has far fewer). */
@@ -102,7 +123,7 @@ export const levelOf = (access: MemberAccess, botId: string): AccessLevel =>
  */
 export function cleanAccess(v: unknown): MemberAccess | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  const o = v as { others?: unknown; bots?: unknown; apps?: unknown };
+  const o = v as { others?: unknown; bots?: unknown; apps?: unknown; computer?: unknown };
   const others: AccessLevel = isAccessLevel(o.others) ? o.others : "none";
   const bots: Record<string, AccessLevel> = {};
   if (o.bots && typeof o.bots === "object" && !Array.isArray(o.bots)) {
@@ -117,11 +138,11 @@ export function cleanAccess(v: unknown): MemberAccess | null {
       bots[id] = l;
     }
   }
-  // Your Apps: kept when it's a level; anything else is left out (the server then keeps the level it had).
-  return { others, bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}) };
+  // Your Apps and Use its computer: kept when they're one; anything else is left out (the server then keeps what it had).
+  return { others, bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(isComputerUse(o.computer) ? { computer: o.computer } : {}) };
 }
 
-/** A new invite's access before the owner changes it: every bot there now to read, and Your Apps to read; bots made later hidden. */
+/** A new invite's access before the owner changes it: every bot there now to read, and Your Apps to read; bots made later hidden; not their computers. */
 export function inviteDefault(botIds: string[]): MemberAccess {
   return { others: "none", bots: Object.fromEntries(botIds.map((id) => [id, "read" as AccessLevel])), apps: "read" };
 }
@@ -184,6 +205,16 @@ export function accessSummary(access: MemberAccess, botIds: string[]): string {
   const how = writes === 0 ? "read" : writes === seen.length ? "write" : `${writes} to write`;
   return `${head}, ${how}${later}`;
 }
+
+/** A short line for whether a person uses the bots' computers, as accessSummary words bots: "Uses its computer", or nothing. */
+/**
+ * The note in the chat when someone without Use its computer says something there: the bot won't answer it (cloud/turns.ts,
+ * and the owner's Mac in a workspace whose chat isn't through Bops Cloud: lib/server/member-acts.ts). Every viewer reads it.
+ */
+export const noUseNote = (owner: string, member: string, bot?: string) =>
+  bot ? `${owner} hasn't let ${member} use ${bot}'s computer, so ${bot} won't answer this.` : `${owner} hasn't let ${member} use the bots' computers, so they won't answer this.`;
+
+export const computerSummary = (access: { computer?: unknown }) => (usesComputer(access) ? "Uses its computer" : "");
 
 /** A short line for a person's Your Apps, as accessSummary words bots: "Your Apps, read"; nothing at None; "not set" before a level. */
 export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(access.apps) ? "Your Apps not set" : access.apps === "none" ? "" : `Your Apps, ${access.apps}`);

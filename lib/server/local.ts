@@ -142,6 +142,11 @@ export async function ensureChrome(botId: string, port: number) {
       "--no-default-browser-check",
       "--hide-crash-restore-bubble",
       "--window-size=1280,860",
+      // None of Chrome's own downloads a bot never uses: components, and the models behind its
+      // suggestions, translation and page hints (about 50 MB in each bot's folder, and the CPU to get
+      // them). Safe Browsing still updates, and the keychain stays, so bots keep their sign-ins.
+      "--disable-component-update",
+      "--disable-features=OptimizationGuideModelDownloading,OptimizationHintsFetching,OptimizationTargetPrediction,OptimizationHints,Translate,MediaRouter,OnDeviceHeadSuggest",
       ...(process.env.BOPS_CHROME_WINDOWS ? [] : ["--headless=new", `--user-agent=${USER_AGENT}`]),
       "about:blank",
     ],

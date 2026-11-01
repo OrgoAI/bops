@@ -81,14 +81,27 @@ export function useAppState() {
         /* retry next tick */
       }
     };
-    const tick = async () => {
+    // Every 0.9 seconds while the window is on show. Hidden (covered or minimized), nothing is drawn, so every
+    // 5 seconds is enough for a chime or a notification; read at once when it's back. A tick in flight
+    // as it comes back ends there: only the newest chain goes on.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let chain = 0;
+    const tick = async (mine: number) => {
       await fetchState();
-      if (!stop) setTimeout(tick, 900);
+      if (!stop && mine === chain) timer = setTimeout(() => void tick(mine), document.hidden ? 5000 : 900);
+    };
+    const back = () => {
+      if (document.hidden) return;
+      clearTimeout(timer);
+      void tick(++chain);
     };
     refreshers.add(fetchState);
-    void tick();
+    document.addEventListener("visibilitychange", back);
+    void tick(chain);
     return () => {
       stop = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", back);
       refreshers.delete(fetchState);
     };
   }, []);

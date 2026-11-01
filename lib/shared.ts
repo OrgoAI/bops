@@ -32,6 +32,8 @@ export type SharedOpen = SharedWorkspace & {
   ownBots?: Record<string, number>;
   more?: string[];
   levels?: Record<string, "read" | "write">;
+  /** Whether the owner let the user use the bots' computers (Use its computer, cloud/ws-slice.ts computerUseOf): their words may wake one and run there. */
+  computer?: boolean;
   you?: string;
   /** The workspace's apps, when the owner gave the user Your Apps (cloud/ws-slice.ts appsFor). */
   apps?: SharedApps;
@@ -52,6 +54,18 @@ export function readOnlyLine(botIds: readonly string[] = [], levels: Record<stri
   if (!botIds.length) return "Only the owner changes this.";
   if (botIds.length > 1 && botIds.some((id) => levels[id] !== "write")) return "You can chat here once the owner gives you Write on every bot in it.";
   return "You can watch this bot. Ask the owner for Write to chat with it.";
+}
+
+/**
+ * The line over the message box in a shared workspace, for the chat's bots, saying whether what the viewer says there
+ * runs on the bots' computers (SharedOpen.computer, Use its computer). Null outside one, or where they can't chat.
+ */
+export function computerLine(state: Viewing, bots: readonly { name: string }[]): string | null {
+  if (!state.shared || !bots.length) return null;
+  const whose = bots.length === 1 ? `${bots[0].name}'s computer` : "their computers";
+  return state.shared.computer
+    ? `You can use ${whose}. What you ask can run there as its administrator.`
+    : `The owner hasn't let you use ${whose}, so ${bots.length === 1 ? bots[0].name : "they"} won't answer what you say.`;
 }
 
 /** Who the owner's own words and doings are said by: "You" in the user's own workspace, "Owner" in one shared with them (they're never the user's). */

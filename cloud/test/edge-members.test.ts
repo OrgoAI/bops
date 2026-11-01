@@ -336,6 +336,22 @@ test("a Write member's act waits for the owner's Mac once per key, and is handed
   mac.ws.close();
 });
 
+test("a member's act says whether the owner let them use the bots' computers, as the owner's state says it then", async () => {
+  roles[`${writer} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
+  roles[`${other} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
+  await query("DELETE FROM bops.cloud_pending WHERE user_id = $1", [actOwner]);
+  const head = (await (await fetch(`${cloud.url}/v1/state/head`, { headers: headers(actOwner) })).json()) as { version: number };
+  const blob = actBlob();
+  (blob.workspaces[0].memberAccess as Record<string, Record<string, unknown>>)[`${other}@example.com`].computer = "use";
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(actOwner), body: JSON.stringify({ base: head.version, state: blob }) })).status, 200);
+  assert.equal((await act(writer, "edge_comp_001")).status, 202);
+  assert.equal((await act(other, "edge_comp_002")).status, 202);
+  const byKey = new Map((await pending(actOwner)).map((r) => [(r.payload as MemberActPayload).key, r.payload as MemberActPayload]));
+  assert.equal(byKey.get("edge_comp_001")?.computer, undefined, "not turned on for them");
+  assert.equal(byKey.get("edge_comp_002")?.computer, true);
+  await query("DELETE FROM bops.cloud_pending WHERE user_id = $1", [actOwner]);
+});
+
 test("a member's acts are counted a minute at a time: one past MEMBER_ACTS_A_MINUTE is told to slow down", async () => {
   roles[`${writer} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
   // Not across a minute's end, so every one is in the same count.

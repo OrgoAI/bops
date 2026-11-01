@@ -263,7 +263,10 @@ const sessionEvent = (id: string, s: HereSession): LiveEventIn => ({ type: "sess
 /* ---------------- What the user's other devices say ---------------- */
 
 /** A bot's mood on another device, as the window gets it. */
-export type RemoteMood = { mood: Exclude<LiveMood, "idle">; chatId?: string };
+/** `waking`: Bops Cloud is waking the bot's computer to answer in that chat (cloud/turns.ts, a "turn" event). */
+export type RemoteMood = { mood: Exclude<LiveMood, "idle">; chatId?: string; waking?: true };
+/** How long a computer is shown waking at most without word from Bops Cloud (its turn's deadline). */
+const WAKING_MS = 10 * 60_000;
 
 /**
  * What the user's bots are doing on their other devices (from the stream), each until its ttl runs
@@ -272,6 +275,8 @@ export type RemoteMood = { mood: Exclude<LiveMood, "idle">; chatId?: string };
  */
 export class RemoteMoods {
   private moods = new Map<string, RemoteMood & { expiresAt: number }>();
+  /** The bots whose computer Bops Cloud is waking to answer, by bot id: where, and until when at most. */
+  private waking = new Map<string, { chatId: string; expiresAt: number }>();
   private timer?: Timer;
   private onChange: () => void;
   private clock: Clock;
@@ -285,6 +290,7 @@ export class RemoteMoods {
   snapshot(s: LiveSnapshot, self: string) {
     const before = this.key();
     this.moods.clear();
+    this.waking.clear();
     for (const m of s.moods ?? []) if (m.by !== self) this.set(m.botId, m.mood, m.chatId, m.ttl);
     this.changed(before);
   }
@@ -298,6 +304,14 @@ export class RemoteMoods {
     this.changed(before);
   }
 
+  /** Where a turn of chat through Bops Cloud stands (a "turn" event): its computer waking, or not any more. */
+  turn(e: { botId: string; chatId: string; state: string }) {
+    const before = this.key();
+    if (e.state === "waking") this.waking.set(e.botId, { chatId: e.chatId, expiresAt: this.clock.now() + WAKING_MS });
+    else this.waking.delete(e.botId);
+    this.changed(before);
+  }
+
   private set(botId: string, mood: LiveMood, chatId: string | undefined, ttl: number) {
     if (mood === "idle") return;
     this.moods.set(botId, { mood, ...(chatId ? { chatId } : {}), expiresAt: this.clock.now() + Math.min(60, Math.max(1, ttl)) * 1000 });
@@ -307,6 +321,7 @@ export class RemoteMoods {
   clear() {
     const before = this.key();
     this.moods.clear();
+    this.waking.clear();
     this.changed(before);
   }
 
@@ -315,26 +330,29 @@ export class RemoteMoods {
     const before = this.key();
     const now = this.clock.now();
     for (const [botId, m] of this.moods) if (m.expiresAt <= now) this.moods.delete(botId);
+    for (const [botId, w] of this.waking) if (w.expiresAt <= now) this.waking.delete(botId);
     this.changed(before);
   }
 
-  /** What the window gets: each bot's mood on another device, by bot id. */
+  /** What the window gets: each bot's mood on another device, by bot id, and whose computer is waking to answer. */
   forApp(): Record<string, RemoteMood> {
-    return Object.fromEntries([...this.moods].map(([botId, m]) => [botId, { mood: m.mood, ...(m.chatId ? { chatId: m.chatId } : {}) }]));
+    const out: Record<string, RemoteMood> = Object.fromEntries([...this.moods].map(([botId, m]) => [botId, { mood: m.mood, ...(m.chatId ? { chatId: m.chatId } : {}) }]));
+    for (const [botId, w] of this.waking) out[botId] = { mood: out[botId]?.mood ?? "thinking", chatId: w.chatId, waking: true };
+    return out;
   }
 
   private key = () => JSON.stringify(this.forApp());
 
   private changed(before: string) {
     if (this.key() !== before) this.onChange();
-    if (this.moods.size && !this.timer)
+    if ((this.moods.size || this.waking.size) && !this.timer)
       this.timer = unref(
         this.clock.setTimeout(() => {
           this.timer = undefined;
           this.sweep();
         }, 1000),
       );
-    else if (!this.moods.size && this.timer) {
+    else if (!this.moods.size && !this.waking.size && this.timer) {
       this.clock.clearTimeout(this.timer);
       this.timer = undefined;
     }
@@ -505,6 +523,7 @@ export class LiveSubscriber {
     const self = this.deps.self();
     if (type === "snapshot") this.deps.moods.snapshot(body as LiveSnapshot, self);
     else if (type === "mood") this.deps.moods.apply(body as Parameters<RemoteMoods["apply"]>[0], self);
+    else if (type === "turn" && typeof body.botId === "string" && typeof body.chatId === "string") this.deps.moods.turn(body as { botId: string; chatId: string; state: string });
     else if (type === "revoked" && this.deps.revoked) this.revoke(this.gen);
     else if (type === "reset" || (type === "state" && body.by !== self && (this.deps.wants?.(body) ?? true))) this.pullSoon();
     // Threads, routines and calls on another device reach this Mac as the state they change ("state").

@@ -146,13 +146,20 @@ function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolea
 
 const LEVELS = new Set(["none", "read", "write"]);
 
+/** What keepAppsLevels puts back, each with what it may be: Your Apps (MemberAccess.apps) and Use its computer (MemberAccess.computer). */
+const KEPT_ACCESS: [string, ReadonlySet<string>][] = [
+  ["apps", LEVELS],
+  ["computer", new Set(["use", "none"])],
+];
+
 /**
- * A person's Your Apps level (MemberAccess.apps) put back where an older Bops dropped it: its People sheet, or its own
- * look at who's still there, rewrites a person's entry as `{ others, bots }` and loses the level (it reads as none:
- * access lost, never gained). For each entry of the merged `merged` workspaces with no level, the level that person
- * had in the first of `copies` (this side's, the other's, the one before) that has one. Never into an entry set with an
- * invite (`invite`) from a copy where it wasn't (removed and invited again on an older Mac starts fresh, as their bots
- * do). An entry taken out stays out.
+ * A person's Your Apps level (MemberAccess.apps) and Use its computer (MemberAccess.computer) put back where an older
+ * Bops dropped them: its People sheet, or its own look at who's still there, rewrites a person's entry as
+ * `{ others, bots }` and loses them (they read as none: access lost, never gained). For each entry of the merged
+ * `merged` workspaces without one, what that person had in the first of `copies` (this side's, the other's, the one
+ * before) that has it. Never into an entry set with an invite (`invite`) from a copy where it wasn't (removed and
+ * invited again on an older Mac starts fresh, as their bots do). An entry taken out stays out. Turned off is kept as
+ * "none" (workspaces.ts setMemberAccess), so it's never taken for one dropped.
  */
 export function keepAppsLevels(merged: unknown, copies: unknown[]): unknown {
   if (!Array.isArray(merged)) return merged;
@@ -168,13 +175,16 @@ export function keepAppsLevels(merged: unknown, copies: unknown[]): unknown {
     const map: Blob = {};
     for (const [key, e] of Object.entries(w.memberAccess)) {
       map[key] = e;
-      if (!isObject(e) || e.apps !== undefined) continue;
-      for (const copy of copies) {
-        const had = entryIn(copy, w.id, key);
-        if (!had || !LEVELS.has(had.apps as string) || (e.invite === true && had.invite !== true)) continue;
-        map[key] = { ...e, apps: had.apps };
-        changed = true;
-        break;
+      if (!isObject(e)) continue;
+      for (const [field, ok] of KEPT_ACCESS) {
+        if ((map[key] as Blob)[field] !== undefined) continue;
+        for (const copy of copies) {
+          const had = entryIn(copy, w.id, key);
+          if (!had || !ok.has(had[field] as string) || (e.invite === true && had.invite !== true)) continue;
+          map[key] = { ...(map[key] as Blob), [field]: had[field] };
+          changed = true;
+          break;
+        }
       }
     }
     return changed ? { ...w, memberAccess: map } : w;

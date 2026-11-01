@@ -26,13 +26,14 @@ import * as session from "./session.ts";
 import * as slack from "./slack.ts";
 import * as state from "./state.ts";
 import * as tunnel from "./tunnel.ts";
+import * as turns from "./turns.ts";
 import * as usage from "./usage.ts";
 import * as verify from "./verify.ts";
 
 /**
  * Bops Cloud. One process serves every user: each module owns its routes (session.ts, proxy.ts,
  * verify.ts, lines.ts, handles.ts, plans.ts, ops.ts, tunnel.ts, hooks.ts, slack.ts, state.ts, pages.ts,
- * usage.ts, agent.ts, live.ts, members.ts, delete-user.ts) and this file only puts them together. See README.md.
+ * usage.ts, agent.ts, live.ts, members.ts, turns.ts, delete-user.ts) and this file only puts them together. See README.md.
  */
 
 const health: Route = {
@@ -68,6 +69,7 @@ export const routes = (): Route[] => [
   ...agent.routes,
   ...live.routes,
   ...members.routes,
+  ...turns.routes,
   ...deleteUser.routes,
 ];
 export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades];
@@ -233,6 +235,8 @@ async function main() {
   const stopStateSweeps = state.startStateSweeps();
   // Which apps the cloud serves (bops.app_policy), read every minute (app-version.ts).
   const stopAppPolicy = startAppPolicy();
+  // Chat turns whose runner went quiet are owed again or ended, and late ones end with a note (turns.ts).
+  const stopTurns = turns.startTurns();
   const server = makeServer();
   server.listen(config.port(), "127.0.0.1", () => console.log(`[cloud] listening on 127.0.0.1:${config.port()}`));
   const stop = () => {
@@ -242,7 +246,10 @@ async function main() {
     stopGuard();
     stopStateSweeps();
     stopAppPolicy();
+    stopTurns();
     tunnel.closeAll();
+    // Every runner listening for turns reconnects to the next start, and is given what it's owed again (turns.ts).
+    turns.closeRunners();
     // Every live stream ends: each device reconnects to the next start, and is reset (live.ts).
     live.closeAll();
     // Usage events still queued go out first (up to 2 seconds).

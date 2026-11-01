@@ -88,6 +88,10 @@ start() {
 cleanup() {
   for k in "${started[@]}"; do "$BIN" stop "${k%%--*}" "${k##*--}" > /dev/null 2>&1; done
   for p in ${HOLD:-} ${STALE:-} ${CDP:-}; do kill "$p" 2> /dev/null; done
+  # Whatever else still runs from the test's folder (an app a failed step left going) goes too: by its
+  # command line, or by its working folder (this shell's own aside).
+  pkill -f -- "$T" 2> /dev/null
+  for p in $(lsof -t +D "$T" 2> /dev/null | sort -u); do [ "$p" != $$ ] && kill "$p" 2> /dev/null; done
   rm -rf "$T"
 }
 trap cleanup EXIT

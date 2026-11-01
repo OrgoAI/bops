@@ -7,7 +7,7 @@ import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritte
 import { accessSummary, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
 import { accessFor, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, watchable } from "../members.ts";
 import { MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, type MemberActPayload, type WsAccess } from "../protocol.ts";
-import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, handedByOthers, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
+import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
 /**
  * Shared workspaces, read only (members.ts, ws-slice.ts): who may watch is what orgo-web's bops-role
@@ -340,6 +340,66 @@ test("the owner sees every bot of the workspace; anyone else only the bots the o
   const text = JSON.stringify(sharedSlice(blob, "ws_acme", member()));
   assert.ok(text.includes('"name":"Acme"'));
   for (const hidden of ["memberAccess", "ann@acme.com", "Bo", "B's", "w-b", "both"]) assert.ok(!text.includes(hidden), `"${hidden}" isn't shown`);
+});
+
+test("Use its computer: off unless the owner turned it on for them, on an entry for their membership now; always the owner's; in their slice and fingerprint", () => {
+  const joinedAt = Date.parse("2026-10-20T12:00:00Z");
+  const blob = (computer?: unknown, at?: number) => team({ "ann@acme.com": { others: "none", bots: { a: "write" }, ...(computer !== undefined ? { computer } : {}), ...(at !== undefined ? { at } : {}) } as MemberAccess });
+  const ws = (b: ReturnType<typeof team>) => b.workspaces[0] as Record<string, unknown>;
+  assert.equal(computerUseOf(ws(blob()), member()), false, "not set: off");
+  assert.equal(computerUseOf(ws(blob("none")), member()), false);
+  assert.equal(computerUseOf(ws(blob("yes")), member()), false, "anything but use: off");
+  assert.equal(computerUseOf(ws(blob("use")), member()), true);
+  assert.equal(computerUseOf(ws(blob("use")), member({ role: "admin" })), true, "an admin the same");
+  assert.equal(computerUseOf(ws(blob("use", joinedAt - 1)), member({ joinedAt })), false, "set before they were removed and came back");
+  assert.equal(computerUseOf(ws(blob()), OWNER_VIEW), true, "the owner always");
+  assert.equal(computerUseOf(ws(team({})), member({ email: "nobody@acme.com" })), false, "no entry");
+  assert.equal(viewerAccess(ws(blob("use")), member()).computer, "use");
+  // Shown to them so their window says it, and part of their fingerprint; never to the owner.
+  assert.equal(sharedSlice(blob("use"), "ws_acme", member()).computer, "use");
+  assert.equal(sharedSlice(blob("none"), "ws_acme", member()).computer, undefined);
+  assert.equal(sharedSlice(blob("use"), "ws_acme", OWNER_VIEW).computer, undefined);
+  assert.notEqual(sharedHash(sharedSlice(blob("use"), "ws_acme", member())), sharedHash(sharedSlice(blob("none"), "ws_acme", member())));
+  // Kept by Bops Cloud's own rules (cleanAccess), and new invites never have it.
+  assert.equal(cleanAccess({ others: "none", bots: {}, computer: "use" })?.computer, "use");
+  assert.equal(cleanAccess({ others: "none", bots: {}, computer: true })?.computer, undefined);
+  assert.equal(inviteDefault(["a"]).computer, undefined);
+});
+
+test("Use its computer as orgo-web says it: bops-role's computerUse is read (a real yes or no only), and goes before the owner's state, but for an entry turned off there", async () => {
+  // bops-role: kept as orgo-web sent it; anything but true or false is as if it didn't say (an orgo-web from before it).
+  const { fetch } = fakeRoles({
+    "k-yes p1": { ...access("member"), computerUse: true },
+    "k-no p1": { ...access("member"), computerUse: false },
+    "k-odd p1": { ...access("member"), computerUse: "yes" } as unknown as WsAccess,
+    "k-old p1": access("member"),
+  });
+  resetMembers({ fetch });
+  assert.equal((await accessFor("u-yes", "k-yes", "p1"))?.computerUse, true);
+  assert.equal((await accessFor("u-no", "k-no", "p1"))?.computerUse, false);
+  assert.equal("computerUse" in ((await accessFor("u-odd", "k-odd", "p1")) ?? {}), false, "not a yes or no: not said");
+  assert.equal("computerUse" in ((await accessFor("u-old", "k-old", "p1")) ?? {}), false);
+  const joinedAt = Date.parse("2026-10-20T12:00:00Z");
+  const blob = (computer?: unknown, at?: number) => team({ "ann@acme.com": { others: "none", bots: { a: "write" }, ...(computer !== undefined ? { computer } : {}), ...(at !== undefined ? { at } : {}) } as MemberAccess });
+  const ws = (b: ReturnType<typeof team>) => b.workspaces[0] as Record<string, unknown>;
+  // orgo-web's yes: on, even where the owner's state never set it (or has it set for a membership before this one).
+  assert.equal(computerUseOf(ws(blob()), member({ computerUse: true })), true, "never set here: orgo-web's yes stands");
+  assert.equal(computerUseOf(ws(blob("use")), member({ computerUse: true })), true);
+  assert.equal(computerUseOf(ws(blob("none", joinedAt - 1)), member({ computerUse: true, joinedAt })), true, "an off from an earlier membership isn't theirs");
+  assert.equal(computerUseOf(ws(team({})), member({ email: "nobody@acme.com", computerUse: true })), true);
+  // ...but not once the owner's Mac turned it off (it does so in orgo-web first: this is the moment before orgo-web's notice lands).
+  assert.equal(computerUseOf(ws(blob("none")), member({ computerUse: true })), false, "turned off in the owner's state");
+  // orgo-web's no: off, whatever the owner's state keeps.
+  assert.equal(computerUseOf(ws(blob("use")), member({ computerUse: false })), false, "orgo-web's no wins");
+  assert.equal(computerUseOf(ws(blob("use")), member({ role: "admin", computerUse: false })), false, "an admin the same");
+  // The owner always; from an orgo-web that doesn't say, the owner's state alone (as before).
+  assert.equal(computerUseOf(ws(blob()), { ...OWNER_VIEW, computerUse: false }), true, "the owner always");
+  assert.equal(computerUseOf(ws(blob("use")), member()), true);
+  assert.equal(computerUseOf(ws(blob()), member()), false);
+  // Their window reads it the same way, and their fingerprint changes with it.
+  assert.equal(sharedSlice(blob(), "ws_acme", member({ computerUse: true })).computer, "use");
+  assert.equal(sharedSlice(blob("use"), "ws_acme", member({ computerUse: false })).computer, undefined);
+  assert.notEqual(sharedHash(sharedSlice(blob("use"), "ws_acme", member({ computerUse: true }))), sharedHash(sharedSlice(blob("use"), "ws_acme", member({ computerUse: false }))));
 });
 
 test("a bot made later is hidden while others is none, and shown when others lets them read", () => {
@@ -1103,8 +1163,9 @@ const actOwner: Record<string, unknown> = {
       id: "ws_act",
       name: "Acts",
       memberAccess: {
-        "sam@example.com": { others: "none", bots: { max: "write", ivy: "read" }, at: 1_700_000_001_000 },
-        "tom@orgo.ai": { others: "none", bots: { max: "write" } },
+        // Both may use the bots' computers (Use its computer): what a reply, an answer or Nothing to add there takes.
+        "sam@example.com": { others: "none", bots: { max: "write", ivy: "read" }, at: 1_700_000_001_000, computer: "use" },
+        "tom@orgo.ai": { others: "none", bots: { max: "write" }, computer: "use" },
       },
     },
   ],

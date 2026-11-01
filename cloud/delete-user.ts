@@ -91,7 +91,8 @@ import { forgetUser } from "./turn-guard.ts";
  * - Deleted at once: `chat_messages` (their chats), `app_state_backups` (whole copies before Start over),
  *   `owner_phones` and `owner_emails` (their own number and address: someone else may verify that
  *   number now), `cloud_pending` (texts, calls and events waiting for their Mac, and what they did as a
- *   member that waits for another owner's), `slack_links`, `plans`
+ *   member that waits for another owner's), `chat_turns` (answers owed to their computers, and owed in another owner's
+ *   workspace for what they said there), `runner_presence`, `chat_routing`, `slack_links`, `plans`
  *   (orgo-web keeps the plan itself), `notice_dismissals`, `cloud_usage` (what they used, for their
  *   account page: what it cost is orgo-web's AI credit ledger, which orgo-web deletes or keeps itself),
  *   `cloud_limits` (the counts that name them; a verify count by recipient alone is no one's and goes
@@ -146,6 +147,11 @@ const CONTENT: [string, string][] = [
   // kept after it was taken (a week, for its dedupe key: tunnel.ts clearOldEvents): it names them and has their words.
   // Nothing of theirs is sent again once they're gone, so the key isn't needed.
   ["cloud_pending", "DELETE FROM bops.cloud_pending WHERE user_id = $1 OR (kind = 'member' AND payload->'member'->>'userId' = $1)"],
+  // Chat turns owed to their computers, and those owed in someone else's workspace for what they said there as a member
+  // (turns.ts): its member names them. Their runners' presence and their workspaces' chat switches go too.
+  ["chat_turns", "DELETE FROM bops.chat_turns WHERE user_id = $1 OR member->>'userId' = $1"],
+  ["runner_presence", "DELETE FROM bops.runner_presence WHERE user_id = $1"],
+  ["chat_routing", "DELETE FROM bops.chat_routing WHERE user_id = $1"],
   ["slack_links", "DELETE FROM bops.slack_links WHERE user_id = $1"],
   ["plans", "DELETE FROM bops.plans WHERE user_id = $1"],
   ["notice_dismissals", "DELETE FROM bops.notice_dismissals WHERE user_id = $1"],

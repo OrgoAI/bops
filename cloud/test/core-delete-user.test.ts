@@ -213,7 +213,7 @@ const count = async (table: string, userId: string, column = "user_id") => Numbe
 /** Every table that names a user, and how many rows each has for this one. */
 async function rowsOf(userId: string) {
   const out: Record<string, number> = {};
-  for (const t of ["app_state", "app_state_backups", "chat_messages", "cloud_accounts", "cloud_agents", "cloud_numbers", "cloud_objects", "cloud_pending", "cloud_usage", "mail_handles", "mail_inboxes", "notice_dismissals", "phone_lines", "plans", "slack_links"])
+  for (const t of ["app_state", "app_state_backups", "chat_messages", "chat_routing", "chat_turns", "runner_presence", "cloud_accounts", "cloud_agents", "cloud_numbers", "cloud_objects", "cloud_pending", "cloud_usage", "mail_handles", "mail_inboxes", "notice_dismissals", "phone_lines", "plans", "slack_links"])
     out[t] = await count(t, userId);
   out.owner_phones = await count("owner_phones", userId, "orgo_user_id");
   out.owner_emails = await count("owner_emails", userId, "orgo_user_id");
@@ -223,8 +223,8 @@ async function rowsOf(userId: string) {
 const nothingOf = (rows: Record<string, number>) => Object.fromEntries(Object.keys(rows).map((k) => [k, 0]));
 
 const ZERO = {
-  app_state: 0, app_state_backups: 0, chat_messages: 0, cloud_accounts: 0, cloud_agents: 0, cloud_limits: 0, cloud_numbers: 0, cloud_objects: 0,
-  cloud_pending: 0, cloud_usage: 0, mail_inboxes: 0, notice_dismissals: 0, owner_emails: 0, owner_phones: 0, phone_lines: 0, plans: 0, slack_links: 0,
+  app_state: 0, app_state_backups: 0, chat_messages: 0, chat_routing: 0, chat_turns: 0, cloud_accounts: 0, cloud_agents: 0, cloud_limits: 0, cloud_numbers: 0, cloud_objects: 0,
+  cloud_pending: 0, runner_presence: 0, cloud_usage: 0, mail_inboxes: 0, notice_dismissals: 0, owner_emails: 0, owner_phones: 0, phone_lines: 0, plans: 0, slack_links: 0,
 };
 const NO_PROVIDERS = { agentphone: { numbers: 0 }, agentmail: { inboxes: 0, pods: 0 }, honcho: { workspaces: 0 }, openai: { responses: 0 }, composio: { connectedAccounts: 0 } };
 
@@ -248,6 +248,9 @@ async function fullUser() {
   objects.push(ids.setup);
   await query("INSERT INTO bops.app_state (user_id, state, version, protocol, writer) VALUES ($1, $2::jsonb, 3, 3, 'mac-1')", [id, JSON.stringify({ installId: "inst1", bots: [{ id: "boppy", name: "Boppy", isMain: true }] })]);
   await query("INSERT INTO bops.chat_messages (user_id, id, chat_id, at, json) VALUES ($1, 'm1', 'bot:boppy', 1, '{\"id\":\"m1\",\"text\":\"hi\"}'), ($1, 'm2', 'bot:boppy', 2, NULL)", [id]);
+  await query("INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, desktop_id, target_device, state, deadline, human_at) VALUES ($1, 'turn_m1', 'm1', 'bot:boppy', 'boppy', 'ws_main', 'd1', 'dev1', 'owed', now(), 1)", [id]);
+  await query("INSERT INTO bops.runner_presence (user_id, device_id, desktop_id) VALUES ($1, 'dev1', 'd1')", [id]);
+  await query("INSERT INTO bops.chat_routing (user_id, ws_id, mode) VALUES ($1, 'ws_main', 'cloud')", [id]);
   await query("INSERT INTO bops.app_state_backups (user_id, state) VALUES ($1, '{\"messages\":[]}')", [id]);
   await query("INSERT INTO bops.owner_phones (orgo_user_id, phone_e164, consent_at, verified_at) VALUES ($1, $2, now(), now())", [id, phone]);
   await query("INSERT INTO bops.owner_emails (orgo_user_id, email, verified_at) VALUES ($1, $2, now())", [id, `${id}@example.com`]);
@@ -341,7 +344,7 @@ test("everything of the user's goes, here and at every provider, with counts; th
   const r = await deleteCall({ userId: u.id });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.deepEqual(r.json.deleted, {
-    ...ZERO, app_state: 1, app_state_backups: 1, chat_messages: 2, cloud_accounts: 1, cloud_agents: 1, cloud_limits: 2, cloud_numbers: 1,
+    ...ZERO, app_state: 1, app_state_backups: 1, chat_messages: 2, chat_routing: 1, chat_turns: 1, runner_presence: 1, cloud_accounts: 1, cloud_agents: 1, cloud_limits: 2, cloud_numbers: 1,
     // An agent session and a code's hold at once; two responses and the connected account once their provider deleted them.
     cloud_objects: 5,
     cloud_pending: 1, cloud_usage: 1, mail_inboxes: 1, notice_dismissals: 1, owner_emails: 1, owner_phones: 1,

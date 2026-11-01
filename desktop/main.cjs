@@ -1285,13 +1285,13 @@ function releaseNotes(notes) {
 
 /**
  * What the page shows: the newer version, what's new in it and where it's at ({ version, notes, phase,
- * asked, failed }), unless there's none or the user put its notice away. One put away while it's ready
+ * asked, failed, why }), unless there's none or the user put its notice away. One put away while it's ready
  * still installs when Bops quits.
  */
 function updateInfo() {
   const u = updates?.state();
   if (!u || u.phase === "none" || u.version === dismissedVersion()) return null;
-  return { version: u.version, notes: u.notes, phase: u.phase, asked: u.asked, failed: u.failed };
+  return { version: u.version, notes: u.notes, phase: u.phase, asked: u.asked, failed: u.failed, why: u.why };
 }
 const sendUpdate = () => mainWin && !mainWin.isDestroyed() && mainWin.webContents.send("update", updateInfo());
 

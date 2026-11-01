@@ -128,8 +128,11 @@ id), and a state write saying another device is 403. Its open sockets and stream
 again every 30 seconds (`server.ts watchComputer`): Orgo turning its credential down, or naming another
 computer for it, ends them; a socket also ends at its token's end; a streamed answer (an agent's events)
 outlives its token only while that computer keeps signing in afresh (`computerSeenAt`, under 2 minutes).
-It still reads the user's whole state, all but the Preview passwords kept for members (`computer-scope.ts
-forComputer`), and spends their AI credit (the identity spec's Q4). orgo-web
+It reads only what its bots need (`computer-scope.ts forComputer`): the bots on it, their chats, threads,
+routines, watches, requests for the user's OK and saved logins, their workspaces, and of each other bot in
+those workspaces only who it is and where it works; never another workspace, nor the Preview passwords
+kept for members. A write puts back what it never read (`withHeldBack`). It still spends the user's AI
+credit (the identity spec's Q4). orgo-web
 answers a profile for an identity token only once `VM_IDENTITY_BOPS_CLOUD_READY=1`, which is set right
 after this is deployed and before `VM_IDENTITY=admins`.
 
@@ -820,7 +823,10 @@ account, and Bops Cloud never edits the owner's state for them: what a Write mem
 by the owner's own Mac.
 
 - Who may is orgo-web's to say, with the caller's own Orgo key: `GET /api/projects/<id>/bops-role`
-  answers `{ role: owner | admin | member, ownerUserId, bopsWsId, name }`, else 404. Kept a minute per
+  answers `{ role: owner | admin | member, ownerUserId, bopsWsId, name, joinedAt?, computerUse? }`, else 404.
+  `computerUse` is the member's Use its computer, which orgo-web keeps (`project_members.bops_computer_use`,
+  set by the owner's Mac: `PATCH /api/workspaces/<id>/members {memberId, bopsComputerUse}`) and Bops Cloud goes
+  by (see "Chat through Bops Cloud"); left out by an orgo-web or a database from before it. Kept a minute per
   caller and project (a no 15 seconds). A project whose `bopsWsId` is null (an Orgo without per
   workspace projects, one "bops" project for all of them) is refused, 409 `not_shareable`.
 - `GET /v1/live?project=<id>`: the owner's stream of that workspace (see "Live"). While it's open it
@@ -844,7 +850,72 @@ by the owner's own Mac.
   already over is 409 `not_waiting`. Then it waits for the owner's Mac as a `member` event
   (`bops.cloud_pending`, dedupe `member:<user>:<key>`, ten minutes at most), and answers 202
   `{ ok, macOn }`. The Mac checks it again against its own state and does it as the owner's taps would,
-  with the member named (`lib/server/member-acts.ts`). Runners never act for a member.
+  with the member named (`lib/server/member-acts.ts`). Runners never act for a member. In a workspace whose
+  chat goes through Bops Cloud (next), a chat act is written here at once instead.
+
+### Chat through Bops Cloud
+
+A per workspace switch (`bops.chat_routing`, off by default) sends a workspace's chat through Bops Cloud
+(`turns.ts`; protocol.ts "Chat through Bops Cloud"). It's set by the owner's Bops (`POST /v1/chat-routing
+{ wsId, mode?: "mac" | "cloud", allowHourly? }`, read with `GET /v1/chat-routing?ws=`) or by Orgo's staff
+(`POST /v1/internal/chat-routing { userId, wsId, mode?, allowHourly?, force? }`, signed as the plan notices
+are), and mirrored on the workspace in the owner's state (`Workspace.chatOn: "cloud"`), which the owner's Mac
+and the runner set up go by; Bops Cloud puts the mirror back on every owner write that drops it (a Bops from
+before). Turning it on waits for a Bops at `CLOUD_CHAT_MIN_VERSION` or newer (the asking Bops's version, or for
+staff the newest the account said; 409 `chat_needs_update`; staff may `force` once they checked every Mac).
+Then:
+
+- **Every message someone says there is written here first.** A member's chat act, and the owner's own
+  message from their Bops (`POST /v1/chats/<chatId>/send { key, text, replyTo? }`, a one bot chat whose bot
+  works on a computer; else 409 `chat_not_in_cloud` and their Bops answers it as before). Under the owner's
+  row lock it's checked again on the state as it is (a member: Write on the bot in their view now), written
+  once by its key (`msg_m_<user>_<key>`, `msg_o_<key>`; a retry is the same message; an id that's someone
+  else's 409 `message_taken`), with the member's stamp as orgo-web vouched for them. An orgo-web notice for
+  them that lands meanwhile takes it back. Every viewer hears it on the stream they watch.
+- **Its answer is owed to the bot's computer** (`bops.chat_turns`) when the owner let the member Use its
+  computer (the owner always may). That's orgo-web's `computerUse` from bops-role, asked afresh for the act,
+  unless the owner's state has it turned off for them (`MemberAccess.computer: "none"`; the owner's Mac turns
+  it off in orgo-web first, so this only covers the moment before orgo-web's notice); from an orgo-web that
+  doesn't send it, the owner's state alone (`ws-slice.ts` computerUseOf). orgo-web's answer goes with the turn
+  (`member.computerUse`), and its claim, beats, pause and resume go by it; orgo-web turning it off sends its
+  members-changed notice, which ends that member's open turns as a removal does. Without it the message stays with a note in the chat ("Tara hasn't let
+  Wren use Max's computer, so Max won't answer this."), marked on their stamp (`member.noUse`, so a later turn
+  reads it as said, never as what to do), and nothing is woken or run. Without it a member also can't tell a
+  thread on a bot's computer more, say there's nothing to add, fold it up, or answer an ask that lets work
+  there go on (403 `member_no_computer`); Stop still goes. Bots with no computer answer as before. A group, or a bot with no
+  computer or set to work on the owner's Mac, stays the owner's Mac's to answer: the member's message is
+  handed to it written already (a `member` event with `stored`, kept a day), and while the Mac is away the
+  chat says so.
+- **The runner answers.** `GET /v1/runner/live` (a computer's runner only) gives it `turn` events for its own
+  device, `turn-cancel` and `state`. It claims a turn (`POST /v1/runner/turns/<id>/claim`: only its own
+  device's, only the oldest of a chat while none of that chat runs, the member and where the bot works
+  checked again; 409 `busy` or `taken`, 410 `over`), gets Bops Cloud's clock to stamp by, beats every 30
+  seconds (`/beat { phase }`, "tools" once it did something that can't be done twice; only a claimed turn;
+  409 when it isn't its any more, or its member lost Write or Use its computer) and ends (`/done { state:
+  done | paused | failed, approvalId?, react?, note? }`). A paused turn goes on only through `/resume {
+  approvalId }`: the OK its pause named, on the runner that paused it, while its member still may (else 409
+  and the turn ends); the runner tags the OK request with the turn (`AskResume.cloudTurn`), so it never runs
+  the approved action outside its turn, and needs nothing kept in memory across a restart. A row it writes
+  carrying a turn's id is taken only while its device holds or last held that turn, and never before the
+  message's time. Its tapback on the message is written by Bops Cloud. A runner whose root someone else
+  has could still leave the tag off a bot row it may write: the turn fence holds honest runners only.
+- **No runner listening**: its computer is woken (`POST <orgo>/api/internal/bops/wake`, signed with
+  `BOPS_CLOUD_WAKE_SECRET`; unset, nothing is woken), one wake at a time per computer however many turns
+  wait, and the turns go to the runner as it connects. A computer billed by the hour is woken only when the
+  owner allowed it (`allowHourly`). Stopped, deleted, out of Free hours or AI credit, billed by the hour
+  and not allowed: its turns end with a note saying so.
+- **A runner that goes quiet** (its lease of 90 seconds runs out): owed again before it did anything that
+  can't be done twice (3 tries), unless its answer is written already (then done: never answered twice),
+  else ended with a note to send it again, never run twice. Owed past its deadline (10 minutes): ended with
+  a note that the computer didn't wake in time. A turn owed a while to a runner that listens is offered
+  again. orgo-web saying the computer runs while no runner connects for 12 tries (a runner from before this
+  build): ended with a note that the owner's Mac must open the updated Bops once. Paused for an OK: no
+  lease, a day to be answered, and it doesn't hold its chat meanwhile. A member removed (`members-changed`),
+  or their access changed in the owner's state (each owner write checks the open turns of members): their
+  turns that may no longer run end, running or paused, and a runner holding one hears `turn-cancel`.
+- **Viewers** hear a `turn` event (owed, waking, thinking, paused, done, failed with its note) and the bot
+  thinking while it's owed or running, held to each member's scope like every other event. Nothing of it
+  goes in the message's row.
 
 ## The app's state
 
@@ -1060,6 +1131,7 @@ deleted user's tombstone 3 days after the last delete (`DELETED_KEEP_DAYS`), or 
 | `delete-user.ts` | a user who deleted their Orgo account: everything of theirs deleted, here and at the providers, and the tombstone's undo (signed) |
 | `tunnel.ts`, `hooks.ts`, `slack.ts`, `state.ts` | 3: the tunnel, webhooks, Slack, state |
 | `live.ts` | what each bot is doing right now, streamed to the user's devices (in memory only) |
+| `turns.ts` | chat through Bops Cloud: messages written here first, their answers owed to the bots' computers, the runners' stream, waking |
 | `lines.ts`, `voice.ts`, `calls.ts` | 4: who owns each line, a call's turns answered here, GPT-Live calls (dormant) |
 | `agent.ts`, `agent-prompt.ts`, `honcho.ts` | 5: the main bot's chat from the phone, what the bot is told there, and its memory |
 | `style.ts` | how every bot writes and asks, and what Bops is: the words the Mac's bots and the cloud's share (the app imports it too) |

@@ -4,8 +4,9 @@
 // apps are open to the owner; never a reply, Nothing to add or an answer for a thread on the owner's Mac, nor an answer
 // to an ask to use the owner's Connected apps or keys; their name made plain; not too late; never on a bot's computer)
 // and done through the ways in the owner's own
-// taps use, with the member named: chat.ts handleMessage (once per key), sessions.ts replyToSession (never a watch),
-// stopSession and dismissWaiting, permission.ts replyToAsk.
+// taps use, with the member named: chat.ts handleMessage (once per key; without Use its computer their words and a note,
+// no turn), chat.ts answerMessage for a message Bops Cloud wrote already (once), sessions.ts replyToSession (never a
+// watch), stopSession and dismissWaiting, permission.ts replyToAsk.
 //
 // The store, the chat, the threads and the asks are stand-ins that record what was asked of them: nothing reaches a
 // real service. The people are made up.
@@ -20,8 +21,8 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const forward = (mod, names) => names.map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(mod)}].${n}(...a);`).join("\n");
 const FAKES = {
-  store: forward("store", ["bot", "chat", "getState", "ownerName", "session"]),
-  chat: forward("chat", ["handleMessage"]),
+  store: forward("store", ["bot", "chat", "getState", "ownerName", "session", "addMessage", "pullState"]),
+  chat: forward("chat", ["handleMessage", "answerMessage"]),
   sessions: forward("sessions", ["replyToSession", "stopSession", "dismissWaiting", "compactThread"]),
   "chat-summary": forward("chat-summary", ["compactChat"]),
   permission: forward("permission", ["replyToAsk"]),
@@ -69,15 +70,16 @@ function fresh(o = {}) {
         id: "ws_acme",
         name: "Acme",
         memberAccess: {
-          "sam@example.com": { others: "none", bots: { max: o.maxLevel ?? "write", ivy: "read" }, at: JOINED + 1000 },
-          "tom@orgo.ai": { others: "none", bots: { max: "write" }, at: JOINED + 1000, apps: o.tomApps ?? "write" },
+          "sam@example.com": { others: "none", bots: { max: o.maxLevel ?? "write", ivy: "read" }, at: JOINED + 1000, computer: o.samComputer ?? "use" },
+          "tom@orgo.ai": { others: "none", bots: { max: "write" }, at: JOINED + 1000, apps: o.tomApps ?? "write", computer: "use" },
         },
         hostedApps: { shop: { botId: "max", computerId: "c1", sites: [{ name: "admin" }] } },
       },
     ],
     bots: [
       { id: "boppy", name: "Boppy", isMain: true },
-      { id: "max", name: "Max", workspaceId: "ws_acme" },
+      // Max works on a computer of his own (what Use its computer gates); `maxComputer: null`, on none.
+      { id: "max", name: "Max", workspaceId: "ws_acme", ...(o.maxComputer === null ? {} : { computerId: o.maxComputer ?? "c1" }) },
       { id: "ivy", name: "Ivy", workspaceId: "ws_acme" },
       { id: "zed", name: "Zed", workspaceId: "ws_acme" },
     ],
@@ -120,8 +122,19 @@ globalThis.__fake = {
     bot: (id) => state.bots.find((b) => b.id === id),
     chat: (id) => state.chats.find((c) => c.id === id),
     session: (id) => state.sessions.find((s) => s.id === id),
+    addMessage: (m) => {
+      const row = { id: `m${state.messages.length}`, at: Date.now(), ...m };
+      state.messages.push(row);
+      did.push(["add", m.role, m.text, m.member?.ref ?? null]);
+      return row;
+    },
+    pullState: async () => {
+      pulls++;
+      onPull();
+    },
   },
   chat: {
+    answerMessage: async (chatId, messageId, member) => void did.push(["answer", chatId, messageId, member]),
     handleMessage: async (chatId, text, replyTo, ...rest) => {
       const member = rest[6];
       did.push(["chat", chatId, text, replyTo, member]);
@@ -159,6 +172,9 @@ globalThis.__fake = {
     seeApps: async () => void did.push(["seeApps"]),
   },
 };
+/** How many times the state was read, and what a read brings in. */
+let pulls = 0;
+let onPull = () => {};
 /** What the owner's Compact says (chat-summary.ts compactChat, sessions.ts compactThread). */
 let compactSays = { ok: true };
 /** What the owner's Mac kept on each app (noteMemberAct), and the next page function's error. */
@@ -166,7 +182,17 @@ const kept = [];
 let appFails = null;
 
 const { memberEvent } = await import(`${root}/lib/server/member-acts.ts`);
-const event = (act, o = {}) => ({ projectId: "proj_acme", wsId: o.wsId ?? "ws_acme", member: o.member ?? SAM, joinedAt: o.joinedAt ?? JOINED, key: o.key ?? "key_00000001", at: o.at ?? Date.now(), act });
+// `computer`: Bops Cloud vouched for their Use its computer (as orgo-web keeps it), unless `computer: false`.
+const event = (act, o = {}) => ({
+  projectId: "proj_acme",
+  wsId: o.wsId ?? "ws_acme",
+  member: o.member ?? SAM,
+  joinedAt: o.joinedAt ?? JOINED,
+  key: o.key ?? "key_00000001",
+  at: o.at ?? Date.now(),
+  act,
+  ...(o.computer === false ? {} : { computer: true }),
+});
 const warned = [];
 console.warn = (line) => warned.push(String(line));
 
@@ -190,6 +216,81 @@ await check("a chat to a bot they have at Write is the member's message, once pe
   // The tunnel sends it again (an ack lost): their words are there, nothing more.
   await memberEvent(event({ act: "chat", chatId: "bot:max", text: "Book the 9am train" }), "e1");
   assert.equal(did.length, 1);
+});
+
+await check("without Use its computer their words stay, with a note that the bot won't answer, and no turn runs for them", async () => {
+  fresh({ samComputer: "none" });
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "Run the backup" }), "e_nouse");
+  assert.deepEqual(did, [
+    ["add", "user", "Run the backup", "key_00000001"],
+    ["add", "system", "Alex hasn't let Sam use Max's computer, so Max won't answer this.", null],
+  ]);
+  // Bops Cloud didn't vouch for it (orgo-web, which keeps it, says no): off, whatever this state keeps.
+  fresh();
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "hi" }, { computer: false }), "e_nouse2");
+  assert.deepEqual(did.map((d) => d.slice(0, 2)), [["add", "user"], ["add", "system"]], "kept as on here, but orgo-web says no");
+  await memberEvent(event({ act: "reply", sessionId: "t-max", text: "go on" }, { key: "key_reply0009", computer: false }), "e_nouse3");
+  assert.ok(warned.some((w) => w.includes("e_nouse3") && w.includes("no computer")));
+  // Not kept here (never set on this Mac) while Bops Cloud vouched: orgo-web's word stands.
+  fresh();
+  delete state.workspaces[1].memberAccess["sam@example.com"].computer;
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "hi" }, { key: "key_00000002" }), "e_nouse4");
+  assert.equal(did[0]?.[0], "chat");
+});
+
+await check("without Use its computer: no reply, Nothing to add, folding up or answer to work on a bot's computer; Stop still; a bot with no computer answers as before", async () => {
+  fresh({ samComputer: "none" });
+  await memberEvent(event({ act: "reply", sessionId: "t-max", text: "rm -rf it" }, { key: "key_reply0001" }), "e_nc1");
+  await memberEvent(event({ act: "dismiss", sessionId: "t-max" }, { key: "key_dism00001" }), "e_nc2");
+  await memberEvent(event({ act: "compact", sessionId: "t-max" }, { key: "key_comp00001" }), "e_nc3");
+  await memberEvent(event({ act: "answer", askId: "ask-1", reply: "once" }, { key: "key_answ00001" }), "e_nc4");
+  // A chat's ask (no thread) for a bot with a computer is the same.
+  state.appApprovals.push({ id: "ask-chat", botId: "max", chatId: "bot:max", action: "Run a command", kind: "brain" });
+  await memberEvent(event({ act: "answer", askId: "ask-chat", reply: "once" }, { key: "key_answ00002" }), "e_nc5");
+  assert.deepEqual(did, [], "none of it done");
+  for (const e of ["e_nc1", "e_nc2", "e_nc3", "e_nc4", "e_nc5"]) assert.ok(warned.some((w) => w.includes(e) && w.includes("no computer")), e);
+  await memberEvent(event({ act: "stop", sessionIds: ["t-max"] }, { key: "key_stop00001" }), "e_nc6");
+  assert.equal(did.length, 1, "Stop still ends it");
+  // A bot with no computer of its own: their words are answered as before (Use its computer gates computers only).
+  fresh({ samComputer: "none", maxComputer: null });
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "hi" }), "e_nc7");
+  assert.equal(did[0]?.[0], "chat");
+});
+
+await check("a member's chat queued before the workspace was switched to Bops Cloud: never added here (only Bops Cloud stamps their words there)", async () => {
+  fresh();
+  state.workspaces[1].chatOn = "cloud";
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "hi" }), "e_sw");
+  assert.deepEqual(did, []);
+  assert.ok(warned.some((w) => w.includes("e_sw") && w.includes("through Bops Cloud")));
+});
+
+await check("a message Bops Cloud wrote already is answered only while they still may: Use its computer turned off since (a group with a computer), or Write taken away", async () => {
+  fresh({ samComputer: "none" });
+  state.messages.push({ id: "msg_m_sam_g1", chatId: "g-max", role: "user", text: "hi", at: 5, member: { ...SAM, ref: "key_00000001" } });
+  // (Bops Cloud took it while they had Use; the owner turned it off before this Mac opened.)
+  await memberEvent({ ...event({ act: "chat", chatId: "g-max", text: "hi" }), stored: true, messageId: "msg_m_sam_g1" }, "e_st1");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(did, []);
+  assert.ok(warned.some((w) => w.includes("e_st1") && w.includes("no computer")));
+});
+
+await check("a message Bops Cloud wrote already (its chat through Bops Cloud, a bot on this Mac) is read until it's here and answered once, never added", async () => {
+  fresh();
+  pulls = 0;
+  onPull = () => pulls === 2 && state.messages.push({ id: "msg_m_sam_k1", chatId: "bot:max", role: "user", text: "hi", at: 5, member: { ...SAM, ref: "key_00000001" } });
+  const stored = { ...event({ act: "chat", chatId: "bot:max", text: "hi" }), stored: true, messageId: "msg_m_sam_k1" };
+  await memberEvent(stored, "e_stored");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(did, [["answer", "bot:max", "msg_m_sam_k1", { ...SAM, ref: "key_00000001" }]]);
+  await memberEvent(stored, "e_stored");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(did.length, 1, "handed again: answered once");
+  // It waits for this Mac up to a day, as the chat says it will.
+  fresh();
+  await memberEvent({ ...stored, messageId: "msg_m_sam_k2", at: Date.now() - 3600_000 }, "e_stored2");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(warned.some((w) => w.includes("e_stored2") && w.includes("isn't here")), "an hour later it's still taken (its message just isn't here)");
 });
 
 await check("a group with Write on every bot is theirs; one with a Read bot, a Read bot's chat, two bots' talk or another workspace's never", async () => {

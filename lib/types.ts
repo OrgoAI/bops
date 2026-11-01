@@ -298,6 +298,13 @@ export type Workspace = {
    */
   memberAccess?: MemberAccessMap;
   /**
+   * Whose chat goes through Bops Cloud first: "cloud" when every message here, the owner's and their people's, is
+   * taken by Bops Cloud, which checks who may, keeps it and has the bot's computer answer. Unset: as before (the
+   * owner's Mac answers). Off by default, turned on a workspace at a time. Then only Bops Cloud writes a member's
+   * stamp on a message here (cloud/computer-scope.ts cloudChatOn, memberStampKept).
+   */
+  chatOn?: "cloud";
+  /**
    * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
    * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
    * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain); like
@@ -498,6 +505,18 @@ export function freeComputerOnDelete(bots: Bot[], wsId: string): { id: string; h
  * bot's own host, when it shares the free Bops computer). Anything about the machine (its id, status,
  * tailnet address, screens) comes from this bot; the work stays `b`'s.
  */
+/**
+ * A chat as the window shows who's typing in it: its own (Chat.typing), and each of its bots thinking or writing in it
+ * elsewhere (AppState.liveMoods with this chat: on another device, or on its computer answering a turn Bops Cloud owes
+ * it, cloud/turns.ts), or whose computer is waking to answer. The same chat when there's none to add.
+ */
+export function withRemoteTyping<C extends Pick<Chat, "id" | "botIds" | "typing">>(c: C, moods: AppState["liveMoods"]): C {
+  const more = Object.entries(moods ?? {})
+    .filter(([botId, m]) => m.chatId === c.id && (m.mood === "thinking" || m.mood === "writing" || m.waking) && c.botIds.includes(botId) && !c.typing.includes(botId))
+    .map(([botId]) => botId);
+  return more.length ? { ...c, typing: [...c.typing, ...more] } : c;
+}
+
 export function workBot(b: Bot, bots: Bot[]): Bot {
   if (!sharesComputer(b)) return b;
   if (b.isMain) return freeComputerBot(bots, b.id) ?? b;
@@ -794,6 +813,11 @@ export type Message = {
    */
   member?: MemberSaid;
   /**
+   * Written by a computer's runner as its answer to a message Bops Cloud took (cloud/turns.ts): that turn's id. Bops
+   * Cloud takes such a row only from the device that holds or held the turn, and never before the message it answers.
+   */
+  turn?: string;
+  /**
    * In the window only, never synced: one the viewer of a shared workspace sent that the owner's Bops hasn't
    * written yet (lib/server/shared-core.ts viewState makes it), and how it stands: on its way, waiting for the
    * owner's Bops to open, or not sent (`error`). `key` sends it again as the same act.
@@ -1061,8 +1085,11 @@ export type ThreadReply = {
   memberSend?: MemberSend;
 };
 
-/** Who a member is on what they said (MemberWho), and their key for it (cloud/protocol.ts MemberActBody). */
-export type MemberSaid = MemberWho & { ref?: string };
+/**
+ * Who a member is on what they said (MemberWho), and their key for it (cloud/protocol.ts MemberActBody). `noUse`: said
+ * without Use its computer, so no bot answers it, and a turn that reads it later takes it as said, never as what to do.
+ */
+export type MemberSaid = MemberWho & { ref?: string; noUse?: true };
 /** How one of the viewer's own acts in a shared workspace stands, until the owner's Bops has written it (Message.memberSend). */
 export type MemberSend = { state: "sending" | "waiting" | "failed"; error?: string; key: string };
 
@@ -1691,7 +1718,7 @@ export type AppState = {
    * when typing), by bot id, from Bops Cloud's live stream (lib/server/live.ts). Filled in by /api/state
    * for the app; never stored or synced.
    */
-  liveMoods?: Record<BotId, { mood: "thinking" | "writing" | "speaking" | "working"; chatId?: string }>;
+  liveMoods?: Record<BotId, { mood: "thinking" | "writing" | "speaking" | "working"; chatId?: string; waking?: true }>;
   /**
    * The workspace shared with the user that's open now (lib/shared.ts, lib/server/shared.ts): watched, and
    * acted in for the bots the owner gave them Write on. Its bots, chats, threads, routines and watches are
@@ -2176,7 +2203,8 @@ export type AskCall = { name: string; arguments: string };
 export type AskResume =
   | { engine: "responses"; responseId: string; callId: string; call: AskCall }
   | { engine: "agents"; sessionId: string; turnId: string; callId: string; call: AskCall }
-  | { engine: "chat"; responseId: string; callId: string; call: AskCall; outputs: { callId: string; output: string }[]; later?: unknown[]; turn?: unknown }
+  /** `cloudTurn`: asked on a chat turn Bops Cloud owed a computer (cloud/turns.ts): the turn goes on only through Bops Cloud (runner-chat.ts resumeAsTurn). */
+  | { engine: "chat"; responseId: string; callId: string; call: AskCall; outputs: { callId: string; output: string }[]; later?: unknown[]; turn?: unknown; cloudTurn?: string }
   | { engine: "held" };
 
 /**
