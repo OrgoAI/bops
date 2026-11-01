@@ -1,5 +1,0 @@
-- A bot's reply arrives whole, with a smooth entrance.
-- Teammates see a bot typing, and an empty chat suggests first asks.
-- Choose which teammates may use each bot's computer.
-- When there isn't room for an update, Bops says so.
-- Bops uses less power while it's in the background.
