@@ -373,7 +373,8 @@ test("Responses over a WebSocket: each response.create checked as a POST is, a r
   const done = await until(() => got.find((e) => e.type === "response.completed"), "the answer");
   assert.equal(sidebandAuth.at(-1), "Bearer sk-test-main", "with the cloud's key, never the caller's");
   assert.deepEqual(wsCreates.slice(sent).map((e) => [e.type, e.input, e.service_tier]), [["response.create", "hello", "ultrafast"]]);
-  assert.equal(await objectOwner("openai", done.response!.id), alice);
+  // Recorded just after the event reaches the caller: wait for it rather than read once.
+  assert.equal(await until(() => objectOwner("openai", done.response!.id), "the response's owner"), alice);
   const row = await until(async () => (await query("SELECT units::float8 AS units, cost_micros::float8 AS cost, detail FROM bops.cloud_usage WHERE kind = 'openai.tokens' AND detail->>'ref' = $1", [done.response!.id])).rows[0], "the count");
   assert.deepEqual([row.units, row.detail.botId, row.detail.source, row.detail.tier, row.cost], [1100, "iris", "session", "ultrafast", (1000 * 2 + 100 * 10) * 6]);
   // A tool the cloud doesn't pass on, or another user's response to go on from: an error event, and nothing sent.

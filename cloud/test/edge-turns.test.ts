@@ -190,6 +190,12 @@ const membersChanged = (projectId: string, userId: string) => {
   });
 };
 
+
+/** A note Bops Cloud writes in the chat (some just after the response): its words once it's there. */
+async function noteOf(owner: string, id: string): Promise<string | undefined> {
+  await until(async () => (await messages(owner)).some((m) => m.id === id), `the note ${id}`);
+  return (await messages(owner)).find((m) => m.id === id)?.text as string | undefined;
+}
 test("a member's message is written by Bops Cloud at once, both viewers hear it and the bot's answer, and the computer's runner answers it on Bops Cloud's clock", async () => {
   const s = await setup();
   const ownerLive = await stream("/v1/live?ws=ws_acme", keyOf(s.owner), "snapshot");
@@ -325,7 +331,7 @@ test("without Use its computer the message stays with a note, nothing is woken, 
   assert.ok((await messages(s.owner)).some((m) => m.id === g.messageId && (m.member as { userId: string }).userId === s.writer));
   const waiting = await query<{ payload: { stored: boolean; messageId: string } }>("SELECT payload FROM bops.cloud_pending WHERE user_id = $1 AND kind = 'member'", [s.owner]);
   assert.deepEqual(waiting.rows.map((r) => [r.payload.stored, r.payload.messageId]), [[true, g.messageId]]);
-  assert.equal((await messages(s.owner)).find((m) => m.id === `${g.messageId}_note`)?.text, "Tara's Mac answers in this group, so the bots will answer once Tara opens Bops.");
+  assert.equal((await noteOf(s.owner, `${g.messageId}_note`)), "Tara's Mac answers in this group, so the bots will answer once Tara opens Bops.");
 });
 
 test("a computer with no runner is woken once however many turns wait, they go to the runner as it connects, and a refusal ends them with a note", async () => {
@@ -355,7 +361,7 @@ test("a computer with no runner is woken once however many turns wait, they go t
   const c = (await (await act(h.writer, h.project, "key-hourly-001", { act: "chat", chatId: "bot:max", text: "c" })).json()) as { turn: string; messageId: string };
   await until(async () => (await turnById(h.owner, c.turn))?.state === "failed", "refused");
   await until(async () => (await messages(h.owner)).some((m) => m.id === `${c.messageId}_note`), "the note");
-  assert.equal((await messages(h.owner)).find((m) => m.id === `${c.messageId}_note`)?.text, "Max's computer is paid by the hour, and Tara hasn't let messages wake it, so Max can't answer this.");
+  assert.equal((await noteOf(h.owner, `${c.messageId}_note`)), "Max's computer is paid by the hour, and Tara hasn't let messages wake it, so Max can't answer this.");
   assert.equal((await fetch(`${cloud.url}/v1/chat-routing`, { method: "POST", headers: own(h.owner), body: JSON.stringify({ wsId: "ws_acme", allowHourly: true }) })).status, 200);
   wakeAnswers.set(h.desktop, () => ({ state: "stopped" }));
   await act(h.writer, h.project, "key-hourly-002", { act: "chat", chatId: "bot:max", text: "d" });
@@ -388,7 +394,7 @@ test("orgo-web's word on Use its computer is the one Bops Cloud goes by: its no 
   const before = wakes.length;
   const no = (await (await act(s.writer, s.project, "key-orgo-no-01", { act: "chat", chatId: "bot:max", text: "run it" })).json()) as { turn?: string; messageId: string };
   assert.equal(no.turn, undefined, "nothing owed");
-  assert.equal((await messages(s.owner)).find((m) => m.id === `${no.messageId}_note`)?.text, "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
+  assert.equal((await noteOf(s.owner, `${no.messageId}_note`)), "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
   assert.equal(await view(s.writer), undefined, "their window says they can't");
   // orgo-web's yes: owed, claimed, and beating on the computer, though the owner's state never set it.
   const yes = (await (await act(s.noUse, s.project, "key-orgo-yes-1", { act: "chat", chatId: "bot:max", text: "run it" })).json()) as { turn: string; messageId: string };
@@ -426,7 +432,7 @@ test("Use its computer turned off in orgo-web: its notice ends what's owed and r
   assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${b.turn}/claim`, {})).status, 410);
   const next = (await (await act(s.writer, s.project, "key-orgo-off-3", { act: "chat", chatId: "bot:max", text: "z" })).json()) as { turn?: string; messageId: string };
   assert.equal(next.turn, undefined);
-  assert.equal((await messages(s.owner)).find((m) => m.id === `${next.messageId}_note`)?.text, "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
+  assert.equal((await noteOf(s.owner, `${next.messageId}_note`)), "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
   box.close();
 });
 
@@ -440,7 +446,7 @@ test("Use its computer taken away after the message: the runner's claim is refus
   const c = await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/claim`, {});
   assert.deepEqual([c.status, ((await c.json()) as { code: string }).code], [410, "over"]);
   assert.equal((await turnById(s.owner, a.turn))?.state, "failed");
-  assert.equal((await messages(s.owner)).find((m) => m.id === `${a.messageId}_note`)?.text, "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
+  assert.equal((await noteOf(s.owner, `${a.messageId}_note`)), "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
 });
 
 test("the owner's own message goes through Bops Cloud too, only in a one bot chat of a switched workspace", async () => {
@@ -468,7 +474,7 @@ test("a bot on the owner's Mac: Bops Cloud writes the message, the Mac is handed
   assert.equal(a.turn, undefined);
   const waiting = await query<{ payload: { stored: boolean; messageId: string } }>("SELECT payload FROM bops.cloud_pending WHERE user_id = $1 AND kind = 'member'", [s.owner]);
   assert.deepEqual([waiting.rows[0]?.payload.stored, waiting.rows[0]?.payload.messageId], [true, a.messageId]);
-  assert.equal((await messages(s.owner)).find((m) => m.id === `${a.messageId}_note`)?.text, "Zed works on Tara's Mac, so Zed will answer once Tara opens Bops.");
+  assert.equal((await noteOf(s.owner, `${a.messageId}_note`)), "Zed works on Tara's Mac, so Zed will answer once Tara opens Bops.");
 });
 
 test("with the switch off nothing changes: the act waits for the owner's Mac as before", async () => {
@@ -499,7 +505,7 @@ test("Use its computer turned off while a turn runs: its next beat is refused, t
   await until(async () => (await turnById(s.owner, a.turn))?.state === "failed", "ended on the owner's write");
   await until(() => box.of("turn-cancel").some((e) => e.data.id === a.turn), "the runner told");
   assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/beat`, { phase: "model" })).status, 409);
-  assert.equal((await messages(s.owner)).find((m) => m.id === `${a.messageId}_note`)?.text, "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
+  assert.equal((await noteOf(s.owner, `${a.messageId}_note`)), "Tara hasn't let Wren use Max's computer, so Max won't answer this.");
   assert.equal((await writeAs(s.owner, s.desktop, [{ id: "after-off", chatId: "bot:max", role: "bot", botId: "max", text: "z", at: Date.now(), turn: a.turn }])).status, 403, "nothing more for it");
   box.close();
 });
@@ -580,7 +586,7 @@ test("a computer orgo-web says is running whose runner never connects (one from 
   await until(async () => (await turnById(s.owner, a.turn))?.state === "failed", "ended", 15_000);
   assert.equal((await turnById(s.owner, a.turn))?.note, "noRunner");
   await until(async () => (await messages(s.owner)).some((m) => m.id === `${a.messageId}_note`), "the note");
-  assert.equal((await messages(s.owner)).find((m) => m.id === `${a.messageId}_note`)?.text, "Max's computer is on, but it can't answer chats yet. Tara needs to open the updated Bops once to set it up.");
+  assert.equal((await noteOf(s.owner, `${a.messageId}_note`)), "Max's computer is on, but it can't answer chats yet. Tara needs to open the updated Bops once to set it up.");
 });
 
 test("turning chat to Bops Cloud waits for a Bops new enough; an older Mac's save that drops the switch has it put back", async () => {
