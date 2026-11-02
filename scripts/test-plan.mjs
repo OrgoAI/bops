@@ -1493,6 +1493,23 @@ assert.equal(onDisk().owner.about, "saved now");
 await new Promise((r) => setTimeout(r, 600));
 assert.equal(onDisk().owner.about, "saved now", "nothing older lands after it");
 
+// Orgo's free account limits (orgo-web lib/free-limits): 429 NEEDS_CARD / NEEDS_PAYMENT become Orgo's own
+// sentence and a link to add a card or credit, never a retry or the bare code.
+{
+  const sentence = "Too many free accounts from this network today. Add a card to keep going.";
+  const card = L.needsCardLimit(new O.OrgoError(`Orgo POST /computers → 429: ${sentence}`, 429, "NEEDS_CARD", sentence, { error: sentence, code: "NEEDS_CARD", reason: "ip", message: sentence }));
+  assert.ok(card instanceof L.PlanLimit);
+  assert.equal(card.message, sentence);
+  assert.deepEqual(card.link, { label: "Add a card on Orgo", url: "https://orgo.test/settings/billing" });
+  noDashes(L.limitText(card));
+  // An Orgo from before the sentence moved into `error` sent the code there: the message is still read.
+  const old = L.needsCardLimit(new O.OrgoError("Orgo POST /computers → 429: NEEDS_CARD", 429, "NEEDS_CARD", "NEEDS_CARD", { error: "NEEDS_CARD", code: "NEEDS_CARD", message: sentence }));
+  assert.equal(old.message, sentence);
+  const pay = L.needsCardLimit(new O.OrgoError("x", 429, "NEEDS_PAYMENT", "This card already unlocked another free account. Buy credit or choose a plan to keep going."));
+  assert.equal(pay.link.label, "Add credit on Orgo");
+  assert.equal(L.needsCardLimit(refused(429, "rate_limited")), null, "a real rate limit is not a card refusal");
+}
+
 console.log(`all plan tests passed (${calls.length} fake Orgo calls, none to the network)`);
 // Gone before the store's next save could make the folder again.
 rmSync(scratch, { recursive: true, force: true });
