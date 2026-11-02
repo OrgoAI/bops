@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { onComputerResized } from "@/lib/computer-size";
 import { afterVncClose, STREAM_RETRY_MS, type StreamPlan } from "@/lib/rtc";
 import { Mascot } from "./mascot";
 import { RtcDesktop, rtcWorthTrying } from "./rtc-desktop";
@@ -182,6 +183,20 @@ function LiveStream({
     const t = setTimeout(() => setStilled(false), 600);
     return () => clearTimeout(t);
   }, [connected, stilled]);
+
+  // The computer changed size (Settings, computer-size.tsx): a fresh plan, since WebRTC streams only a
+  // computer with 4 cores, so a smaller one goes on over VNC and a bigger one may stream over WebRTC again.
+  useEffect(
+    () =>
+      onComputerResized(() => {
+        setVncUp(false);
+        setRtc("off");
+        setPlan(null);
+        if (ever.current) setStage("reconnecting");
+        setAttempt((a) => a + 1);
+      }),
+    [],
+  );
 
   useEffect(() => {
     if (resting) return;

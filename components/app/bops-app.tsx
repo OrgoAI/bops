@@ -43,6 +43,7 @@ import { NewThread } from "./new-thread";
 import { readyAgents } from "@/lib/agents";
 import { footerPageOf, openFooterPage } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
+import { PickComputer, useSizePick } from "./computer-size";
 import { ThisMacSettings } from "./setup";
 import { TooltipLayer } from "./tooltip";
 import { LoginsPage } from "./logins";
@@ -101,16 +102,24 @@ function chime() {
  * Bops asks who you are first: nobody signed in with Orgo means the sign-in screen (sign-in.tsx),
  * unless this is a self-hosted install running on its own Orgo key. Signing out anywhere clears the
  * state's account, which checks again and brings the sign-in screen back. Once signed in it's the app
- * right away: what this Mac still needs (setup.tsx) waits behind a badge on the account menu.
+ * right away: what this Mac still needs (setup.tsx) waits behind a badge on the account menu. Billed by
+ * use, the account is asked once which size its computer is (Pick your computer, computer-size.tsx), over
+ * the app, as it opens.
  */
 export function BopsApp() {
   const state = useAppState();
   const [auth, recheck, retry] = useAuthStatus(state?.account?.signedInAt);
   useAnalytics(state);
+  const pick = useSizePick(auth && !auth.needsSignIn && !auth.cloudProblem ? state : null);
   if (auth?.needsSignIn) return <SignIn onSignedIn={recheck} />;
   // Signed in, but their Bops (it lives in Bops Cloud) couldn't be loaded: nothing to show until it can.
   if (auth?.cloudProblem) return <CloudUnreachable onRetry={retry} />;
-  return <Bops state={auth ? state : null} />;
+  return (
+    <>
+      <Bops state={auth ? state : null} />
+      {pick.view && <PickComputer view={pick.view} onDone={pick.done} />}
+    </>
+  );
 }
 
 /** A new tab's id, made when a tab opens (in a handler, never while rendering). */

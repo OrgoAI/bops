@@ -1,6 +1,7 @@
 // Tests for what the account sheet's Your plan shows (components/app/account.tsx PlanAndCredit) for each way of
 // paying for Bops (lib/bops-billing.ts): billed by use (the Orgo balance, Add credit on Orgo, one card, no
-// Bops plan), given a month more of a plan (that plan's credit, the day it ends, then what they'll pay), and
+// Bops plan, and the computer's size, Medium or Large, with a switch asked first; Pick your computer too,
+// components/app/computer-size.tsx), given a month more of a plan (that plan's credit, the day it ends, then what they'll pay), and
 // Bops' own plans while orgo-web still bills by them; never Free for an answer that didn't say. Every word
 // plain: no dashes, never Orbit.
 //
@@ -59,13 +60,20 @@ globalThis.EventSource = class {
   close() {}
 };
 
-/** GET /api/account, as each test sets it. */
+/** GET /api/account, as each test sets it; `sizeAnswer`, what POST /api/computer/size answers (each switch is kept in `switches`). */
 let account = null;
+let sizeAnswer = () => json({ ok: true, size: "large", changed: true });
+const switches = [];
 const json = (j, status = 200) => ({ ok: status < 400, status, json: async () => j });
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
   if (u.startsWith("/api/account/credit")) return json({ off: true });
   if (u.startsWith("/api/account")) return json(structuredClone(account));
+  if (u === "/api/computer/size" && init.method === "POST") {
+    switches.push(JSON.parse(init.body));
+    return sizeAnswer();
+  }
+  if (u.startsWith("/api/computer/size")) return json({ needed: false, sizes: [], current: null, preselect: null, change: null });
   return json({}, 404);
 };
 const opened = [];
@@ -74,6 +82,13 @@ globalThis.open = (url) => void opened.push(url);
 const { createElement: h, act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { PlanAndCredit } = await import(pathToFileURL(`${root}/components/app/account.tsx`).href);
+const { PickComputer } = await import(pathToFileURL(`${root}/components/app/computer-size.tsx`).href);
+// Every live view in the window hears when the computer changed size (lib/computer-size.ts).
+let resized = 0;
+globalThis.dispatchEvent = (e) => {
+  if (e.type === "bops:computer-resized") resized++;
+  return true;
+};
 
 let passed = 0;
 const test = async (name, f) => {
@@ -85,13 +100,13 @@ const settle = async () => {
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 };
 const words = (box) => [box.textContent, ...[...box.querySelectorAll("[aria-label],[data-tip],[title]")].flatMap((e) => ["aria-label", "data-tip", "title"].map((a) => e.getAttribute(a)))].filter(Boolean).join("\n");
-async function show(info) {
+async function show(info, el) {
   account = info;
   const box = doc.createElement("div");
   doc.body.appendChild(box);
   const r = createRoot(box);
   await act(async () => {
-    r.render(h(PlanAndCredit, { state: { account: { user: { id: "u_ava", email: "ava@fernway.example" } }, bots: [], workspaces: [] } }));
+    r.render(el ?? h(PlanAndCredit, { state: { account: { user: { id: "u_ava", email: "ava@fernway.example" } }, bots: [], workspaces: [] } }));
     await settle();
   });
   const text = words(box);
@@ -166,6 +181,145 @@ await test("Bops' own plans while orgo-web still bills by them: the three cards,
   await m.done();
   m = await show({ ...base, bops: null });
   assert.equal(m.text.match(/Current/g), null, "no plan marked, never Free");
+  await m.done();
+});
+
+/* ---------------- Medium or Large (components/app/computer-size.tsx) ---------------- */
+
+const SIZES = [
+  { key: "medium", name: "Medium", cpu: 2, ramGb: 8, diskGb: 80, hourlyCents: 5.5 },
+  { key: "large", name: "Large", cpu: 4, ramGb: 16, diskGb: 80, hourlyCents: 11 },
+];
+const sized = (computer = {}) =>
+  usage({ computer: { size: "Medium", key: "medium", id: "c_ava", change: "bops", hourlyCents: 5.5, asleepFree: true, ...computer }, sizes: SIZES, defaultSize: "medium" });
+const radio = (box, label) => [...box.querySelectorAll('[role="radio"]')].find((b) => b.textContent.includes(label));
+const re = (t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+
+await test("an orgo-web before sizes: one price, the Large it makes, and no size to switch", async () => {
+  const m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: usage() } });
+  assert.match(m.text, /Your computer: \$0\.11 an hour while it works/);
+  assert.match(m.text, /4 cores, 16 GB RAM, 80 GB, multi-screen/);
+  assert.equal(m.box.querySelector("[data-your-computer]"), null);
+  await m.done();
+});
+
+await test("with sizes: the card says from Medium's price, and Your computer shows its size and Orgo's price for it", async () => {
+  const m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: sized() } });
+  assert.match(m.text, /Your computer: from \$0\.055 an hour while it works, free while it sleeps/);
+  assert.match(m.text, /Medium or Large, 80 GB, multi-screen\. It sleeps when nothing's using it\./);
+  assert.match(m.text, /Your computer/);
+  assert.match(m.text, re("Medium: 2 cores, 8 GB, 80 GB. $0.055 an hour while it works."));
+  assert.equal(radio(m.box, "Medium").getAttribute("aria-checked"), "true");
+  await m.done();
+});
+
+await test("switching to Large: asked first with its price and that it may restart, then switched, and said so", async () => {
+  switches.length = 0;
+  resized = 0;
+  sizeAnswer = () => json({ ok: true, size: "large", changed: true });
+  const m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: sized() } });
+  await click(radio(m.box, "Large"));
+  const asked = words(m.box);
+  assert.match(asked, /Switch to Large\?/);
+  assert.match(asked, re("Large costs $0.11 an hour while it works. Your computer may restart, and anything open on it may close."));
+  assert.equal(switches.length, 0, "nothing until they say so");
+  await click(button(m.box, "Cancel"));
+  assert.equal(switches.length, 0);
+  assert.doesNotMatch(words(m.box), /Switch to Large\?/);
+  await click(radio(m.box, "Large"));
+  await click(button(m.box, "Switch"));
+  assert.deepEqual(switches, [{ size: "large" }]);
+  assert.match(words(m.box), /Your computer is Large now\./);
+  assert.match(words(m.box), re("Large: 4 cores, 16 GB, 80 GB. $0.11 an hour while it works."));
+  assert.equal(resized, 1, "the live views stream it afresh");
+  assert.doesNotMatch(words(m.box), /[\u2013\u2014]|Orbit/);
+  await m.done();
+});
+
+await test("too little credit for Large: the app's words and Orgo's top up; any other refusal in plain words", async () => {
+  opened.length = 0;
+  sizeAnswer = () => json({ ok: false, error: "Add Orgo credit to switch to Large. You need enough for an hour.", code: "bops_out_of_credit", topUpUrl: "https://orgo.test/settings/billing" }, 402);
+  let m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: sized() } });
+  await click(radio(m.box, "Large"));
+  await click(button(m.box, "Switch"));
+  assert.match(words(m.box), /Add Orgo credit to switch to Large\. You need enough for an hour\./);
+  const adds = [...m.box.querySelectorAll("button")].filter((b) => b.textContent.trim() === "Add credit on Orgo");
+  await click(adds.at(-1));
+  assert.deepEqual(opened, ["https://orgo.test/settings/billing"]);
+  assert.equal(radio(m.box, "Medium").getAttribute("aria-checked"), "true", "still Medium");
+  await m.done();
+  sizeAnswer = () => ({ ok: false, status: 500, json: async () => { throw new Error("not JSON"); } });
+  m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: sized() } });
+  await click(radio(m.box, "Large"));
+  await click(button(m.box, "Switch"));
+  assert.match(words(m.box), /Couldn't change your computer's size\. Try again in a minute\./);
+  await m.done();
+});
+
+await test("on the Orgo plan: no price named, the plan's says; still being set up: a line, and no switch", async () => {
+  let m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: sized({ change: "plan" }) } });
+  assert.match(m.text, re("Medium: 2 cores, 8 GB, 80 GB. Part of your Orgo plan."));
+  await click(radio(m.box, "Large"));
+  const asked = words(m.box);
+  assert.match(asked, /Switch to Large\?/);
+  assert.match(asked, /Your computer may restart, and anything open on it may close\./);
+  assert.doesNotMatch(asked, /costs/);
+  await m.done();
+  m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: sized({ change: null }) } });
+  assert.match(m.text, /Your computer is still being set up\. You can switch in a minute\./);
+  assert.equal(radio(m.box, "Large").disabled, true);
+  await m.done();
+  // No computer yet: nothing to switch here (Pick your computer kept the size it's made at).
+  m = await show({ ...base, bops: { billing: "usage", tier: null, name: "Pay as you go", priceCents: 0, usage: sized({ id: null }) } });
+  assert.equal(m.box.querySelector("[data-your-computer]"), null);
+  await m.done();
+});
+
+const VIEW = { needed: true, sizes: SIZES, current: null, preselect: "medium", change: null };
+await test("Pick your computer: each size with Orgo's price, how long $5 runs it and what it's for, Medium picked first; Continue keeps the one picked", async () => {
+  switches.length = 0;
+  sizeAnswer = () => json({ ok: true, size: "large", changed: false });
+  let doneCalled = 0;
+  const m = await show(null, h(PickComputer, { view: VIEW, onDone: () => doneCalled++ }));
+  for (const t of [
+    "Pick your computer",
+    "Your bots work on a computer in the cloud. You pay for it only while it works.",
+    "Medium",
+    "2 cores, 8 GB",
+    "$0.055 an hour",
+    "$5 runs it for about 90 hours. Good for most tasks.",
+    "Large",
+    "4 cores, 16 GB",
+    "$0.11 an hour",
+    "$5 runs it for about 45 hours. Faster, with smoother screen video.",
+    "AI is paid from the same credit.",
+    "You can change this anytime in Settings.",
+  ])
+    assert.match(m.text, re(t), t);
+  assert.doesNotMatch(m.text, /Current/, "someone new has no computer yet");
+  assert.equal(radio(m.box, "Medium").getAttribute("aria-checked"), "true");
+  await click(radio(m.box, "Large"));
+  await click(button(m.box, "Continue"));
+  assert.deepEqual(switches, [{ size: "large" }]);
+  assert.equal(doneCalled, 1);
+  await m.done();
+});
+
+await test("Pick your computer for someone with a Large: Large picked first and marked; a switch that didn't work can keep it as it is", async () => {
+  switches.length = 0;
+  sizeAnswer = () => json({ ok: false, error: "Your bots are working on it. Switch when they finish.", code: "bots_working" }, 409);
+  let doneCalled = 0;
+  const m = await show(null, h(PickComputer, { view: { ...VIEW, current: "large", preselect: "large", change: "bops" }, onDone: () => doneCalled++ }));
+  assert.equal(radio(m.box, "Large").getAttribute("aria-checked"), "true");
+  assert.match(radio(m.box, "Large").textContent, /Current/);
+  await click(radio(m.box, "Medium"));
+  await click(button(m.box, "Continue"));
+  assert.match(words(m.box), /Your bots are working on it\. Switch when they finish\./);
+  assert.equal(doneCalled, 0, "still open");
+  sizeAnswer = () => json({ ok: true, size: "large", changed: false });
+  await click(button(m.box, "Keep Large"));
+  assert.deepEqual(switches, [{ size: "medium" }, { size: "large" }]);
+  assert.equal(doneCalled, 1);
   await m.done();
 });
 
