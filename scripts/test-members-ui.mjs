@@ -227,7 +227,7 @@ function bops() {
     state: "ready",
     orgoUrl: "https://orgo.test/workspaces/w1",
     host: "orgo",
-    fullAccess: "not_yet",
+    fullAccess: "on",
     keysOnComputers: false,
     you: { id: "u1", name: "Tess Ito", email: "tess@example.com" },
     people: [{ id: "m1", name: "Jamie Lee", email: "jamie@example.com", role: "viewer", guest: false, access: { others: "none", bots: { boppy: "read" } } }],
@@ -246,14 +246,16 @@ function bops() {
     if (fake.hold) await fake.hold;
     if (fake.refuse) return { ok: false, status: 502, json: async () => ({ code: "ORGO_ERROR", error: "Orgo couldn't do that just now." }) };
     if (fake.refuseWith) return { ok: false, status: fake.refuseWith.status, json: async () => structuredClone(fake.refuseWith.body) };
-    if (method === "PATCH" && body.access) info.people.find((p) => p.id === body.memberId).access = A.cleanAccess(body.access);
+    if (method === "PATCH" && body.access && body.memberId) info.people.find((p) => p.id === body.memberId).access = A.cleanAccess(body.access);
+    if (method === "PATCH" && body.role && body.memberId) info.people.find((p) => p.id === body.memberId).role = body.role;
+    if (method === "PATCH" && body.role && body.invite) info.invites.find((i) => i.email === body.invite).role = body.role;
     if (method === "POST") return { ok: true, status: 200, json: async () => ({ email: body.email, role: body.role, emailSent: true }) };
     return { ok: true, status: 200, json: async () => ({ ok: true }) };
   };
   return fake;
 }
 
-await test("the owner says Every bot; a person and an invite say which bots, and the role is about the computers", async () => {
+await test("the owner says Every bot; a person and an invite say which bots, and each says their role plainly", async () => {
   bops();
   const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
   const you = rowOf(box, "Tess Ito");
@@ -261,11 +263,27 @@ await test("the owner says Every bot; a person and an invite say which bots, and
   const jamie = rowOf(box, "Jamie Lee");
   assert.equal(summaryOf(jamie), "1 bot, read");
   assert.ok(buttonOf(jamie, "Bots"), "a Bots toggle under the name");
-  assert.match(jamie.textContent, /Computers: View only/);
+  assert.match(you.textContent, /Owner/, "the owner's row says Owner");
+  assert.equal(buttonOf(jamie, "Member").getAttribute("aria-checked"), "true", "a Member");
+  assert.equal(buttonOf(jamie, "Admin").getAttribute("aria-checked"), "false");
   const alex = rowOf(box, "alex@example.com");
-  assert.match(summaryOf(alex), /^Every bot, 1 to write, new bots to read · Computers: View only · expires Oct 28$/);
+  assert.match(summaryOf(alex), /^Every bot, 1 to write, new bots to read · expires Oct 28$/);
+  assert.equal(buttonOf(alex, "Member").getAttribute("aria-checked"), "true", "an invite's role too");
   assert.equal(summaryOf(box.querySelector("form")), "Every bot, read", "an invite starts with every bot there now to read");
   assert.equal(box.querySelector("[data-bot-access]"), null, "no picker open until asked");
+  await done();
+});
+
+await test("while Bops Cloud doesn't give people their role yet (fullAccess not_yet): Admin isn't offered, and Your Apps says it waits", async () => {
+  const fake = bops();
+  fake.info.fullAccess = "not_yet";
+  const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  const jamie = rowOf(box, "Jamie Lee");
+  const admin = buttonOf(jamie, "Admin");
+  assert.equal(admin.disabled, true, "Admin held back on a person");
+  assert.equal(admin.getAttribute("data-tip"), M.WORDS.fullAccessNotYet);
+  assert.equal(buttonOf(jamie, "Member").disabled, false);
+  assert.equal(buttonOf(box.querySelector("form"), "Admin").disabled, true, "and in the invite form");
   await done();
 });
 
@@ -391,13 +409,63 @@ await test("with a shared workspace open, no bots are offered or sent", async ()
   const { box, done } = await mount(h(S.Members, { state: shared, onClose: noop, onUpgrade: noop }));
   assert.ok(box.textContent.includes(M.WORDS.sharedOpen));
   assert.equal(summaryOf(rowOf(box, "Jamie Lee")), undefined, "a person says no bots");
-  assert.equal(summaryOf(rowOf(box, "alex@example.com")), "Computers: View only · expires Oct 28", "nor does an invite");
+  assert.equal(summaryOf(rowOf(box, "alex@example.com")), "expires Oct 28", "nor does an invite");
   assert.equal(buttonOf(box, "Choose bots"), undefined);
   assert.equal(buttonOf(box, "Bots"), undefined);
   assert.match(rowOf(box, "Tess Ito").textContent, /Every bot/, "the owner still has every bot");
   await type(box.querySelector("form input"), "sky@example.com");
   await submit(box.querySelector("form"));
   assert.deepEqual(fake.sent[0].body, { email: "sky@example.com", role: "viewer" });
+  await done();
+});
+
+/* ---------------- Owner, Admin and Member ---------------- */
+
+await test("an Admin's row says what they have, with no bots to pick; making someone an Admin is one choice, asked first; Member goes at once", async () => {
+  const fake = bops();
+  fake.info.people.push({ id: "m2", name: "Ada Park", email: "ada@example.com", role: "admin", guest: false, access: { others: "none", bots: {} } });
+  const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  const ada = () => rowOf(box, "Ada Park");
+  assert.equal(summaryOf(ada()), M.ADMIN_WORDS.row, "every bot, its computer and your apps");
+  assert.equal(buttonOf(ada(), "Bots"), undefined, "nothing to pick");
+  assert.equal(buttonOf(ada(), "Admin").getAttribute("aria-checked"), "true");
+  // Jamie made an Admin: asked first, in plain words.
+  await click(buttonOf(rowOf(box, "Jamie Lee"), "Admin"));
+  assert.equal(fake.sent.length, 0, "nothing sent before the answer");
+  assert.ok(rowOf(box, "Jamie Lee").textContent.includes(M.ADMIN_WORDS.confirmTitle("Jamie Lee")));
+  assert.ok(rowOf(box, "Jamie Lee").textContent.includes(M.ADMIN_WORDS.confirmBody));
+  await click(buttonOf(rowOf(box, "Jamie Lee"), M.ADMIN_WORDS.confirm));
+  assert.deepEqual(fake.sent.at(-1), { method: "PATCH", body: { memberId: "m1", role: "admin" } });
+  // Ada made a Member: at once, and the row says they keep only the bots they had, and a copied password outlasts it.
+  await click(buttonOf(ada(), "Member"));
+  assert.deepEqual(fake.sent.at(-1), { method: "PATCH", body: { memberId: "m2", role: "viewer" } });
+  assert.ok(ada().textContent.includes(M.ADMIN_WORDS.toMemberTip));
+  assert.ok(ada().textContent.includes(M.WORDS.copiedPassword));
+  await done();
+});
+
+await test("inviting an Admin hides the bots and sends none; an invite's role changes in place, and an orgo-web that can't says so", async () => {
+  const fake = bops();
+  const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  const form = () => box.querySelector("form");
+  await click(buttonOf(form(), "Admin"));
+  assert.equal(buttonOf(form(), "Choose bots"), undefined, "no bots to choose for an Admin");
+  assert.ok(form().textContent.includes(M.ROLE_LINES.admin));
+  await type(form().querySelector("input"), "kai@example.com");
+  await submit(form());
+  assert.deepEqual(fake.sent.at(-1), { method: "POST", body: { email: "kai@example.com", role: "admin" } });
+  // The waiting invite made an Admin, without sending it again.
+  const alex = () => rowOf(box, "alex@example.com");
+  await click(buttonOf(alex(), "Admin"));
+  assert.deepEqual(fake.sent.at(-1), { method: "PATCH", body: { invite: "alex@example.com", role: "admin" } });
+  assert.match(summaryOf(alex()), new RegExp(`^${M.ADMIN_WORDS.row}`));
+  // An orgo-web before that: said, and Resend then sends it with the role picked.
+  fake.refuseWith = { status: 409, body: { code: "INVITE_ROLE_NOT_READY", error: M.ADMIN_WORDS.inviteRoleNotReady } };
+  await click(buttonOf(alex(), "Member"));
+  assert.ok(alex().textContent.includes(M.ADMIN_WORDS.inviteRoleNotReady));
+  fake.refuseWith = null;
+  await click(buttonOf(alex(), "Resend"));
+  assert.deepEqual(fake.sent.at(-1), { method: "POST", body: { email: "alex@example.com", role: "viewer", access: { others: "read", bots: { sam: "write" } } } });
   await done();
 });
 
@@ -424,14 +492,14 @@ await test("no dashes, and the sheet says the bots you pick, never the saved log
   assert.match(box.textContent, /Never your saved logins or keys\./, "no keys of Bops' on the computers");
   assert.ok(!/Vault/.test(box.textContent), "the Vault is Logins now");
   assert.ok(!/They see everything in the workspace/.test(box.textContent));
-  assert.match(M.ROLE_LINES.viewer, /^On orgo\.ai /, "View only is about the computers");
+  assert.equal(M.ROLE_LINES.viewer, "Sees and does only what you pick for them.");
   await done();
 });
 
-await test("View only and None say what Orgo lets people do on orgo.ai, and keys on the computers are said whenever anyone else is in", async () => {
-  // On orgo.ai View only may have Orgo's agent work on every bot's computer (root there), a bot set to None's too.
-  assert.ok(!/can't click, type or change anything/.test(M.ROLE_LINES.viewer), "never that View only changes nothing");
-  assert.match(M.ROLE_LINES.viewer, /ask Orgo's agent to work on any of them/);
+await test("Member and None say what people get, and keys on the computers are said whenever anyone else is in", async () => {
+  // An Admin's line says what only the owner does; a Member's never promises orgo.ai (a staff owned workspace keeps a Member without Use its computer off there).
+  assert.equal(M.ROLE_LINES.admin, "Every bot, its computer and your apps. Only you can add people or delete this workspace.");
+  assert.ok(!/orgo\.ai/.test(M.ROLE_LINES.viewer));
   assert.match(M.ACCESS_TIPS.none, /^Can't see this bot in Bops\. On orgo\.ai they still see its computer\.$/);
   const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // Bops' keys on the computers, and only someone with View only in: said, and the footer doesn't promise the keys.
@@ -511,7 +579,7 @@ await test("Your Apps: a row of its own beside the bots under Access, Read for a
   assert.equal(summaryOf(rowOf(m.box, "Jamie Lee")), "1 bot, read · Your Apps, read", "worded as the bots are");
   assert.match(rowOf(m.box, "Jamie Lee").querySelector("[data-access-summary]").className, /min-w-0 truncate/, "the line gives way, cut with an ellipsis");
   assert.equal(rowOf(m.box, "Jamie Lee").querySelector("[data-access-summary]").getAttribute("title"), "1 bot, read · Your Apps, read", "and says it whole on hover");
-  assert.match(summaryOf(rowOf(m.box, "alex@example.com")), /^Every bot, 1 to write, new bots to read · Your Apps not set · Computers/, "an invite from before the scope: not set, never None");
+  assert.match(summaryOf(rowOf(m.box, "alex@example.com")), /^Every bot, 1 to write, new bots to read · Your Apps not set · expires/, "an invite from before the scope: not set, never None");
   assert.equal(summaryOf(m.box.querySelector("form")), "Every bot, read · Your Apps, read", "a new invite starts at Read");
   await click(buttonOf(rowOf(m.box, "Jamie Lee"), "Access"));
   const picker = () => rowOf(m.box, "Jamie Lee").querySelector("[data-bot-access]");
@@ -523,7 +591,7 @@ await test("Your Apps: a row of its own beside the bots under Access, Read for a
   assert.equal(levelButton(picker(), "Your Apps", "None").getAttribute("data-tip"), "Doesn't see your apps.");
   assert.equal(picker().querySelector("[data-apps-legend]").textContent, "Your Apps never shows them variables or keys, and only you buy domains.");
   assert.equal(picker().querySelector("[data-apps-older]"), null, "no older Macs, no line");
-  assert.equal(picker().querySelector("[data-apps-note]").textContent, "They see your apps once Bops Cloud updates. Until then, nothing changes for them.", "Bops Cloud doesn't show them yet");
+  assert.equal(picker().querySelector("[data-apps-note]"), null, "Bops Cloud shows them now: no line saying it doesn't yet");
   await click(levelButton(picker(), "Your Apps", "Write"));
   assert.deepEqual(fake.sent.at(-1), { method: "PATCH", body: { memberId: "m1", access: { others: "none", bots: { boppy: "read" }, apps: "write" } } });
   assert.equal(summaryOf(rowOf(m.box, "Jamie Lee")), "1 bot, read · Your Apps, write");

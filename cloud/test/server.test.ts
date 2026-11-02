@@ -52,6 +52,13 @@ const wsKey = () => randomBytes(16).toString("base64");
 
 const alive = async () => (await fetch(`http://127.0.0.1:${port}/health`)).status;
 
+test("/health says what this Bops Cloud does (CLOUD_CAPS): roles, which the owner's Mac waits for before it offers Admin", async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/health`);
+  const body = (await res.json()) as { ok: boolean; caps?: string[] };
+  assert.equal(res.status, 200);
+  assert.ok(body.caps?.includes("roles"));
+});
+
 test("an address the router can't read is a 400, and the cloud keeps serving", async () => {
   const answer = await raw("GET // HTTP/1.1\r\nHost: cloud\r\nConnection: close\r\n\r\n");
   assert.match(answer, /^HTTP\/1\.1 400/);

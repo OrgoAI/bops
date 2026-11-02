@@ -654,7 +654,8 @@ await test("A member's window: the groups read only (no rename), their default n
   assert.equal(G.siteLabel(leeView, { id: "ada", workspaceId: "shared_p1" }), "shop.example.com");
   assert.equal(G.siteLabel(leeView, { id: "bo", workspaceId: "shared_p1" }), "blog");
   const leeHtml = render(leeView, { chatId: "chat_ada" });
-  assert.match(leeHtml, />Ada<\/span><span data-row-line="site"[^>]*>shop\.example\.com</);
+  // (Lee is of Orgo's team, who sees Your Apps wherever it's sent: the </> of a coder's row may come before the site.)
+  assert.match(leeHtml, />Ada<\/span><span data-row-line="site"[^>]*>(<span[^>]*data-code-mark[^>]*>&lt;\/&gt;<\/span>)?shop\.example\.com</);
 });
 
 await test("A member's Works on: read only, the site as they see it; nothing when there's none", async () => {

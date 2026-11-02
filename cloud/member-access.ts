@@ -60,6 +60,12 @@ export const fitComputer = (access: MemberAccess, botIds: readonly string[]): Me
   usesComputer(access) && !writesAny(access, botIds) ? { ...access, computer: "none" } : access;
 
 export const NO_ACCESS: MemberAccess = { others: "none", bots: {} };
+/**
+ * What an Admin has (Orgo's role "admin", whatever is kept for them): Write on every bot, the ones made later too, Your
+ * Apps at Write, Use its computer. Bops Cloud (ws-slice.ts viewerAccess) and the owner's Mac (lib/server/member-acts.ts)
+ * give it. A fresh object each time, so nothing that changes one changes another's.
+ */
+export const adminAccess = (): MemberAccess => ({ others: "write", bots: Object.create(null) as Record<string, AccessLevel>, apps: "write", computer: "use" });
 /** The most bots one person's entry names (a workspace has far fewer). */
 export const MAX_ACCESS_BOTS = 200;
 

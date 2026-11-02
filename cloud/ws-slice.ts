@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
-import { accessOf, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
+import { accessOf, adminAccess, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
 import type { SharedApp, SharedApps, SharedGroup, SharedWsSlice, WsRole } from "./protocol.ts";
 
 /**
@@ -26,10 +26,14 @@ import type { SharedApp, SharedApps, SharedGroup, SharedWsSlice, WsRole } from "
  * owner gave nothing (no entry by their email, or by their user id for a guest) is shown no bot at all.
  * A thread a hidden bot handed over reads as its own bot's, and the note the hand-off left isn't shown
  * (keepSession, sharedMessage), so neither names that bot. The main bot's "While you were busy" digest
- * tells them only what the watches of bots they have found (sharedMessage). The owner's apps are the
- * owner's: anyone else is shown none of their app threads, nor a line, note or result of them in a chat
- * (appThreadsFor, sharedMessage), but for Orgo's own team (an @orgo.ai email, apps-team.ts) with Write on
- * the bot, who may ask it to work on them.
+ * tells them only what the watches of bots they have found (sharedMessage). The workspace's
+ * apps (Your Apps) are shown in a workspace whose owner is Orgo's own team (an @orgo.ai email, apps-team.ts), as
+ * orgo-web says who owns it (SliceViewer.ownerEmail), never as the owner's upload says: there, to anyone with Your
+ * Apps (an Admin always), and their app threads to whoever has Write on the bot (appThreadsFor). A viewer of Orgo's
+ * team sees a workspace's apps anywhere, read only where its owner isn't (appsOpenFor).
+ *
+ * An Admin (orgo-web's role) is shown every bot, the ones made later too, and uses their computers, whatever the
+ * owner's state keeps for them (viewerAccess): only the owner deletes the workspace, and nothing here does.
  */
 
 /** The workspace every older bot and chat belongs to (lib/types.ts MAIN_WORKSPACE). */
@@ -208,7 +212,15 @@ export function chatWsOf(byId: Map<unknown, Record<string, unknown>>) {
  * only when it was given for their membership now, begun at `joinedAt` (member-access.ts currentFor). `computerUse`:
  * their Use its computer as orgo-web said it (WsAccess.computerUse), when it did.
  */
-export type SliceViewer = { role: WsRole; email?: string; id: string; joinedAt?: number; computerUse?: boolean };
+export type SliceViewer = {
+  role: WsRole;
+  email?: string;
+  id: string;
+  joinedAt?: number;
+  computerUse?: boolean;
+  /** The owner's sign in email, as orgo-web says it (WsAccess.ownerEmail): whether the workspace has apps (appsOpenFor). */
+  ownerEmail?: string;
+};
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
 
@@ -219,6 +231,8 @@ export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
  * member's act is checked against (members.ts act), as their view is.
  */
 export function viewerAccess(workspace: Record<string, unknown> | null, viewer: SliceViewer): MemberAccess {
+  // An Admin: every bot (made later too), Your Apps at Write and Use its computer, whatever is kept for them.
+  if (viewer.role === "admin") return adminAccess();
   const map = isObject(workspace?.memberAccess) ? (workspace.memberAccess as MemberAccessMap) : undefined;
   const kept: unknown = accessOf(map, viewer);
   // Set before they were removed (or left) and came back: not theirs now.
@@ -227,6 +241,8 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
   if (isObject(o.bots)) for (const [id, level] of Object.entries(o.bots)) bots[id] = isAccessLevel(level) ? level : "none";
   return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(usesComputer(o) ? { computer: "use" as const } : {}) };
 }
+
+export { adminAccess };
 
 /**
  * Whether what `viewer` says in the workspace may wake its bots' computers and run there (Use its computer): the owner
@@ -238,7 +254,8 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
  * someone's words, and on each claim, beat, pause and resume after (turns.ts memberStill).
  */
 export function computerUseOf(workspace: Record<string, unknown> | null, viewer: SliceViewer): boolean {
-  if (viewer.role === "owner") return true;
+  // The owner always, and an Admin always (orgo-web never keeps an Admin off either).
+  if (viewer.role === "owner" || viewer.role === "admin") return true;
   const kept = keptComputer(workspace, viewer);
   return typeof viewer.computerUse === "boolean" ? viewer.computerUse && kept !== "none" : kept === "use";
 }
@@ -276,26 +293,35 @@ const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: tru
 const MAX_SHARED_APPS = 30;
 
 /**
+ * Whether a workspace's apps are shown to `viewer` (apps-team.ts): "write" (as far as their level goes) when orgo-web
+ * says its owner signs in with an @orgo.ai email (SliceViewer.ownerEmail); "read" (never more) when only the viewer
+ * does, as Orgo's own team sees apps everywhere; false otherwise. Never from the owner's state: that is whatever their
+ * Mac uploaded, and a Mac never uploads its account anyway (lib/server/state-merge.ts NEVER_SYNCED).
+ */
+export const appsOpenFor = (viewer: SliceViewer): "write" | "read" | false => (appsOpenTo(viewer.ownerEmail) ? "write" : appsOpenTo(viewer.email) ? "read" : false);
+
+/** Whether the owner's own apps are open (their app threads, a member's acts on an app): orgo-web says the owner is Orgo's team. */
+export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer.ownerEmail);
+
+/**
  * A workspace's apps on the web as `viewer` is shown them (SharedWsSlice.apps): only for someone other than the owner,
- * with apps open to their email (apps-team.ts, as for the owner) and Your Apps at Read or more on an entry that's for
- * their membership now (viewerAccess), in a workspace with apps. Allow lists only: of each app's record its name, its
+ * with apps open to them (appsOpenFor) and Your Apps at Read or more on an entry that's for their membership now (an
+ * Admin always has Write: viewerAccess). A workspace with no apps yet gives an empty list. Allow lists only: of each app's record its name, its
  * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
  * members (Workspace.appsForMembers) its head, sites (each with its Preview's link and state), history, deploys and
  * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. Never its
  * variables, tokens, keys, logs, error text, computer or project ids.
  */
-/** Whether a workspace has apps: its owner (the account whose state this is) signs in with an @orgo.ai email (apps-team.ts). */
-export const ownerAppsOpen = (blob: Record<string, unknown> | null | undefined): boolean => {
-  const account = isObject(blob?.account) ? blob.account : undefined;
-  const user = isObject(account?.user) ? account.user : undefined;
-  return appsOpenTo(typeof user?.email === "string" ? user.email : undefined);
-};
-
-export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>, open = false): SharedApps | undefined {
+export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>): SharedApps | undefined {
+  const open = appsOpenFor(viewer);
   if (viewer.role === "owner" || !workspace || !open) return undefined;
-  const level = appsLevelOf(access);
-  if (!permits(level, "read") || !isObject(workspace.hostedApps)) return undefined;
+  const kept = appsLevelOf(access);
+  // Capped at Read for a viewer of Orgo's team in a workspace whose owner isn't.
+  const level = open === "read" && kept === "write" ? "read" : kept;
+  if (!permits(level, "read")) return undefined;
   const write = level === "write";
+  // A workspace with no apps on the web yet still has Your Apps: an empty page, never a hidden one.
+  if (!isObject(workspace.hostedApps)) return { level: write ? "write" : "read", at: 0, list: [] };
   const seen = isObject(workspace.appsForMembers) ? workspace.appsForMembers : {};
   const seenApps = isObject(seen.apps) ? seen.apps : {};
   const list: SharedApp[] = Object.entries(workspace.hostedApps)
@@ -407,14 +433,13 @@ export function appThreadsOf(blob: Record<string, unknown>): Set<string> {
 }
 
 /**
- * The app threads (appThreadsOf) a viewer other than the owner isn't shown: every one, unless apps are open
- * to their email (apps-team.ts: Orgo's own team), and then those of bots they don't have at Write. Whether
- * apps are open to the owner is the owner's Mac's to say (member-acts.ts checks it before an app's ask is
- * answered, and the turn before any app tool is given): the cloud can't know it.
+ * The app threads (appThreadsOf) a viewer other than the owner isn't shown: every one, unless the workspace's owner is
+ * Orgo's team (orgo-web says so: ownerAppsOpen), and then those of bots they don't have at Write. The owner's Mac checks
+ * its own account too before an app's ask is answered (member-acts.ts).
  */
 export function appThreadsFor(blob: Record<string, unknown>, access: MemberAccess, viewer: SliceViewer): Set<string> {
   const all = appThreadsOf(blob);
-  if (!ownerAppsOpen(blob) || !all.size) return all;
+  if (!ownerAppsOpen(viewer) || !all.size) return all;
   const botOf = new Map(list(blob.sessions).map((s) => [s.id, s.botId]));
   return new Set([...all].filter((id) => {
     const bot = botOf.get(id);
@@ -424,10 +449,10 @@ export function appThreadsFor(blob: Record<string, unknown>, access: MemberAcces
 
 /**
  * The bots whose app lines in a chat a viewer other than the owner is shown (sharedMessage `appBots`): the
- * ones they have at Write, when apps are open to their email (appThreadsFor); none otherwise.
+ * ones they have at Write, when the owner is Orgo's team (appThreadsFor); none otherwise.
  */
-export function appBotsFor(access: MemberAccess, viewer: SliceViewer, botIds: Iterable<string>, open = false): Set<string> {
-  if (!open) return new Set();
+export function appBotsFor(access: MemberAccess, viewer: SliceViewer, botIds: Iterable<string>): Set<string> {
+  if (!ownerAppsOpen(viewer)) return new Set();
   return new Set([...botIds].filter((id) => permits(levelOf(access, id), "write")));
 }
 
@@ -494,9 +519,11 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   const all = (items: Record<string, unknown>[], spec: Spec) => items.map((x) => keep(x, spec) as Record<string, unknown>);
   const bots = viewer.role === "owner" ? undefined : new Set(s.bots.map((b) => b.id));
   const chats = bots && new Set(s.chats.map((c) => c.id));
-  const apps = access && bots ? appsFor(s.workspace, viewer, access, bots, ownerAppsOpen(blob)) : undefined;
+  const apps = access && bots ? appsFor(s.workspace, viewer, access, bots) : undefined;
   // The computers the bots shown share, and (with Your Apps) the site each works on: only there when there's any.
   const groups = computersOf(blob, ws, s.workspace, s.bots);
+  // An Admin's: the computer each bot shown works on, to stream it with their own Orgo key (orgo-web hands its password to an Admin alone).
+  const screens = viewer.role === "admin" ? screensOf(blob, s.bots) : undefined;
   const sites = apps ? sitesOf(s.workspace, s.bots) : undefined;
   return {
     workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
@@ -517,7 +544,22 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     ...(access && apps ? { apps } : {}),
     ...(groups ? { groups } : {}),
     ...(sites ? { sites } : {}),
+    ...(screens ? { screens } : {}),
   };
+}
+
+/**
+ * The Orgo computer each of the `shown` bots works on (hostOf: its own, or the main bot's it shares), by bot id: for an
+ * Admin's slice alone (SharedWsSlice.screens), who sees and uses those computers on orgo.ai anyway. Undefined: none.
+ */
+export function screensOf(blob: Record<string, unknown>, shown: Record<string, unknown>[]): Record<string, string> | undefined {
+  const all = list(blob.bots);
+  const out: Record<string, string> = {};
+  for (const b of shown) {
+    const h = hostOf(b, all);
+    if (typeof b.id === "string" && b.runsOn !== "mac" && typeof h.computerId === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(h.computerId)) out[b.id] = h.computerId;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** The bots a slice shows, by id: what a viewer other than the owner may read the messages of (sharedMessages). */

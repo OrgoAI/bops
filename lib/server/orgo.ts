@@ -357,7 +357,13 @@ export async function sharedWorkspaces(): Promise<SharedWorkspace[]> {
   const list = (await call<{ workspaces?: OrgoWorkspace[] }>("GET", "/workspaces")).workspaces ?? [];
   return list
     .filter((w) => (w.role === "admin" || w.role === "member") && w.product === "bops" && typeof w.bops_ws_id === "string" && !!w.bops_ws_id)
-    .map((w) => ({ projectId: w.id, name: w.name, owner: typeof w.owner_email === "string" ? w.owner_email : "", role: w.role as SharedRole }));
+    .map((w) => ({
+      projectId: w.id,
+      name: w.name,
+      owner: typeof w.owner_email === "string" ? w.owner_email : "",
+      role: w.role as SharedRole,
+      orgoUrl: `${orgoOrigin()}/workspaces?project_id=${encodeURIComponent(w.id)}`,
+    }));
 }
 
 /**
@@ -692,7 +698,13 @@ export const orgoMembers = {
   /** Take someone's access away (Orgo stops their open screens within seconds). */
   remove: (key: string, workspace: string, memberId: string) =>
     callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "DELETE", body: { memberId } }),
-  /** Change what someone can do. Orgo's words here: "member" (View only) or "admin" (Full access). */
+  /**
+   * Change a waiting invite's role without sending it again (no new link, no email): "viewer" (a Member) or "admin". An
+   * orgo-web before it answers 404 or 405 with no "Invite not found" (lib/server/members.ts says to resend it then).
+   */
+  setInviteRole: (key: string, workspace: string, email: string, permission: "viewer" | "admin") =>
+    callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/invite`, { method: "PATCH", body: { email, permission } }),
+  /** Change someone's role. Orgo's words here: "member" (a Member) or "admin" (an Admin). */
   setRole: (key: string, workspace: string, memberId: string, role: "member" | "admin") =>
     callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "PATCH", body: { memberId, role } }),
   /** Use its computer for a member, on or off (MEMBER_COMPUTER_ROUTE): orgo-web keeps it and goes by it. */

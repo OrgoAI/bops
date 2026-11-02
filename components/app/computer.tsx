@@ -18,7 +18,7 @@ import { canWake, OUT_OF_CREDIT_WAKE } from "@/lib/bops-billing";
 import { freeHoursOutLine } from "@/lib/plan-includes";
 import { AppLogo, botApps } from "./apps";
 import { botBezel, botOnInk, botWash, MonitorIcon, post, screenNo } from "./ui";
-import { readOnly, yourMac } from "@/lib/shared";
+import { readOnly, SHARED_SCREEN_WORDS, yourMac } from "@/lib/shared";
 import { useWindowVisible } from "./window-visible";
 import { ago, onSameComputer, screenMap, teamScreens, type ScreenKind, type TeamScreen } from "@/lib/screens";
 
@@ -1237,14 +1237,19 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
         <Waking thumbnail={false} bot={b} text={`Setting up ${host.name}'s computer… about a minute`} />
       </div>
     );
-  // A workspace shared with the user: the computer (or the Mac) is the owner's, with nothing here to set up or watch.
-  // A plain line saying where its work shows, not an empty card the size of a screen.
-  if (readOnly(state))
+  // A workspace shared with the user: the computer (or the Mac) is the owner's, with nothing here to set up. An Admin
+  // sees its screen live and can take control (SharedScreen); anyone else reads where its work shows, and someone who
+  // may use the computer is pointed at it on orgo.ai. Never an empty card the size of a screen.
+  if (state.shared) {
+    if (b.runsOn !== "mac" && state.shared.role === "admin" && state.shared.screens?.includes(b.id)) return <SharedScreen state={state} bot={b} />;
+    const orgoUrl = b.runsOn !== "mac" && (state.shared.role === "admin" || state.shared.computer) ? state.shared.orgoUrl : undefined;
     return (
-      <p className="px-1 py-2 text-[14px] leading-5 text-[#6B6B6B]">
-        {`${b.name} works on ${b.runsOn === "mac" ? yourMac(state) : "the owner's computer"}. Its screens show only in the owner's Bops; its work shows in the chat.`}
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 py-2 text-[14px] leading-5 text-[#6B6B6B]">
+        <span>{`${b.name} works on ${b.runsOn === "mac" ? yourMac(state) : "the owner's computer"}. Its work shows in the chat.`}</span>
+        {orgoUrl && <OrgoLink href={orgoUrl} label={state.shared.role === "admin" ? SHARED_SCREEN_WORDS.open : SHARED_SCREEN_WORDS.watch} />}
       </p>
     );
+  }
   return (
     <div className="flex aspect-[16/10] w-full flex-col items-center justify-center gap-3 rounded-[20px] px-8 text-center" style={{ backgroundImage: botWash(b) }}>
       <Mascot botId={b.id} color={b.color} size={44} />
@@ -1275,6 +1280,49 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
           {`Set up ${host.name}'s computer`}
         </button>
       )}
+    </div>
+  );
+}
+
+/** The workspace on orgo.ai, where its computers are too: opened in the browser. */
+function OrgoLink({ href, label }: { href: string; label: string }) {
+  return (
+    <a href={href} target="_blank" rel="noreferrer" className="rounded-full px-2.5 py-1 text-[13px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-black/[0.04]">
+      {label}
+    </a>
+  );
+}
+
+/**
+ * A shared workspace's bot's computer, live, for an Admin (lib/shared.ts SharedOpen.screens): its boot screen,
+ * watched, and theirs to click and type on once they take control. Streamed with their own Orgo key
+ * (/api/workspaces/shared/screen). When it can't open (asleep, or Orgo said no), it says so and points at orgo.ai.
+ */
+function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
+  const [failed, setFailed] = useState(false);
+  const [control, setControl] = useState(false);
+  const orgoUrl = state.shared?.orgoUrl;
+  if (failed)
+    return (
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 py-2 text-[14px] leading-5 text-[#6B6B6B]">
+        <span>{`${SHARED_SCREEN_WORDS.failed} ${SHARED_SCREEN_WORDS.asleep(b.name)}`}</span>
+        <button type="button" onClick={() => setFailed(false)} className="rounded-full px-2.5 py-1 text-[13px] font-medium leading-4 text-ink hover:bg-black/[0.04]">
+          Try again
+        </button>
+        {orgoUrl && <OrgoLink href={orgoUrl} label={SHARED_SCREEN_WORDS.open} />}
+      </p>
+    );
+  return (
+    <div data-shared-screen className="flex flex-col gap-2">
+      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-[20px] bg-black" style={{ backgroundImage: botWash(b) }}>
+        <LiveDesktop botId={b.id} display={99} interactive={control} planUrl={`/api/workspaces/shared/screen?bot=${encodeURIComponent(b.id)}`} bot={b} busy={control} onFail={() => setFailed(true)} className="h-full w-full" />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 px-1">
+        <button type="button" onClick={() => setControl((x) => !x)} className={`rounded-full px-3 py-1 text-[13px] font-medium leading-4 ${control ? "bg-ink text-white" : "text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-black/[0.04]"}`}>
+          {control ? SHARED_SCREEN_WORDS.release : SHARED_SCREEN_WORDS.control}
+        </button>
+        {orgoUrl && <OrgoLink href={orgoUrl} label={SHARED_SCREEN_WORDS.open} />}
+      </div>
     </div>
   );
 }

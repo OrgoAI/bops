@@ -988,8 +988,9 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
   if (!t.member) return "ok";
   const ws = list(blob.workspaces).find((w) => w.id === t.wsId) ?? null;
   // Use its computer as orgo-web said it when the message was taken (a change there since sends a notice, which ends the turn: cancelMember).
+  // An Admin's, as orgo-web said it then (a role change since sends a notice, which ends the turn); one stored before roles is a member's.
   const viewer: SliceViewer = {
-    role: "member",
+    role: t.member.role === "admin" ? "admin" : "member",
     id: t.member.userId,
     ...(t.member.email ? { email: t.member.email } : {}),
     ...(t.member.joinedAt !== undefined ? { joinedAt: t.member.joinedAt } : {}),
