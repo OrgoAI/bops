@@ -1,0 +1,1 @@
+- Settings, General can let your bots answer with your Mac closed.

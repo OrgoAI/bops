@@ -889,14 +889,35 @@ by the owner's own Mac.
 
 ### Chat through Bops Cloud
 
-A per workspace switch (`bops.chat_routing`, off by default) sends a workspace's chat through Bops Cloud
-(`turns.ts`; protocol.ts "Chat through Bops Cloud"). It's set by the owner's Bops (`POST /v1/chat-routing
-{ wsId, mode?: "mac" | "cloud", allowHourly? }`, read with `GET /v1/chat-routing?ws=`) or by Orgo's staff
-(`POST /v1/internal/chat-routing { userId, wsId, mode?, allowHourly?, force? }`, signed as the plan notices
-are), and mirrored on the workspace in the owner's state (`Workspace.chatOn: "cloud"`), which the owner's Mac
-and the runner set up go by; Bops Cloud puts the mirror back on every owner write that drops it (a Bops from
-before). Turning it on waits for a Bops at `CLOUD_CHAT_MIN_VERSION` or newer (the asking Bops's version, or for
-staff the newest the account said; 409 `chat_needs_update`; staff may `force` once they checked every Mac).
+A per workspace switch (`bops.chat_routing`) sends a workspace's chat through Bops Cloud (`turns.ts`;
+protocol.ts "Chat through Bops Cloud"). It's set by the owner's Bops (`POST /v1/chat-routing
+{ wsId, mode?: "mac" | "cloud" | "auto", allowHourly? }`, read with `GET /v1/chat-routing?ws=`; Settings,
+General has the switch) or by Orgo's staff (`POST /v1/internal/chat-routing { userId, wsId, mode?, allowHourly?,
+force? }`, signed as the plan notices are), and mirrored on the workspace in the owner's state
+(`Workspace.chatOn`: "cloud", or "mac" when someone chose the Mac; `chatAuto` while Bops Cloud may move it),
+which the owner's Mac and the runner set up go by; Bops Cloud puts the mirror back on every owner write, and
+one whose save lacked it gets one more version, Bops Cloud's, so it reads it. Turning it on waits for a Bops at
+`CLOUD_CHAT_MIN_VERSION` or newer (the asking Bops's version, or for staff the last Mac the account said: a
+computer's runner never counts; 409 `chat_needs_update`; staff may `force` once they checked every Mac).
+
+**By itself** (`autoRoute`, `BOPS_CHAT_AUTO`: unset or "off" nothing, "on" everyone, a comma list of Orgo user
+ids a canary, "revert" moves back at start everything it moved). A workspace nobody chose for (no row, or
+`set_by` NULL, "auto" or "auto-held") goes through Bops Cloud once the owner's last Mac is at the minimum and
+every computer its bots work on has a runner the Mac set up and saw running (`AppState.runners`, not failed,
+not found down) at the minimum, which connected to `/v1/runner/live` at that version since Bops Cloud started
+and since that computer last couldn't answer (`set_by` "auto", `allow_hourly` false). It's looked at when a
+runner connects, when the owner's state is written, and when a turn can't be answered. It goes back to the Mac
+whenever its bots have no computer, a runner is missing, failed or being stopped, the computer is found down,
+or a turn ended for want of its computer (a wake refused, no runner, too late): never because a runner just
+went quiet, as computers nap. A wake refused (billed by the hour and not let, stopped, deleted, paused, out of
+Free hours or credit) holds it on the Mac a day ("auto-held"). A choice the owner or staff made (`set_by`
+"owner" or "staff") is never moved, either way; the owner's `mode: "auto"` gives it back (where moves are off
+for them it's "cloud"), and `allowHourly` alone chooses nothing. Members' messages in a workspace that may move
+are written here first and handed to the Mac (stored), and whether a computer answers is decided under the
+owner's lock, so no move drops one. Not covered: group chats (the Mac's), bots in browsers on the Mac or
+routines on This Mac (no runner), a shared workspace where orgo-web refuses identity or the computer came with
+a key.
+
 Then:
 
 - **Every message someone says there is written here first.** A member's chat act, and the owner's own
