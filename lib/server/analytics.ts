@@ -40,7 +40,11 @@ function client(): Client {
   return g.bopsPosthog;
 }
 
-const plan = () => cloudSessionNow()?.plan?.tier;
+/** The plan as events name it: the Bops tier, or "usage" for a user billed by use (cloud/plans.ts planLabel). */
+const plan = () => {
+  const p = cloudSessionNow()?.plan;
+  return p?.billing === "usage" ? ("usage" as const) : p?.tier;
+};
 
 const superProps = () => {
   const v = appVersion();

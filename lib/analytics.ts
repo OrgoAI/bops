@@ -21,7 +21,7 @@ export type AnalyticsInfo = {
   internal: boolean;
   environment: "production" | "staging" | "development";
   appVersion: string | null;
-  plan: "free_bops" | "pro_bops" | "max_bops" | null;
+  plan: "free_bops" | "pro_bops" | "max_bops" | "usage" | null;
 };
 
 /**

@@ -1,6 +1,6 @@
 import { and, botForAgent, callSettings, skillsOf, view, type Bot, type CallSettings, type State } from "./calls.ts";
 import { config } from "./config.ts";
-import { hasCredit } from "./credit.ts";
+import { billingFor, creditWords, hasCredit } from "./credit.ts";
 import type { CallerVerdict, CloudCallPayload } from "./protocol.ts";
 import { loadState } from "./state.ts";
 import { queueForMac } from "./tunnel.ts";
@@ -238,7 +238,8 @@ export async function cloudVoiceTurn(userId: string, event: ApVoiceEvent, verdic
     reply = { text: c.owner ? `Hi, it's ${b.name}. I can't talk right now. Text me at this number and I'll get back to you.` : "Sorry, nobody can take your call right now. Bye!", hangup: true };
   } else if (!(await hasCredit(userId).catch(() => true))) {
     // Answering costs AI credit (the turn's tokens): once it's used up, the call ends politely.
-    reply = { text: c.owner ? `Hi, it's ${b.name}. Your AI credit is used up, so I can't talk right now. Open Bops to add more.` : "Sorry, nobody can take your call right now. Bye!", hangup: true };
+    const credit = c.owner ? creditWords(await billingFor(userId)).name : "";
+    reply = { text: c.owner ? `Hi, it's ${b.name}. Your ${credit} is used up, so I can't talk right now. Open Bops to add more.` : "Sorry, nobody can take your call right now. Bye!", hangup: true };
   } else {
     try {
       const r = await respond(c, c.owner ? ownerPrompt(s, b, c) : strangerPrompt(b.name));

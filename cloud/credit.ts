@@ -3,7 +3,8 @@ import type pg from "pg";
 import { config } from "./config.ts";
 import { query } from "./db.ts";
 import { HttpError } from "./http.ts";
-import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "./protocol.ts";
+import { billingOf } from "./plans.ts";
+import { AI_CREDIT_EMPTY, AI_CREDIT_LOW, type BopsBilling } from "./protocol.ts";
 
 /**
  * AI credit: what a user's bots may spend on OpenAI, AgentPhone, Typesafe and texted codes, at what
@@ -21,6 +22,12 @@ import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "./protocol.ts";
  *   left: a model's answer already asked for, or an agent turn's last few seconds before the cloud
  *   stopped it (turn-guard.ts holds running turns to the credit). The next grant covers it.
  *
+ * A user billed by use (protocol.ts BopsBilling "usage") has no Bops credit: orgo-web's two functions
+ * answer for them from their Orgo credit (what's left, and each use taken from it at Orgo's rate), so
+ * the cloud calls them the same way for everyone, and an older cloud spends from the right place too.
+ * Only the words differ: they're told about their Orgo credit and to add some, never to upgrade
+ * (creditWords). They get no Bops $5 either (welcome): Orgo's signup credit is their start.
+ *
  * Off unless BOPS_AI_CREDITS=1: then nothing is taken and nothing is refused (a self-hosted or local
  * cloud). On, the cloud won't start without access to the two tables (checkCreditAccess).
  */
@@ -29,6 +36,32 @@ export const creditsOn = () => config.aiCredits();
 
 /** What the app is told when the credit is used up (a 402, or a task the cloud stopped: turn-guard.ts). */
 export const OUT_OF_CREDIT = "You're out of AI credit, so your bots have stopped. Upgrade in Settings to keep them going.";
+/** The same for a user billed by use: it's their Orgo credit, and there's nothing to upgrade, only credit to add. */
+export const OUT_OF_ORGO_CREDIT = "You're out of Orgo credit, so your bots have stopped. Add credit in Settings to keep them going.";
+
+/**
+ * The credit's words for how the user is billed: its name, and what a 402 (none left: `empty`) and a 403
+ * or a stopped task (too little left: `low`) say. Bops' plans say AI credit and Upgrade; billing by use
+ * says Orgo credit and Add credit.
+ */
+export function creditWords(billing: BopsBilling = "plan") {
+  if (billing === "usage")
+    return {
+      name: "Orgo credit",
+      empty: OUT_OF_ORGO_CREDIT,
+      low: "There isn't enough Orgo credit left to start this task. Add credit in Settings to keep your bots going.",
+      stopped: "It needs more Orgo credit than you have left, so it's stopped. Add credit in Settings to keep it going.",
+    };
+  return {
+    name: "AI credit",
+    empty: OUT_OF_CREDIT,
+    low: "There isn't enough AI credit left to start this task. Upgrade in Settings to keep your bots going.",
+    stopped: "It needs more AI credit than you have left, so it's stopped. Upgrade in Settings to keep it going.",
+  };
+}
+
+/** How the user is billed, for the words only: "plan" when it can't be read (a refusal never fails on it). */
+export const billingFor = (userId: string): Promise<BopsBilling> => billingOf(userId).catch(() => "plan" as const);
 
 /** What the user has left, in micro-dollars (Free's $5 given first, if they never had it). */
 export async function creditLeft(userId: string): Promise<number> {
@@ -50,17 +83,21 @@ export async function spend(c: pg.PoolClient, userId: string, micros: number): P
 /** The credit ran out (usage events), after the spend that did it committed. */
 export const creditRanOut = (userId: string) => trackCloudEvent(userId, "bops_ai_credit_ran_out", {});
 
-/** The 402 a call that would spend gets when the credit's used up: the app shows it with Upgrade. */
-export const outOfCredit = () => new HttpError(402, OUT_OF_CREDIT, { code: AI_CREDIT_EMPTY, upgrade: true });
+/**
+ * The 402 a call that would spend gets when the credit's used up: the app shows it with Upgrade, or with
+ * Add credit for a user billed by use (`billing` "usage" says so: an app that knows reads it).
+ */
+export const outOfCredit = (billing: BopsBilling = "plan") =>
+  new HttpError(402, creditWords(billing).empty, { code: AI_CREDIT_EMPTY, upgrade: true, ...(billing === "usage" ? { billing } : {}) });
 
 /**
  * A task that can't start on what's left, though some is (turn-guard.ts admitTurn): 403, not 402, so
  * no app takes the credit for used up (every app before 0.0.16 pauses all its bots on any 402). The
  * body is shaped like OpenAI's errors too, so the OpenAI SDK in the app keeps the code.
  */
-export function shortOfCredit(): HttpError {
-  const message = "There isn't enough AI credit left to start this task. Upgrade in Settings to keep your bots going.";
-  return new HttpError(403, message, { error: { message, code: AI_CREDIT_LOW }, code: AI_CREDIT_LOW, upgrade: true });
+export function shortOfCredit(billing: BopsBilling = "plan"): HttpError {
+  const message = creditWords(billing).low;
+  return new HttpError(403, message, { error: { message, code: AI_CREDIT_LOW }, code: AI_CREDIT_LOW, upgrade: true, ...(billing === "usage" ? { billing } : {}) });
 }
 
 /**
@@ -71,7 +108,7 @@ export function shortOfCredit(): HttpError {
 export async function requireCredit(userId: string, minCost = 0): Promise<void> {
   if (!creditsOn()) return;
   const left = await creditLeft(userId);
-  if (left <= 0 || left < minCost) throw outOfCredit();
+  if (left <= 0 || left < minCost) throw outOfCredit(await billingFor(userId));
 }
 
 /** Whether the user has any credit left; true when AI credit is off. */
@@ -79,9 +116,13 @@ export async function hasCredit(userId: string): Promise<boolean> {
   return !creditsOn() || (await creditLeft(userId)) > 0;
 }
 
-/** Give a new user Free's $5 (once ever; nothing if they've had it). Best effort: the gate gives it too. */
+/**
+ * Give a new user Free's $5 (once ever; nothing if they've had it). Best effort: the gate gives it too.
+ * Not asked for a user the cloud knows is billed by use: Bops gives them nothing (Orgo's signup credit
+ * is their start), and orgo-web's balance function gives them nothing either when asked.
+ */
 export async function welcome(userId: string): Promise<void> {
-  if (!creditsOn()) return;
+  if (!creditsOn() || (await billingFor(userId)) === "usage") return;
   await creditLeft(userId).catch((e: Error) => console.warn(`[credit] ${userId}'s first AI credit: ${e.message}`));
 }
 

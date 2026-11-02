@@ -5,8 +5,8 @@ import { db, ensureUserRow, query } from "./db.ts";
 import { currentHandle, MAIN_WORKSPACE } from "./handles.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { lineDigits } from "./lines.ts";
-import { ACCOUNT_DELETED, BOPS_TIERS, PLAN_LIMIT, PLAN_REQUIRED, type BopsTier, type CloudPlanPayload } from "./protocol.ts";
-import { ensurePlanInbox, ensurePlanPhone, mainBotOf, pausePlanItems, releaseAfterPause } from "./provision.ts";
+import { ACCOUNT_DELETED, BOPS_TIERS, BOPS_USAGE, isBilling, PLAN_LIMIT, PLAN_REQUIRED, type BopsBilling, type BopsTier, type CloudPlanPayload } from "./protocol.ts";
+import { ensurePlanInbox, ensurePlanPhone, hasPlanLine, mainBotOf, pausePlanItems, releaseAfterPause } from "./provision.ts";
 import { queueForMac } from "./tunnel.ts";
 
 /**
@@ -33,44 +33,94 @@ import { queueForMac } from "./tunnel.ts";
  *   none, Pro 1, Max up to 5) are all the user can hold; proxy.ts asks requireRoomForNumber before a
  *   purchase. The app holds each plan to its emails the same way (CloudSession.plan). Beyond the
  *   main bot's, which the plan brings, Max's numbers and emails come only when the user asks.
+ * - **Billed by use** (protocol.ts BopsBilling "usage"): no Bops plan at all, so nothing is paused
+ *   or given back for being "on Free". The main bot gets its inbox (free), keeps the plan's number if
+ *   it had one, and the user may buy numbers up to BOPS_USAGE's, each paid from their Orgo credit like
+ *   any other (the credit gate decides, never the tier kept here). orgo-web's notice says it as
+ *   {userId, billing: "usage", at} (its tier, if it sends one, may be an Orgo plan's key and is ignored).
  */
 
 const isTier = (x: unknown): x is BopsTier => typeof x === "string" && Object.hasOwn(BOPS_TIERS, x);
 export const paidTier = (t: BopsTier) => t !== "free_bops";
 
-/** The user's plan as the cloud last heard it; Free until it hears otherwise. */
-export async function tierOf(userId: string): Promise<BopsTier> {
-  const r = await query<{ tier: BopsTier }>("SELECT tier FROM bops.plans WHERE user_id = $1", [userId]);
-  return r.rows[0]?.tier ?? "free_bops";
+/** The user's plan as the cloud last heard it, and how they're billed: Free on Bops' plans until it hears otherwise. */
+export type KeptPlan = { tier: BopsTier; billing: BopsBilling };
+
+export async function planOf(userId: string): Promise<KeptPlan> {
+  const r = await query<{ tier: BopsTier; billing: BopsBilling | null }>("SELECT tier, billing FROM bops.plans WHERE user_id = $1", [userId]);
+  const row = r.rows[0];
+  return { tier: row?.tier ?? "free_bops", billing: row?.billing === "usage" ? "usage" : "plan" };
 }
+
+/** The user's plan as the cloud last heard it; Free until it hears otherwise. Means nothing for a user billed by use (billingOf). */
+export async function tierOf(userId: string): Promise<BopsTier> {
+  return (await planOf(userId)).tier;
+}
+
+/** How the user is billed, as the cloud last heard it: "plan" until orgo-web says otherwise. */
+export async function billingOf(userId: string): Promise<BopsBilling> {
+  return (await planOf(userId)).billing;
+}
+
+/** The plan as usage events name it: the tier, or "usage" for a user billed by use. */
+export const planLabel = (p: KeptPlan) => (p.billing === "usage" ? "usage" : p.tier);
+
+/** Whether two kept plans differ in what the user has (a tier means nothing once billed by use). */
+export const planMoved = (a: KeptPlan, b: KeptPlan) => planLabel(a) !== planLabel(b);
 
 /**
  * Keep what orgo-web said at `at`, unless something it said later is kept already. `kept`: this was
- * newer, and stands now; `before`: the tier before it.
+ * newer, and stands now; `before`: the plan before it. `billing` missing (an orgo-web from before
+ * billing by use) keeps how the user is billed as it is.
  */
-export async function recordTier(userId: string, tier: BopsTier, at: Date, source: "notice" | "session"): Promise<{ kept: boolean; before: BopsTier }> {
+export async function recordTier(
+  userId: string,
+  tier: BopsTier,
+  at: Date,
+  source: "notice" | "session",
+  billing?: BopsBilling,
+): Promise<{ kept: boolean; before: KeptPlan; now: KeptPlan }> {
   await ensureUserRow(userId);
-  const r = await query<{ before: BopsTier | null; kept: boolean }>(
-    `WITH before AS (SELECT tier FROM bops.plans WHERE user_id = $1),
+  const r = await query<{ before_tier: BopsTier | null; before_billing: BopsBilling | null; kept: boolean; billing: BopsBilling | null }>(
+    `WITH before AS (SELECT tier, billing FROM bops.plans WHERE user_id = $1),
           kept AS (
-            INSERT INTO bops.plans AS p (user_id, tier, changed_at, source) VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_id) DO UPDATE SET tier = EXCLUDED.tier, changed_at = EXCLUDED.changed_at, source = EXCLUDED.source, updated_at = now()
+            INSERT INTO bops.plans AS p (user_id, tier, changed_at, source, billing) VALUES ($1, $2, $3, $4, COALESCE($5, 'plan'))
+            ON CONFLICT (user_id) DO UPDATE SET tier = EXCLUDED.tier, changed_at = EXCLUDED.changed_at, source = EXCLUDED.source,
+              billing = COALESCE($5, p.billing), updated_at = now()
             WHERE p.changed_at < EXCLUDED.changed_at
-            RETURNING 1)
-     SELECT (SELECT tier FROM before) AS before, EXISTS (SELECT 1 FROM kept) AS kept`,
-    [userId, tier, at, source],
+            RETURNING p.billing)
+     SELECT (SELECT tier FROM before) AS before_tier, (SELECT billing FROM before) AS before_billing,
+            EXISTS (SELECT 1 FROM kept) AS kept, (SELECT billing FROM kept) AS billing`,
+    [userId, tier, at, source, billing ?? null],
   );
-  const kept = r.rows[0].kept;
-  const before = r.rows[0].before ?? "free_bops";
-  if (kept && before !== tier)
-    trackCloudEvent(userId, "bops_plan_changed", { from_plan: before, to_plan: tier, heard_via: source }, { once: `${before}>${tier}@${at.toISOString()}`, set: { bops_plan: tier } });
-  return { kept, before };
+  const row = r.rows[0];
+  const before: KeptPlan = { tier: row.before_tier ?? "free_bops", billing: row.before_billing === "usage" ? "usage" : "plan" };
+  const now: KeptPlan = row.kept ? { tier, billing: row.billing === "usage" ? "usage" : "plan" } : before;
+  if (row.kept && planMoved(before, now)) {
+    const from = planLabel(before);
+    const to = planLabel(now);
+    trackCloudEvent(userId, "bops_plan_changed", { from_plan: from, to_plan: to, heard_via: source }, { once: `${from}>${to}@${at.toISOString()}`, set: { bops_plan: to } });
+  }
+  return { kept: row.kept, before, now };
+}
+
+/**
+ * What orgo-web said, as the cloud keeps it: a Bops tier on Bops' plans, or billing by use (with any
+ * tier, or none: it may be an Orgo plan's key, and is kept as free_bops). Null when it doesn't fit:
+ * billing it doesn't know, or a tier that isn't Bops' on Bops' plans (never taken for Free).
+ */
+export function saidPlan(x: { tier?: unknown; billing?: unknown } | null | undefined): { tier: BopsTier; billing?: BopsBilling } | null {
+  if (!x) return null;
+  if (x.billing !== undefined && x.billing !== null && !isBilling(x.billing)) return null;
+  if (x.billing === "usage") return { tier: isTier(x.tier) ? x.tier : "free_bops", billing: "usage" };
+  if (!isTier(x.tier)) return null;
+  return { tier: x.tier, ...(x.billing === "plan" ? { billing: "plan" as const } : {}) };
 }
 
 /* ---------------- Asking orgo-web ---------------- */
 
 /** When the cloud last asked orgo-web about each user (when the question went out), and what it said, so a burst of calls doesn't ask again each time. */
-const asked = new Map<string, { at: number; tier: BopsTier | null }>();
+const asked = new Map<string, { at: number; tier: BopsTier | null; billing?: BopsBilling }>();
 const ASK_EVERY_MS = 60_000;
 
 /**
@@ -79,19 +129,20 @@ const ASK_EVERY_MS = 60_000;
  * a minute, unless `fresh`: an answer from that minute comes back with its own `at`, so keeping it
  * (recordTier) never undoes a notice orgo-web sent after it was read.
  */
-export async function askOrgoForTier(userId: string, key: string, fresh = false): Promise<{ tier: BopsTier | null; at: Date }> {
+export async function askOrgoForTier(userId: string, key: string, fresh = false): Promise<{ tier: BopsTier | null; billing?: BopsBilling; at: Date }> {
   const last = asked.get(userId);
-  if (!fresh && last && Date.now() - last.at < ASK_EVERY_MS) return { tier: last.tier, at: new Date(last.at) };
+  if (!fresh && last && Date.now() - last.at < ASK_EVERY_MS) return { tier: last.tier, ...(last.billing ? { billing: last.billing } : {}), at: new Date(last.at) };
   const at = Date.now();
-  let tier: BopsTier | null = null;
+  let said: ReturnType<typeof saidPlan> = null;
   try {
     const res = await fetch(`${config.orgoOrigin()}/api/bops/plan`, { headers: { Authorization: `Bearer ${key}`, Accept: "application/json" }, signal: AbortSignal.timeout(8_000) });
-    const body = res.ok ? ((await res.json().catch(() => null)) as { tier?: unknown } | null) : null;
-    tier = isTier(body?.tier) ? body.tier : null;
+    const body = res.ok ? ((await res.json().catch(() => null)) as { tier?: unknown; billing?: unknown } | null) : null;
+    said = saidPlan(body);
   } catch {}
-  asked.set(userId, { at, tier });
+  const tier = said?.tier ?? null;
+  asked.set(userId, { at, tier, ...(said?.billing ? { billing: said.billing } : {}) });
   if (asked.size > 10_000) for (const [k, v] of asked) if (Date.now() - v.at > ASK_EVERY_MS) asked.delete(k);
-  return { tier, at: new Date(at) };
+  return { tier, ...(said?.billing ? { billing: said.billing } : {}), at: new Date(at) };
 }
 
 /**
@@ -101,8 +152,8 @@ export async function askOrgoForTier(userId: string, key: string, fresh = false)
  */
 export async function atSession(userId: string, key: string): Promise<void> {
   const said = key ? await askOrgoForTier(userId, key, true) : null;
-  const r = said?.tier ? await recordTier(userId, said.tier, said.at, "session") : null;
-  const changed = !!r?.kept && r.before !== said?.tier;
+  const r = said?.tier ? await recordTier(userId, said.tier, said.at, "session", said.billing) : null;
+  const changed = !!r?.kept && planMoved(r.before, r.now);
   await settle(userId, { force: changed, tierChanged: changed });
 }
 
@@ -176,8 +227,11 @@ export function locked<T>(userId: string, work: () => Promise<T>): Promise<T> {
 }
 
 async function settleNow(userId: string, tierChanged: boolean) {
-  const tier = await tierOf(userId);
-  if (!paidTier(tier)) {
+  const { tier, billing } = await planOf(userId);
+  const usage = billing === "usage";
+  // Said to the Mac only when it isn't the old default, so an older app reads the notice as before.
+  const billed = usage ? { billing } : {};
+  if (!usage && !paidTier(tier)) {
     waitingForState.delete(userId);
     const paused = await pausePlanItems(userId);
     if (tierChanged || paused.phone || paused.email) await tellMac(userId, { tier, botId: (await mainBotOf(userId))?.bot.id ?? null, workspaceId: MAIN_WORKSPACE, ...paused });
@@ -187,17 +241,20 @@ async function settleNow(userId: string, tierChanged: boolean) {
   if (!main) {
     // Nothing to set up for until the Mac says who the main bot is: its next state upload does it.
     waitingForState.add(userId);
-    if (tierChanged) await tellMac(userId, { tier, botId: null, workspaceId: MAIN_WORKSPACE });
+    if (tierChanged) await tellMac(userId, { tier, ...billed, botId: null, workspaceId: MAIN_WORKSPACE });
     return;
   }
   waitingForState.delete(userId);
-  const phone = await ensurePlanPhone(userId, main);
+  // Billed by use, the inbox is free and a plan's number they had stays theirs (picked up again if it
+  // was paused); a number is never bought for them here: they buy one, paid from their credit.
+  const phone = !usage || (await hasPlanLine(userId)) ? await ensurePlanPhone(userId, main) : null;
   const email = await ensurePlanInbox(userId, main);
   if (!tierChanged && !phone?.changed && !email?.changed) return;
   const claimed = email?.handle ?? (await currentHandle(userId, MAIN_WORKSPACE));
   const handle = claimed ? { handle: claimed.handle, auto: claimed.auto, changesLeft: claimed.changesLeft } : null;
   await tellMac(userId, {
     tier,
+    ...billed,
     botId: main.bot.id,
     workspaceId: MAIN_WORKSPACE,
     ...(phone?.phone.numberId ? { phone: phone.phone } : {}),
@@ -224,14 +281,17 @@ export function afterStateUpload(userId: string) {
  */
 export async function sweep(): Promise<number> {
   const released = await releaseAfterPause(
-    async (userId, item) => tellMac(userId, { tier: await tierOf(userId), botId: (await mainBotOf(userId))?.bot.id ?? null, workspaceId: MAIN_WORKSPACE, ...item }),
+    async (userId, item) => {
+      const p = await planOf(userId);
+      await tellMac(userId, { tier: p.tier, ...(p.billing === "usage" ? { billing: p.billing } : {}), botId: (await mainBotOf(userId))?.bot.id ?? null, workspaceId: MAIN_WORKSPACE, ...item });
+    },
     locked,
   );
   const stuck = await query<{ user_id: string }>(
     `SELECT DISTINCT x.user_id FROM (
        SELECT user_id FROM bops.phone_lines WHERE plan AND status IN ('setting_up', 'broken') AND updated_at < now() - interval '5 minutes'
        UNION SELECT user_id FROM bops.mail_inboxes WHERE plan AND status IN ('setting_up', 'broken') AND updated_at < now() - interval '5 minutes'
-     ) x JOIN bops.plans p ON p.user_id = x.user_id AND p.tier <> 'free_bops'
+     ) x JOIN bops.plans p ON p.user_id = x.user_id AND (p.tier <> 'free_bops' OR p.billing = 'usage')
      LIMIT 100`,
   );
   for (const s of stuck.rows) await settle(s.user_id, { force: true });
@@ -259,16 +319,18 @@ export async function numbersHeld(userId: string): Promise<number> {
   return r.rows[0]?.n ?? 0;
 }
 
-/** Whether the plan has room for one more number with `held` already. */
-export const roomForNumber = (tier: BopsTier, held: number) => held < BOPS_TIERS[tier].phoneNumbers;
+/** Whether the plan has room for one more number with `held` already: billed by use, up to BOPS_USAGE's, each paid for. */
+export const roomForNumber = (tier: BopsTier, held: number, billing: BopsBilling = "plan") => held < (billing === "usage" ? BOPS_USAGE.phoneNumbers : BOPS_TIERS[tier].phoneNumbers);
 
 /**
  * The refusal for one number more than the plan includes, in the plan's words: Free and Pro are
- * offered the plan that has room (402 PLAN_REQUIRED, `upgrade`, `upgradeTo`); Max is at its most.
+ * offered the plan that has room (402 PLAN_REQUIRED, `upgrade`, `upgradeTo`); Max is at its most, and
+ * so is a user billed by use at BOPS_USAGE's (nothing to buy that gives more).
  */
-export function numberRefusal(tier: BopsTier): HttpError {
+export function numberRefusal(tier: BopsTier, billing: BopsBilling = "plan"): HttpError {
   const pro = BOPS_TIERS.pro_bops.phoneNumbers;
   const max = BOPS_TIERS.max_bops.phoneNumbers;
+  if (billing === "usage") return new HttpError(402, `You have ${BOPS_USAGE.phoneNumbers} phone numbers, the most one account can have for now.`, { code: PLAN_LIMIT });
   if (tier === "max_bops") return new HttpError(402, `Max includes up to ${max} phone numbers, and you have ${max}.`, { code: PLAN_LIMIT });
   if (tier === "pro_bops") return new HttpError(402, `Pro includes ${pro} phone number. Max includes up to ${max}.`, { code: PLAN_REQUIRED, upgrade: true, upgradeTo: "max_bops" });
   return new HttpError(402, `Free doesn't include a phone number. Pro includes ${pro}, and Max up to ${max}.`, { code: PLAN_REQUIRED, upgrade: true, upgradeTo: "pro_bops" });
@@ -282,20 +344,24 @@ export function numberRefusal(tier: BopsTier): HttpError {
  */
 export async function requireRoomForNumber(userId: string, key?: string): Promise<void> {
   if (!config.planLimits()) return;
-  let tier = await tierOf(userId);
+  let plan = await planOf(userId);
   const held = await numbersHeld(userId);
-  if (!roomForNumber(tier, held) && tier !== "max_bops" && key) {
+  const room = (p: KeptPlan) => roomForNumber(p.tier, held, p.billing);
+  // Nothing orgo-web could say gives more to Max, or to a user billed by use at their most.
+  const atMost = plan.billing === "usage" || plan.tier === "max_bops";
+  if (!room(plan) && !atMost && key) {
     const said = await askOrgoForTier(userId, key);
-    if (said.tier && said.tier !== tier && roomForNumber(said.tier, held)) {
+    const next: KeptPlan | null = said.tier ? { tier: said.tier, billing: said.billing ?? plan.billing } : null;
+    if (next && planMoved(next, plan) && room(next)) {
       // Kept as of when it was read (it may be the minute's answer): a later notice still stands.
-      const r = await recordTier(userId, said.tier, said.at, "session");
+      const r = await recordTier(userId, next.tier, said.at, "session", said.billing);
       if (r.kept) {
-        void settle(userId, { force: true, tierChanged: r.before !== said.tier });
-        tier = said.tier;
+        void settle(userId, { force: true, tierChanged: planMoved(r.before, r.now) });
+        plan = r.now;
       }
     }
   }
-  if (!roomForNumber(tier, held)) throw numberRefusal(tier);
+  if (!room(plan)) throw numberRefusal(plan.tier, plan.billing);
 }
 
 /**
@@ -376,29 +442,31 @@ export const routes: Route[] = [
       if (!secret) throw new HttpError(404, "Not found");
       const body = await readBody(req, 16 * 1024);
       if (!planSigned(secret, one(req.headers["x-bops-timestamp"]), body, one(req.headers["x-bops-signature"]))) throw new HttpError(401, "Bad signature");
-      let n: { userId?: unknown; tier?: unknown; at?: unknown };
+      let n: { userId?: unknown; tier?: unknown; billing?: unknown; at?: unknown };
       try {
         n = JSON.parse(body.toString("utf8")) as typeof n;
       } catch {
         throw new HttpError(400, "Body isn't JSON");
       }
       const at = typeof n?.at === "string" ? new Date(n.at) : new Date(NaN);
-      if (typeof n?.userId !== "string" || !USER_ID.test(n.userId) || !isTier(n.tier) || Number.isNaN(at.getTime()) || at.getTime() > Date.now() + 5 * 60_000)
-        throw new HttpError(400, "Send {userId, tier, at}");
+      const said = saidPlan(n);
+      if (typeof n?.userId !== "string" || !USER_ID.test(n.userId) || !said || Number.isNaN(at.getTime()) || at.getTime() > Date.now() + 5 * 60_000)
+        throw new HttpError(400, "Send {userId, tier, at}, or {userId, billing: \"usage\", at}");
       // A user deleted lately (delete-user.ts) gets no plan row back: the Stripe cancel that came with
       // their deletion sends a notice too, and it's answered as taken so orgo-web doesn't send it again.
-      const recorded = await recordTier(n.userId, n.tier, at, "notice").catch((e: unknown) => {
+      const recorded = await recordTier(n.userId, said.tier, at, "notice", said.billing).catch((e: unknown) => {
         if (e instanceof HttpError && e.extra?.code === ACCOUNT_DELETED) return null;
         throw e;
       });
       if (!recorded) {
-        console.log(`[plans] ${n.userId}: ${n.tier} at ${at.toISOString()} (the user was deleted: ignored)`);
+        console.log(`[plans] ${n.userId}: ${said.billing === "usage" ? "usage" : said.tier} at ${at.toISOString()} (the user was deleted: ignored)`);
         return sendJson(res, 200, { ok: true, applied: false });
       }
-      const { kept, before } = recorded;
+      const { kept, before, now } = recorded;
+      const moved = planMoved(before, now);
       // Answered at once (orgo-web waits a few seconds at most); the setting up runs after.
-      if (kept) void settle(n.userId, { force: before !== n.tier, tierChanged: before !== n.tier });
-      console.log(`[plans] ${n.userId}: ${n.tier} at ${at.toISOString()}${kept ? (before !== n.tier ? ` (was ${before})` : " (no change)") : " (older than what's kept: ignored)"}`);
+      if (kept) void settle(n.userId, { force: moved, tierChanged: moved });
+      console.log(`[plans] ${n.userId}: ${planLabel(now)} at ${at.toISOString()}${kept ? (moved ? ` (was ${planLabel(before)})` : " (no change)") : " (older than what's kept: ignored)"}`);
       sendJson(res, 200, { ok: true, applied: kept });
     },
   },

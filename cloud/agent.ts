@@ -143,7 +143,7 @@ async function needCredit(userId: string) {
   try {
     await requireCredit(userId);
   } catch (e) {
-    if (e instanceof HttpError && e.status === 402) throw new HttpError(402, "You're out of AI credit.", { code: AI_CREDIT_EMPTY });
+    if (e instanceof HttpError && e.status === 402) throw new HttpError(402, `You're out of ${e.extra?.billing === "usage" ? "Orgo" : "AI"} credit.`, { code: AI_CREDIT_EMPTY });
     throw e;
   }
 }
@@ -162,11 +162,11 @@ const line = (t: string, max: number) => {
 
 /*
  * Words the Mac's bots write that send the user to buy, which Bops for iPhone never shows (it sells
- * nothing: App Store 3.1.1 and 3.1.3(f)). A sentence that starts with them (lib/server/cloud.ts
+ * nothing: App Store 3.1.1 and 3.1.3(f)). A sentence that starts with them, Upgrade or Add credit (lib/server/cloud.ts
  * OUT_OF_CREDIT, lib/server/plan.ts, cloud/credit.ts, cloud/turn-guard.ts, cloud/plans.ts) and the
  * clause orgo-web's free hours end with ("…, or upgrade to Pro to keep it on").
  */
-const BUY = /\s*\bUpgrade (?:in Settings|to (?:Max|Pro|Orgo)\b|to use it again|to get a number again|within \d+ days)[^.!?\n]*[.!?]?/g;
+const BUY = /\s*\b(?:Upgrade (?:in Settings|to (?:Max|Pro|Orgo)\b|to use it again|to get a number again|within \d+ days)|Add (?:more )?credit (?:in Settings|on Orgo|to wake it)\b)[^.!?\n]*[.!?]?/g;
 const BUY_CLAUSE = /,? or upgrade to (?:Max|Pro)\b[^.!?\n]*/g;
 /** A Markdown link, with the space before it: [words](target) or [words](target "title"). */
 const LINK = /(\s*)\[([^\]\n]+)\]\(([^)\s]*)(?:\s+"[^"\n]*")?\)/g;

@@ -325,6 +325,44 @@ test("with no credit left, calls that spend are refused with 402 before they're 
   assert.equal(after.status, 200, after.text);
 });
 
+/** orgo-web moved the user to billing by use (its plan notice, as cloud/plans.ts keeps it). */
+async function billedByUse(userId: string) {
+  await query(
+    `INSERT INTO bops.plans (user_id, tier, changed_at, source, billing) VALUES ($1, 'free_bops', now(), 'notice', 'usage')
+     ON CONFLICT (user_id) DO UPDATE SET billing = 'usage', changed_at = now()`,
+    [userId],
+  );
+}
+/** An app that knows billing by use (protocol.ts USAGE_MIN_APP_VERSION or later). */
+const NEW_APP = { "x-bops-version": "9.0.0" };
+
+test("billed by use, the 402 and the 403 say Orgo credit and Add credit, never Upgrade, and say how they're billed", async () => {
+  const u = await newUser();
+  await setCredit(u, { free: 0 });
+  await billedByUse(u);
+  const r = await as(u, "POST", "/proxy/openai/v1/responses", { model: "gpt-6.1-sol", input: "hi" }, NEW_APP);
+  assert.equal(r.status, 402, r.text);
+  assert.deepEqual(r.json, { error: "You're out of Orgo credit, so your bots have stopped. Add credit in Settings to keep them going.", code: "ai_credit_empty", upgrade: true, billing: "usage" });
+  // A number's month needs that much credit, as on any plan.
+  const n = await as(u, "POST", "/proxy/agentphone/v1/numbers", { country: "US", type: "sms" }, NEW_APP);
+  assert.equal(n.status, 402, n.text);
+  assert.equal(n.json.billing, "usage");
+  // Too little to start a task (the turn guard's 403) says the same way.
+  const { shortOfCredit, outOfCredit } = await import("../credit.ts");
+  assert.equal(shortOfCredit("usage").message, "There isn't enough Orgo credit left to start this task. Add credit in Settings to keep your bots going.");
+  assert.match(shortOfCredit().message, /AI credit.*Upgrade/);
+  assert.equal(outOfCredit().extra?.billing, undefined, "Bops' plans: as before");
+});
+
+test("POST /v1/session gives a user billed by use no Bops $5: Orgo's signup credit is their start", async () => {
+  const u = await newUser();
+  await billedByUse(u);
+  const r = await as(u, "POST", "/v1/session", undefined, NEW_APP);
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.plan.billing, "usage");
+  assert.equal((await query("SELECT 1 FROM public.bops_ai_credit_grants WHERE user_id = $1", [u])).rowCount, 0, "no free_signup grant asked for");
+});
+
 test("a treg call may cost at most what's left of the credit", async () => {
   const u = await newUser();
   await setCredit(u, { free: 30_000 });

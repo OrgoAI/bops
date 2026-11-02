@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import pg from "pg";
 import WebSocket from "ws";
+import { forPhone } from "../agent.ts";
 import { shutdownTelemetry } from "../analytics.ts";
 import { forgetNotedVersions, refreshAppPolicy } from "../app-version.ts";
 import { creditLeft } from "../credit.ts";
@@ -478,6 +479,20 @@ test("out of AI credit: 402 in the phone's own words, before anything is written
   assert.equal(responses().length, asked);
   assert.deepEqual(await rowsOf(id), []);
   assert.equal(((await phone(id, "GET", "/v1/agent")).json as AgentInfo).working, false);
+});
+
+test("billed by use and out of credit: the phone's 402 says Orgo credit, still with nothing to buy", async () => {
+  const id = await newUser(STATE);
+  await creditLeft(id);
+  await query("UPDATE public.bops_ai_credit SET free_micros = 0, plan_micros = 0 WHERE user_id = $1", [id]);
+  await query("INSERT INTO bops.plans (user_id, tier, changed_at, source, billing) VALUES ($1, 'free_bops', now(), 'notice', 'usage')", [id]);
+  const r = await send(id, newId(), "Hi");
+  assert.equal(r.status, 402, r.text);
+  assert.equal(r.json.error, "You're out of Orgo credit.");
+  assert.equal(r.json.upgrade, undefined);
+  // The Mac's words that send the user to add credit go, as Upgrade's do.
+  assert.equal(forPhone("I'm out of Orgo credit, so I've stopped. Add credit in Settings to keep me going."), "I'm out of Orgo credit, so I've stopped.");
+  assert.equal(forPhone("Your Bops computer is asleep: your Orgo credit ran out. Add credit on Orgo to wake it."), "Your Bops computer is asleep: your Orgo credit ran out.");
 });
 
 test("a chat that isn't the main bot's any more (409 agent_changed), and more than 20 sends a minute (429 slow_down), write nothing", async () => {

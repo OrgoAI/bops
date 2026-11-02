@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import * as agent from "./agent.ts";
-import { appVersionOf, fromIphone, noteAppVersion, noteIphoneVersion, requireAppVersion, requireIphoneVersion, startAppPolicy } from "./app-version.ts";
+import { appVersionOf, fromIphone, noteAppVersion, noteIphoneVersion, requireAppVersion, requireIphoneVersion, requireUsageAppVersion, startAppPolicy } from "./app-version.ts";
 import { bearer, computerSeenAt, requireUser, userForKey, type CloudUser } from "./auth.ts";
 import { captureCloudException, inTelemetryScope, shutdownTelemetry } from "./analytics.ts";
 import { config } from "./config.ts";
@@ -97,6 +97,7 @@ async function appCheck(req: IncomingMessage, user: CloudUser, path: string) {
   }
   noteAppVersion(user.id, version);
   requireAppVersion(path, version);
+  if (!user.computer) await requireUsageAppVersion(user.id, path, version);
   if (!user.computer && path.startsWith("/proxy/") && (await state.behindState(req, user.id))) throw state.behindRefusal(path);
 }
 

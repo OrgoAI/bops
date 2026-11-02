@@ -81,6 +81,14 @@ async function planLine(userId: string): Promise<LineRow | null> {
   return r.rows[0] ?? null;
 }
 
+/**
+ * Whether the user still has a plan's number (not given back): a user billed by use keeps the one they
+ * had (plans.ts settles it like a plan's), but is never bought one for nothing.
+ */
+export async function hasPlanLine(userId: string): Promise<boolean> {
+  return !!(await planLine(userId));
+}
+
 /** Whether the main bot has a number that isn't the plan's: its own (Bot.phone), the workspace's, or a line the cloud has for it. */
 async function ownNumberOf(userId: string, main: MainBot): Promise<boolean> {
   // A plan's number given back while the Mac was away is still on the bot in its last upload: that one isn't its own.
@@ -327,7 +335,8 @@ export const RELEASE_AFTER_DAYS = 30;
 type Guard = <T>(userId: string, work: () => Promise<T>) => Promise<T>;
 
 /**
- * Give back what was paused 30 days ago and still is (the user is still on Free): the number to
+ * Give back what was paused 30 days ago and still is (the user is still on Free, and not billed by use:
+ * one billed by use keeps what they had, plans.ts): the number to
  * AgentPhone (DELETE /v1/numbers/{id}), the inbox to AgentMail. Each is looked at again under the
  * user's lock (`guard`) before it goes, so an upgrade that came meanwhile keeps it. Each released one
  * is told to its user's Mac through `tell`. A provider that fails, or isn't set up here, leaves it
@@ -340,7 +349,7 @@ export async function releaseAfterPause(tell: (userId: string, item: { phone?: P
      FROM bops.phone_lines l
      JOIN bops.cloud_accounts a ON a.user_id = l.user_id
      LEFT JOIN bops.plans p ON p.user_id = l.user_id
-     WHERE l.plan AND l.status = 'paused' AND l.paused_at < now() - make_interval(days => $1) AND COALESCE(p.tier, 'free_bops') = 'free_bops'
+     WHERE l.plan AND l.status = 'paused' AND l.paused_at < now() - make_interval(days => $1) AND COALESCE(p.tier, 'free_bops') = 'free_bops' AND COALESCE(p.billing, 'plan') = 'plan'
      LIMIT 100`,
     [RELEASE_AFTER_DAYS],
   );
@@ -350,7 +359,7 @@ export async function releaseAfterPause(tell: (userId: string, item: { phone?: P
         `SELECT a.agentphone_sub_account AS sub FROM bops.phone_lines l
          JOIN bops.cloud_accounts a ON a.user_id = l.user_id
          LEFT JOIN bops.plans p ON p.user_id = l.user_id
-         WHERE l.digits = $1 AND l.user_id = $2 AND l.plan AND l.status = 'paused' AND l.paused_at < now() - make_interval(days => $3) AND COALESCE(p.tier, 'free_bops') = 'free_bops'`,
+         WHERE l.digits = $1 AND l.user_id = $2 AND l.plan AND l.status = 'paused' AND l.paused_at < now() - make_interval(days => $3) AND COALESCE(p.tier, 'free_bops') = 'free_bops' AND COALESCE(p.billing, 'plan') = 'plan'`,
         [l.digits, l.user_id, RELEASE_AFTER_DAYS],
       );
       const sub = still.rows[0]?.sub;
@@ -378,7 +387,7 @@ export async function releaseAfterPause(tell: (userId: string, item: { phone?: P
   const inboxes = await query<InboxRow & { user_id: string }>(
     `SELECT i.inbox_id, i.pod_id, i.email, i.handle, i.status, i.problem, i.user_id
      FROM bops.mail_inboxes i LEFT JOIN bops.plans p ON p.user_id = i.user_id
-     WHERE i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $1) AND COALESCE(p.tier, 'free_bops') = 'free_bops'
+     WHERE i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $1) AND COALESCE(p.tier, 'free_bops') = 'free_bops' AND COALESCE(p.billing, 'plan') = 'plan'
      LIMIT 100`,
     [RELEASE_AFTER_DAYS],
   );
@@ -386,7 +395,7 @@ export async function releaseAfterPause(tell: (userId: string, item: { phone?: P
     const gone = await guard(i.user_id, async () => {
       const still = await query(
         `SELECT 1 FROM bops.mail_inboxes i LEFT JOIN bops.plans p ON p.user_id = i.user_id
-         WHERE i.inbox_id = $1 AND i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $2) AND COALESCE(p.tier, 'free_bops') = 'free_bops'`,
+         WHERE i.inbox_id = $1 AND i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $2) AND COALESCE(p.tier, 'free_bops') = 'free_bops' AND COALESCE(p.billing, 'plan') = 'plan'`,
         [i.inbox_id, RELEASE_AFTER_DAYS],
       );
       if (!still.rowCount) return false;

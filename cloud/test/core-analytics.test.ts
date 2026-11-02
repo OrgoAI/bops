@@ -116,6 +116,19 @@ test("a free to pro notice is one bops_plan_changed with the person's plan; the 
   assert.equal(of(id, "bops_plan_changed").length, 1);
 });
 
+test("a move to billing by use is one bops_plan_changed to \"usage\"; a notice of a tier while billed by use sends none", async () => {
+  const id = newUser("usage");
+  assert.equal(await notice({ userId: id, tier: "pro_bops", at: new Date(Date.now() - 2000).toISOString() }), 200);
+  assert.equal(await notice({ userId: id, billing: "usage", tier: "hacker_v2", at: new Date(Date.now() - 1000).toISOString() }), 200);
+  const e = await until(() => of(id, "bops_plan_changed").find((x) => x.properties.to_plan === "usage") ?? null, "to usage");
+  assert.equal(e.properties.from_plan, "pro_bops");
+  assert.deepEqual(e.properties.$set, { bops_plan: "usage" });
+  // Still billed by use (an orgo-web from before says no billing): the tier means nothing, so nothing changed.
+  assert.equal(await notice({ userId: id, tier: "max_bops", at: new Date().toISOString() }), 200);
+  await settle();
+  assert.equal(of(id, "bops_plan_changed").length, 2);
+});
+
 test("a user whose state has analyticsOff sends nothing on a notice", async () => {
   const id = newUser("switched-off");
   await query("INSERT INTO bops.app_state (user_id, state, version) VALUES ($1, $2::jsonb, 1)", [id, JSON.stringify({ analyticsOff: true })]);

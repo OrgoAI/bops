@@ -1,7 +1,8 @@
 import type { IncomingMessage } from "node:http";
 import { query } from "./db.ts";
 import { HttpError } from "./http.ts";
-import { APP_CLIENT_HEADER, APP_UPDATE_REQUIRED, APP_VERSION_HEADER, IOS_CLIENT } from "./protocol.ts";
+import { billingOf } from "./plans.ts";
+import { APP_CLIENT_HEADER, APP_UPDATE_REQUIRED, APP_VERSION_HEADER, IOS_CLIENT, USAGE_MIN_APP_VERSION } from "./protocol.ts";
 
 /**
  * Which Bops app each user is on, and keeping old ones out. Every call from the app says its version
@@ -114,6 +115,35 @@ export function requireAppVersion(path: string, version: string | null): void {
   const extra = path.startsWith("/proxy/openai/") ? { error: { message: UPDATE_BOPS, code: APP_UPDATE_REQUIRED } } : {};
   throw new HttpError(426, UPDATE_BOPS, { code: APP_UPDATE_REQUIRED, ...extra });
 }
+
+export const UPDATE_BOPS_USAGE = "Bops now bills by what you use, from your Orgo credit. Update Bops from bops.bot to keep going.";
+
+/** How each user is billed, as last read (a minute at most), so the gate below costs a query a minute per user, not one a call. */
+const billed = new Map<string, { usage: boolean; at: number }>();
+
+/**
+ * 426 for a Mac app older than USAGE_MIN_APP_VERSION (or one that doesn't say) when the user is billed
+ * by use (protocol.ts BopsBilling): it would show them Bops' Free plan and sell them Bops credit that
+ * nothing spends. Its state's calls still go through, as with block_below. Not for a computer's runner
+ * (it isn't the app the user sees). A failure to read the billing lets the call through.
+ */
+export async function requireUsageAppVersion(userId: string, path: string, version: string | null): Promise<void> {
+  if (OPEN_TO_OLD_APPS.test(path)) return;
+  if (version && !olderThan(version, USAGE_MIN_APP_VERSION)) return;
+  let kept = billed.get(userId);
+  if (!kept || Date.now() - kept.at > 60_000) {
+    const usage = (await billingOf(userId).catch(() => "plan")) === "usage";
+    if (billed.size > 50_000) billed.clear();
+    kept = { usage, at: Date.now() };
+    billed.set(userId, kept);
+  }
+  if (!kept.usage) return;
+  const extra = path.startsWith("/proxy/openai/") ? { error: { message: UPDATE_BOPS_USAGE, code: APP_UPDATE_REQUIRED } } : {};
+  throw new HttpError(426, UPDATE_BOPS_USAGE, { code: APP_UPDATE_REQUIRED, ...extra });
+}
+
+/** For tests: forget how users are billed. */
+export const forgetBilling = () => billed.clear();
 
 /** 426 when an iPhone app is older than ios_block_below (or doesn't say). block_below never applies to it. */
 export function requireIphoneVersion(version: string | null): void {
