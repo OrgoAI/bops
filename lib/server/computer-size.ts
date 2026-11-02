@@ -58,8 +58,11 @@ export async function sizeView({ phaseOnly = false } = {}): Promise<SizeView> {
   return { ...none, needed: !st.computerSizeChosenAt, sizes, current, preselect, change: u.computer.change ?? (id ? "bops" : null) };
 }
 
-/** A switch's answer: done (`changed` false when there was nothing to change), or why not, in the app's words. */
-export type SizeResult = { ok: true; size: ComputerSize; changed: boolean } | { ok: false; status: number; error: string; code?: string; topUpUrl?: string };
+/**
+ * A switch's answer: done (`changed` false when there was nothing to change, and when it changed, the
+ * computer's id, so only its live views stream afresh), or why not, in the app's words.
+ */
+export type SizeResult = { ok: true; size: ComputerSize; changed: boolean; computerId?: string } | { ok: false; status: number; error: string; code?: string; topUpUrl?: string };
 
 const refused = (status: number, error: string, more: { code?: string; topUpUrl?: string } = {}): SizeResult => ({ ok: false, status, error, ...more });
 
@@ -177,9 +180,19 @@ export async function switchSize(size: ComputerSize): Promise<SizeResult> {
       keep(size);
       orgo.forgetStream(id);
       forgetPlan();
+      return done.changed ? { ...done, computerId: id } : done;
     }
     return done;
   } finally {
     sizeSwitch.phase = undefined;
   }
+}
+
+/**
+ * Pick your computer answered with the size the computer already is: kept on this account, without asking
+ * Orgo, so a plan read that fails just then never holds the card up. Nothing changes on the computer.
+ */
+export function keepSize(size: ComputerSize): SizeResult {
+  keep(size);
+  return { ok: true, size, changed: false };
 }

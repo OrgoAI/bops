@@ -209,10 +209,30 @@ await test("the words: each size with Orgo's price and hours, Settings' line, th
   assert.deepEqual(W.confirmWords(l, "bops"), { title: "Switch to Large?", line: "Large costs $0.11 an hour while it works. Your computer may restart, and anything open on it may close.", action: "Switch" });
   assert.deepEqual(W.confirmWords(m, "plan"), { title: "Switch to Medium?", line: "Your computer may restart, and anything open on it may close.", action: "Switch" });
   assert.equal(W.doneWords(m), "Your computer is Medium now.");
+  // On the Orgo plan the card names no price and no hours: what it costs is the plan's.
+  assert.deepEqual(W.offerWords(l, "plan"), { name: "Large", specs: "4 cores, 16 GB", price: "", lasts: "Part of your Orgo plan.", blurb: "Faster, with smoother screen video." });
+  assert.deepEqual(W.offerWords(m, "bops"), W.offerWords(m));
+  assert.doesNotMatch(W.PICK_WORDS.planLine, /pay/);
+  assert.equal(W.RESTART_WORDS, "Your computer may restart, and anything open on it may close.");
   // Orgo's own prices, whatever they are: nothing here names one.
   assert.equal(W.offerWords({ ...m, hourlyCents: 6 }).lasts, "$5 runs it for about 80 hours.");
-  for (const t of [...Object.values(W.PICK_WORDS), ...Object.values(W.PHASE_WORDS), ...Object.values(W.SIZE_REFUSED).map((x) => (typeof x === "function" ? x(l) : x)), ...Object.values(W.offerWords(m)), W.settingsHint(m, "bops"), W.confirmWords(l, "bops").line])
+  for (const t of [...Object.values(W.PICK_WORDS), ...Object.values(W.offerWords(l, "plan")), W.RESTART_WORDS, ...Object.values(W.PHASE_WORDS), ...Object.values(W.SIZE_REFUSED).map((x) => (typeof x === "function" ? x(l) : x)), ...Object.values(W.offerWords(m)), W.settingsHint(m, "bops"), W.confirmWords(l, "bops").line])
     noDashes(t);
+});
+
+await test("a computer that changed size is said with its id, so only its live views stream afresh", async () => {
+  globalThis.window = new EventTarget();
+  try {
+    const heard = [];
+    const stop = W.onComputerResized((id) => heard.push(id));
+    W.computerResized("c-1");
+    W.computerResized();
+    stop();
+    W.computerResized("c-2");
+    assert.deepEqual(heard, ["c-1", undefined], "the id when said, none otherwise; nothing after stop");
+  } finally {
+    delete globalThis.window;
+  }
 });
 
 /* ---------------- The size a new computer is made at (plan.ts makeFree) ---------------- */
@@ -318,10 +338,24 @@ await test("Pick your computer is asked of a user billed by use until they answe
 
 /* ---------------- Switching (lib/server/computer-size.ts) ---------------- */
 
-const post = async (size) => {
-  const res = await R.POST(new Request("http://localhost:3210/api/computer/size", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ size }) }));
+const post = async (size, more = {}) => {
+  const res = await R.POST(new Request("http://localhost:3210/api/computer/size", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ size, ...more }) }));
   return { status: res.status, ...(await res.json()) };
 };
+
+await test("Continue on the computer's own size (keep) is answered without asking Orgo, so a plan read that fails never holds the card up", async () => {
+  billedBy("usage");
+  fresh({ computer: { id: "c-keep", size: "large", status: "running" } });
+  noComputer();
+  n = calls.length;
+  const r = await post("large", { keep: true });
+  assert.deepEqual([r.status, r.ok, r.changed, r.size, r.computerId], [200, true, false, "large", undefined]);
+  assert.equal(calls.length, n, "nothing asked of Orgo");
+  assert.equal(S.getState().computerSize, "large");
+  assert.ok(S.getState().computerSizeChosenAt);
+  assert.equal((await view()).needed, false, "answered on this account");
+  assert.equal((await post("tiny", { keep: true })).status, 400, "only a size this app knows");
+});
 
 await test("no computer yet: the size is kept as the one it's made at, and the account has answered", async () => {
   billedBy("usage");
@@ -348,7 +382,7 @@ await test("Continue on the computer's own size changes nothing; the other size 
   assert.equal(await O.orgo.webrtc("c-big", { webrtc: null, running: true }), false);
   assert.equal(asked("POST", "/api/computers/c-big/webrtc").length, n);
   r = await post("medium");
-  assert.deepEqual([r.status, r.ok, r.changed, r.size], [200, true, true, "medium"]);
+  assert.deepEqual([r.status, r.ok, r.changed, r.size, r.computerId], [200, true, true, "medium", "c-big"], "the computer's id, so only its live views stream afresh");
   assert.deepEqual(asked("POST", "/api/bops/computer/size").at(-1).body, { size: "medium" });
   assert.equal(o.computer.size, "medium");
   assert.equal(S.getState().computerSize, "medium");

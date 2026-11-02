@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { trackEvent } from "@/lib/analytics";
 import type { ComputerSize, ComputerSizeChange, SizeOffer, UsageTerms } from "@/lib/bops-billing";
-import { computerResized, confirmWords, doneWords, offerWords, PHASE_WORDS, PICK_WORDS, SIZE_REFUSED, settingsHint, type SizePhase, type SizeView } from "@/lib/computer-size";
+import { computerResized, confirmWords, doneWords, offerWords, PHASE_WORDS, PICK_WORDS, RESTART_WORDS, SIZE_REFUSED, settingsHint, type SizePhase, type SizeView } from "@/lib/computer-size";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { Segmented } from "./segmented";
@@ -21,7 +21,8 @@ type Said = { ok: true; text: string } | { ok: false; text: string; topUpUrl?: s
 
 /**
  * Switching the size: POST /api/computer/size, with how far it has got (GET ?phase=1) while it waits, so the
- * button says Waking or Restarting when it does. Done, the live views stream afresh and the state is read again.
+ * button says Waking or Restarting when it does. Done, the computer's live views stream afresh and the state
+ * is read again. `keep`: the size the computer already is, answered without asking Orgo (nothing to switch).
  */
 function useSizeSwitch() {
   const [busy, setBusy] = useState<ComputerSize | null>(null);
@@ -44,15 +45,15 @@ function useSizeSwitch() {
     }, 1000);
     return () => clearInterval(t);
   }, [busy]);
-  const run = async (offer: SizeOffer): Promise<boolean> => {
+  const run = async (offer: SizeOffer, { keep = false } = {}): Promise<boolean> => {
     setBusy(offer.key);
     setPhase("switching");
     setSaid(null);
     try {
-      const res = await fetch("/api/computer/size", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ size: offer.key }) });
-      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; changed?: boolean; error?: string; topUpUrl?: string };
-      // Every live view in the window streams it afresh, whether or not this one is still open.
-      if (j.ok && j.changed) computerResized();
+      const res = await fetch("/api/computer/size", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(keep ? { size: offer.key, keep: true } : { size: offer.key }) });
+      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; changed?: boolean; computerId?: string; error?: string; topUpUrl?: string };
+      // Every live view of that computer in the window streams it afresh, whether or not this one is still open.
+      if (j.ok && j.changed) computerResized(j.computerId);
       if (!live.current) return !!j.ok;
       if (j.ok) {
         if (j.changed) setSaid({ ok: true, text: doneWords(offer) });
@@ -88,17 +89,21 @@ function AddCredit({ url, surface }: { url: string; surface: "account" | "comput
 
 /**
  * Pick your computer, asked once per account when Bops opens (`view.needed`), for a user billed by use:
- * each size with its price, about how long $5 runs it and what it's for, the computer's own size (or Medium
- * for someone new) picked first. Continue keeps that size or switches to the one picked; with no computer
- * yet, it's the size one is made at. After a switch that didn't work, the computer can be kept as it is.
+ * each size with its price, about how long $5 runs it and what it's for (on the Orgo plan, that it's part
+ * of the plan instead), the computer's own size (or Medium for someone new) picked first. Continue keeps
+ * that size, answered without asking Orgo, or switches to the one picked, said first to maybe restart the
+ * computer; with no computer yet, it's the size one is made at. After a try that didn't work, the computer
+ * can be kept as it is, or the card closed for now (it's asked again next time Bops opens).
  */
 export function PickComputer({ view, onDone }: { view: SizeView; onDone: () => void }) {
   const [pick, setPick] = useState<ComputerSize>(view.preselect ?? view.sizes[0].key);
   const { busy, phase, said, run } = useSizeSwitch();
   const offer = view.sizes.find((s) => s.key === pick) ?? view.sizes[0];
   const kept = view.current ? view.sizes.find((s) => s.key === view.current) : undefined;
+  const plan = view.change === "plan";
+  const switching = !!view.current && pick !== view.current;
   const go = async (o: SizeOffer) => {
-    if (await run(o)) onDone();
+    if (await run(o, { keep: !!view.current && o.key === view.current })) onDone();
   };
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-desk text-ink" data-pick-computer>
@@ -108,11 +113,11 @@ export function PickComputer({ view, onDone }: { view: SizeView; onDone: () => v
           <Mascot botId="boppy" color="#0A0A0A" size={56} />
           <div className="flex flex-col items-center gap-1.5 pb-5 pt-5 text-center">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{PICK_WORDS.title}</span>
-            <span className="max-w-[320px] text-[13.5px] leading-[19px] text-pencil">{PICK_WORDS.line}</span>
+            <span className="max-w-[320px] text-[13.5px] leading-[19px] text-pencil">{plan ? PICK_WORDS.planLine : PICK_WORDS.line}</span>
           </div>
           <div role="radiogroup" aria-label={PICK_WORDS.title} className="flex w-full flex-col gap-2">
             {view.sizes.map((s) => {
-              const w = offerWords(s);
+              const w = offerWords(s, view.change);
               const on = s.key === pick;
               return (
                 <button
@@ -128,7 +133,7 @@ export function PickComputer({ view, onDone }: { view: SizeView; onDone: () => v
                     <span className="text-[13.5px] font-semibold leading-5">{w.name}</span>
                     <span className="flex items-center gap-2">
                       {view.current === s.key && <span className="rounded-full bg-[#F2F2F0] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3A3A38]">Current</span>}
-                      <span className="text-[13px] font-medium leading-5 tabular-nums">{w.price}</span>
+                      {w.price && <span className="text-[13px] font-medium leading-5 tabular-nums">{w.price}</span>}
                     </span>
                   </span>
                   {w.specs && <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">{w.specs}</span>}
@@ -142,6 +147,11 @@ export function PickComputer({ view, onDone }: { view: SizeView; onDone: () => v
           </div>
           <span className="pt-3 text-center text-[12px] leading-4 text-pencil">{PICK_WORDS.ai}</span>
           <span className="pb-5 pt-1 text-center text-[12px] leading-4 text-pencil">{PICK_WORDS.later}</span>
+          {switching && (
+            <span className="pb-3 text-center text-[12.5px] leading-[18px] text-[#3A3A38]" data-pick-restart>
+              {RESTART_WORDS}
+            </span>
+          )}
           <button
             disabled={!!busy}
             onClick={() => void go(offer)}
@@ -159,6 +169,9 @@ export function PickComputer({ view, onDone }: { view: SizeView; onDone: () => v
                   Keep {kept.name}
                 </button>
               )}
+              <button disabled={!!busy} onClick={onDone} className="text-[12.5px] font-medium text-pencil underline underline-offset-2 disabled:opacity-50" data-pick-not-now>
+                {PICK_WORDS.notNow}
+              </button>
             </div>
           )}
         </div>

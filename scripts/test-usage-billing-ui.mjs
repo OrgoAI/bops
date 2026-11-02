@@ -297,11 +297,21 @@ await test("Pick your computer: each size with Orgo's price, how long $5 runs it
   ])
     assert.match(m.text, re(t), t);
   assert.doesNotMatch(m.text, /Current/, "someone new has no computer yet");
+  assert.doesNotMatch(m.text, /may restart/, "no computer yet, so nothing to restart");
   assert.equal(radio(m.box, "Medium").getAttribute("aria-checked"), "true");
   await click(radio(m.box, "Large"));
   await click(button(m.box, "Continue"));
   assert.deepEqual(switches, [{ size: "large" }]);
   assert.equal(doneCalled, 1);
+  await m.done();
+});
+
+await test("Pick your computer on the Orgo plan: no price and no hours, the plan's line instead, and never 'you pay only while it works'", async () => {
+  switches.length = 0;
+  const m = await show(null, h(PickComputer, { view: { ...VIEW, current: "large", preselect: "large", change: "plan" }, onDone: () => {} }));
+  assert.match(m.text, /Your bots work on a computer in the cloud\. It is part of your Orgo plan\./);
+  assert.equal(m.text.match(/Part of your Orgo plan\./g)?.length, 2, "on each size");
+  assert.doesNotMatch(m.text, /an hour|runs it for|You pay for it only while it works/);
   await m.done();
 });
 
@@ -312,14 +322,36 @@ await test("Pick your computer for someone with a Large: Large picked first and 
   const m = await show(null, h(PickComputer, { view: { ...VIEW, current: "large", preselect: "large", change: "bops" }, onDone: () => doneCalled++ }));
   assert.equal(radio(m.box, "Large").getAttribute("aria-checked"), "true");
   assert.match(radio(m.box, "Large").textContent, /Current/);
+  assert.doesNotMatch(m.text, /may restart/, "its own size: nothing switches");
   await click(radio(m.box, "Medium"));
+  assert.match(words(m.box), /Your computer may restart, and anything open on it may close\./, "said before Continue switches it");
   await click(button(m.box, "Continue"));
   assert.match(words(m.box), /Your bots are working on it\. Switch when they finish\./);
   assert.equal(doneCalled, 0, "still open");
   sizeAnswer = () => json({ ok: true, size: "large", changed: false });
   await click(button(m.box, "Keep Large"));
-  assert.deepEqual(switches, [{ size: "medium" }, { size: "large" }]);
+  assert.deepEqual(switches, [{ size: "medium" }, { size: "large", keep: true }], "its own size is kept without asking Orgo");
   assert.equal(doneCalled, 1);
+  await m.done();
+});
+
+await test("Pick your computer when a try didn't work: Not now closes it (asked again next time); Continue on its own size is kept without asking Orgo", async () => {
+  switches.length = 0;
+  sizeAnswer = () => json({ ok: false, error: "Couldn't change your computer's size. Try again in a minute." }, 502);
+  let doneCalled = 0;
+  let m = await show(null, h(PickComputer, { view: VIEW, onDone: () => doneCalled++ }));
+  assert.equal(button(m.box, "Not now"), undefined, "only after a try that didn't work");
+  await click(button(m.box, "Continue"));
+  assert.match(words(m.box), /Couldn't change your computer's size\./);
+  await click(button(m.box, "Not now"));
+  assert.deepEqual([switches.length, doneCalled], [1, 1]);
+  await m.done();
+  switches.length = 0;
+  sizeAnswer = () => json({ ok: true, size: "large", changed: false });
+  m = await show(null, h(PickComputer, { view: { ...VIEW, current: "large", preselect: "large", change: "bops" }, onDone: () => doneCalled++ }));
+  await click(button(m.box, "Continue"));
+  assert.deepEqual(switches, [{ size: "large", keep: true }]);
+  assert.equal(doneCalled, 2);
   await m.done();
 });
 

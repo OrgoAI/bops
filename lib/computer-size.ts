@@ -36,12 +36,17 @@ export const PHASE_WORDS: Record<SizePhase, string> = {
   restarting: "Restarting your computer to switch…",
 };
 
-/** What Pick your computer says around its choices. */
+/** What a switch may do to the computer, said before one (Settings asks; Pick your computer says it under the choices). */
+export const RESTART_WORDS = "Your computer may restart, and anything open on it may close.";
+
+/** What Pick your computer says around its choices (`planLine` instead of `line` when the computer is part of the Orgo plan). */
 export const PICK_WORDS = {
   title: "Pick your computer",
   line: "Your bots work on a computer in the cloud. You pay for it only while it works.",
+  planLine: "Your bots work on a computer in the cloud. It is part of your Orgo plan.",
   ai: "AI is paid from the same credit.",
   later: "You can change this anytime in Settings.",
+  notNow: "Not now",
   action: "Continue",
 };
 
@@ -54,14 +59,19 @@ const BLURB: Partial<Record<ComputerSize, string>> = {
 /** "2 cores, 8 GB": a size's cores and memory, as far as Orgo said them. */
 export const specsText = (s: SizeOffer) => [s.cpu !== undefined ? `${s.cpu} ${s.cpu === 1 ? "core" : "cores"}` : "", s.ramGb !== undefined ? `${s.ramGb} GB` : ""].filter(Boolean).join(", ");
 
-/** One choice on the card: its name, cores and memory, price, how long $5 runs it, and what it's good for. */
-export function offerWords(s: SizeOffer) {
+/**
+ * One choice on the card: its name, cores and memory, price, how long $5 runs it, and what it's good for.
+ * On the Orgo plan (`change` "plan"), what it costs is the plan's: no price and no hours, "Part of your
+ * Orgo plan." instead.
+ */
+export function offerWords(s: SizeOffer, change?: ComputerSizeChange) {
   const start = BOPS_USAGE.startCents;
+  const plan = change === "plan";
   return {
     name: s.name,
     specs: specsText(s),
-    price: `${rateText(s.hourlyCents)} an hour`,
-    lasts: `${rateText(start)} runs it for about ${hoursFor(s.hourlyCents, start)} hours.`,
+    price: plan ? "" : `${rateText(s.hourlyCents)} an hour`,
+    lasts: plan ? "Part of your Orgo plan." : `${rateText(start)} runs it for about ${hoursFor(s.hourlyCents, start)} hours.`,
     blurb: BLURB[s.key] ?? "",
   };
 }
@@ -78,8 +88,7 @@ export function settingsHint(s: SizeOffer, change: ComputerSizeChange | undefine
 
 /** Asking before a switch: its title, and what it costs (never on the Orgo plan, whose own price stands) and does. */
 export function confirmWords(s: SizeOffer, change: ComputerSizeChange | undefined) {
-  const restart = "Your computer may restart, and anything open on it may close.";
-  return { title: `Switch to ${s.name}?`, line: change === "plan" ? restart : `${s.name} costs ${rateText(s.hourlyCents)} an hour while it works. ${restart}`, action: "Switch" };
+  return { title: `Switch to ${s.name}?`, line: change === "plan" ? RESTART_WORDS : `${s.name} costs ${rateText(s.hourlyCents)} an hour while it works. ${RESTART_WORDS}`, action: "Switch" };
 }
 
 /** What the app says when a switch is done. */
@@ -96,17 +105,21 @@ export const SIZE_REFUSED = {
   credit: (s: SizeOffer) => `Add Orgo credit to switch to ${s.name}. You need enough for an hour.`,
 };
 
-/** The event a live view listens for (components/app/live-desktop.tsx): the computer changed size, so its stream starts again the way the new size streams. */
+/**
+ * The event a live view listens for (components/app/live-desktop.tsx): a computer changed size, so its
+ * stream starts again the way the new size streams. It carries the computer's id (detail.computerId).
+ */
 const RESIZED = "bops:computer-resized";
 
-/** Say the computer changed size, to every live view in this window. */
-export const computerResized = () => {
-  if (typeof window !== "undefined") window.dispatchEvent(new Event(RESIZED));
+/** Say a computer changed size, to the live views in this window (only that computer's stream afresh; with no id, all do). */
+export const computerResized = (computerId?: string) => {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(RESIZED, { detail: { computerId } }));
 };
 
-/** Call `f` whenever the computer changes size; returns how to stop. */
-export function onComputerResized(f: () => void) {
+/** Call `f` with the computer's id (when it was said) whenever a computer changes size; returns how to stop. */
+export function onComputerResized(f: (computerId: string | undefined) => void) {
   if (typeof window === "undefined") return () => {};
-  window.addEventListener(RESIZED, f);
-  return () => window.removeEventListener(RESIZED, f);
+  const on = (e: Event) => f((e as CustomEvent<{ computerId?: string } | null>).detail?.computerId);
+  window.addEventListener(RESIZED, on);
+  return () => window.removeEventListener(RESIZED, on);
 }
