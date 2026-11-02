@@ -1,0 +1,2 @@
+- Pick a Medium or Large computer when you start.
+- Change your computer's size anytime in Settings.
