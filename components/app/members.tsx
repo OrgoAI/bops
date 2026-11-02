@@ -6,16 +6,15 @@ import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, computerSumma
 import { appsOwnShown } from "@/lib/apps-access";
 import {
   ACCESS_TIPS,
+  ADMIN_WORDS,
   APPS_TIPS,
   APPS_WORDS,
   CLOUD_SHARES_APPS,
   COMPUTER_WORDS,
   emailOf,
-  FULL_ACCESS_IN_BOPS,
   ROLE_LINES,
   ROLE_NAMES,
   WORDS,
-  type FullAccess,
   type Invite,
   type InviteSent,
   type MemberRole,
@@ -38,8 +37,8 @@ import { AppsIcon } from "./made-apps";
  * members of the user's Orgo workspace named "bops", which holds the computers of every Bops workspace:
  * the user invites people by email, sends an invite again or cancels it, picks which of the open
  * workspace's bots each person sees in Bops (none, read or write per bot, and for bots made later:
- * BotAccess, lib/member-access.ts), changes what they can do on the computers on orgo.ai (View only, or
- * Full access when the app offers it) and removes people. Who they are comes from GET /api/members
+ * BotAccess, lib/member-access.ts), makes someone an Admin (every bot, its computer and Your Apps, whatever
+ * is picked) or a Member (what's picked) and removes people. Each row says the role: Owner, Admin or Member. Who they are comes from GET /api/members
  * (lib/server/members.ts), which reads Orgo with the user's key, and orgo-web decides who may be added
  * (Free nobody, Pro 2 people, Max up to 5); which bots each sees is kept in the workspace
  * (Workspace.memberAccess) and comes back with them. The app never makes share links: a link lets in
@@ -602,9 +601,6 @@ function BotsToggle({ open, label, onClick }: { open: boolean; label: string; on
   );
 }
 
-/** A role as the rows say it: about the computers on orgo.ai, so it isn't read as the bots' access beside it. */
-const onComputers = (role: MemberRole) => `Computers: ${ROLE_NAMES[role]}`;
-
 /* ---------------- Add someone ---------------- */
 
 /**
@@ -708,8 +704,8 @@ function SaidLine({ said }: { said: Said }) {
 }
 
 /**
- * Invite someone by email, with View only picked each time it opens and after every invite (Full access
- * only when the app offers it, with its one warning under the field), and the bots they'll see: every bot
+ * Invite someone by email, as a Member each time it opens and after every invite (or an Admin, with its one
+ * warning under the field, and no bots to pick: an Admin has every bot), and a Member's bots: every bot
  * there now to read and bots made later hidden (inviteDefault) until the user chooses, under Choose bots.
  * The address is checked here first: its shape, not the user's own, not someone who has access. Typing an
  * address with an invite waiting sends that invite again, with the bots it has unless others are chosen
@@ -746,8 +742,9 @@ function InviteForm({
   const again = !!waiting;
   // An invite sent again keeps its bots, as its row's Resend does: never every bot, unasked.
   const access = chosen ?? waiting?.access ?? inviteDefault(ids);
-  const offer = info.fullAccess;
-  const picked = offer === "not_yet" ? "viewer" : role;
+  const picked = role;
+  // An Admin has every bot: there's nothing to pick, and nothing is sent.
+  const picking = !!bots && picked === "viewer";
 
   const send = async () => {
     const address = emailOf(email);
@@ -758,7 +755,7 @@ function InviteForm({
     onSaid(null);
     // The sheet reads who has access again before this answers: an invite that took the last seat has
     // already swapped this form for the plan's block, so what happened is said by AddSomeone.
-    const r = await act("POST", { email: address, role: picked, ...(bots ? { access } : {}) });
+    const r = await act("POST", { email: address, role: picked, ...(picking ? { access } : {}) });
     setBusy(false);
     if (r.status !== 200) return onSaid({ tone: "bad", text: saidOf(r) });
     const made = r.json as InviteSent;
@@ -799,12 +796,12 @@ function InviteForm({
           autoComplete="off"
           className="h-10 min-w-0 flex-1 rounded-full bg-white px-4 text-[14px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
         />
-        {offer !== "not_yet" && <AccessPicker value={role} onChange={setRole} fullAccess={offer} disabled={busy} />}
+        <AccessPicker value={role} onChange={setRole} disabled={busy} />
         <button type="submit" disabled={!email.trim() || busy} className="h-10 shrink-0 rounded-full bg-ink px-4 text-[13px] font-medium text-white disabled:opacity-50">
           {busy ? "Sending…" : sent ? "Sent" : again ? "Resend invite" : "Send invite"}
         </button>
       </div>
-      {bots && (
+      {picking && (
         <span className="flex min-w-0 items-center gap-2 pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">
           <span data-access-summary className="truncate">
             {summary(access, ids)}
@@ -812,13 +809,13 @@ function InviteForm({
           <BotsToggle open={choosing} label={scopeShown ? "Choose access" : "Choose bots"} onClick={() => setChoosing((x) => !x)} />
         </span>
       )}
-      {bots && choosing && <BotAccess bots={bots} value={access} onChange={setChosen} disabled={busy} invite />}
+      {picking && choosing && <BotAccess bots={bots} value={access} onChange={setChosen} disabled={busy} invite />}
       <RoleLine role={picked} />
     </form>
   );
 }
 
-/** What the picked access means. Full access's is the one warning before it's sent, marked like what needs the user. */
+/** What the picked role means. An Admin's is the one warning before it's sent, marked like what needs the user. */
 function RoleLine({ role }: { role: MemberRole }) {
   return role === "admin" ? (
     <span className="flex items-start gap-1.5 pt-0.5 text-[12.5px] leading-[18px] text-[#3A3A38]">
@@ -830,30 +827,24 @@ function RoleLine({ role }: { role: MemberRole }) {
   );
 }
 
-/**
- * View only or Full access on the bots' computers (orgo.ai), as a segmented control named Computers so it
- * isn't read as the bots' access. With Full access off, that choice stays visible but can't be picked,
- * and says why on hover.
- */
-function AccessPicker({ value, onChange, fullAccess, disabled }: { value: MemberRole; onChange: (role: MemberRole) => void; fullAccess: FullAccess; disabled?: boolean }) {
+/** Member or Admin, as a segmented control named Role: one choice makes someone an Admin. */
+function AccessPicker({ value, onChange, disabled }: { value: MemberRole; onChange: (role: MemberRole) => void; disabled?: boolean }) {
   return (
     <div className="flex shrink-0 items-center gap-1.5">
-      <span className="text-[12px] text-[#9A9A98]">Computers</span>
-      <div role="radiogroup" aria-label="What they can do on your bots' computers" className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px] ${disabled ? "opacity-50" : ""}`}>
+      <span className="text-[12px] text-[#9A9A98]">Role</span>
+      <div role="radiogroup" aria-label="Their role" className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px] ${disabled ? "opacity-50" : ""}`}>
         {(["viewer", "admin"] as const).map((r) => {
           const on = value === r;
-          const off = r === "admin" && fullAccess !== "on" && !on;
           return (
             <button
               key={r}
               type="button"
               role="radio"
               aria-checked={on}
-              aria-disabled={off || undefined}
               disabled={disabled}
-              data-tip={off ? WORDS.fullAccessOffTip : undefined}
-              onClick={() => !on && !off && onChange(r)}
-              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : off ? "cursor-default text-[#C9C9C6]" : "text-[#6B6B6B] hover:text-ink"}`}
+              data-tip={r === "admin" ? ROLE_LINES.admin : ROLE_LINES.viewer}
+              onClick={() => !on && onChange(r)}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
             >
               {ROLE_NAMES[r]}
             </button>
@@ -916,7 +907,7 @@ function WhoHasAccess({ info, bots, act }: { info: Ready; bots: Bot[] | null; ac
           </div>
         </div>
         {info.people.map((p) => (
-          <PersonRow key={p.id} person={p} bots={bots} fullAccess={info.fullAccess} act={act} />
+          <PersonRow key={p.id} person={p} bots={bots} act={act} />
         ))}
         {!info.people.length && <div className="px-3.5 py-3 text-[12.5px] leading-4 text-[#9A9A98]">Just you so far.</div>}
       </div>
@@ -925,21 +916,20 @@ function WhoHasAccess({ info, bots, act }: { info: Ready; bots: Bot[] | null; ac
 }
 
 /**
- * Someone with access: who, which bots they see, and what they can do on the computers. Under Bots, every
+ * Someone with access: who, their role, and a Member's bots (an Admin has every bot, so there's nothing to pick). Under Bots, every
  * bot change is saved at once (PATCH {memberId, access}), one at a time with the newest last, and shown
  * as picked while it saves; one that's turned down goes back to what was saved, with why under the row.
  * Use its computer goes to orgo-web first (lib/server/members.ts): one orgo-web turns down stays as it was, the same way.
- * View only applies at once; Full access asks first. In the View only release their role is words, and
- * Full access has a Make View only on hover. Remove asks first too. Until taking Full access away also
- * changes the computers' passwords (FULL_ACCESS_IN_BOPS), Remove and View only say that a password they
- * copied keeps working: never "access ended" when it hasn't.
+ * Member applies at once (back to the bots they had as one); Admin asks first. Remove asks first too. Removing an
+ * Admin, or making them a Member, says that a computer password they copied keeps working: never "access ended"
+ * when it hasn't.
  */
-function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots: Bot[] | null; fullAccess: FullAccess; act: Act }) {
+function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | null; act: Act }) {
   const summary = useSummary();
   const scopeShown = useContext(AppsScope).shown;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Their Full access was taken away in Team: they may still hold what it gave them.
+  // They were made a Member here: they may still hold what being an Admin gave them.
   const [demoted, setDemoted] = useState(false);
   const [asking, setAsking] = useState<"remove" | "full" | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
@@ -982,8 +972,9 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
     setDraft(null);
   };
   const hadFull = p.role === "admin" || demoted;
-  // A computer password they copied with Full access outlasts it (FULL_ACCESS_IN_BOPS).
-  const copied = hadFull && !FULL_ACCESS_IN_BOPS;
+  const admin = p.role === "admin";
+  // A computer password they copied as an Admin outlasts it, until the computer's password changes.
+  const copied = hadFull;
   const change = async (role: MemberRole) => {
     setBusy(true);
     setError(null);
@@ -1015,7 +1006,12 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
             {p.guest && <Badge>Guest</Badge>}
           </span>
           <SubLine who={p.guest ? "Joined with a link on orgo.ai" : p.email && p.email !== p.name ? p.email : null}>
-            {bots && (
+            {admin && (
+              <span data-access-summary className="min-w-0 truncate" title={ADMIN_WORDS.row}>
+                {ADMIN_WORDS.row}
+              </span>
+            )}
+            {bots && !admin && (
               <>
                 <span data-access-summary className="min-w-0 truncate" title={summary(access, ids)}>
                   {summary(access, ids)}
@@ -1026,23 +1022,7 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
             )}
           </SubLine>
         </div>
-        {fullAccess === "not_yet" ? (
-          <>
-            {p.role === "admin" && (
-              <button
-                disabled={busy}
-                data-tip={copied ? WORDS.copiedPassword : undefined}
-                onClick={() => void change("viewer")}
-                className={`${rowAction} text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-50`}
-              >
-                {busy ? "Changing…" : "Make View only"}
-              </button>
-            )}
-            <span className="shrink-0 text-[12.5px] text-[#6B6B6B]">{onComputers(p.role)}</span>
-          </>
-        ) : (
-          <AccessPicker value={p.role} fullAccess={fullAccess} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />
-        )}
+        <AccessPicker value={p.role} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />
         {/* Asked in place: while it asks, its question under the row stands for it. */}
         {asking !== "remove" && (
           <button onClick={() => setAsking("remove")} className={`${rowAction} shrink-0 text-[#B42318] hover:bg-[#FEF3F2]`}>
@@ -1050,7 +1030,7 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
           </button>
         )}
       </div>
-      {bots && choosing && (
+      {bots && choosing && !admin && (
         <div className="pl-12 pt-2">
           <BotAccess bots={bots} value={access} onChange={(next) => void pick(next)} />
         </div>
@@ -1062,7 +1042,7 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
       )}
       {copied && p.role === "viewer" && (
         <span role="status" className="pl-12 pt-1.5 text-[12px] leading-4 text-[#6B6B6B]">
-          {WORDS.copiedPassword}
+          {`${ADMIN_WORDS.toMemberTip} ${WORDS.copiedPassword}`}
         </span>
       )}
       {asking === "remove" && (
@@ -1082,9 +1062,9 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
       )}
       {asking === "full" && (
         <Confirm
-          title={`Give ${p.name} Full access?`}
-          line={ROLE_LINES.admin}
-          action="Give Full access"
+          title={ADMIN_WORDS.confirmTitle(p.name)}
+          line={ADMIN_WORDS.confirmBody}
+          action={ADMIN_WORDS.confirm}
           busy={busy}
           error={confirmError}
           onConfirm={() => void change("admin")}
@@ -1120,7 +1100,7 @@ function Invited({ info, bots, act }: { info: Ready; bots: Bot[] | null; act: Ac
     >
       <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
         {info.invites.map((i) => (
-          <InviteRow key={i.email} invite={i} bots={bots} fullAccess={info.fullAccess} canSend={!!s} act={act} />
+          <InviteRow key={i.email} invite={i} bots={bots} canSend={!!s} act={act} />
         ))}
       </div>
     </Section>
@@ -1128,15 +1108,17 @@ function Invited({ info, bots, act }: { info: Ready; bots: Bot[] | null; act: Ac
 }
 
 /**
- * An invite: to whom, which bots they'll see, what they can do on the computers, and when it expires.
- * Resend (Send again once it's expired) emails a new link, with the same bots, and the old one stops
- * working; Copy link is for sending it another way; Cancel asks once.
- * A Full access invite is sent again only while the app offers Full access, and none while adding people
- * waits for orgo-web's numbers (`canSend` false: the route would turn it down).
+ * An invite: to whom, their role (changed in place, without sending it again: PATCH {invite, role}), a Member's bots,
+ * and when it expires. Resend (Send again once it's expired) emails a new link, with the same role and bots, and the
+ * old one stops working; Copy link is for sending it another way; Cancel asks once. None is sent while adding people
+ * waits for orgo-web's numbers (`canSend` false: the route would turn it down). An orgo-web that can't change a waiting
+ * invite's role says so, and Resend then sends it with the role picked.
  */
-function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invite; bots: Bot[] | null; fullAccess: FullAccess; canSend: boolean; act: Act }) {
+function InviteRow({ invite: i, bots, canSend, act }: { invite: Invite; bots: Bot[] | null; canSend: boolean; act: Act }) {
   const summary = useSummary();
-  const [busy, setBusy] = useState<"resend" | "cancel" | null>(null);
+  const [busy, setBusy] = useState<"resend" | "cancel" | "role" | null>(null);
+  // The role picked here when orgo-web couldn't change it in place: Resend sends it with that one.
+  const [role, setRole] = useState<MemberRole>(i.role);
   const [sure, setSure] = useState(false);
   const [sent, setSent] = useState(false);
   // A minute between sends.
@@ -1155,7 +1137,7 @@ function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invi
   const resend = async () => {
     setBusy("resend");
     setError(null);
-    const r = await act("POST", { email: i.email, role: i.role, access: i.access });
+    const r = await act("POST", { email: i.email, role, ...(role === "viewer" ? { access: i.access } : {}) });
     setBusy(null);
     // A plan refusal says why in the plan's words; anything else is the row's plain line.
     if (r.status !== 200) return setError(r.status === 402 ? saidOf(r) : errorOf(r, "Couldn't resend. Try again."));
@@ -1170,7 +1152,19 @@ function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invi
     setSure(false);
     if (r.status !== 200) setError(errorOf(r, "Couldn't cancel the invite. Try again."));
   };
-  const canResend = canSend && (i.role === "viewer" || fullAccess === "on");
+  const changeRole = async (next: MemberRole) => {
+    setBusy("role");
+    setError(null);
+    setRole(next);
+    const r = await act("PATCH", { invite: i.email, role: next });
+    setBusy(null);
+    if (r.status === 200) return;
+    // An orgo-web before it: the role stays picked here, for Resend.
+    if ((r.json as Partial<MembersRefusal>).code === "INVITE_ROLE_NOT_READY") return setError(ADMIN_WORDS.inviteRoleNotReady);
+    setRole(i.role);
+    setError(errorOf(r, "Couldn't change their role. Try again."));
+  };
+  const canResend = canSend;
   const showing = busy === "resend" || sent;
   return (
     <div className={row}>
@@ -1181,11 +1175,11 @@ function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invi
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-[14px] font-medium leading-[18px]">{i.email}</span>
           <span data-access-summary className="truncate text-[12.5px] leading-4 text-[#6B6B6B]">
-            {bots && `${summary(i.access, bots.map((b) => b.id))} · `}
-            {onComputers(i.role)}
-            {i.expiresAt !== null && ` · ${i.expired ? "expired" : "expires"} ${day(i.expiresAt)}`}
+            {role === "admin" ? ADMIN_WORDS.row : bots && summary(i.access, bots.map((b) => b.id))}
+            {i.expiresAt !== null && `${role === "admin" || bots ? " · " : ""}${i.expired ? "expired" : "expires"} ${day(i.expiresAt)}`}
           </span>
         </div>
+        {!sure && <AccessPicker value={role} disabled={!!busy} onChange={(next) => void changeRole(next)} />}
         {sure ? (
           <span className="motion-rise-in flex shrink-0 items-center gap-1">
             <button disabled={!!busy} onClick={() => void cancel()} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-50">

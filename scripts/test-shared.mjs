@@ -1863,7 +1863,9 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   // The workspace's owner decides, not who's looking: any viewer given Your Apps sees an Orgo team owner's apps, and
   // nobody sees apps in a workspace whose owner isn't Orgo's team.
   assert.equal(A.appsShown({ ...v, account: { user: { email: "sam@example.com" } } }), true, "a viewer outside Orgo's team sees an Orgo team owner's apps");
-  assert.equal(A.appsShown({ ...v, shared: { ...v.shared, owner: "dana@acme.test" } }), false, "an owner outside Orgo's team: no apps");
+  // Orgo's own team sees what Bops Cloud sent of a workspace whose owner isn't (read only, the cloud's to cap); anyone else nothing.
+  assert.equal(A.appsShown({ ...v, shared: { ...v.shared, owner: "dana@acme.test" } }), true, "a viewer of Orgo's team, an owner outside it");
+  assert.equal(A.appsShown({ ...v, account: { user: { email: "sam@example.com" } }, shared: { ...v.shared, owner: "dana@acme.test" } }), false, "an owner and a viewer outside Orgo's team: no apps");
   // An act on an app: sent, pending until the owner's Bops keeps it on the app, then gone (its ok and said show there).
   const sent = [];
   const r = await actWith(copy, { act: "deploy", app: "shop" }, "key_deploy_01", sam, async (body) => (sent.push(JSON.parse(body)), { status: 202, body: { ok: true, macOn: true } }));

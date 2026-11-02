@@ -13,17 +13,17 @@
  * adds nobody, Pro 2 people, Max up to 5), and the app shows what it says. Nobody is added from an
  * orgo-web that doesn't send its numbers (seats): one from before that rule holds no plan to it.
  *
- * Orgo's two roles keep Orgo's names, so an invitee reads the same words on orgo.ai: View only (Orgo's
- * "member": watch the screens without clicking or typing there, and ask Orgo's agent to work on any of the
- * computers, which runs as root there and on the user's plan: orgo-web's canUseAgent) and Full access
- * (Orgo's "admin": use the computers as the user can). So the sheet never says View only changes nothing,
- * nor that a bot set to None is hidden on orgo.ai, and whenever anyone else is in, it says keys Bops put
- * on the computers can be read there (ReadyView in components/app/members.tsx).
+ * The roles, said plainly in the sheet and the switcher: Owner (the account that owns the workspace: everything),
+ * Admin (Orgo's "admin", kept by orgo-web: every bot, bots made later too, Use its computer and Your Apps at Write, and
+ * the computers on orgo.ai as the owner uses them; never deleting the workspace, nor for now adding or changing
+ * people), and Member (Orgo's "member": what the owner picks per bot, lib/member-access.ts). Bops Cloud and the
+ * owner's Mac give an Admin all of that from the role alone, never from an entry here. Whenever anyone else is in,
+ * the sheet says keys Bops put on the computers can be read there (ReadyView in components/app/members.tsx).
  */
 import type { BopsTier } from "@/cloud/protocol";
 import type { AccessLevel, MemberAccess } from "./member-access";
 
-/** What someone can do on the bots' computers: "viewer" is Orgo's member (View only), "admin" Full access. */
+/** Someone's role in the workspace: "viewer" is a Member (Orgo's "member": what the owner picks), "admin" an Admin. */
 export type MemberRole = "viewer" | "admin";
 
 /**
@@ -61,9 +61,9 @@ export type MemberSeats = {
 export type SeatsError = "PLAN_UNAVAILABLE" | "ORGO_NOT_READY";
 
 /**
- * Whether the app offers Full access: "on"; "off" while Bops puts its own keys on the bots' computers
- * (someone with Full access is root there and could read them); "not_yet" until removing someone ends
- * every way they had in (FULL_ACCESS_IN_BOPS).
+ * Whether the app offers Admin: "on". ("off" and "not_yet" are from a Bops before Admin was a role, which held it back
+ * while its keys were on the bots' computers: a Member with Use its computer is root there all the same, and keys are
+ * kept off the computers of any workspace with someone else in it.)
  */
 export type FullAccess = "on" | "off" | "not_yet";
 
@@ -110,25 +110,31 @@ export type MembersRefusal = {
 export type InviteSent = { email: string; role: MemberRole; emailSent: boolean; link?: string };
 
 /**
- * Full access in the app. Off until removing someone with Full access also changes the computers'
- * passwords (orgo-web and the hosts): someone removed could still use a password they copied. Until
- * then the sheet adds people with View only, and can move anyone with Full access to View only or
- * remove them, saying a password they copied outlasts that (WORDS.copiedPassword).
- * BOPS_MEMBERS_FULL_ACCESS=1 offers it before that (lib/server/members.ts).
+ * Admin in the app: on. Removing or demoting an Admin says a computer password they copied keeps working until it's
+ * changed (WORDS.copiedPassword).
  */
-export const FULL_ACCESS_IN_BOPS = false;
+export const FULL_ACCESS_IN_BOPS = true;
 
-/** The roles in Orgo's words. */
-export const ROLE_NAMES: Record<MemberRole, string> = { viewer: "View only", admin: "Full access" };
+/** The roles as the app says them (the owner's row says Owner). */
+export const ROLE_NAMES: Record<MemberRole, string> = { viewer: "Member", admin: "Admin" };
 
-/**
- * What each role means, under the invite form and in the Give Full access dialog: Full access's is the one
- * warning. Both say orgo.ai and every computer, as the role is Orgo's and covers every bot's computer,
- * whichever bots they see in Bops.
- */
+/** What each role means, under the invite form: an Admin's is the one warning. */
 export const ROLE_LINES: Record<MemberRole, string> = {
-  viewer: "On orgo.ai they can watch every bot's computer live, and ask Orgo's agent to work on any of them, on your plan. They can't click or type there themselves.",
-  admin: "On orgo.ai they can use every bot's computer as you can, including sites your bots are signed in to.",
+  viewer: "Sees and does only what you pick for them.",
+  admin: "Every bot, its computer and your apps. Only you can add people or delete this workspace.",
+};
+
+/** The People sheet's words for an Admin (lib/server/members.ts, components/app/members.tsx). */
+export const ADMIN_WORDS = {
+  row: "Every bot, its computer and your apps",
+  confirmTitle: (name: string) => `Make ${name} an Admin?`,
+  confirmBody:
+    "They can use every bot and its computer as you can, bots made later too, and change your apps. Bots that answer on your Mac answer them too. Only you can add people or delete this workspace.",
+  confirm: "Make Admin",
+  toMember: "Make Member",
+  toMemberTip: "They keep only the bots you picked for them before.",
+  older: "One of your Macs runs an older Bops. Until it updates, it goes by the bots you picked for them.",
+  inviteRoleNotReady: "Orgo can't change a waiting invite yet. Resend it to change the role.",
 };
 
 /**
@@ -158,7 +164,7 @@ export const APPS_WORDS = {
  * (cloud/members.ts). False until a Bops Cloud deploy carries that change: the level is kept meanwhile, and the People
  * sheet says it starts then. The release that deploys it flips this.
  */
-export const CLOUD_SHARES_APPS = false;
+export const CLOUD_SHARES_APPS = true;
 
 /**
  * The People sheet's words for Use its computer (lib/member-access.ts MemberAccess.computer): whether what someone says
@@ -198,7 +204,7 @@ export const WORDS = {
   noKey: "Bops can't use your Orgo sign-in right now. Sign out, then sign in again.",
   rejected: "Orgo didn't accept this Mac's sign-in. Sign out, then sign in again.",
   selfHosted:
-    "On a self-hosted Bops, add people on orgo.ai, in the workspace your bots use. Self-hosted setups can keep your own keys on your bots' computers, so give Full access only to people you'd trust with those keys.",
+    "On a self-hosted Bops, add people on orgo.ai, in the workspace your bots use. Self-hosted setups can keep your own keys on your bots' computers, so make someone an Admin only if you'd trust them with those keys.",
   noComputers: "Your bots don't have a computer on Orgo yet. Once they do, you can add people to watch it here.",
   planUnavailable: "Couldn't check your plan just now, so adding people is paused. Try again in a minute.",
   planUnavailableShort: "Couldn't check your plan just now. Try again in a minute.",
@@ -212,10 +218,10 @@ export const WORDS = {
   gone: "They don't have access anymore.",
   notOwner: "Orgo says only the owner can do that.",
   windowOnly: "People can only be added in the Bops app.",
-  fullAccessOff: "Full access is off while your bots' computers hold keys from this Mac.",
+  fullAccessOff: "Admin is off while your bots' computers hold keys from this Mac.",
   fullAccessOffTip: "Off while your bots' computers hold keys from this Mac.",
-  fullAccessNotYet: "Bops adds people with View only for now.",
-  keysOff: "Your bots' computers hold keys from this Mac, so Full access is off.",
+  fullAccessNotYet: "Bops adds people as Members for now.",
+  keysOff: "Your bots' computers hold keys from this Mac, so Admin is off.",
   keysOffAnyone: "Anyone you add can still read those keys there through Orgo's agent, so add only people you'd trust with them.",
   keysHeld: "Your bots' computers hold keys from this Mac. Anyone you add can read them there through Orgo's agent, so add only people you'd trust with them.",
   copiedPassword: "A computer password they copied keeps working until it's changed.",
