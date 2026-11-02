@@ -149,6 +149,17 @@ function openNow(): (Open & { at: SharedOpen; data: SharedWsState }) | null {
 export const sharedOpen = () => !!openNow();
 
 /**
+ * The Orgo computer a bot of the shared workspace open works on, for an Admin (Bops Cloud names it for an Admin alone:
+ * SharedWsSlice.screens); null otherwise. Streamed with the user's own Orgo key (app/api/workspaces/shared/screen).
+ */
+export function sharedScreen(botId: string): string | null {
+  const open = openNow();
+  if (!open || open.at.role !== "admin") return null;
+  const id = open.data.state.screens?.[botId];
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(id) ? id : null;
+}
+
+/**
  * What the window is shown: with a shared workspace open, its state in place of the user's own
  * workspace (shared-core.ts viewState), with a version of its own (the user's own changes and the
  * copy's both change it); else null.

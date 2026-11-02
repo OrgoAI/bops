@@ -94,6 +94,11 @@ type LiveDesktopProps = {
   bot?: { id: string; name: string; color: string };
   /** Something's going on on this screen (a task on it, or the user driving it): it streams whenever the window is on show. */
   busy?: boolean;
+  /**
+   * Where the plan comes from, in place of /api/vnc: a shared workspace's screen, for an Admin
+   * (/api/workspaces/shared/screen). Nothing is asked of the computer then: a stream Orgo shrank isn't put back.
+   */
+  planUrl?: string;
 };
 
 /** One view's own stream. `quiet`: no loading state for the first few seconds (a thumbnail's copied picture is still up). */
@@ -108,6 +113,7 @@ function LiveStream({
   bot,
   busy,
   quiet,
+  planUrl,
 }: LiveDesktopProps & { quiet?: boolean }) {
   const [plan, setPlan] = useState<StreamPlan | null>(null);
   // WebRTC for this plan: being tried (VNC shows the screen meanwhile), showing it, or not used.
@@ -187,7 +193,8 @@ function LiveStream({
     if (resting) return;
     let gone = false;
     void (async () => {
-      const res = await fetch(`/api/vnc?bot=${botId}&display=${display}`, { cache: "no-store" });
+      const res = await fetch(planUrl ?? `/api/vnc?bot=${botId}&display=${display}`, { cache: "no-store" });
+      if (!res.ok) throw new Error("no plan");
       const p = (await res.json()) as StreamPlan;
       if (gone) return;
       const tryRtc = !thumbnail && !!p.rtc && rtcWorthTrying(p.rtc);
@@ -262,7 +269,7 @@ function LiveStream({
   /** WebRTC ended, and why; `streamed`: it had been showing the screen. */
   function rtcEnded(reason: string, streamed: boolean) {
     // Orgo's gateway shrank the screen to fit its limit before saying so: Bops puts it back.
-    if (reason === "shrunk") void fetch(`/api/vnc?bot=${botId}&display=${display}`, { method: "POST" }).catch(() => {});
+    if (reason === "shrunk" && !planUrl) void fetch(`/api/vnc?bot=${botId}&display=${display}`, { method: "POST" }).catch(() => {});
     setRtc("off");
     // Live before: a fresh try, VNC first and WebRTC alongside again.
     if (streamed || !plan?.vnc) return dropped();

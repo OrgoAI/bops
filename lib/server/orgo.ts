@@ -356,7 +356,13 @@ export async function sharedWorkspaces(): Promise<SharedWorkspace[]> {
   const list = (await call<{ workspaces?: OrgoWorkspace[] }>("GET", "/workspaces")).workspaces ?? [];
   return list
     .filter((w) => (w.role === "admin" || w.role === "member") && w.product === "bops" && typeof w.bops_ws_id === "string" && !!w.bops_ws_id)
-    .map((w) => ({ projectId: w.id, name: w.name, owner: typeof w.owner_email === "string" ? w.owner_email : "", role: w.role as SharedRole }));
+    .map((w) => ({
+      projectId: w.id,
+      name: w.name,
+      owner: typeof w.owner_email === "string" ? w.owner_email : "",
+      role: w.role as SharedRole,
+      orgoUrl: `${orgoOrigin()}/workspaces?project_id=${encodeURIComponent(w.id)}`,
+    }));
 }
 
 /**

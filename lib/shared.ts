@@ -11,11 +11,14 @@ import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
  */
 import { ownerOnlyAsk } from "@/lib/member-access";
 
-/** Orgo's roles in a workspace: owner everything, admin Full access, member View only. */
+/** The roles in a workspace: the owner everything; an Admin every bot, its computer and its apps, all but deleting it; a Member what the owner picks. */
 export type SharedRole = "owner" | "admin" | "member";
 
-/** A workspace shared with the user, as the switcher lists it. `owner`: who shared it (their Orgo email, or "" when Orgo doesn't say). */
-export type SharedWorkspace = { projectId: string; name: string; owner: string; role: SharedRole };
+/**
+ * A workspace shared with the user, as the switcher lists it. `owner`: who shared it (their Orgo email, or "" when Orgo
+ * doesn't say). `orgoUrl`: the workspace on orgo.ai, where its computers are too.
+ */
+export type SharedWorkspace = { projectId: string; name: string; owner: string; role: SharedRole; orgoUrl?: string };
 
 /**
  * The shared workspace open now (AppState.shared): `wsId` is its id in the window's state, never one of the user's own.
@@ -39,6 +42,11 @@ export type SharedOpen = SharedWorkspace & {
   apps?: SharedApps;
   /** Its computers with two or more of the bots shown on one, for the sidebar's groups (cloud/ws-slice.ts computersOf). */
   groups?: SharedGroup[];
+  /**
+   * For an Admin: the bots whose computer's screen they can open here (cloud/ws-slice.ts screensOf). Which computer
+   * stays in the server's copy: the window asks /api/workspaces/shared/screen by bot.
+   */
+  screens?: string[];
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
 };
@@ -141,8 +149,21 @@ export function answersAsk(state: Viewing & { sessions?: readonly { id: string; 
 /** The line on something in a shared workspace only the owner can answer or do, for a viewer who can't. */
 export const OWNER_ONLY_LINE = "Only the owner can answer this.";
 
-/** The role as the switcher says it, in Orgo's words for it (lib/members.ts). */
-export const roleLabel = (role: SharedRole) => (role === "member" ? "View only" : role === "admin" ? "Full access" : "Owner");
+/** The role as the switcher says it, plainly (lib/members.ts ROLE_NAMES). */
+export const roleLabel = (role: SharedRole) => (role === "member" ? "Member" : role === "admin" ? "Admin" : "Owner");
+
+/** The viewer's role in the shared workspace open, said under its name. */
+export const roleHere = (role: SharedRole) => (role === "admin" ? "You're an Admin here" : role === "owner" ? "You're the owner" : "You're a Member here");
+
+/** The shared computer panel's words (components/app/computer.tsx). */
+export const SHARED_SCREEN_WORDS = {
+  open: "Open on orgo.ai",
+  watch: "Watch on orgo.ai",
+  failed: "Couldn't open the screen.",
+  control: "Take control",
+  release: "Stop controlling",
+  asleep: (bot: string) => `If it's asleep, it wakes when you ask ${bot} something.`,
+};
 
 /**
  * A line Bops wrote in the user's own voice ("Stopped by you", "You took over from Boppy · paused Book

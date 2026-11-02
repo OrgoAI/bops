@@ -24,7 +24,7 @@ import { NoticeCard } from "./notice-popup";
 import { forgetWorkspaceHere } from "@/lib/workspace-local";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouDot, post, RoundButton, SideToggleIcon, useNow } from "./ui";
 import { ChartIcon } from "./team-chart";
-import { ownerWho, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
+import { ownerWho, roleHere, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
 import { appsLine, appsName, appsShown } from "@/lib/apps-access";
 import { botGroups, groupedList, siteLabel } from "@/lib/bot-groups";
 import { codersOf } from "@/lib/bot-mood";
@@ -1014,6 +1014,12 @@ export function WorkspaceSwitcher({
           <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
+      {/* Their role in a workspace shared with them, plainly. */}
+      {state.shared && (
+        <span data-shared-role className="block truncate px-0 text-[12px] leading-4 text-[#9A9A98]">
+          {roleHere(state.shared.role)}
+        </span>
+      )}
       {open && (
         <div className="motion-menu-in absolute left-0 top-[calc(100%+6px)] z-30 flex w-[248px] origin-top-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
           <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-[#9A9A98]">Workspaces</div>
