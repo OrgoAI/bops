@@ -298,7 +298,7 @@ function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; stat
   const apps = appsOwnShown(state);
   const older = useOlderBops(apps);
   return (
-    <AppsScope.Provider value={{ shown: apps, older }}>
+    <AppsScope.Provider value={{ shown: apps, older, roles: info.fullAccess === "on" }}>
       {(keys || info.host === "mac" || !bots) && (
         <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
           {!bots && <Notice>{WORDS.sharedOpen}</Notice>}
@@ -328,8 +328,12 @@ export function sheetBots(state: AppState, wsId?: string): Bot[] | null {
   return [...team].sort((a, b) => Number(b.isMain) - Number(a.isMain));
 }
 
-/** Whether the sheet shows Your Apps (apps open to the owner), and whether a Mac on the account runs a Bops from before it. */
-const AppsScope = createContext<{ shown: boolean; older: boolean }>({ shown: false, older: false });
+/**
+ * Whether the sheet shows Your Apps (apps open to the owner), whether a Mac on the account runs a Bops from before it,
+ * and whether Bops Cloud gives people their role yet (MembersInfo.fullAccess "on": Admin is offered, and Your Apps
+ * reach people; else "not_yet" until it updates).
+ */
+const AppsScope = createContext<{ shown: boolean; older: boolean; roles: boolean }>({ shown: false, older: false, roles: true });
 
 /** A Mac or runner on the account on a Bops from before (the org chart's check, GET /api/workspaces?olderBops=1), asked only when `ask`. */
 function useOlderBops(ask: boolean) {
@@ -427,7 +431,7 @@ export function BotAccess({ bots, value, onChange, disabled, invite }: { bots: B
           />
         </div>
       )}
-      {scope.shown && (!hasBot || !CLOUD_SHARES_APPS) && (
+      {scope.shown && (!hasBot || !CLOUD_SHARES_APPS || !scope.roles) && (
         <span data-apps-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
           {!hasBot ? APPS_WORDS.needsBot : APPS_WORDS.notYet}
         </span>
@@ -827,24 +831,27 @@ function RoleLine({ role }: { role: MemberRole }) {
   );
 }
 
-/** Member or Admin, as a segmented control named Role: one choice makes someone an Admin. */
+/** Member or Admin, as a segmented control named Role: one choice makes someone an Admin (only once Bops Cloud gives people their role: AppsScope.roles). */
 function AccessPicker({ value, onChange, disabled }: { value: MemberRole; onChange: (role: MemberRole) => void; disabled?: boolean }) {
+  const { roles } = useContext(AppsScope);
   return (
     <div className="flex shrink-0 items-center gap-1.5">
       <span className="text-[12px] text-[#9A9A98]">Role</span>
       <div role="radiogroup" aria-label="Their role" className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px] ${disabled ? "opacity-50" : ""}`}>
         {(["viewer", "admin"] as const).map((r) => {
           const on = value === r;
+          // Not offered yet: Bops Cloud would give an Admin no bots (someone an Admin already can still be made a Member).
+          const held = r === "admin" && !roles && !on;
           return (
             <button
               key={r}
               type="button"
               role="radio"
               aria-checked={on}
-              disabled={disabled}
-              data-tip={r === "admin" ? ROLE_LINES.admin : ROLE_LINES.viewer}
+              disabled={disabled || held}
+              data-tip={held ? WORDS.fullAccessNotYet : r === "admin" ? ROLE_LINES.admin : ROLE_LINES.viewer}
               onClick={() => !on && onChange(r)}
-              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : held ? "text-[#B5B5B3]" : "text-[#6B6B6B] hover:text-ink"}`}
             >
               {ROLE_NAMES[r]}
             </button>

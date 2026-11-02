@@ -110,8 +110,9 @@ export type MembersRefusal = {
 export type InviteSent = { email: string; role: MemberRole; emailSent: boolean; link?: string };
 
 /**
- * Admin in the app: on. Removing or demoting an Admin says a computer password they copied keeps working until it's
- * changed (WORDS.copiedPassword).
+ * Admin in the app: on, once this Mac's Bops Cloud gives people their role (lib/server/members.ts fullAccessNow, which
+ * says "not_yet" till then). Removing or demoting an Admin says a computer password they copied keeps working until
+ * it's changed (WORDS.copiedPassword).
  */
 export const FULL_ACCESS_IN_BOPS = true;
 
@@ -165,6 +166,7 @@ export const APPS_WORDS = {
  * sheet says it starts then. The release that deploys it flips this.
  */
 export const CLOUD_SHARES_APPS = true;
+// (The sheet also says APPS_WORDS.notYet while Bops Cloud doesn't give people their role yet: MembersInfo.fullAccess.)
 
 /**
  * The People sheet's words for Use its computer (lib/member-access.ts MemberAccess.computer): whether what someone says
@@ -220,7 +222,7 @@ export const WORDS = {
   windowOnly: "People can only be added in the Bops app.",
   fullAccessOff: "Admin is off while your bots' computers hold keys from this Mac.",
   fullAccessOffTip: "Off while your bots' computers hold keys from this Mac.",
-  fullAccessNotYet: "Bops adds people as Members for now.",
+  fullAccessNotYet: "Admin starts once Bops Cloud updates. Until then, people join as Members.",
   keysOff: "Your bots' computers hold keys from this Mac, so Admin is off.",
   keysOffAnyone: "Anyone you add can still read those keys there through Orgo's agent, so add only people you'd trust with them.",
   keysHeld: "Your bots' computers hold keys from this Mac. Anyone you add can read them there through Orgo's agent, so add only people you'd trust with them.",

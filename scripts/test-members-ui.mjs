@@ -274,6 +274,19 @@ await test("the owner says Every bot; a person and an invite say which bots, and
   await done();
 });
 
+await test("while Bops Cloud doesn't give people their role yet (fullAccess not_yet): Admin isn't offered, and Your Apps says it waits", async () => {
+  const fake = bops();
+  fake.info.fullAccess = "not_yet";
+  const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  const jamie = rowOf(box, "Jamie Lee");
+  const admin = buttonOf(jamie, "Admin");
+  assert.equal(admin.disabled, true, "Admin held back on a person");
+  assert.equal(admin.getAttribute("data-tip"), M.WORDS.fullAccessNotYet);
+  assert.equal(buttonOf(jamie, "Member").disabled, false);
+  assert.equal(buttonOf(box.querySelector("form"), "Admin").disabled, true, "and in the invite form");
+  await done();
+});
+
 await test("an invite goes out with the bots chosen, and the form starts over after", async () => {
   const fake = bops();
   const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));

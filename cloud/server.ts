@@ -9,7 +9,7 @@ import { checkCreditAccess } from "./credit.ts";
 import { migrate, query } from "./db.ts";
 import * as deleteUser from "./delete-user.ts";
 import { HttpError, matches, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
-import { BOPS_DEVICE_HEADER, COMPUTER_NOT_ALLOWED } from "./protocol.ts";
+import { BOPS_DEVICE_HEADER, CLOUD_CAPS, COMPUTER_NOT_ALLOWED, type CloudHealth } from "./protocol.ts";
 import * as handles from "./handles.ts";
 import * as hooks from "./hooks.ts";
 import * as lines from "./lines.ts";
@@ -46,7 +46,8 @@ const health: Route = {
       await query("SELECT 1");
       dbOk = true;
     } catch {}
-    sendJson(res, dbOk ? 200 : 503, { ok: dbOk, macs: tunnel.connectedCount() });
+    const body: CloudHealth = { ok: dbOk, macs: tunnel.connectedCount(), caps: [...CLOUD_CAPS] };
+    sendJson(res, dbOk ? 200 : 503, body);
   },
 };
 

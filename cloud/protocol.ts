@@ -345,6 +345,18 @@ export type PhoneOwnerRemove = { number: string };
 export const CLOUD_TUNNEL_HEADER = "x-bops-cloud";
 
 /**
+ * What this Bops Cloud does that an app may wait for, said on GET /health (CloudHealth.caps). "roles": it gives an
+ * Admin (orgo-web's role) every bot, Your Apps at Write and Use its computer whatever the owner's entries say
+ * (ws-slice.ts viewerAccess, turns.ts memberStill), and shows members a workspace's apps. The owner's Mac offers Admin,
+ * and says Your Apps reach people, only once its Bops Cloud says so (lib/server/cloud-caps.ts): before that, an Admin
+ * with no entry would see no bot at all there.
+ */
+export const CLOUD_CAPS = ["roles"] as const;
+export type CloudCap = (typeof CLOUD_CAPS)[number];
+/** GET /health: the database answers (`ok`), how many Macs hold a tunnel, and CLOUD_CAPS (none from a Bops Cloud before them). */
+export type CloudHealth = { ok: boolean; macs: number; caps?: string[] };
+
+/**
  * AI credit (orgo-web's public.bops_ai_credit, which both sides read): what the user's bots spend on
  * OpenAI, AgentPhone, Typesafe and texted codes, at what Orgo pays for it, in micro-dollars (1 cent =
  * 10,000). When it's used up, a call that would spend more is answered 402 with this code (and
