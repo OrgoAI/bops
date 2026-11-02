@@ -345,8 +345,22 @@ function bopsLimit(s: { text: string; upgrade: "max" | null }) {
 /** A PlanLimit in chat: its words, and its link when it has one. */
 export const limitText = (e: PlanLimit) => (e.link ? `${e.message} [${e.link.label}](${e.link.url})` : e.message);
 
+/**
+ * Orgo's free account limits turned a computer down (orgo-web lib/free-limits: 429 NEEDS_CARD, or
+ * NEEDS_PAYMENT when the card already lifted another account): Orgo's own sentence, and where to add
+ * a card or credit. A limit for the day, not a busy server, so it is never tried again on its own.
+ */
+export function needsCardLimit(e: unknown) {
+  if (!(e instanceof OrgoError) || (e.code !== "NEEDS_CARD" && e.code !== "NEEDS_PAYMENT")) return null;
+  const answer = e.answer as { message?: unknown } | undefined;
+  const said = typeof answer?.message === "string" ? answer.message : e.said && e.said !== e.code ? e.said : "Orgo needs a card on this account to make another free computer.";
+  return new PlanLimit(said, { label: e.code === "NEEDS_PAYMENT" ? "Add credit on Orgo" : "Add a card on Orgo", url: `${orgoOrigin()}/settings/billing` });
+}
+
 /** Orgo turned a Bops computer down for the Bops plan (orgo-web's create gate, BOPS_COMPUTER_LIMIT): its words. */
 function bopsRefusal(e: unknown) {
+  const card = needsCardLimit(e);
+  if (card) return card;
   if (!(e instanceof OrgoError) || e.code !== "BOPS_COMPUTER_LIMIT") return null;
   forgetPlan();
   const said = e.said || e.message;
@@ -389,6 +403,8 @@ function limitOf(short: PlanShort, plan: OrgoPlan | null, main: Bot) {
 
 /** Orgo turned a computer down for the plan: why, with numbers read again. Null when it was turned down for anything else. */
 async function refusedFor(e: unknown, main: Bot) {
+  const card = needsCardLimit(e);
+  if (card) return card;
   const short = planRefusal(e);
   if (!short) return null;
   forgetPlan();
