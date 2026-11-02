@@ -4,8 +4,8 @@
  *
  * Billing by use (USAGE_CARD; bops.bot's pricing changes to the same words at the switch date, not
  * before, so the site never advertises it while Pro and Max are still sold): no plan. The user pays for what they use from their Orgo credit, the
- * Bops computer by the hour while it works and nothing while it sleeps, AI at Orgo's rate; a new Orgo
- * account starts with Orgo's $5 of credit.
+ * Bops computer (Medium or Large, from Medium's price) by the hour while it works and nothing while it
+ * sleeps, AI at Orgo's rate; a new Orgo account starts with Orgo's $5 of credit.
  * The numbers are BOPS_USAGE's, which Bops Cloud holds them to (orgo-web's own answer wins in the
  * app: lib/bops-billing.ts).
  *
@@ -24,6 +24,7 @@
  * Shared by the server and the app (no server imports).
  */
 import { BOPS_TIERS, BOPS_USAGE, type BopsTier } from "@/cloud/protocol";
+import { rateText } from "@/lib/bops-billing";
 
 /** Where the plan's limits stand: one of Bops' plans, or billing by use ("usage"). */
 export type RoomTier = BopsTier | "usage";
@@ -49,17 +50,24 @@ const included = (tier: BopsTier) => {
 };
 
 /**
- * Billing by use, as the account sheet and bops.bot say it: one card, no plan to pick. `hourlyCents` and
- * `numberCents` are orgo-web's when it said them (the app's), else BOPS_USAGE's (bops.bot's).
+ * Billing by use, as the account sheet and bops.bot say it: one card, no plan to pick. The computer is
+ * Medium or Large, so it costs from the smaller one's price: `fromHourlyCents`, orgo-web's when it listed
+ * the sizes (the app's), else BOPS_USAGE's (bops.bot's). `hourlyCents` instead: an orgo-web that makes
+ * every Bops computer Large (before sizes), whose one price that is. `numberCents` is orgo-web's when it
+ * said it, else BOPS_USAGE's.
  */
-export function usageCard(p: { hourlyCents?: number; numberCents?: number } = {}) {
-  const hourly = cents(p.hourlyCents ?? BOPS_USAGE.computerHourlyCents);
+export function usageCard(p: { fromHourlyCents?: number; hourlyCents?: number; numberCents?: number } = {}) {
+  const one = p.fromHourlyCents === undefined && p.hourlyCents !== undefined;
+  const hourly = one ? cents(p.hourlyCents!) : `from ${rateText(p.fromHourlyCents ?? BOPS_USAGE.computerFromHourlyCents)}`;
   const number = cents(p.numberCents ?? BOPS_USAGE.numberMonthlyCents);
   return {
     name: "Pay only for what you use",
     price: "$0",
     per: "/month",
-    computers: { title: "Your own Bops computer", detail: "4 cores, 16 GB RAM, 80 GB, multi-screen. It sleeps when nothing's using it." },
+    computers: {
+      title: "Your own Bops computer",
+      detail: one ? "4 cores, 16 GB RAM, 80 GB, multi-screen. It sleeps when nothing's using it." : "Medium or Large, 80 GB, multi-screen. It sleeps when nothing's using it.",
+    },
     lines: [
       { text: `Your computer: ${hourly} an hour while it works, free while it sleeps` },
       { text: "AI at Orgo's rate" },
