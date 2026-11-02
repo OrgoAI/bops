@@ -82,5 +82,37 @@ export async function sendThroughCloud(chatId: string, text: string, replyTo?: s
   return "failed";
 }
 
+/**
+ * The owner's switch for a workspace's chat (Settings, General: components/app/chat-switch.tsx), to Bops Cloud (POST
+ * /v1/chat-routing, cloud/turns.ts setRouting): "mac" chooses this Mac, and Bops Cloud never moves that workspace by
+ * itself after; "auto" gives the choice back, so Bops Cloud moves it once its bots' computers answer there (or turns it
+ * on, where Bops Cloud doesn't move workspaces for this account). The state is read again now: it carries the switch as
+ * Bops Cloud wrote it (Workspace.chatOn, chatAuto). Refused: Bops Cloud's words (an older Bops on another Mac: 409).
+ */
+export async function setChatRouting(wsId: string, mode: "auto" | "mac"): Promise<{ ok: true } | { error: string; status: number }> {
+  const user = stateUser();
+  const auth = cloudKey();
+  if (onRunner() || !cloudOn() || !user || !auth) return { error: "Sign in with Orgo to use Bops Cloud.", status: 409 };
+  const f = g.__bopsCloudChat?.fetch ?? fetch;
+  let res: Response;
+  try {
+    res = await f(`${cloudUrl()}/v1/chat-routing`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${auth}`, [BOPS_USER_HEADER]: user, [BOPS_PROTOCOL_HEADER]: String(STATE_PROTOCOL), [BOPS_DEVICE_HEADER]: stateDevice() ?? "", "content-type": "application/json", ...appHeaders() },
+      body: JSON.stringify({ wsId, mode }),
+      signal: AbortSignal.timeout(15_000),
+      cache: "no-store",
+    });
+  } catch {
+    return { error: "Couldn't reach Bops Cloud. Check your internet connection.", status: 502 };
+  }
+  const body = (await res.json().catch(() => null)) as { ok?: boolean; error?: unknown } | null;
+  if (res.ok && body?.ok) {
+    await pullState().catch(() => {});
+    return { ok: true };
+  }
+  return { error: typeof body?.error === "string" && body.error ? body.error : "Bops Cloud couldn't change that. Try again.", status: res.status === 409 || res.status === 404 ? res.status : 502 };
+}
+
 /** For tests: this way to reach Bops Cloud (unset: fetch). */
 export const cloudChatForTests = (opts: { fetch?: typeof fetch }) => void (g.__bopsCloudChat = opts);

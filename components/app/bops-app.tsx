@@ -30,6 +30,7 @@ import { appsStamp, HostedAppTab, OpenAppTask, OpenHostedApp, OpenSettings } fro
 import { ComposerBridgeProvider, useComposerBridgeHost } from "./composer-bridge";
 import { OpenBotComputer } from "./app-envs";
 import { WorkspaceDomains } from "./workspace-domains";
+import { ChatSwitch } from "./chat-switch";
 import { BotSettingsPage } from "./bot-settings";
 import type { SettingsSection } from "@/lib/bot-settings";
 
@@ -2167,6 +2168,8 @@ export function Settings({
       <>
         <PaneHead title="General" sub={shared ? `${wsName}, shared with you.` : `${wsName}, shared with the people you add.`} />
         <WorkspaceGeneral state={state} />
+        {/* Whether its bots answer with every Mac closed: the owner's, where Bops Cloud says it applies (a self-hosted Bops has none). */}
+        {!selfHosted && <ChatSwitch state={state} />}
       </>
     );
   else if (pane === "team" && !shared)

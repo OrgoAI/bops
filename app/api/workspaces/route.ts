@@ -5,6 +5,8 @@ import { closeShared, sharedOpen } from "@/lib/server/shared";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { olderBopsOnAccount } from "@/lib/server/chart";
 import { GroupError, setComputerName } from "@/lib/server/bot-groups";
+import { setChatRouting } from "@/lib/server/cloud-chat";
+import { runnersSoon } from "@/lib/server/runner-install";
 
 /**
  * `?preview=<id>`: what deleting that workspace takes with it, for the confirm (its computers, keys, skills
@@ -53,12 +55,13 @@ export async function POST(request: Request) {
  * (setChain), only from the Bops window and never while a workspace shared with the user is open; what was kept
  * comes back. `computerName` (with `id`): { computer, name } names one of its computers, the one its bots' group in the
  * sidebar is called (lib/bot-groups.ts; an empty name gives it its default back), the owner's alone as the chart is;
- * answers { ok, name }.
+ * answers { ok, name }. `chat` (with `id`): "mac" or "auto", the owner's switch for its chat through Bops Cloud
+ * (lib/server/cloud-chat.ts setChatRouting), the owner's alone too; Bops Cloud's words when it refuses.
  */
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites, chain, computerName } = (await request.json().catch(() => ({}))) as {
+  const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites, chain, computerName, chat } = (await request.json().catch(() => ({}))) as {
     id?: string;
     name?: string;
     current?: string;
@@ -68,8 +71,19 @@ export async function PATCH(request: Request) {
     favorites?: unknown;
     chain?: unknown;
     computerName?: { computer?: unknown; name?: unknown };
+    chat?: unknown;
   };
   ensureMain();
+  // Where its chat is answered is the owner's to say: from their own window, with their own workspace open.
+  if (chat !== undefined) {
+    if (!id || (chat !== "mac" && chat !== "auto")) return Response.json({ error: 'Say which workspace, and "mac" or "auto".' }, { status: 400 });
+    if (!fromBopsWindow(request) || sharedOpen()) return Response.json({ error: "Only the owner can change where the chat is answered." }, { status: 403 });
+    const r = await setChatRouting(id, chat);
+    if ("error" in r) return Response.json({ error: r.error }, { status: r.status });
+    // A computer someone else can use keeps a runner by it (runner-install.ts sharedRunnerOk): looked at now, not in ten minutes.
+    runnersSoon();
+    return Response.json({ ok: true });
+  }
   // What a computer is called is the owner's to say too: from their own window, with their own workspace open.
   if (computerName !== undefined) {
     if (!id) return Response.json({ error: "Say which workspace." }, { status: 400 });
