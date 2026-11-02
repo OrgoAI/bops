@@ -23,6 +23,7 @@ import { reachableFromComputers } from "./composio";
 import { computerToolOn } from "./computer-task";
 import { findBopsWorkspace, MEMBER_COMPUTER_ROUTE, orgoMembers, type OrgoInvite, type OrgoMember } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
+import { cloudDoes } from "./cloud-caps";
 import { onRunner } from "./persist";
 import { getState, stateInCloud } from "./store";
 import { setMemberAccess } from "./workspaces";
@@ -93,13 +94,17 @@ const keysOnComputers = () => reachableFromComputers() || !computerToolOn() || !
 const runnerKeys = () => Object.values(getState().runners ?? {}).some((x) => x.status === "running" || x.status === "installing" || runnerKeyMade(x));
 
 /**
- * Whether the sheet offers Admin: always. Bops Cloud and orgo-web give an Admin their role from orgo-web alone, whatever
- * this Mac says, and a Member with Use its computer is root on the computers all the same; Bops keeps its account keys
- * off the computers of any workspace with someone else in it (othersCanUse), and the sheet says when other keys are
- * there (keysOnComputers). Making someone a Member, or removing them, is never held back.
+ * Whether the sheet offers Admin: once this Mac's Bops Cloud says it gives an Admin their role (cloud-caps.ts "roles":
+ * before that it goes by entries alone, and an Admin, who's kept none, would see no bot there), "not_yet" until then. A
+ * Bops whose state isn't in Bops Cloud (self-hosted, a hosted server) has no Bops Cloud to wait for. Bops Cloud and
+ * orgo-web give an Admin their role from orgo-web alone, whatever this Mac says, and a Member with Use its computer is
+ * root on the computers all the same; Bops keeps its account keys off the computers of any workspace with someone else
+ * in it (othersCanUse), and the sheet says when other keys are there (keysOnComputers). Making someone a Member, or
+ * removing them, is never held back.
  */
-export function fullAccessNow(): FullAccess {
-  return "on";
+export async function fullAccessNow(): Promise<FullAccess> {
+  if (!stateInCloud()) return "on";
+  return (await cloudDoes("roles")) ? "on" : "not_yet";
 }
 
 const fullAccessRefused = (now: FullAccess) =>
@@ -375,7 +380,7 @@ async function load(key: string, { fresh = false } = {}): Promise<Loaded> {
         wsId,
         orgoUrl: `${orgoOrigin()}/workspaces?project_id=${encodeURIComponent(workspace)}`,
         host: getState().host === "mac" ? "mac" : "orgo",
-        fullAccess: fullAccessNow(),
+        fullAccess: await fullAccessNow(),
         keysOnComputers: keysOnComputers(),
         you,
         people,
@@ -542,23 +547,36 @@ async function changeInviteAccess(body: { invite?: unknown; access?: unknown; ro
   const access = inviteAccess(accessIn(body.access));
   if (!email || role === null || (access === undefined && !role)) return no(400, "BAD_REQUEST", WORDS.whatToSend);
   if (access === null) return no(400, "BAD_ACCESS", WORDS.whatToSend);
+  const full = role === "admin" ? await fullAccessNow() : "on";
+  if (full !== "on") return counted(fullAccessRefused(full));
   const sheet = await sheetFor(who.key);
   if ("status" in sheet) return sheet;
-  if (!sheet.info.invites.some((i) => i.email === email)) return no(404, "GONE", WORDS.gone);
+  const waiting = sheet.info.invites.find((i) => i.email === email);
+  if (!waiting) return no(404, "GONE", WORDS.gone);
   // Its role, without sending it again (orgo-web keeps it on the invite, and it carries over as they join). An orgo-web
-  // before that route can't: the sheet says to resend it with the role.
+  // before that route can't (405, or a 404 with no code of the route's): the sheet says to resend it with the role.
+  // The route's own 404s: INVITE_NOT_FOUND (accepted or cancelled since the sheet's read) is an invite that's gone,
+  // and "Project not found" a refusal like any.
   if (role) {
     const got = (await orgoMembers.setInviteRole(who.key, sheet.workspace, email, role)) as Got;
     if (!done(got)) {
-      if (got && (got.status === 405 || (got.status === 404 && !/invite not found/i.test(str(got.json?.error) ?? "")))) return no(409, "INVITE_ROLE_NOT_READY", ADMIN_WORDS.inviteRoleNotReady);
-      if (got?.status === 404) return no(404, "GONE", WORDS.gone);
+      const code = str(got?.json?.code);
+      const said = str(got?.json?.error);
+      if (got?.status === 404 && (code === "INVITE_NOT_FOUND" || /invite not found/i.test(said ?? ""))) return no(404, "GONE", WORDS.gone);
+      if (got && (got.status === 405 || (got.status === 404 && !code && !/project not found/i.test(said ?? "")))) return no(409, "INVITE_ROLE_NOT_READY", ADMIN_WORDS.inviteRoleNotReady);
       return counted(refusalOf(got, { invite: true, email }));
     }
     trackServerEvent("bops_member_access_changed", { to_role: role });
   }
-  if (access === undefined) return ok({ ok: true });
   const key = accessKey({ email })!;
   const had = accessMapOf(sheet.wsId)?.[key];
+  // An Admin's invite made a Member with no bots sent, and nothing kept for it (an Admin's invite keeps none): Read on
+  // every bot, as a new invite starts, the same as a joined Admin made a Member.
+  if (access === undefined && role === "viewer" && waiting.role === "admin" && !had) {
+    setMemberAccess(sheet.wsId, key, inviteDefault(botIdsOf(sheet.wsId)), { invite: true });
+    return ok({ ok: true });
+  }
+  if (access === undefined) return ok({ ok: true });
   setMemberAccess(sheet.wsId, key, access, { invite: true, ...(typeof had?.at === "number" ? { at: had.at } : {}) });
   return ok({ ok: true });
 }
@@ -578,8 +596,8 @@ export async function invite(body: { email?: unknown; role?: unknown; access?: u
   if (!email) return no(400, "BAD_EMAIL", WORDS.badEmail);
   if (!role) return no(400, "BAD_ROLE", WORDS.whatToSend);
   if (access === null) return no(400, "BAD_ACCESS", WORDS.whatToSend);
-  const full = fullAccessNow();
-  if (role === "admin" && full !== "on") return counted(fullAccessRefused(full));
+  const full = role === "admin" ? await fullAccessNow() : "on";
+  if (full !== "on") return counted(fullAccessRefused(full));
   const sheet = await sheetFor(who.key);
   if ("status" in sheet) return sheet;
   const { info, workspace, wsId } = sheet;
@@ -625,8 +643,8 @@ export async function changeAccess(body: { memberId?: unknown; role?: unknown; a
   const access = accessIn(body.access);
   if (!memberId || role === null || (!role && access === undefined)) return no(400, "BAD_REQUEST", WORDS.whatToSend);
   if (access === null) return no(400, "BAD_ACCESS", WORDS.whatToSend);
-  const full = fullAccessNow();
-  if (role === "admin" && full !== "on") return counted(fullAccessRefused(full));
+  const full = role === "admin" ? await fullAccessNow() : "on";
+  if (full !== "on") return counted(fullAccessRefused(full));
   let where: Where;
   let keys: { key: string; idKey?: string } | undefined;
   // Their entry kept now, and Use its computer as it is now: orgo-web's, as the sheet shows it (listOf), else the copy here.

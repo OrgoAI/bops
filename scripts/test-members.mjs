@@ -93,8 +93,11 @@ const M = await import(`${root}/lib/members.ts`);
 const P = await import(`${root}/lib/plan-includes.ts`);
 const A = await import(`${root}/cloud/analytics-rules.ts`);
 const T = await import(`${root}/cloud/protocol.ts`);
-// Loaded: now it's the Mac app, whose state lives in Bops Cloud.
+// Loaded: now it's the Mac app, whose state lives in Bops Cloud. Its Bops Cloud gives people their role (cloud-caps.ts).
 delete process.env.BOPS_SELF_HOSTED;
+const Caps = await import(`${root}/lib/server/cloud-caps.ts`);
+const withRoles = async () => ({ ok: true, macs: 0, caps: ["roles"] });
+Caps.resetCloudCaps({ health: withRoles });
 
 /** Every error the route said, to hold them all to the app's words. */
 const said = new Set();
@@ -212,6 +215,28 @@ assert.equal(ready.seatsError, undefined);
 assert.equal(ready.orgoUrl, `https://orgo.test/workspaces?project_id=${WS}`);
 assert.equal(ready.host, "orgo");
 assert.equal(ready.fullAccess, "on", "Admin is offered");
+// Admin waits for a Bops Cloud that gives people their role ("roles" on its /health): one before it would give an Admin,
+// who has no entry, no bot at all. Nothing goes to orgo-web, and making someone a Member is never held back.
+for (const health of [async () => ({ ok: true, macs: 0 }), async () => ({ ok: true, macs: 0, caps: [] }), async () => offline()]) {
+  Caps.resetCloudCaps({ health });
+  assert.equal((await get()).body.fullAccess, "not_yet");
+  const n = calls.length;
+  const asks = [
+    await route("POST", { email: "newer@example.com", role: "admin" }),
+    await route("PATCH", { invite: "pat@example.com", role: "admin" }),
+    await route("PATCH", { memberId: "u-jamie", role: "admin" }),
+  ];
+  assert.deepEqual(asks.map((x) => [x.status, x.body.code, x.body.error]), Array(3).fill([409, "FULL_ACCESS_NOT_YET", M.WORDS.fullAccessNotYet]));
+  assert.equal(calls.filter((c) => c.method !== "GET").length, calls.slice(0, n).filter((c) => c.method !== "GET").length, "nothing changed on orgo-web");
+}
+// Asked again after a no (a minute), and a yes is kept.
+let healthAsked = 0;
+Caps.resetCloudCaps({ health: async () => (healthAsked++, { ok: true, macs: 0, caps: ["roles"] }) });
+assert.equal(await Caps.cloudDoes("roles"), true);
+assert.equal(await Caps.cloudDoes("roles"), true);
+assert.equal(healthAsked, 1, "a yes is kept");
+Caps.resetCloudCaps({ health: withRoles });
+assert.equal((await get()).body.fullAccess, "on");
 assert.equal(ready.keysOnComputers, false, "nothing of Bops' on the computers");
 assert.ok(!JSON.stringify(ready).includes(KEY), "the key never goes to the window");
 // The upgrade orgo-web offers, in the app's words; seats it couldn't read; an orgo-web without times.
@@ -514,11 +539,36 @@ assert.deepEqual(calls.filter((c) => c.method === "POST").at(-1).body, { email: 
   assert.equal(invited().length, n, "no new email");
   r = await route("PATCH", { invite: "nobody@example.com", role: "admin" });
   assert.deepEqual([r.status, r.body.code], [404, "GONE"], "only an invite Orgo lists");
-  // An orgo-web before that route: said plainly, nothing sent.
-  delete replies[`PATCH /api/workspaces/${WS}/invite`];
+  // orgo-web's own answer for an invite no longer waiting (accepted or cancelled since the sheet's read): gone, never
+  // "resend it"; and the project gone, a refusal. Nothing sent either way.
+  replies[`PATCH /api/workspaces/${WS}/invite`] = () => json(404, { error: "No invite to that address is waiting.", code: "INVITE_NOT_FOUND" });
   r = await route("PATCH", { invite: "pat@example.com", role: "admin" });
-  assert.deepEqual([r.status, r.body.code, r.body.error], [409, "INVITE_ROLE_NOT_READY", M.ADMIN_WORDS.inviteRoleNotReady]);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [404, "GONE", M.WORDS.gone], "orgo-web's real 404 body");
+  replies[`PATCH /api/workspaces/${WS}/invite`] = () => json(404, { error: "Project not found" });
+  r = await route("PATCH", { invite: "pat@example.com", role: "admin" });
+  assert.deepEqual([r.status, r.body.code], [502, "ORGO_ERROR"]);
+  // An orgo-web before that route (405, or a 404 that's no answer of the route's): said plainly, nothing sent.
+  for (const old of [() => new Response(null, { status: 405 }), undefined]) {
+    if (old) replies[`PATCH /api/workspaces/${WS}/invite`] = old;
+    else delete replies[`PATCH /api/workspaces/${WS}/invite`];
+    r = await route("PATCH", { invite: "pat@example.com", role: "admin" });
+    assert.deepEqual([r.status, r.body.code, r.body.error], [409, "INVITE_ROLE_NOT_READY", M.ADMIN_WORDS.inviteRoleNotReady]);
+  }
   assert.equal(invited().length, n, "still no new email");
+  // An Admin's invite (nothing kept for it) made a Member with no bots sent: Read on every bot, as a new invite starts.
+  // A Member's made a Member again keeps what it has (here: nothing).
+  replies[`PATCH /api/workspaces/${WS}/invite`] = (c) => json(200, { success: true, email: c.body.email, permission: c.body.permission });
+  const inviteEntry = (email) => Sm.getState().workspaces?.find((x) => x.id === wsOf())?.memberAccess?.[email];
+  Ws.setMemberAccess(wsOf(), "old@example.com", null);
+  Ws.setMemberAccess(wsOf(), "pat@example.com", null);
+  r = await route("PATCH", { invite: "old@example.com", role: "viewer" });
+  assert.equal(r.status, 200);
+  const made = inviteEntry("old@example.com");
+  assert.ok(made && made.invite === true && made.others === "none" && Object.values(made.bots).every((l) => l === "read") && made.apps === "read", "Read on every bot, kept as the invite's");
+  r = await route("PATCH", { invite: "pat@example.com", role: "viewer" });
+  assert.equal(r.status, 200);
+  assert.equal(inviteEntry("pat@example.com"), undefined, "a Member's invite isn't given bots it didn't have");
+  Ws.setMemberAccess(wsOf(), "old@example.com", null);
   replies = usual();
 }
 assert.equal(M.FULL_ACCESS_IN_BOPS, true, "this release has Admin");
