@@ -377,7 +377,7 @@ test("treg calls at once share what's left: each holds its cap until it's counte
   // Three at once, each asking for up to $1, with $0.03 left.
   const three = await Promise.all([0, 1, 2].map(() => as(u, "POST", "/proxy/treg/call/treg.companies.slow", { q: "fintech" }, { "x-treg-route-max-cost": "1" })));
   assert.deepEqual(three.map((r) => r.status).sort(), [200, 429, 429]);
-  assert.match(three.find((r) => r.status === 429)!.json.error, /using what's left of your AI credit/);
+  assert.match(three.find((r) => r.status === 429)!.json.error, /using what's left of your credit/);
   const caps = tregCalls().slice(before).map((g) => Number(g.headers["x-treg-route-max-cost"]));
   assert.deepEqual(caps, [0.03], "one went, capped at what was left");
   // Counted (at $0 here) and given back: the next one has the room again.

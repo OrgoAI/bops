@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { bearer, type CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
-import { creditLeft, creditsOn, outOfCredit, requireCredit } from "./credit.ts";
+import { billingFor, creditLeft, creditsOn, outOfCredit, requireCredit } from "./credit.ts";
 import { seal } from "./crypto.ts";
 import { banksOn, botIdsOn, grantsOn, inboxesOn, linesOn, ownerNumbers, type Blob as StateBlob, type Level } from "./computer-scope.ts";
 import { accountDeleted, isDeleted, objectInfo, objectOwner, ownObject, query, sessionUsed } from "./db.ts";
@@ -1461,7 +1461,7 @@ function holdForTreg(call: Call, asked: number): Promise<number> {
     const held = tregHeld.get(user) ?? { n: 0, micros: 0 };
     if (held.n >= TREG_AT_ONCE) throw new HttpError(429, "Too many business data lookups at once. Try again in a moment.");
     const cap = creditsOn() ? Math.min(asked, Math.max(0, (await creditLeft(user)) - held.micros) / 1_000_000) : asked;
-    if (cap <= 0) throw held.n > 0 ? new HttpError(429, "Your other business data lookups are using what's left of your AI credit. Try again in a moment.") : outOfCredit();
+    if (cap <= 0) throw held.n > 0 ? new HttpError(429, "Your other business data lookups are using what's left of your credit. Try again in a moment.") : outOfCredit(await billingFor(user));
     const mine = Math.ceil(cap * 1_000_000);
     held.n += 1;
     held.micros += mine;
