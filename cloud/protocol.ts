@@ -903,6 +903,14 @@ export const MESSAGE_TAKEN = "message_taken";
 export const CHAT_NEEDS_UPDATE = "chat_needs_update";
 /** The first Bops whose Mac keeps to chat through Bops Cloud (runners kept up on identity, Use its computer, stored messages). */
 export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
+/**
+ * The first Bops with the owner's switch in Settings, General (components/app/chat-switch.tsx): Bops Cloud moves a
+ * workspace to it by itself (cloud/turns.ts autoRoute) only for an owner whose last Mac is at this or newer, so an
+ * owner it moves can always choose their Mac again in the app.
+ */
+export const CHAT_AUTO_MIN_VERSION = "0.0.38";
+/** 409 on the owner's switch turned back on ("auto") where Bops Cloud doesn't move workspaces for them yet (BOPS_CHAT_AUTO). */
+export const CHAT_AUTO_OFF = "chat_auto_off";
 /** On a runner's stream, an event "turn": answer this message (`seq`: its write, so the runner reads messages up to it first). */
 export type RunnerTurnEvent = { id: string; messageId: string; chatId: string; botId: string; seq: number };
 /** On a runner's stream, an event "turn-cancel": stop that turn and write nothing more for it (its member was removed, or it was taken back). */

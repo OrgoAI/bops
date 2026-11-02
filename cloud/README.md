@@ -902,17 +902,20 @@ computer's runner never counts; 409 `chat_needs_update`; staff may `force` once 
 
 **By itself** (`autoRoute`, `BOPS_CHAT_AUTO`: unset or "off" nothing, "on" everyone, a comma list of Orgo user
 ids a canary, "revert" moves back at start everything it moved). A workspace nobody chose for (no row, or
-`set_by` NULL, "auto" or "auto-held") goes through Bops Cloud once the owner's last Mac is at the minimum and
+`set_by` NULL, "auto" or "auto-held") goes through Bops Cloud once the owner's last Mac has the switch
+(`CHAT_AUTO_MIN_VERSION`, so the owner can always choose the Mac again) and
 every computer its bots work on has a runner the Mac set up and saw running (`AppState.runners`, not failed,
 not found down) at the minimum, which connected to `/v1/runner/live` at that version since Bops Cloud started
 and since that computer last couldn't answer (`set_by` "auto", `allow_hourly` false). It's looked at when a
 runner connects, when the owner's state is written, and when a turn can't be answered. It goes back to the Mac
 whenever its bots have no computer, a runner is missing, failed or being stopped, the computer is found down,
-or a turn ended for want of its computer (a wake refused, no runner, too late): never because a runner just
-went quiet, as computers nap. A wake refused (billed by the hour and not let, stopped, deleted, paused, out of
+or a turn ended for want of its computer (a wake refused, no runner, too late while no runner listened): never
+because a runner just went quiet, as computers nap, nor for a turn that ran out of time waiting behind a longer
+answer in its chat. Turns still owed to its computers go with it, in the same write: a member's message is
+handed to the Mac to answer (a stored `member` event), the owner's own ends with a note to send it again. A wake refused (billed by the hour and not let, stopped, deleted, paused, out of
 Free hours or credit) holds it on the Mac a day ("auto-held"). A choice the owner or staff made (`set_by`
 "owner" or "staff") is never moved, either way; the owner's `mode: "auto"` gives it back (where moves are off
-for them it's "cloud"), and `allowHourly` alone chooses nothing. Members' messages in a workspace that may move
+for them it's refused, 409 `chat_auto_off`, and the row stays), and `allowHourly` alone chooses nothing. Members' messages in a workspace that may move
 are written here first and handed to the Mac (stored), and whether a computer answers is decided under the
 owner's lock, so no move drops one. Not covered: group chats (the Mac's), bots in browsers on the Mac or
 routines on This Mac (no runner), a shared workspace where orgo-web refuses identity or the computer came with

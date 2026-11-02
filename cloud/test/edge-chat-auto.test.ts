@@ -5,7 +5,7 @@ import { after, before, test } from "node:test";
 import { closeDb, query } from "../db.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import { autoRoute, closeRunners, resetTurns, revertAuto, turnTiming } from "../turns.ts";
+import { autoRoute, closeRunners, resetTurns, revertAuto, sweepTurns, turnTiming } from "../turns.ts";
 import { dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
@@ -82,7 +82,7 @@ const user = (what: string) => {
   users.push(id);
   return id;
 };
-const own = (userId: string, version = "0.0.37", device = "mac-o") => ({
+const own = (userId: string, version = "0.0.38", device = "mac-o") => ({
   Authorization: `Bearer ${keyOf(userId)}`,
   "x-bops-user": userId,
   "x-bops-protocol": "2",
@@ -117,8 +117,8 @@ async function setup(opts: { runner?: boolean } = {}) {
     ...(opts.runner !== false ? { runners: { [desktop]: runnerState() } } : {}),
   };
   assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: own(owner), body: JSON.stringify({ base: 0, state }) })).status, 200);
-  // The account as Bops Cloud made it at the Mac's first session, with the version that Mac said.
-  await query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, '0.0.37') ON CONFLICT (user_id) DO UPDATE SET app_version = '0.0.37'", [owner]);
+  // The account as Bops Cloud made it at the Mac's first session, with the version that Mac said (one with the switch).
+  await query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, '0.0.38') ON CONFLICT (user_id) DO UPDATE SET app_version = '0.0.38'", [owner]);
   return { owner, writer, project, desktop };
 }
 
@@ -229,6 +229,25 @@ test("the owner's switch back on gives the choice back: Bops Cloud moves it once
   box.close();
 });
 
+test("where Bops Cloud doesn't move workspaces for the owner yet, the switch back on is refused and the Mac's stays the choice", async () => {
+  const s = await setup({ runner: false });
+  assert.equal((await routeAs(s.owner, { mode: "mac" })).status, 200);
+  delete process.env.BOPS_CHAT_AUTO;
+  try {
+    const r = await routeAs(s.owner, { mode: "auto" });
+    assert.equal(r.status, 409);
+    assert.equal(((await r.json()) as { code?: string }).code, "chat_auto_off");
+    assert.deepEqual(await rowOf(s.owner), { mode: "mac", set_by: "owner", allow_hourly: false });
+    assert.equal((await staff({ userId: s.owner, wsId: "ws_acme", mode: "auto" })).status, 409);
+    // No row at all: none made.
+    const t = await setup({ runner: false });
+    assert.equal((await routeAs(t.owner, { mode: "auto" })).status, 409);
+    assert.equal(await rowOf(t.owner), undefined);
+  } finally {
+    process.env.BOPS_CHAT_AUTO = "on";
+  }
+});
+
 test("taken down or failed on the Mac's write, it goes back to the Mac; back up and connected, to Bops Cloud again", async () => {
   const s = await setup();
   const box = await listenAs(s.owner, s.desktop);
@@ -316,6 +335,15 @@ test("an owner whose last Mac is older than chat through Bops Cloud, or outside 
   assert.equal((await query("SELECT app_version FROM bops.cloud_accounts WHERE user_id = $1", [s.owner])).rows[0].app_version, "0.0.35", "the runner's call didn't say it");
   box.close();
 
+  // A Mac that keeps to chat through Bops Cloud but has no switch (0.0.37): the owner couldn't choose it back, so not moved.
+  const w = await setup();
+  await ownerChanges(w.owner, () => {}, own(w.owner, "0.0.37", "mac-old"));
+  await until(async () => (await query("SELECT 1 FROM bops.cloud_accounts WHERE user_id = $1 AND app_version = '0.0.37'", [w.owner])).rowCount === 1, "the 0.0.37 Mac's version kept");
+  const wbox = await listenAs(w.owner, w.desktop);
+  await autoRoute(w.owner);
+  assert.equal(await rowOf(w.owner), undefined, "a Mac without the switch");
+  wbox.close();
+
   const t = await setup();
   const u = await setup();
   process.env.BOPS_CHAT_AUTO = `${u.owner}`;
@@ -398,4 +426,58 @@ test("BOPS_CHAT_AUTO=revert sends every workspace Bops Cloud moved back to the M
     process.env.BOPS_CHAT_AUTO = "on";
   }
   box.close();
+});
+
+const runner = (owner: string, desktop: string, path: string, body?: unknown) =>
+  fetch(`${cloud.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${vm(owner, desktop)}`, "x-bops-user": owner, "x-bops-protocol": "2", "content-type": "application/json" }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+const turnOf = async (owner: string, id: string) => (await query<{ state: string; note: string | null }>("SELECT state, note FROM bops.chat_turns WHERE user_id = $1 AND id = $2", [owner, id])).rows[0];
+const readAllMessages = async (owner: string) =>
+  ((await (await fetch(`${cloud.url}/v1/messages?after=0`, { headers: own(owner) })).json()) as { messages: { id: string; json: { text: string } | null }[] }).messages;
+
+test("a turn that ran out of time behind a longer answer in its chat, its runner listening, never moves the workspace back", async () => {
+  const s = await setup();
+  const box = await listenAs(s.owner, s.desktop);
+  await until(() => cloudNow(s.owner), "moved");
+  const a = (await (await act(s.writer, s.project, "key-auto-long1", { act: "chat", chatId: "bot:max", text: "a long task" })).json()) as { turn: string };
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/claim`, {})).status, 200);
+  const b = (await (await act(s.writer, s.project, "key-auto-long2", { act: "chat", chatId: "bot:max", text: "and then" })).json()) as { turn: string };
+  // One at a time in a chat: the second waits behind the first past its deadline.
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${b.turn}/claim`, {})).status, 409);
+  await query("UPDATE bops.chat_turns SET deadline = now() - interval '1 second' WHERE user_id = $1 AND id = $2", [s.owner, b.turn]);
+  await sweepTurns();
+  assert.deepEqual(await turnOf(s.owner, b.turn), { state: "expired", note: "late" });
+  await autoRoute(s.owner);
+  assert.deepEqual(await rowOf(s.owner), { mode: "cloud", set_by: "auto", allow_hourly: false });
+  box.close();
+});
+
+test("moved back to the Mac while a member's turn waits on its computer: the Mac is handed the message to answer, and the owner's own says to send it again", async () => {
+  const s = await setup();
+  const box = await listenAs(s.owner, s.desktop);
+  await until(() => cloudNow(s.owner), "moved");
+  box.close();
+  await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
+  // Its computer takes a while to come back: the turns keep waiting on it.
+  wakeAnswers.set(s.desktop, () => ({ state: "storage", expectedSeconds: 30 }));
+  try {
+    const a = (await (await act(s.writer, s.project, "key-auto-hb001", { act: "chat", chatId: "bot:max", text: "while it wakes" })).json()) as { turn: string; messageId: string };
+    const o = await fetch(`${cloud.url}/v1/chats/${encodeURIComponent("bot:max")}/send`, { method: "POST", headers: own(s.owner), body: JSON.stringify({ key: "key-auto-hbown", text: "mine too" }) });
+    assert.equal(o.status, 200);
+    const mine = ((await o.json()) as { turn: string }).turn;
+    await until(async () => (await turnOf(s.owner, a.turn))?.state === "waking", "waking");
+    // Its runner fails on the Mac meanwhile: back to the Mac, with what waited.
+    await ownerChanges(s.owner, (st) => void (st.runners = { [s.desktop]: runnerState("0.0.37", { status: "failed" }) }));
+    await until(async () => !(await cloudNow(s.owner)), "back to the Mac");
+    assert.deepEqual(await turnOf(s.owner, a.turn), { state: "expired", note: null });
+    assert.deepEqual(await turnOf(s.owner, mine), { state: "failed", note: "toMac" });
+    const pending = await pendingOf(s.owner);
+    assert.equal(pending.filter((p) => p.stored && p.messageId === a.messageId).length, 1, "the Mac answers the member's message");
+    const all = await readAllMessages(s.owner);
+    const note = all.find((m) => m.id === `${a.messageId}_note`)?.json?.text;
+    assert.equal(note, "Tara's Mac answers Max for now, so Max will answer once Tara opens Bops.");
+    assert.equal(all.find((m) => m.id === "msg_o_key-auto-hbown_note")?.json?.text, "Tara's Mac answers Max for now, and Max hadn't started on this yet. Send it again.");
+    assert.ok(!all.some((m) => /can't answer chats yet|didn't wake up/.test(m.json?.text ?? "")), "no failure note");
+  } finally {
+    wakeAnswers.delete(s.desktop);
+  }
 });

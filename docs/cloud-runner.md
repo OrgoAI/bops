@@ -567,12 +567,18 @@ Chat through Bops Cloud by default (`BOPS_CHAT_AUTO`), after the above:
 1. Before the deploy, read only: `chat_routing` by mode and `set_by`. A row `mode='mac'` with `set_by`
    'owner' or 'staff' that someone wrote only to say `allowHourly` (before this change that made it a choice)
    would hold that workspace on the Mac for good: set its `set_by` to NULL.
-2. Deploy Bops Cloud with `BOPS_CHAT_AUTO` unset (nothing moves), then a canary: the test accounts' Orgo user
-   ids, comma separated. Check a test workspace moves (`set_by` 'auto', `chatOn` "cloud" in its state) and
-   answers with every Mac closed, then "on". Every eligible workspace moves within about a minute of the deploy
-   that turns it on (each runner reconnects). Undo: "revert" and a deploy (the moved ones go back with their
-   mirror), then unset.
+2. Deploy Bops Cloud with `BOPS_CHAT_AUTO` unset (nothing moves).
 3. Mac 0.0.38 (the switch in Settings, General, and the shared workspace default) with the normal release.
+   It must come before anything moves: an owner Bops Cloud moves has to be able to choose their Mac again in
+   the app, and 0.0.36 and 0.0.37 have no switch. Bops Cloud holds to that by itself too: it moves only an
+   owner whose last Mac is at `CHAT_AUTO_MIN_VERSION` (0.0.38) or newer, and the owner's switch turned back on
+   is refused (409 `chat_auto_off`) while `BOPS_CHAT_AUTO` doesn't cover them.
+4. A canary: `BOPS_CHAT_AUTO` set to the test accounts' Orgo user ids, comma separated, with those accounts on
+   0.0.38. Check a test workspace moves (`set_by` 'auto', `chatOn` "cloud" in its state) and answers with every
+   Mac closed, and that its switch turned off moves it back to the Mac.
+5. Once 0.0.38 has spread (most owners' last Mac on it), "on". Every eligible workspace moves within about a
+   minute of the deploy that turns it on (each runner reconnects); an owner still on an older Mac moves once
+   that Mac updates. Undo: "revert" and a deploy (the moved ones go back with their mirror), then unset.
 
 Before this Bops ships (identity: the identity spec's rollout, `vm-identity-spec.md` 5):
 
