@@ -2,6 +2,7 @@
 
 import type { AppHosting, AppsForMembers, IngotToken } from "./hosted-apps";
 import type { Chain } from "./chain";
+import type { ComputerSize } from "./bops-billing";
 import type { MemberAccessMap, MemberWho } from "./member-access";
 import type { Ping } from "./pings";
 import type { SharedOpen } from "./shared";
@@ -1680,6 +1681,18 @@ export type AppState = {
    * canWake): the chat says so, but AI work still goes while some credit is left.
    */
   credits?: { out: boolean; at: number; usage?: true; computer?: true };
+  /**
+   * Billed by use, the size of the user's free Bops computer (lib/bops-billing.ts ComputerSize): the one it
+   * is, as Orgo's plan read last said, or the one they picked before there was one, which it's made at
+   * (lib/server/plan.ts makeFree). Shared by every Mac of theirs, so a computer made again (deleted on
+   * Orgo's site) comes back the same size. Unset: none known yet, and a new one is made at Orgo's default.
+   */
+  computerSize?: ComputerSize;
+  /**
+   * When the user answered Pick your computer (components/app/computer-size.tsx), once per account: kept
+   * their computer's size or switched it. Unset: it's asked, of a user billed by use, when Orgo lists sizes.
+   */
+  computerSizeChosenAt?: number;
   /**
    * A Connected App (or a vault key) just finished connecting for a bot, and the window offers that bot's
    * starter routines for it (GET /api/routines/suggestions). One at a time; cleared once answered or

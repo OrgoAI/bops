@@ -33,6 +33,7 @@ import { canWake, centsText, extensionLine, type BopsBilling, type UsageTerms } 
 import { freeHoursWords, PLAN_CARDS, usageCard, type PlanLine } from "@/lib/plan-includes";
 import { BOPS_TIERS } from "@/cloud/protocol";
 import type { AppState } from "@/lib/types";
+import { YourComputer } from "./computer-size";
 import { Mascot, Spinner } from "./mascot";
 import { signOutOfOrgo as signOutAsking, UNSENT } from "./sign-in";
 import { AskInPlace, refreshState } from "./ui";
@@ -198,8 +199,9 @@ type Open = "pro_bops" | "max_bops" | "manage";
  * What the user pays for Bops. `plan` is orgo-web's answer (GET /api/bops/plan), `billing` how they're
  * billed (orgo-web's, else Bops Cloud's word at the session), each missing when nobody said.
  *
- * - Billed by use: their Orgo credit left (OrgoBalance, with Add credit on Orgo) and what things cost
- *   (UsageCard). No plan to pick.
+ * - Billed by use: their Orgo credit left (OrgoBalance, with Add credit on Orgo), their computer's size
+ *   with a switch to the other (YourComputer, when Orgo lists sizes) and what things cost (UsageCard). No
+ *   plan to pick.
  * - Given a month more of their plan: that plan's credit as before, the day it ends, and what they'll
  *   pay from then (UsageCard). No upgrades.
  * - Otherwise Bops' own plans (orgo-web still bills by them): Free, Pro or Max, with the user's marked
@@ -214,6 +216,7 @@ function YourPlan({ plan, billing, known, onPlan, userId }: { plan: BopsPlan | n
     return (
       <Section title="Your plan">
         {plan?.usage && <OrgoBalance usage={plan.usage} />}
+        {plan?.usage && <YourComputer usage={plan.usage} />}
         <UsageCard usage={plan?.usage} mark="Current" />
       </Section>
     );
@@ -236,7 +239,9 @@ function YourPlan({ plan, billing, known, onPlan, userId }: { plan: BopsPlan | n
  * at orgo-web's prices when it said them. `mark`: the tag in its corner ("Current", or the day it starts).
  */
 function UsageCard({ usage, mark }: { usage?: UsageTerms; mark: string }) {
-  const c = usageCard({ hourlyCents: usage?.computer.hourlyCents, numberCents: usage?.numberMonthlyCents });
+  // From the smallest size's price when Orgo lists sizes; one price, the computer's, from an Orgo that makes only Large.
+  const price = usage?.sizes ? { fromHourlyCents: Math.min(...usage.sizes.map((s) => s.hourlyCents)) } : usage ? { hourlyCents: usage.computer.hourlyCents } : {};
+  const c = usageCard({ ...price, numberCents: usage?.numberMonthlyCents });
   return (
     <div className="flex flex-col gap-3 rounded-[14px] p-4 shadow-[0_0_0_1.5px_#0A0A0A]">
       <span className="flex min-h-5 items-center justify-between gap-2">

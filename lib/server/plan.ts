@@ -1,12 +1,13 @@
 import "server-only";
 import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
 import type { BopsPlan } from "@/lib/account";
-import { balanceOut, billingIn, canWake, extensionEndIn, msOf, orgoTopUpPage, usageTermsIn } from "@/lib/bops-billing";
+import type { SizePhase } from "@/lib/computer-size";
+import { balanceOut, billingIn, canWake, extensionEndIn, msOf, orgoTopUpPage, usageTermsIn, type ComputerSize, type UsageTerms } from "@/lib/bops-billing";
 import { pendingFrom, savedCardFrom, type PendingTopUp, type SavedCard } from "@/lib/credit-topup";
 import { botChatId, freeComputerBot, workspaceOf, type Bot } from "@/lib/types";
 import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, ownOnOrgoPlan, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
 import { orgoHeaders } from "./app-version";
-import { cloudOn, cloudSessionNow } from "./cloud";
+import { billedByUse, cloudOn, cloudSessionNow } from "./cloud";
 import { callOrgo, computerChanges, orgo, orgoProjectFor, OrgoError, ownedWorkspace } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import { addMessage, getState, stateEpoch, update } from "./store";
@@ -96,6 +97,7 @@ export function bopsPlanFrom(a: BopsPlanAnswer): BopsPlan | null {
   if (!billing) return null;
   if (billing === "usage") {
     const usage = usageTermsIn(a as Record<string, unknown>, orgoOrigin());
+    noteComputerSize(usage);
     const plan: BopsPlan = { billing, tier: null, name: "Pay as you go", priceCents: 0, usage };
     // Enough to spend clears "out of credit"; when it was the computer that couldn't wake, enough for an hour of it.
     const out = getState().credits;
@@ -135,6 +137,26 @@ export function bopsPlanFrom(a: BopsPlanAnswer): BopsPlan | null {
   };
   if ((plan.credit?.leftMicros ?? 0) > 0 && getState().credits?.out) update((st) => (st.credits = undefined));
   return plan;
+}
+
+/**
+ * Billed by use, the computer's size as Orgo's plan read says it (lib/bops-billing.ts): kept in the state
+ * (computerSize) when there's a computer, so one made again (deleted on Orgo's site) comes back the size it
+ * was, and an existing user's stays Large. With none yet, what it takes to wake is the size it'll be made at
+ * (the one picked, else Orgo's default), not Orgo's word for no computer. Never while a switch is under way:
+ * a read from before it would put the old size back.
+ */
+function noteComputerSize(usage: UsageTerms) {
+  const c = usage.computer;
+  if (c.id === null && usage.sizes) {
+    const want = getState().computerSize ?? usage.defaultSize;
+    const offer = usage.sizes.find((s) => s.key === want);
+    if (offer) c.hourlyCents = offer.hourlyCents;
+    return;
+  }
+  if (typeof c.id !== "string" || !c.key || sizeSwitch.phase || getState().computerSize === c.key) return;
+  const key = c.key;
+  update((st) => (st.computerSize = key));
 }
 
 /**
@@ -277,7 +299,10 @@ type Limits = {
 };
 
 const KEEP_MS = 60_000;
-const g = globalThis as unknown as { bopsOrgoPlan?: { key: string; changes: number; at: number; plan: Promise<OrgoPlan | null> }; bopsMaking?: Promise<unknown> };
+const g = globalThis as unknown as { bopsOrgoPlan?: { key: string; changes: number; at: number; plan: Promise<OrgoPlan | null> }; bopsMaking?: Promise<unknown>; bopsSizeSwitch?: { phase?: SizePhase } };
+
+/** A switch of the computer's size under way (lib/server/computer-size.ts switchSize), and how far it has got; none: `phase` unset. */
+export const sizeSwitch: { phase?: SizePhase } = (g.bopsSizeSwitch ??= {});
 
 /** The user's plan (null when nobody is signed in, or Orgo didn't answer). `fresh` asks Orgo again even within the minute. */
 export async function orgoPlan({ fresh = false } = {}): Promise<OrgoPlan | null> {
@@ -560,14 +585,40 @@ export function makeMainComputer(main: Bot, name: string, epoch = stateEpoch()):
 }
 
 /**
+ * The size the free Bops computer is made at (bops_size), billed by use: the one the user picked or has
+ * (state.computerSize), else Orgo's default for someone new, when Orgo's plan read lists it. Picked from a
+ * list Orgo gave, it goes even when the plan can't be read just now. Nothing on Bops' plans, or when Orgo
+ * lists no sizes (an orgo-web before them): Orgo makes it Large then, as before.
+ */
+async function freeSize(): Promise<ComputerSize | undefined> {
+  if (!billedByUse()) return undefined;
+  const { computerSize: had, computerSizeChosenAt: chose } = getState();
+  const key = await loadOrgoKey();
+  const usage = (key ? await readBopsPlan(key).catch(() => null) : null)?.usage;
+  if (!usage) return chose ? had : undefined;
+  const want = had ?? usage.defaultSize;
+  return usage.sizes?.some((s) => s.key === want) ? want : undefined;
+}
+
+/** Orgo turned down the size it was asked for (an orgo-web that took it out since): made again without one, as Large. */
+const sizeRefused = (e: unknown) => e instanceof OrgoError && e.status === 400 && (e.code === "INVALID_BOPS_SIZE" || /bops_size/.test(e.said ?? ""));
+
+/**
  * The free Bops computer, made now. Orgo makes it free only when the user still has none; if one
  * came along meanwhile it's an ordinary create, so whether this one is free is read back from Orgo.
+ * Billed by use, at the size the user picked (freeSize).
  */
 async function makeFree(main: Bot, name: string, epoch: number): Promise<MainComputer> {
   sameUser(epoch);
   let made: { id: string };
   try {
-    made = await orgo.create(name, { free: true, wsId: workspaceOf(main) });
+    const size = await freeSize();
+    sameUser(epoch);
+    const create = (size?: ComputerSize) => orgo.create(name, { free: true, wsId: workspaceOf(main), ...(size ? { size } : {}) });
+    made = await create(size).catch((e: unknown) => {
+      if (size && sizeRefused(e)) return create();
+      throw e;
+    });
   } catch (e) {
     throw (await refusedFor(e, main)) ?? e;
   }

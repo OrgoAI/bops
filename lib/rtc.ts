@@ -29,6 +29,8 @@ export type StreamPlan = {
    * (?screen=): how Orgo closes that socket then says what to do next (afterVncClose).
    */
   screen?: string;
+  /** The computer the screen is on, so a view streams afresh only when that computer changed size. */
+  computerId?: string;
 };
 
 /** Orgo closes its stream sockets with these: the signaling socket, and the VNC one where it says so. */
