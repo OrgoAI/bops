@@ -427,15 +427,19 @@ export const isBilling = (x: unknown): x is BopsBilling => x === "plan" || x ===
  * What billing by use gives and costs, as the app shows it when orgo-web's answer doesn't say (orgo-web's
  * own numbers win: lib/bops-billing.ts), and what the cloud holds a user billed by use to:
  *
- * - `computerHourlyCents`: the Bops computer (Orgo's Large: 4 cores, 16 GB, 80 GB) by the hour while it
- *   works, from Orgo credit. Asleep (suspended after 15 minutes nobody uses it) it costs nothing.
+ * - `computerHourlyCents`: the Bops computer at Orgo's Large (4 cores, 16 GB, 80 GB) by the hour while it
+ *   works, from Orgo credit: what every one costs that an app sends no size for. Asleep (suspended after 15
+ *   minutes nobody uses it) it costs nothing.
+ * - `computerFromHourlyCents`: the same at Orgo's Medium (2 cores, 8 GB, 80 GB), the smallest size a Bops
+ *   computer is made at, which bops.bot says it costs from (orgo-web lists each size's own price:
+ *   lib/bops-billing.ts SizeOffer).
  * - `numberMonthlyCents`: a phone number's month, from Orgo credit, as any number bought through the
  *   cloud (pricing.ts). A number the user had with a plan before stays theirs.
  * - `startCents`: the Orgo credit a new Orgo account starts with (orgo-web's signup credit, not Bops').
  * - `phoneNumbers`: how many numbers the user may hold, each paid for. `emails`: the main bot's inbox,
  *   free (cloud/plans.ts sets it up); a bot that has one from before keeps it.
  */
-export const BOPS_USAGE = { computerHourlyCents: 11, numberMonthlyCents: 300, startCents: 500, phoneNumbers: 5, emails: 1 } as const;
+export const BOPS_USAGE = { computerHourlyCents: 11, computerFromHourlyCents: 5.5, numberMonthlyCents: 300, startCents: 500, phoneNumbers: 5, emails: 1 } as const;
 
 /**
  * The oldest Mac app that knows billing by use (it shows the Orgo balance, never Bops' plans, and adds
