@@ -44,14 +44,17 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
  * set up again (a new release) stays up, with its routines, until the new one starts in its place
  * (RunnerState.upgrading); a try that doesn't get that far leaves it as it was.
  *
- * A workspace someone else can use whose chat goes through Bops Cloud (Workspace.chatOn "cloud", the per workspace
- * switch, off by default) keeps its computers' runners, so the bots answer there with no Mac open: only a computer
- * whose bots are all of that one workspace (sharedRunnerOk: one that also serves a private workspace never is), and
- * only on the computer's own Orgo identity (an hour long, held to its bots by Bops Cloud), never the account's key.
- * A computer with a key on it, or whose identity doesn't answer, has none (install), a runner it had on a key is
- * stopped first and its key revoked, and the way back never gives it a key (stillRuns). Runners are set up only by
- * an owner's Mac (this look is a Mac loop, and the bundle ships inside the Mac app): the owner's Mac must open a Bops
- * with this change once before any computer of a shared workspace gets its runner, and again for each newer runner.
+ * A workspace someone else can use whose chat goes through Bops Cloud (Workspace.chatOn "cloud"), or that Bops Cloud
+ * may move there by itself (Workspace.chatAuto: nobody chose the Mac), keeps its computers' runners, so the bots
+ * answer there with no Mac open (Bops Cloud moves it once that runner connects): only a computer whose bots are all of
+ * that one workspace (sharedRunnerOk: one that also serves a private workspace never is), and only on the computer's
+ * own Orgo identity (an hour long, held to its bots by Bops Cloud), never the account's key. A computer with a key on
+ * it, or whose identity doesn't answer, has none (install), a runner it had on a key is stopped first and its key
+ * revoked, and the way back never gives it a key (stillRuns; RunnerState.shared keeps that past a restart of the
+ * Mac). Runners are set up only by an owner's Mac (this look is a Mac loop, and the bundle ships inside the Mac app):
+ * the owner's Mac must open a Bops with this change once before any computer of a shared workspace gets its runner,
+ * and again for each newer runner. A Mac from before this change (0.0.36, 0.0.37) keeps one only while the chat goes
+ * through Bops Cloud, and takes one down otherwise: this Mac waits a while before it sets that one up again.
  *
  * Its computer's Orgo identity (vm-identity.ts) comes first on the runner, and its key is the fallback
  * wherever identity doesn't reach. This release (the identity spec's phase 1) gives every computer its
@@ -596,15 +599,18 @@ async function lookDown(id: string): Promise<"down" | "up" | undefined> {
 
 /**
  * Whether a computer someone else can use keeps its runner: every bot on it is of one workspace, and that workspace's
- * chat goes through Bops Cloud (Workspace.chatOn "cloud"). Its people can use what the bots on it can (they may be
- * root there), so a computer that also serves another workspace's bots, a private one or one shared with others,
- * never does. The runner then signs in with its computer's identity alone (install, stillRuns).
+ * chat goes through Bops Cloud (Workspace.chatOn "cloud") or Bops Cloud may move it there (chatAuto, never once the
+ * owner chose the Mac: chatOn "mac"). Its people can use what the bots on it can (they may be root there), so a
+ * computer that also serves another workspace's bots, a private one or one shared with others, never does. The runner
+ * then signs in with its computer's identity alone (install, stillRuns), which orgo-web answers there only where it
+ * keeps every member without Use its computer off the computer.
  */
 export function sharedRunnerOk(s: Pick<AppState, "bots" | "workspaces">, id: string): boolean {
   const on = s.bots.filter((b) => workBot(b, s.bots).computerId?.toLowerCase() === id.toLowerCase());
   const spaces = new Set(on.map((b) => workspaceOf(b)));
   if (spaces.size !== 1) return false;
-  return s.workspaces?.find((w) => w.id === [...spaces][0])?.chatOn === "cloud";
+  const w = s.workspaces?.find((x) => x.id === [...spaces][0]);
+  return !!w && (w.chatOn === "cloud" || (w.chatAuto === true && w.chatOn !== "mac"));
 }
 
 /**
@@ -642,6 +648,9 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
   }
   if (shared) (box.shared ??= new Set()).add(id);
   else box.shared?.delete(id);
+  // Kept on its state too: a Mac just started never gives it a key on the way back before it has looked here (stillRuns).
+  const was = runnerOf(id);
+  if (was && !!was.shared !== shared) mark(id, { ...was, shared: shared || undefined });
   const down = await lookDown(id);
   if (down === "down") return;
   const x = runnerOf(id);
@@ -665,6 +674,10 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
   // too: each try wakes the computer before Orgo says so again.
   const retry = box.retry.get(id);
   if (retry && retry.at > Date.now() && (x?.status === "running" || (x?.status === "failed" && x.error !== NO_BUNDLE))) return;
+  // Another Mac took it down a moment ago as someone else can use the workspace (a Bops from before, which keeps none
+  // there until the chat goes through Bops Cloud): set up again only after a while, or the two would take turns each
+  // minute, waking the computer and sending its files every time.
+  if (x?.status === "failed" && x.error === FULL_ACCESS && x.by !== me && Date.now() - x.at < RETRY_MIN_MS) return;
   // Only on a computer that's up (Orgo's word for it, a read that never wakes it): every command wakes one that's
   // asleep, and setting a runner up is never a reason to wake a computer (only a run's next step, or the user using
   // it, is). Asleep, a runner that's up stays as it is, and one with none, or one that didn't start, waits until the
@@ -752,7 +765,7 @@ async function install(id: string, bundle: Bundle, key: string, me: string, shar
   // only now that the new build runs on its identity. A try that went wrong before this left the runner
   // that was up, and its key, as they were.
   if (onIdentity && hadKey && up.auth === "identity" && runnerKeyMade(runnerOf(id)) && (await takeKeyBack(id, key))) mark(id, keyless(runnerOf(id)!));
-  mark(id, { status: "running", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(runnerOf(id)), ...authOf(up.auth) });
+  mark(id, { status: "running", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(runnerOf(id)), ...authOf(up.auth), ...(shared ? { shared: true } : {}) });
   // The runner goes by the state: it starts on that computer's routines once it reads this.
   void flushState().catch(() => {});
 }
@@ -920,7 +933,7 @@ async function stillRuns(id: string, me: string, key: string): Promise<boolean |
   const auth = authIn(got.output);
   const ident = said("ident");
   // Someone else can use it (sharedRunnerOk): never given a key on the way back, and one found on it stops the runner.
-  if (box.shared?.has(id)) {
+  if (box.shared?.has(id) || runnerOf(id)?.shared) {
     if (said("key") === "yes") {
       await stop(id, key, STOPPED.full);
       failed(id, FULL_ACCESS, null, me, false);
@@ -961,7 +974,7 @@ async function wayBack(id: string, me: string, key: string, up: boolean): Promis
 
 /**
  * What a look depends on, besides the time: where the bots work, which computers they're on, each
- * runner's state, and the runs a runner left going of routines it no longer runs (strays: one set to run
+ * runner's state, each workspace's switch, and the runs a runner left going of routines it no longer runs (strays: one set to run
  * on the Mac is looked at within a minute, not at the next full look). A runner being stopped that kept a
  * run of its going (one paused for the user's OK: stop) is taken off within a minute of that run's end.
  */
@@ -979,7 +992,12 @@ function signature() {
         .sort()
         .join(",")
     : "";
-  return `${heardRunsOn() ?? ""}|${runsOnMissing()}|${s.host ?? ""}|${on}|${runners}|${left}`;
+  // Each workspace's switch (Bops Cloud's: a computer someone else can use keeps a runner by it, sharedRunnerOk).
+  const switches = (s.workspaces ?? [])
+    .map((w) => `${w.id}:${w.chatOn ?? ""}:${w.chatAuto ? "auto" : ""}`)
+    .sort()
+    .join(",");
+  return `${heardRunsOn() ?? ""}|${runsOnMissing()}|${s.host ?? ""}|${on}|${runners}|${left}|${switches}`;
 }
 
 /** Each minute: a full look when something it depends on changed, or every 10 minutes. */
