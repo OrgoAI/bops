@@ -1,3 +1,0 @@
-- Bops moves to pay as you go, from your Orgo credit.
-- Settings shows your Orgo credit, with a way to add more.
-- When Orgo needs a card, Bops says so and links there.
