@@ -416,6 +416,27 @@ test("orgo-web's word on Use its computer is the one Bops Cloud goes by: its no 
   box.close();
 });
 
+test("an Admin with no entry: their message is owed to the computer and claimed with the role; made a member with no entry, the turn's next beat is refused", async () => {
+  const s = await setup();
+  const admin = user("admin");
+  roles[`${admin} ${s.project}`] = { role: "admin", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme", computerUse: false };
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  const r = (await (await act(admin, s.project, "key-admin-01", { act: "chat", chatId: "bot:max", text: "Plan the launch" })).json()) as { turn?: string; messageId: string };
+  assert.ok(r.turn, "owed to the computer, with no entry and orgo-web's column at no");
+  const row = (await query<{ member: { role?: string } }>("SELECT member FROM bops.chat_turns WHERE user_id = $1 AND id = $2", [s.owner, r.turn])).rows[0];
+  assert.equal(row.member.role, "admin", "the role goes with the turn");
+  const c = await runner(s.owner, s.desktop, `/v1/runner/turns/${r.turn}/claim`, {});
+  assert.equal(c.status, 200, await c.clone().text());
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${r.turn}/beat`, { phase: "model" })).status, 200);
+  // Made a member on orgo.ai: the notice ends what's owed to them.
+  roles[`${admin} ${s.project}`] = { role: "member", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme" };
+  assert.equal((await membersChanged(s.project, admin)).status, 204);
+  await until(async () => (await turnById(s.owner, r.turn!))?.state === "expired", "ended on the notice");
+  await until(() => box.of("turn-cancel").some((e) => e.data.id === r.turn), "the runner told");
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${r.turn}/beat`, { phase: "model" })).status, 409);
+  box.close();
+});
+
 test("Use its computer turned off in orgo-web: its notice ends what's owed and running for them, and what they say next stays with a note", async () => {
   const s = await setup();
   const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
