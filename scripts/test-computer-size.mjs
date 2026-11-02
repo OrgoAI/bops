@@ -184,7 +184,7 @@ await test("the sizes, the computer's own and how it's switched, read flat or ne
   const old = B.usageTermsIn({ billing: "usage", computer: { size: "Large", hourlyCents: 11, asleepFree: true } }, "https://orgo.test");
   assert.equal(old.sizes, undefined);
   assert.equal(old.defaultSize, undefined);
-  assert.equal(old.computer.key, "large", "read from its name");
+  assert.deepEqual(old.computer, { size: "Large", hourlyCents: 11, asleepFree: true }, "read as before, nothing added");
   assert.equal(old.computer.change, undefined);
   // No computer yet; switched by Orgo's resize (a yes from an orgo-web that switches every size that way).
   assert.equal(B.usageTermsIn({ billing: "usage", usage: { computer: { id: null } } }, "x").computer.id, null);

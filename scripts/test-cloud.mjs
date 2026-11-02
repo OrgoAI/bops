@@ -942,13 +942,14 @@ const ORGO_USAGE = {
   balanceCents: 800, computer: { size: "Large", hourlyCents: 11, asleepFree: true, wakeNeedsCents: 11, creditCents: 300 },
   numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing#credits", outOfCredit: false,
 };
-const orgoUsage = { balanceCents: 800, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300 }, numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing#credits" };
+// The computer's id and size (usage.computer), read for its size (lib/server/computer-size.ts); no sizes listed, so nothing to pick.
+const orgoUsage = { balanceCents: 800, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300, key: "large", id: "d1" }, numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing#credits" };
 bopsPlan.answer = () => Response.json(ORGO_USAGE);
 assert.deepEqual((await L.readBopsPlan(KEY)).usage, orgoUsage);
 const nestedOnly = { ...ORGO_USAGE };
 for (const flat of ["balanceCents", "computer", "numberMonthlyCents", "topUpUrl", "outOfCredit"]) delete nestedOnly[flat];
 bopsPlan.answer = () => Response.json(nestedOnly);
-assert.deepEqual((await L.readBopsPlan(KEY)).usage, { ...orgoUsage, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300 } });
+assert.deepEqual((await L.readBopsPlan(KEY)).usage, { ...orgoUsage, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300, key: "large", id: "d1" } });
 // Its month before billing by use, nested: the day it ends.
 bopsPlan.answer = () => Response.json({ billing: "plan", tier: "max_bops", extension: { tier: "max_bops", ends_at: "2026-12-05T00:00:00Z", kept_free: true }, credit: { left_micros: 1 } });
 assert.equal((await L.readBopsPlan(KEY)).extensionEndsAt, Date.parse("2026-12-05T00:00:00Z"));

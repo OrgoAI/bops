@@ -135,8 +135,8 @@ export function usageTermsIn(a: Record<string, unknown>, origin: string): UsageT
   const credit = num(field(c, "creditCents")) ?? num(u.computer_credit_cents);
   const month = num(field(a, "numberMonthlyCents")) ?? num(u.phone_number_cents_per_month);
   const page = field(a, "topUpUrl") ?? obj(u.add_credit).page;
-  // Its real size: the flat key, else the nested size ("medium"), else the flat name ("Medium").
-  const key = [c.key, uc.size, typeof c.size === "string" ? c.size.toLowerCase() : undefined].find(isComputerSize);
+  // Its real size: the flat key, else the nested size ("medium"). An orgo-web before sizes says neither.
+  const key = [c.key, uc.size].find(isComputerSize);
   const id = "id" in c ? c.id : uc.id;
   const change = changeIn(c.change !== undefined ? c.change : uc.change);
   const sizes = sizesIn(a, u);
