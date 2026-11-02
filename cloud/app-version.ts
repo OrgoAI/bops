@@ -1,7 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import { query } from "./db.ts";
 import { HttpError } from "./http.ts";
-import { billingOf } from "./plans.ts";
 import { APP_CLIENT_HEADER, APP_UPDATE_REQUIRED, APP_VERSION_HEADER, IOS_CLIENT, USAGE_MIN_APP_VERSION } from "./protocol.ts";
 
 /**
@@ -132,6 +131,9 @@ export async function requireUsageAppVersion(userId: string, path: string, versi
   if (version && !olderThan(version, USAGE_MIN_APP_VERSION)) return;
   let kept = billed.get(userId);
   if (!kept || Date.now() - kept.at > 60_000) {
+    // Loaded when asked: plans.ts brings the tunnel and the whole plan machinery, which this file's
+    // readers (analytics.ts, and its test's stand-in database) don't need.
+    const { billingOf } = await import("./plans.ts");
     const usage = (await billingOf(userId).catch(() => "plan")) === "usage";
     if (billed.size > 50_000) billed.clear();
     kept = { usage, at: Date.now() };

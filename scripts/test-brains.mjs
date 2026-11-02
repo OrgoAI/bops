@@ -753,7 +753,7 @@ await test("Settings, Brain: Bops agent first with its bots, then each brain and
   const t = text(html);
   noDashes(t, "Settings, Brain");
   assert.match(t, /^Brain What your bots work with\. Bops agent runs on Orgo credit\. Claude Code and Codex run on your own plan or key\. Add a brain/);
-  assert.match(t, /Bops agent AI credit Boppy Rook Claude Code/, "Bops agent's bots: those on no brain");
+  assert.match(t, /Bops agent Orgo credit Boppy Rook Claude Code/, "Bops agent's bots: those on no brain");
   assert.match(t, /Claude Code Max plan · signed in on Boppy's computer Sign in on Rook's computer/, "Rook's own computer isn't signed in");
   assert.match(t, /Otto .*Rook not picked/);
   assert.match(t, /Sign out on Boppy's computer/);
