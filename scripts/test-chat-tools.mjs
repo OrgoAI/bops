@@ -2027,6 +2027,48 @@ await check("apps on a member's turn: in an @orgo.ai owner's workspace, for a me
   }
 });
 
+await check("an Admin's turn (MemberTurn.role) has every bot and Your Apps at Write, with no entry or only a Read one; the role is never kept on their message, and without it their entry counts", async () => {
+  const ivy = { userId: "user_ivy", email: "ivy@example.com", name: "Ivy" };
+  const appTools = ["make_app", "change_app", "work_on_app", "deploy_app"];
+  const was = S.getState().workspaces[0].memberAccess;
+  // (Nothing left queued by a check before: each answer here is this check's.)
+  answers.length = 0;
+  try {
+    for (const entry of [undefined, { others: "read", bots: {} }]) {
+      S.update((s) => {
+        const map = { ...was };
+        delete map["ivy@example.com"];
+        if (entry) map["ivy@example.com"] = entry;
+        s.workspaces[0].memberAccess = map;
+      });
+      const tag = entry ? "a Read entry" : "no entry";
+      // The owner's Mac (member-acts.ts handleMessage): answered, with the app tools in this staff owned workspace.
+      answers.push(reply("Hi Ivy."));
+      const n = asked.length;
+      const ref = `key_ivy_${entry ? "r" : "n"}1`;
+      await Chat.handleMessage(chatId, "can you change the site?", undefined, undefined, undefined, undefined, undefined, undefined, undefined, { ...ivy, ref, role: "admin" });
+      assert.ok(asked[n], `answered with ${tag}`);
+      for (const tool of appTools) assert.ok(toolNames(asked[n]).includes(tool), `${tag}: ${tool}`);
+      const kept = messages().find((m) => m.member?.ref === ref);
+      assert.deepEqual(kept.member, { ...ivy, ref }, "the role isn't kept on the message");
+      // A computer's runner (runner-chat.ts answerMessage): a message Bops Cloud wrote, answered as an Admin's.
+      const id = S.addMessage({ chatId, role: "user", text: "and the other page?", member: { ...ivy, ref: `${ref}b` } }).id;
+      answers.push(reply("On it."));
+      const m = asked.length;
+      const out = await Chat.answerMessage(chatId, id, { ...ivy, ref: `${ref}b`, role: "admin" });
+      assert.ok(asked[m], `the runner's turn answered with ${tag}`);
+      assert.equal(out?.text, "On it.");
+      for (const tool of appTools) assert.ok(toolNames(asked[m]).includes(tool), `runner, ${tag}: ${tool}`);
+      // The same person without the role: their entry counts (none, or Read), so no turn.
+      const k = asked.length;
+      await Chat.handleMessage(chatId, "one more", undefined, undefined, undefined, undefined, undefined, undefined, undefined, { ...ivy, ref: `${ref}c` });
+      assert.equal(asked.length, k, `no turn without the role, with ${tag}`);
+    }
+  } finally {
+    S.update((s) => (s.workspaces[0].memberAccess = was));
+  }
+});
+
 await check("a member's turn that paused for an OK goes on as theirs (ChatPause keeps who it was)", async () => {
   const sam = { userId: "user_sam", email: "sam@example.com", name: "Sam" };
   const ask = { id: "apr_sam", botId: "boppy", chatId, action: "Send it", resources: [], preview: "", at: 1, reply: { reply: "reject", at: 2 }, resume: { engine: "chat", responseId: "resp_paused", callId: "call_paused", call: { name: "use_app", arguments: "{}" }, outputs: [], turn: { member: sam, config: { model: "gpt-test", effort: "low" }, seen: [], madeUp: [], outsideRead: false } } };

@@ -1091,6 +1091,19 @@ export type ThreadReply = {
  * without Use its computer, so no bot answers it, and a turn that reads it later takes it as said, never as what to do.
  */
 export type MemberSaid = MemberWho & { ref?: string; noUse?: true };
+/**
+ * A member as their turn goes by them (chat.ts TurnOptions.member): MemberSaid, and `role` "admin" when Bops Cloud or
+ * the owner's Mac found them an Admin as it took what they said (cloud/protocol.ts TurnMember.role, member-acts.ts
+ * adminOf). An Admin's turn has every bot at Write and Your Apps at Write, whatever Workspace.memberAccess keeps for
+ * them. Never kept on a Message, a thread or a session (saidOf): a role is orgo-web's, asked afresh each time.
+ */
+export type MemberTurn = MemberSaid & { role?: "admin" };
+/** What a member said goes down as (Message.member, a thread's reply, a session's): MemberTurn without its role. */
+export function saidOf(m: MemberTurn): MemberSaid {
+  const said: MemberTurn = { ...m };
+  delete said.role;
+  return said;
+}
 /** How one of the viewer's own acts in a shared workspace stands, until the owner's Bops has written it (Message.memberSend). */
 export type MemberSend = { state: "sending" | "waiting" | "failed"; error?: string; key: string };
 

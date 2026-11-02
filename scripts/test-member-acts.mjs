@@ -569,10 +569,14 @@ await check("an Admin with no entry chats with every bot, replies, answers and u
   fresh();
   await memberEvent(event({ act: "chat", chatId: "bot:ivy", text: "Plan the week" }, { member: ADA, role: "admin", key: "key_admin_001", computer: false }), "e_ad1");
   assert.deepEqual(did.map((d) => d.slice(0, 2)), [["chat", "bot:ivy"]], "a bot nobody gave them, with no entry at all");
+  // The role goes down to the turn (chat.ts TurnOptions.member): it decides what the bot does for them, not an entry.
+  assert.deepEqual(did[0][4], { ...ADA, ref: "key_admin_001", role: "admin" });
   await memberEvent(event({ act: "reply", sessionId: "t-max", text: "Window seat" }, { member: ADA, role: "admin", key: "key_admin_002", computer: false }), "e_ad2");
   await memberEvent(event({ act: "answer", askId: "ask-1", reply: "once" }, { member: ADA, role: "admin", key: "key_admin_003" }), "e_ad3");
   await memberEvent(event({ act: "chat", chatId: "g-both", text: "Both of you" }, { member: ADA, role: "admin", key: "key_admin_004" }), "e_ad4");
   assert.deepEqual(did.map((d) => d[0]), ["chat", "reply", "answer", "chat"], "Use its computer too, whatever Bops Cloud's flag says");
+  assert.equal(did[3][4].role, "admin", "a group's turn too");
+  assert.equal(did[1][5].role, undefined, "a reply in a thread is kept without the role");
   // The owner's own logins stay theirs, and work on the owner's Mac too: an Admin is no owner.
   did.length = 0;
   await memberEvent(event({ act: "answer", askId: "ask-gmail", reply: "always" }, { member: ADA, role: "admin", key: "key_admin_005" }), "e_ad5");
@@ -608,6 +612,7 @@ await check("a stored message from an Admin hours ago: an Admin only while orgo-
   await memberEvent(stored("key_stored_01"), "e_st1");
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(did.map((d) => d[0]), ["answer"]);
+  assert.deepEqual(did[0][3], { ...ADA, ref: "key_stored_01", role: "admin" }, "answered as an Admin's turn");
   assert.equal(asked, 1, "orgo-web asked once");
   // Made a Member since (the notice lost): their entry counts, and they have none.
   fresh();

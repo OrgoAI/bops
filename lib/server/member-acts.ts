@@ -4,7 +4,7 @@ import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, appsLevelOf, cleanName, currentFor, levelOf, noUseNote, ownerOnlyAsk, permits, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
 import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
-import { workBot, workspaceOf, type Message, type Workspace } from "@/lib/types";
+import { workBot, workspaceOf, type MemberSaid, type MemberTurn, type Message, type Workspace } from "@/lib/types";
 import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
@@ -99,6 +99,9 @@ function ofApp(sessionId: string | undefined): boolean {
   }
   return false;
 }
+
+/** Who the member is on their turn (chat.ts TurnOptions.member): an Admin's (adminOf) goes by the role, not by an entry. */
+const turnOf = (said: MemberSaid, admin: boolean): MemberTurn => (admin ? { ...said, role: "admin" } : said);
 
 /** How long orgo-web's list of a workspace's Admins is kept for a stored act (adminOf). */
 const ADMINS_MS = 60_000;
@@ -257,7 +260,8 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
         addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: noUseNote(ownerName(), who.name, name) });
         return;
       }
-      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, said).catch(warn);
+      // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message.
+      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin)).catch(warn);
       return;
     }
     case "reply": {
@@ -346,7 +350,7 @@ async function answerOne(p: MemberActPayload, who: MemberWho, chatId: string, me
   // A bot of this chat said something after it: answered already (this Mac before a restart).
   const at = getState().messages.find((m) => m.id === messageId)!.at;
   if (getState().messages.some((m) => m.chatId === chatId && m.role === "bot" && m.at > at)) return;
-  await answerMessage(chatId, messageId, said);
+  await answerMessage(chatId, messageId, turnOf(said, admin));
 }
 
 /** What a refused act on an app says, on the app where the member sees it (and the owner's rows). */
