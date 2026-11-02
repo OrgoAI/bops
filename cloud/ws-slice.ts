@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
-import { accessOf, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
+import { accessOf, adminAccess, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
 import type { SharedApp, SharedApps, SharedGroup, SharedWsSlice, WsRole } from "./protocol.ts";
 
 /**
@@ -242,11 +242,7 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
   return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(usesComputer(o) ? { computer: "use" as const } : {}) };
 }
 
-/**
- * What an Admin has (viewerAccess): Write on every bot, the ones made later too, Your Apps at Write, Use its computer. A
- * fresh object each time, so nothing that changes one changes another's.
- */
-export const adminAccess = (): MemberAccess => ({ others: "write", bots: Object.create(null) as Record<string, AccessLevel>, apps: "write", computer: "use" });
+export { adminAccess };
 
 /**
  * Whether what `viewer` says in the workspace may wake its bots' computers and run there (Use its computer): the owner
