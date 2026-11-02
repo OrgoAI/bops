@@ -240,6 +240,7 @@ export async function creditsOut(): Promise<boolean> {
   // Still out, or Orgo didn't say: asked again in a few minutes.
   if (getState().credits?.out) update((s) => (s.credits = { ...s.credits!, out: true, at: Date.now() }));
   // Billed by use, it's the Orgo balance (lib/bops-billing.ts).
-  if (plan?.usage) return (plan.usage.balanceCents ?? 0) <= 0;
+  // Only a balance Orgo said is 0 or less: one it didn't say never keeps AI work stopped.
+  if (plan?.usage) return plan.usage.balanceCents !== undefined && plan.usage.balanceCents <= 0;
   return !plan?.credit || plan.credit.leftMicros <= 0;
 }

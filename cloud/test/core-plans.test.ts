@@ -762,13 +762,15 @@ test("an app too old to know billing by use is told to update, for a user billed
   await notice({ userId: id, billing: "usage", at: at() });
   const { forgetBilling } = await import("../app-version.ts");
   forgetBilling();
-  let r = await ask(id, "/v1/usage", "0.0.32");
+  const r = await ask(id, "/v1/usage", "0.0.32");
   assert.equal(r.status, 426);
+  // 0.0.33 to 0.0.37 shipped without billing by use: held to it too.
+  assert.equal((await ask(id, "/v1/usage", "0.0.37")).status, 426);
   assert.equal(r.json.code, "app_update_required");
   assert.match(r.json.error, /Update Bops from bops\.bot/);
   assert.equal((await ask(id, "/v1/usage")).status, 426, "an app that doesn't say");
   assert.notEqual((await ask(id, "/v1/state", "0.0.32")).status, 426, "its state's calls still go through");
-  assert.notEqual((await ask(id, "/v1/usage", "0.0.33")).status, 426);
+  assert.notEqual((await ask(id, "/v1/usage", "0.0.38")).status, 426);
   assert.notEqual((await ask(other.id, "/v1/usage", "0.0.32")).status, 426, "a user on Bops' plans isn't held to it");
   await settle(id);
 });

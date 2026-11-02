@@ -141,4 +141,24 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- orgo-web's three argument spend (its 20261149: a kind, 'phone_number' at cost), as a stand-in: it
+-- records the kind it was asked with (public.bops_test_spends, tests only) and spends as the two
+-- argument form does. Only what the cloud sends is tested here; orgo-web tests the money.
+CREATE TABLE IF NOT EXISTS public.bops_test_spends (
+  id      bigserial PRIMARY KEY,
+  user_id uuid NOT NULL,
+  micros  bigint NOT NULL,
+  kind    text,
+  at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE OR REPLACE FUNCTION public.bops_ai_credit_spend(p_user uuid, p_micros bigint, p_kind text) RETURNS bigint
+  LANGUAGE plpgsql SECURITY INVOKER
+  SET search_path = public, pg_temp
+AS $$
+BEGIN
+  INSERT INTO public.bops_test_spends (user_id, micros, kind) VALUES (p_user, p_micros, p_kind);
+  RETURN public.bops_ai_credit_spend(p_user, p_micros);
+END
+$$;
+
 COMMIT;

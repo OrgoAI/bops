@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { creditRanOut, creditsOn, spend } from "./credit.ts";
+import { creditRanOut, creditsOn, spend, spendKindOf } from "./credit.ts";
 import { query, tx } from "./db.ts";
 import { HttpError, sendJson, type Route } from "./http.ts";
 import { costOf, webSearchBilled } from "./pricing.ts";
@@ -76,7 +76,7 @@ export async function recordUsage(userId: string, kind: string, units: number, d
         detail ? JSON.stringify(detail) : null,
         cost,
       ]);
-      if (cost > 0 && creditsOn()) ranOut = (await spend(c, userId, cost)).ranOut;
+      if (cost > 0 && creditsOn()) ranOut = (await spend(c, userId, cost, spendKindOf(kind))).ranOut;
     },
   );
   if (ranOut) creditRanOut(userId);
@@ -124,7 +124,7 @@ export async function recordUsageFor(userId: string, kind: string, ref: string, 
           JSON.stringify(keep.detail),
           cost,
         ]);
-      if (paid > 0 && creditsOn()) ranOut = (await spend(c, userId, paid)).ranOut;
+      if (paid > 0 && creditsOn()) ranOut = (await spend(c, userId, paid, spendKindOf(kind))).ranOut;
     },
   );
   if (ranOut) creditRanOut(userId);

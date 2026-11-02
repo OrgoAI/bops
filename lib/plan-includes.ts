@@ -2,9 +2,10 @@
  * What Bops costs, in the words the app and bops.bot show, and why there's no room for one more phone
  * number, email or computer. Two ways (cloud/protocol.ts BopsBilling):
  *
- * Billing by use (USAGE_CARD; site/index.html's pricing says the same words, which
- * scripts/test-site.mjs checks): no plan. The user pays for what they use from their Orgo credit, the
- * Bops computer by the hour while it works and nothing while it sleeps, AI at Orgo's rate, $5 to start.
+ * Billing by use (USAGE_CARD; bops.bot's pricing changes to the same words at the switch date, not
+ * before, so the site never advertises it while Pro and Max are still sold): no plan. The user pays for what they use from their Orgo credit, the
+ * Bops computer by the hour while it works and nothing while it sleeps, AI at Orgo's rate; a new Orgo
+ * account starts with Orgo's $5 of credit.
  * The numbers are BOPS_USAGE's, which Bops Cloud holds them to (orgo-web's own answer wins in the
  * app: lib/bops-billing.ts).
  *
@@ -62,7 +63,7 @@ export function usageCard(p: { hourlyCents?: number; numberCents?: number } = {}
     lines: [
       { text: `Your computer: ${hourly} an hour while it works, free while it sleeps` },
       { text: "AI at Orgo's rate" },
-      { text: `$${BOPS_USAGE.startCents / 100} to start` },
+      { text: `New Orgo accounts start with $${BOPS_USAGE.startCents / 100} of credit` },
       { text: "As many bots as you like, sharing it" },
       { text: "1 email for your main bot, free" },
       { text: `A phone number for ${number} a month` },

@@ -197,8 +197,6 @@ html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
 .plan li.no { color: #8a8a87; font-weight: 400; }
 .plan li.no svg { margin: 2px 1px 0; }
 .plans-note { margin-top: 4px; }
-/* One way to pay (billing by use): a single card, as wide as a stacked one. */
-.plans.one { grid-template-columns: minmax(0, 1fr); width: 520px; }
 
 /* 6. Close */
 .s5 { gap: 30px; padding: 120px var(--gutter) 130px; }

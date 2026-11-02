@@ -1,5 +1,5 @@
 import "server-only";
-import { OUT_OF_CREDIT_CODES, OUT_OF_CREDIT_WAKE } from "@/lib/bops-billing";
+import { isBopsOutOfCreditCode, isOutOfCreditCode, OUT_OF_CREDIT_WAKE } from "@/lib/bops-billing";
 import { billedByUse, cloudOn, noteComputerOutOfCredit } from "./cloud";
 import { orgo, OrgoError } from "./orgo";
 import { orgoKey } from "./orgo-auth";
@@ -92,12 +92,12 @@ export function startActivityBeat() {
  */
 /**
  * Billed by use, Orgo wouldn't wake or start the computer for want of Orgo credit (402 with one of
- * lib/bops-billing.ts OUT_OF_CREDIT_CODES; bops_out_of_credit on any billing): the app's words for it,
+ * lib/bops-billing.ts isOutOfCreditCode, any case; bops_out_of_credit on any billing): the app's words for it,
  * and the chat's out of credit card is shown (noteComputerOutOfCredit). Undefined for any other error.
  */
 export function computerOutOfCredit(e: unknown): string | undefined {
-  if (!(e instanceof OrgoError) || e.status !== 402 || !e.code || !OUT_OF_CREDIT_CODES.has(e.code)) return undefined;
-  if (e.code !== "bops_out_of_credit" && !billedByUse()) return undefined;
+  if (!(e instanceof OrgoError) || e.status !== 402 || !isOutOfCreditCode(e.code)) return undefined;
+  if (!isBopsOutOfCreditCode(e.code) && !billedByUse()) return undefined;
   noteComputerOutOfCredit();
   return OUT_OF_CREDIT_WAKE;
 }

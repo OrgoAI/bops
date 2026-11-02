@@ -121,7 +121,7 @@ await test("billed by use: the Orgo balance, Add credit on Orgo, and one card in
   assert.match(m.text, /Pay only for what you use/);
   assert.match(m.text, /Your computer: \$0\.11 an hour while it works, free while it sleeps/);
   assert.match(m.text, /AI at Orgo's rate/);
-  assert.match(m.text, /\$5 to start/);
+  assert.match(m.text, /New Orgo accounts start with \$5 of credit/);
   assert.match(m.text, /A phone number for \$3 a month/);
   assert.doesNotMatch(m.text, /\bPro\b|\bMax\b|Upgrade|AI credit|10 hours/);
   assert.equal(button(m.box, "Upgrade to Pro"), undefined);
@@ -149,7 +149,7 @@ await test("a month more of Pro: that plan's credit, the day it ends in plain wo
     ...base,
     bops: { billing: "plan", tier: "pro_bops", name: "Pro", priceCents: 2000, status: "active", cancelAtPeriodEnd: true, periodEnd: Date.parse("2026-11-20T00:00:00Z"), extensionEndsAt: ends, credit: { leftMicros: 12_000_000, planLeftMicros: 12_000_000, freeLeftMicros: 0 } },
   });
-  assert.match(m.text, /Pro\. Your current plan stays free until Dec 3, then you pay only for what you use\./);
+  assert.match(m.text, /Pro\. Your current plan stays as it is until Dec 3, then you pay only for what you use\./);
   assert.match(m.text, /\$12 of \$20 left/, "the plan's monthly credit from the plan table");
   assert.match(m.text, /From Dec 3/);
   assert.match(m.text, /Pay only for what you use/);

@@ -1,7 +1,7 @@
 import "server-only";
 import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
 import type { BopsPlan } from "@/lib/account";
-import { billingIn, canWake, extensionEndIn, msOf, orgoTopUpPage, usageTermsIn } from "@/lib/bops-billing";
+import { balanceOut, billingIn, canWake, extensionEndIn, msOf, orgoTopUpPage, usageTermsIn } from "@/lib/bops-billing";
 import { pendingFrom, savedCardFrom, type PendingTopUp, type SavedCard } from "@/lib/credit-topup";
 import { botChatId, freeComputerBot, workspaceOf, type Bot } from "@/lib/types";
 import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, ownOnOrgoPlan, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
@@ -99,7 +99,8 @@ export function bopsPlanFrom(a: BopsPlanAnswer): BopsPlan | null {
     const plan: BopsPlan = { billing, tier: null, name: "Pay as you go", priceCents: 0, usage };
     // Enough to spend clears "out of credit"; when it was the computer that couldn't wake, enough for an hour of it.
     const out = getState().credits;
-    if (out?.out && (usage.balanceCents ?? 0) > 0 && (!out.computer || canWake(usage))) update((st) => (st.credits = undefined));
+    // A balance Orgo didn't say isn't a used up one: never left locked on it.
+    if (out?.out && !balanceOut(usage) && (!out.computer || canWake(usage))) update((st) => (st.credits = undefined));
     return plan;
   }
   if (a.tier !== "free_bops" && a.tier !== "pro_bops" && a.tier !== "max_bops") return null;

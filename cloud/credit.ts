@@ -74,10 +74,41 @@ export async function creditLeft(userId: string): Promise<number> {
  * for). What's left after, and whether this use is the one that ran the credit out (only at the
  * crossing, never after): the caller reports that once its transaction has committed (creditRanOut).
  */
-export async function spend(c: pg.PoolClient, userId: string, micros: number): Promise<{ left: number; ranOut: boolean }> {
-  const r = await c.query<{ left: string | null }>("SELECT public.bops_ai_credit_spend($1::uuid, $2::bigint) AS left", [userId, Math.ceil(micros)]);
+export async function spend(c: pg.PoolClient, userId: string, micros: number, kind: SpendKind = "ai"): Promise<{ left: number; ranOut: boolean }> {
+  const r =
+    kind !== "ai" && (await atCostSpendReady(c))
+      ? await c.query<{ left: string | null }>("SELECT public.bops_ai_credit_spend($1::uuid, $2::bigint, $3::text) AS left", [userId, Math.ceil(micros), kind])
+      : await c.query<{ left: string | null }>("SELECT public.bops_ai_credit_spend($1::uuid, $2::bigint) AS left", [userId, Math.ceil(micros)]);
   const left = Number(r.rows[0]?.left ?? 0);
   return { left, ranOut: left <= 0 && left + Math.ceil(micros) > 0 };
+}
+
+/**
+ * What a use is, for orgo-web's spend: "ai" (everything metered, at Orgo's rate for a user billed by
+ * use: list price plus their markup) or "phone_number" (a number's month, at cost: $3 stays $3).
+ * Bops' own plans spend both the same.
+ */
+export type SpendKind = "ai" | "phone_number";
+
+/** The use kind a recorded use is spent as (usage.ts): a number's month at cost, the rest as AI. */
+export const spendKindOf = (usageKind: string): SpendKind => (usageKind === "agentphone.numbers" ? "phone_number" : "ai");
+
+/**
+ * Whether orgo-web's three argument spend (its 20261149) is there and bops_app may run it, asked in the
+ * caller's transaction (a missing function would abort it). Remembered once it is; asked again after a
+ * minute while it isn't, so the cloud takes it up without a restart. Without it a number is spent as AI.
+ */
+let atCostReady = false;
+let atCostAskedAt = 0;
+async function atCostSpendReady(c: pg.PoolClient): Promise<boolean> {
+  if (atCostReady) return true;
+  if (Date.now() - atCostAskedAt < 60_000) return false;
+  atCostAskedAt = Date.now();
+  const r = await c.query<{ ok: boolean | null }>(
+    `SELECT COALESCE(has_function_privilege(to_regprocedure('public.bops_ai_credit_spend(uuid, bigint, text)'), 'EXECUTE'), false) AS ok`,
+  );
+  atCostReady = r.rows[0]?.ok === true;
+  return atCostReady;
 }
 
 /** The credit ran out (usage events), after the spend that did it committed. */

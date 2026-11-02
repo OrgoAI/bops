@@ -931,6 +931,34 @@ assert.deepEqual((await L.readBopsPlan(KEY)).usage, { balanceCents: 0, computer:
 // Nothing said: BOPS_USAGE's prices, and no balance made up.
 bopsPlan.answer = () => Response.json({ billing: "usage" });
 assert.deepEqual((await L.readBopsPlan(KEY)).usage, { computer: { size: "Large", hourlyCents: 11, asleepFree: true }, numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing" });
+// orgo-web's own answer, as its readBopsUsagePlan writes it (orgo-web lib/billing/bops-plan.ts; its
+// lib/bops-usage-move.pg.test.ts checks the same fields): the flat fields win, and its nested ones alone read the same.
+const ORGO_USAGE = {
+  tier: "free_bops", name: "Usage", billing: "usage", extension: null,
+  usage: { orgo_tier: "free", balance_cents: 800, out_of_credit: false, computer_credit_cents: 300, ai_markup_percent: 10,
+    computer: { id: "d1", size: "large", cpu: 4, ram_gb: 16, disk_gb: 80, billing: "hourly", running_cents_per_hour: 11, asleep_cents_per_hour: 0, idle_sleep_minutes: 15, wake_needs_cents: 11 },
+    phone_number_cents_per_month: 300, free_phone_numbers: 0, free_emails: 1,
+    add_credit: { checkout: "/api/credits/checkout", card_on_file: "/api/credits/card-on-file", page: "https://www.orgo.ai/settings/billing#credits" } },
+  balanceCents: 800, computer: { size: "Large", hourlyCents: 11, asleepFree: true, wakeNeedsCents: 11, creditCents: 300 },
+  numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing#credits", outOfCredit: false,
+};
+const orgoUsage = { balanceCents: 800, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300 }, numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing#credits" };
+bopsPlan.answer = () => Response.json(ORGO_USAGE);
+assert.deepEqual((await L.readBopsPlan(KEY)).usage, orgoUsage);
+const nestedOnly = { ...ORGO_USAGE };
+for (const flat of ["balanceCents", "computer", "numberMonthlyCents", "topUpUrl", "outOfCredit"]) delete nestedOnly[flat];
+bopsPlan.answer = () => Response.json(nestedOnly);
+assert.deepEqual((await L.readBopsPlan(KEY)).usage, { ...orgoUsage, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300 } });
+// Its month before billing by use, nested: the day it ends.
+bopsPlan.answer = () => Response.json({ billing: "plan", tier: "max_bops", extension: { tier: "max_bops", ends_at: "2026-12-05T00:00:00Z", kept_free: true }, credit: { left_micros: 1 } });
+assert.equal((await L.readBopsPlan(KEY)).extensionEndsAt, Date.parse("2026-12-05T00:00:00Z"));
+// What the computer may spend decides a wake, not the whole balance (a plan's allowance pays AI only).
+assert.equal(B.canWake({ balanceCents: 800, computer: { hourlyCents: 11, creditCents: 5 } }), false);
+// A balance Orgo didn't say never locks AI work: out of credit clears on any read without one.
+S.update((s) => (s.credits = { out: true, at: Date.now(), usage: true }));
+bopsPlan.answer = () => Response.json({ billing: "usage" });
+await L.readBopsPlan(KEY);
+assert.equal(S.getState().credits, undefined);
 // Billing it doesn't know: no answer, never Free.
 bopsPlan.answer = () => Response.json({ billing: "metered", tier: "free_bops" });
 assert.equal(await L.readBopsPlan(KEY), null);
@@ -939,7 +967,7 @@ bopsPlan.answer = () => Response.json({ billing: "plan", tier: "pro_bops", exten
 const moving = await L.readBopsPlan(KEY);
 assert.equal(moving.tier, "pro_bops");
 assert.equal(moving.extensionEndsAt, Date.parse("2026-12-03T17:00:00Z"));
-assert.equal(B.extensionLine(moving.extensionEndsAt), "Your current plan stays free until Dec 3, then you pay only for what you use.");
+assert.equal(B.extensionLine(moving.extensionEndsAt), "Your current plan stays as it is until Dec 3, then you pay only for what you use.");
 // Out of credit clears once Orgo shows some; when it was the computer that couldn't wake, once there's an hour of it.
 S.update((s) => (s.credits = { out: true, at: Date.now(), usage: true }));
 bopsPlan.answer = () => Response.json({ billing: "usage", balanceCents: 5 });
@@ -988,7 +1016,7 @@ assert.deepEqual(PI.peopleShort({ plan: "usage", limit: 0, used: 0, caps: { pro_
 const SH = await import(`${root}/lib/shared.ts`);
 assert.equal(SH.ownerCredit(Cl.outOfCreditWords()), "I'm out of Orgo credit, so I've stopped.");
 // The card bops.bot and the sheet show, with orgo-web's prices when it said them; no dashes, no Bops plan named.
-assert.deepEqual(PI.usageCard({ hourlyCents: 12, numberCents: 350 }).lines.map((l) => l.text).slice(0, 3), ["Your computer: $0.12 an hour while it works, free while it sleeps", "AI at Orgo's rate", "$5 to start"]);
+assert.deepEqual(PI.usageCard({ hourlyCents: 12, numberCents: 350 }).lines.map((l) => l.text).slice(0, 3), ["Your computer: $0.12 an hour while it works, free while it sleeps", "AI at Orgo's rate", "New Orgo accounts start with $5 of credit"]);
 for (const line of [PI.USAGE_CARD.name, PI.USAGE_CARD.computers.detail, ...PI.USAGE_CARD.lines.map((l) => l.text), B.OUT_OF_CREDIT_WAKE, B.extensionLine(Date.now())])
   assert.ok(!/[\u2013\u2014]|Orbit|\bPro\b|\bMax\b/.test(line), line);
 // Orgo turning a wake down for want of credit: the asleep words, and the chat's card, for a user billed by use.
@@ -999,6 +1027,9 @@ assert.equal(FH.computerOutOfCredit(noCredit), B.OUT_OF_CREDIT_WAKE);
 assert.deepEqual(S.getState().credits && { ...S.getState().credits, at: 0 }, { out: true, at: 0, usage: true, computer: true });
 S.update((s) => (s.credits = undefined));
 assert.equal(FH.computerOutOfCredit(Object.assign(new O.OrgoError("x", 402), { code: "bops_free_hours" })), undefined);
+// orgo-web's code in any case: BOPS_OUT_OF_CREDIT is bops_out_of_credit.
+assert.equal(FH.computerOutOfCredit(Object.assign(new O.OrgoError("You are out of Orgo credit.", 402), { code: "BOPS_OUT_OF_CREDIT" })), B.OUT_OF_CREDIT_WAKE);
+S.update((s) => (s.credits = undefined));
 await withSession(SESSION);
 assert.equal(Cl.billedByUse(), false);
 assert.equal(L.usageRefusal(), null);

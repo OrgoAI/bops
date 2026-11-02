@@ -276,8 +276,9 @@ export function afterStateUpload(userId: string) {
 /**
  * Every hour: give back what was paused 30 days ago (provision.ts releaseAfterPause, each under the
  * user's lock, so an upgrade at that moment never has its number given back under it), telling each
- * user's Mac; and try again a paid plan's number or inbox that a provider failed on (broken, or cut
- * short while it was set up), so it doesn't wait for the app to open.
+ * user's Mac; try again a paid plan's number or inbox that a provider failed on (broken, or cut
+ * short while it was set up), so it doesn't wait for the app to open; and, billed by use, charge each
+ * number past the free one its month (numbers-renew.ts).
  */
 export async function sweep(): Promise<number> {
   const released = await releaseAfterPause(
@@ -295,6 +296,9 @@ export async function sweep(): Promise<number> {
      LIMIT 100`,
   );
   for (const s of stuck.rows) await settle(s.user_id, { force: true });
+  // Billing by use: a number past the free one, a month at a time from Orgo credit (numbers-renew.ts).
+  const { renewUsageNumbers } = await import("./numbers-renew.ts");
+  await renewUsageNumbers().catch((e: Error) => console.warn(`[plans] number renewals: ${e.message}`));
   return released;
 }
 

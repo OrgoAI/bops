@@ -363,6 +363,35 @@ test("POST /v1/session gives a user billed by use no Bops $5: Orgo's signup cred
   assert.equal((await query("SELECT 1 FROM public.bops_ai_credit_grants WHERE user_id = $1", [u])).rowCount, 0, "no free_signup grant asked for");
 });
 
+test("billed by use, a number is spent at cost (kind phone_number) and renewed a month at a time, the plan's number free", async () => {
+  const u = await newUser();
+  await setCredit(u, { free: 20_000_000 });
+  await billedByUse(u);
+  const kinds = async () => (await query<{ kind: string }>("SELECT kind FROM public.bops_test_spends WHERE user_id = $1 ORDER BY id", [u])).rows.map((r) => r.kind);
+  const bought = await as(u, "POST", "/proxy/agentphone/v1/numbers", { country: "US", type: "sms" }, NEW_APP);
+  assert.equal(bought.status, 200, bought.text);
+  await until(async () => (await kinds()).length === 1);
+  assert.deepEqual(await kinds(), ["phone_number"]);
+  // The plan's number they kept: free, never renewed.
+  const planDigits = newNumber().slice(-10);
+  await query("INSERT INTO bops.phone_lines (digits, user_id, e164, plan, status) VALUES ($1, $2, $3, true, 'ready')", [planDigits, u, `+1${planDigits}`]);
+  const { renewUsageNumbers } = await import("../numbers-renew.ts");
+  await renewUsageNumbers();
+  const lines = async () =>
+    (await query<{ plan: boolean; paid: Date | null }>("SELECT plan, paid_until AS paid FROM bops.phone_lines WHERE user_id = $1 ORDER BY plan", [u])).rows;
+  const [bought1, plan1] = await lines();
+  assert.ok(bought1.paid && bought1.paid.getTime() > Date.now() + 29 * 86_400_000, "its purchase paid the first month");
+  assert.equal(plan1.paid, null);
+  assert.equal((await kinds()).length, 1);
+  // The month runs out: one more month charged, once, at cost.
+  await query("UPDATE bops.phone_lines SET paid_until = now() - interval '1 minute' WHERE user_id = $1 AND NOT plan", [u]);
+  await renewUsageNumbers();
+  await renewUsageNumbers();
+  assert.deepEqual(await kinds(), ["phone_number", "phone_number"]);
+  assert.ok((await lines())[0].paid!.getTime() > Date.now() + 29 * 86_400_000);
+  assert.equal((await usageOf(u, "agentphone.numbers")).length, 2);
+});
+
 test("a treg call may cost at most what's left of the credit", async () => {
   const u = await newUser();
   await setCredit(u, { free: 30_000 });

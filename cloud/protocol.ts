@@ -427,9 +427,10 @@ export const BOPS_USAGE = { computerHourlyCents: 11, numberMonthlyCents: 300, st
  * The oldest Mac app that knows billing by use (it shows the Orgo balance, never Bops' plans, and adds
  * credit on Orgo). The cloud answers an older one 426 for a user billed by use (cloud/app-version.ts
  * requireUsageAppVersion), since it would show them Free and sell them Bops credit nothing spends.
- * The release that carries billing by use must be this version or later.
+ * The release that carries billing by use must be this version or later: 0.0.33 to 0.0.37 shipped
+ * without it, so this is the first version after them. Raise it if the release lands later.
  */
-export const USAGE_MIN_APP_VERSION = "0.0.33";
+export const USAGE_MIN_APP_VERSION = "0.0.38";
 
 /**
  * Who a call through the cloud's proxies is for, sent by the app with each one (lib/server/usage.ts
