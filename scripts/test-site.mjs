@@ -360,7 +360,8 @@ await test("pricing shows billing by use as the app says it, line for line, and 
     );
     assert.deepEqual(got, want, `${viewport.width}px`);
     // The prices people ask about first, word for word.
-    assert.ok(got[0].lines.some((l) => l.text === "Your computer: $0.11 an hour while it works, free while it sleeps"));
+    assert.ok(got[0].lines.some((l) => l.text === "Your computer: from $0.055 an hour while it works, free while it sleeps"));
+    assert.equal(got[0].computers.detail, "Medium or Large, 80 GB, multi-screen. It sleeps when nothing's using it.");
     assert.ok(got[0].lines.some((l) => l.text === "AI at Orgo's rate"));
     assert.ok(got[0].lines.some((l) => l.text === "New Orgo accounts start with $5 of credit"));
     // No Bops plans are sold any more: none named.

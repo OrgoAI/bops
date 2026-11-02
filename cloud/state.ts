@@ -30,7 +30,7 @@ import {
 import { dropOlderMac, notifyMac } from "./tunnel.ts";
 import { messagesWritten, stateWritten } from "./live.ts";
 import { forgetTelemetryChoice } from "./analytics.ts";
-import { keepChatOn, nudgeRunners, recheckTurns, routedWorkspaces, turnRowsMayWrite } from "./turns.ts";
+import { autoRoute, chatAutoFor, keepChatOn, nudgeRunners, recheckTurns, routedWorkspaces, turnRowsMayWrite } from "./turns.ts";
 
 /**
  * The app's state, kept here for each user (protocol.ts, "The app's state in Bops Cloud"). Owner: edge builder.
@@ -549,6 +549,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   const writer = user.computer?.device || deviceOf(req);
   const level = stateLevelOf(req);
   let raised = false;
+  // The switch's mirror put back over what the Mac sent (keepChatOn): it reads it in a moment (one more version, below).
+  let mirrored = false;
   const version = await tx(async (c) => {
     const row = await lockUser(c, user.id);
     // Before the version: an older app is never handed the newer one's state to merge (409).
@@ -566,14 +568,16 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
       json = toJson(next);
       written = next;
     } else {
-      // The switch of each workspace's chat as Bops Cloud keeps it (turns.ts keepChatOn): a Bops from before drops it.
-      const routed = await routedWorkspaces(c, user.id);
-      if (routed) {
-        const kept = keepChatOn(written, routed);
-        if (kept !== written) {
-          written = kept;
-          json = toJson(blobOf(kept));
-        }
+      // The switch of each workspace's chat as Bops Cloud keeps it (turns.ts keepChatOn): a Bops from before drops it,
+      // and one that never heard of a change of it (Bops Cloud may move a workspace by itself) doesn't have it yet.
+      // An account with no row, that Bops Cloud doesn't move workspaces for, and with no mark of that left: nothing to put back.
+      const rows = await routedWorkspaces(c, user.id);
+      const on = chatAutoFor(user.id);
+      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && w.chatAuto !== undefined) ? keepChatOn(written, rows, on) : written;
+      if (kept !== written) {
+        written = kept;
+        json = toJson(blobOf(kept));
+        mirrored = true;
       }
     }
     const r = await c.query<{ version: string }>(
@@ -581,6 +585,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
       [user.id, json, level, writer],
     );
     raised = level > row.protocol;
+    // The Mac takes the version it's answered as what it sent: one more, Bops Cloud's, has it read what was put back.
+    if (mirrored) await c.query("UPDATE bops.app_state SET version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [user.id]);
     return Number(r.rows[0].version);
   });
   if (version === null) {
@@ -599,6 +605,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   forgetTelemetryChoice(user.id);
   // Who may have their messages run on the bots' computers may have changed: turns of anyone who may not end now.
   if (!user.computer) void recheckTurns(user.id).catch((e: Error) => console.warn(`[state] turns recheck: ${e.message}`));
+  // A runner set up, taken down or failed, a bot moved, a newer Mac: a workspace's chat may move (turns.ts autoRoute).
+  if (!user.computer) void autoRoute(user.id, written);
 }
 
 /** A build from before: its whole state, messages and all, the Mac's own `version` kept as given. */

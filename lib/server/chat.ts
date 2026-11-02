@@ -1,6 +1,6 @@
 import "server-only";
 import { appsOpen } from "@/lib/apps-access";
-import { accessOf, appsLevelOf, levelOf, permits, type AccessLevel, type MemberWho } from "@/lib/member-access";
+import { accessOf, adminAccess, appsLevelOf, levelOf, permits, type AccessLevel, type MemberAccess } from "@/lib/member-access";
 import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import { fullAccessOn } from "./full-access";
@@ -19,7 +19,7 @@ import { contactLine, createBot, namesTheUser } from "./bots";
 import { creditsOut, noteOutOfCredit, outOfCreditWords } from "./cloud";
 import { noOwnComputer } from "./plan";
 import { agentLabel, agentName, agentNamed, aiOf, modelShort, paysLabel, readyAgents } from "@/lib/agents";
-import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, routineSent, settingsOf, TAPBACK_EMOJI, TAPBACKS, workBot, workspaceOf, type AppApproval, type Bot, type ChannelKind, type Delivery, type Message, type ReplyDraft, type Routine, type RoutineRun, type Schedule, type Session, type SkillProposal, type Tapback } from "@/lib/types";
+import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, routineSent, settingsOf, TAPBACK_EMOJI, TAPBACKS, saidOf, workBot, workspaceOf, type AppApproval, type Bot, type ChannelKind, type Delivery, type MemberTurn, type Message, type ReplyDraft, type Routine, type RoutineRun, type Schedule, type Session, type SkillProposal, type Tapback } from "@/lib/types";
 import { computerBriefing, teamBriefing } from "./briefing";
 import { belowOf, directOf, entryOf, inLine, mayAskIn, ownMemory, reachOf, readsTeam, worksForNow } from "@/lib/chain";
 import { asksNow, chartedFor, handOffRefused, namesList, teamNow } from "./chart";
@@ -470,17 +470,26 @@ const fromOutside = (m: Message) => m.sms?.dir === "in" || (m.email?.dir === "in
  * owner's own access for them on the bot's workspace (Workspace.memberAccess), read afresh each time: a bot taken
  * down to Read, or a member removed, mid-turn has nothing more done for them. A bot of another workspace is none.
  */
-function memberLevel(member: MemberWho, botId: string): AccessLevel {
-  const b = bot(botId);
-  const ws = b ? getState().workspaces?.find((w) => w.id === workspaceOf(b)) : undefined;
-  return ws ? levelOf(accessOf(ws.memberAccess, { email: member.email, id: member.userId }), botId) : "none";
+function memberLevel(member: MemberTurn, botId: string): AccessLevel {
+  const access = memberAccessFor(member, botId);
+  return access ? levelOf(access, botId) : "none";
 }
-const memberWrites = (member: MemberWho, botId: string) => permits(memberLevel(member, botId), "write");
-/** Whether a member has Your Apps at Write in bot `botId`'s workspace (Workspace.memberAccess): what working on its apps through a bot takes. */
-function memberAppsWrite(member: MemberWho, botId: string): boolean {
+/**
+ * What a member has in bot `botId`'s workspace: everything for an Admin (MemberTurn.role, as member-access.ts
+ * adminAccess gives it: every bot, Your Apps and Use its computer at Write, whatever's kept for them), else the
+ * owner's entry for them. Null for a bot of no workspace here.
+ */
+function memberAccessFor(member: MemberTurn, botId: string): MemberAccess | null {
   const b = bot(botId);
   const ws = b ? getState().workspaces?.find((w) => w.id === workspaceOf(b)) : undefined;
-  return !!ws && appsLevelOf(accessOf(ws.memberAccess, { email: member.email, id: member.userId })) === "write";
+  if (!ws) return null;
+  return member.role === "admin" ? adminAccess() : accessOf(ws.memberAccess, { email: member.email, id: member.userId });
+}
+const memberWrites = (member: MemberTurn, botId: string) => permits(memberLevel(member, botId), "write");
+/** Whether a member has Your Apps at Write in bot `botId`'s workspace (an Admin always, else Workspace.memberAccess): what working on its apps through a bot takes. */
+function memberAppsWrite(member: MemberTurn, botId: string): boolean {
+  const access = memberAccessFor(member, botId);
+  return !!access && appsLevelOf(access) === "write";
 }
 
 /** The owner's app threads (Session.app), and every thread carrying one on (moved from it, a part of it): ws-slice.ts appThreadsOf. */
@@ -616,8 +625,8 @@ export async function handleMessage(
   onCall?: boolean,
   /** Sent from the app with one of the bots' apps open next to the chat (Message.lookingAt). */
   lookingAt?: string,
-  /** Said by a member with Write from their own Bops (member-acts.ts), not the owner: their turn (TurnOptions.member). */
-  member?: Message["member"],
+  /** Said by a member with Write from their own Bops (member-acts.ts), not the owner: their turn (TurnOptions.member). Their role is never kept on the message (saidOf). */
+  member?: MemberTurn,
   /** The agent the owner picked in the message box for the threads this message starts (Message.agent): never a member's. */
   agent?: string,
   /** The owner's words about one of their apps on the web (Message.appNote: Fix it, or what Select and Draw put in the box): never a member's. */
@@ -632,7 +641,7 @@ export async function handleMessage(
   const target = replyTo ? getState().messages.find((m) => m.id === replyTo && m.chatId === chatId) : undefined;
   const root = target ? (target.replyTo ?? target.id) : undefined;
   const app = lookingAt && madeApp(lookingAt) ? lookingAt : undefined;
-  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel, lookingAt: app, ...(member ? { member } : {}), ...(agent && !member && /^[A-Za-z0-9_]{1,40}$/.test(agent) ? { agent } : {}), ...(appNote && !member ? { appNote: true as const } : {}), ...(appNote && !member && picks?.length ? { picks } : {}) });
+  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel, lookingAt: app, ...(member ? { member: saidOf(member) } : {}), ...(agent && !member && /^[A-Za-z0-9_]{1,40}$/.test(agent) ? { agent } : {}), ...(appNote && !member ? { appNote: true as const } : {}), ...(appNote && !member && picks?.length ? { picks } : {}) });
   trackServerEvent("bops_message_sent", { chat_kind: c.kind, via: onCall ? "call" : (via ?? "app"), image_count: images?.length ?? 0, is_reply: !!root });
   // Into the shared memory (unless the user wants it kept from someone), and remembered if it's a lasting fact. A
   // member's words go in as theirs, so nothing they say about themselves is taken for the owner.
@@ -646,7 +655,7 @@ export async function handleMessage(
   if (!images?.length && !app && !mine.picks && (await continueThread(chatId, text, root, member))) return mine;
   if (!ours()) return mine;
   if (c.kind === "group") {
-    await groupTurn(chatId, mine);
+    await groupTurn(chatId, mine, member);
     return mine;
   }
   await botTurn(c.botIds[0], chatId, { replyTo: root, answering: mine.id, ...(onCall ? { call: true } : {}), ...(member ? { member } : {}) });
@@ -659,14 +668,14 @@ export async function handleMessage(
  * only for a one bot chat; on the owner's Mac (member-acts.ts, a bot on the Mac or a group) a group's turn too. Never
  * sent on into a thread (on a runner, the thread may be another Bops's). Null when the chat or the message isn't here.
  */
-export async function answerMessage(chatId: string, messageId: string, member?: Message["member"]): Promise<TurnOut | null> {
+export async function answerMessage(chatId: string, messageId: string, member?: MemberTurn): Promise<TurnOut | null> {
   const c = chat(chatId);
   const mine = getState().messages.find((m) => m.id === messageId && m.chatId === chatId && m.role === "user");
   if (!c || !mine || (c.kind === "group" && currentTurn())) return null;
   const words = member ? `${member.name} said: ${mine.text}` : mine.text;
   rememberMessage(c.kind === "bot" ? scopeOf(c.botIds[0]) : wsOf(c.botIds[0]), chatId, mine.id, words, { chat: chatName(chatId) }, member);
   if (c.kind === "group") {
-    await groupTurn(chatId, mine);
+    await groupTurn(chatId, mine, member);
     return { text: null };
   }
   return turn(c.botIds[0], chatId, { ...(mine.replyTo ? { replyTo: mine.replyTo } : {}), answering: mine.id, ...(member ? { member } : {}) });
@@ -724,7 +733,7 @@ const FOLLOW_UP_WINDOW_MS = 2 * 60 * 60 * 1000;
  * otherwise push the user's own work out. For a bot's turn (`botId`, tell_task), only its own threads and those
  * of bots it may ask on the team chart (lib/chain.ts).
  */
-function followUpThreads(chatId: string, member?: MemberWho, botId?: string) {
+function followUpThreads(chatId: string, member?: MemberTurn, botId?: string) {
   const now = Date.now();
   // On a member's turn, only threads of bots they have at Write, never one on the owner's Mac (their words never
   // reach work there), nor one of the owner's apps unless apps are theirs too (memberThreadOk).
@@ -747,7 +756,7 @@ function followUpThreads(chatId: string, member?: MemberWho, botId?: string) {
  * another keeps the chat it came from), not on the owner's Mac, and not one of the owner's app threads unless apps
  * are open to them and to the owner (lib/apps-access.ts). member-acts.ts checks a reply in a thread the same way.
  */
-function memberThreadOk(member: MemberWho): (s: Session) => boolean {
+function memberThreadOk(member: MemberTurn): (s: Session) => boolean {
   const open = appsOpen(getState());
   const apps = appThreads();
   return (s) => memberWrites(member, s.botId) && s.runsOn !== "mac" && (!apps.has(s.id) || (open && memberAppsWrite(member, s.botId)));
@@ -845,7 +854,7 @@ const ownerPick = (chatId: string) => [...getState().messages].reverse().find((m
  * The latest message in a chat of whoever this turn is for: the member's own (TurnOptions.member) on a member's
  * turn, else the owner's (fromOwner). What the "they asked for it themselves" checks read (an app, a site, a skill).
  */
-function speakerSaid(chatId: string, member?: MemberWho): Message | undefined {
+function speakerSaid(chatId: string, member?: MemberTurn): Message | undefined {
   return [...getState().messages].reverse().find((m) => m.chatId === chatId && (member ? m.role === "user" && m.member?.userId === member.userId : fromOwner(m)));
 }
 
@@ -864,7 +873,7 @@ function chatName(chatId: string) {
  * and can send it on itself (tell_task): "that was a test, carry on" is for the bot, not for the
  * task that happens to be running.
  */
-async function continueThread(chatId: string, text: string, replyTo?: string, member?: Message["member"]) {
+async function continueThread(chatId: string, text: string, replyTo?: string, member?: MemberTurn) {
   const ours = sameState();
   const threads = followUpThreads(chatId, member);
   if (!threads.length) return false;
@@ -945,7 +954,7 @@ async function continueThread(chatId: string, text: string, replyTo?: string, me
   // one of the standing things that are the owner's to set up.
   if (!member && (await watchInstead(target.id, text).catch(() => null))) return true;
   if (!ours()) return true;
-  replyToSession(target.id, text, undefined, undefined, member);
+  replyToSession(target.id, text, undefined, undefined, member ? saidOf(member) : undefined);
   // In a bot's own chat the reply comes from that bot, even when the thread is one it handed off.
   const c = chat(chatId)!;
   const speaker = c.kind === "bot" ? c.botIds[0] : target.botId;
@@ -965,7 +974,7 @@ const reEscape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * who replies to the user; the reply shows "Asked ● Sam", which opens their conversation. One level: a teammate answering doesn't ask anyone else, and
  * doesn't start work (it says what it would do instead).
  */
-async function askTeammate(asker: Bot, toId: string, question: string, chatId: string, asked: NonNullable<Message["asked"]>, member?: MemberWho) {
+async function askTeammate(asker: Bot, toId: string, question: string, chatId: string, asked: NonNullable<Message["asked"]>, member?: MemberTurn) {
   const t = bot(toId);
   // On a member's turn, only a teammate they see (Read or Write): one not given them stays hidden, its answers too.
   // And only one the asker may ask on the team chart (lib/chain.ts): the same words, so a hidden bot's name never comes back.
@@ -1154,9 +1163,12 @@ type TurnOptions = {
    * owner's are. The owner's logins this bot has (Connected apps, keys) it may use for them, every write asking the
    * owner (named as theirs: access-sync.ts UseWhere.member), but nothing else of the owner's own (their drafts, their
    * Mac: sessions.ts StartOptions.member; their memory of facts: NOT_FROM_MEMBER), and apps only when they're Orgo's
-   * team too (apps-access.ts). Paid from the owner's AI credit, as every turn of the owner's bot is.
+   * team too (apps-access.ts). Paid from the owner's AI credit, as every turn of the owner's bot is. An Admin's
+   * (MemberTurn.role, as Bops Cloud or the owner's Mac found it taking their words) has every bot of the workspace and
+   * Your Apps at Write, whatever Workspace.memberAccess keeps for them (memberAccessFor). A turn that pauses keeps it
+   * (ChatPause), so their turn goes on as it began once the owner answers.
    */
-  member?: MemberWho;
+  member?: MemberTurn;
   /** Asked aloud on the user's call (call.ts): its app and key uses are logged as from a call (access-sync.ts). */
   call?: boolean;
   /**
@@ -1730,7 +1742,7 @@ const ASKS_FOR_APP = /\bapps?\b/i;
  * something from outside Bops, an app is built only then (a page's, an email's or an app's text could
  * be what asks for it).
  */
-async function ownerAskedForApp(chatId: string, botId: string, member?: MemberWho): Promise<boolean> {
+async function ownerAskedForApp(chatId: string, botId: string, member?: MemberTurn): Promise<boolean> {
   // On a member's turn, their own words (speakerSaid): the owner's earlier ones never ask for what the member wants.
   const mine = speakerSaid(chatId, member);
   const words = mine?.text.trim() ?? "";
@@ -1764,7 +1776,7 @@ export const asksForProd = (words: string) => ASKS_FOR_PROD.test(words.replace(N
  * Whether the user's own latest message here asks for Prod (deploy_app): their words, never a page's or the
  * bot's, and never a member's (publishing is the owner's alone).
  */
-function ownerAskedForProd(chatId: string, member?: MemberWho): boolean {
+function ownerAskedForProd(chatId: string, member?: MemberTurn): boolean {
   if (member) return false;
   const words = speakerSaid(chatId, member)?.text.trim() ?? "";
   return !!words && asksForProd(words);
@@ -1781,7 +1793,7 @@ const NAMES_A_SITE = /\b(?:apps?|sites?|website|web ?pages?)\b/i;
  * then: the site is public, so a page's, an email's or an app's text must never be what puts it there.
  * (Saying "app" isn't enough, as it is for make_app's private tools.)
  */
-async function ownerAskedForSite(chatId: string, botId: string, what: "deploy" | "change", member?: MemberWho): Promise<boolean> {
+async function ownerAskedForSite(chatId: string, botId: string, what: "deploy" | "change", member?: MemberTurn): Promise<boolean> {
   const mine = speakerSaid(chatId, member);
   const words = mine?.text.trim() ?? "";
   if (!mine || !words) return false;
@@ -2902,7 +2914,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             notes.push(`Moved ${s.title} to your Mac: “${message}”`);
           } else {
             // Passed on from someone else's email: the task gets it as information from them, not the user's words.
-            replyToSession(s.id, message, undefined, outsideFrom, member);
+            replyToSession(s.id, message, undefined, outsideFrom, member ? saidOf(member) : undefined);
             sessionIds.push(s.id);
             // What the task got, in the bot's words, so a wrong send is plain to see.
             notes.push(`Sent to ${s.title}: “${message}”`);
@@ -2916,7 +2928,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // A thread already doing the job moves to the Mac only when the user's own words ask for it too (sessions.ts foldInto).
       // A thread started for what the user kept between us is kept between us too (Session.secret).
       // A member's turn places work as someone else's does (the cloud, or the owner picks), never on the Mac (sessions.ts StartOptions.member).
-      const place = { where: args.where ?? "auto", thenOnMac: args.then_on_mac ?? undefined, outside: outsideFrom, ownerAsked: !opts.outside && !member && asksForMac(ownerSaid(chatId)), secret: isSecret(opts.answering), ...(member ? { member } : {}) };
+      const place = { where: args.where ?? "auto", thenOnMac: args.then_on_mac ?? undefined, outside: outsideFrom, ownerAsked: !opts.outside && !member && asksForMac(ownerSaid(chatId)), secret: isSecret(opts.answering), ...(member ? { member: saidOf(member) } : {}) };
       if (item.name === "start_task") {
         // The skill it follows: the one the bot named, else (in a routine's run) the routine's.
         const named = args.skill?.trim();
@@ -3234,7 +3246,9 @@ function reactLater(messageId: string, botId: string, type: Tapback) {
  * A group chat: Jev decides what the user's message needs and from whom; bots answer in turn, and one
  * put a question by another answers it, until the exchange comes to rest.
  */
-async function groupTurn(chatId: string, first: Message) {
+/** `who`: the member whose message `first` is, as their turn goes by them (MemberTurn: with their role), else as it's kept on the message. */
+async function groupTurn(chatId: string, first: Message, who?: MemberTurn) {
+  const member: MemberTurn | undefined = first.member && who?.userId === first.member.userId ? { ...first.member, ...(who.role === "admin" ? { role: "admin" as const } : {}) } : first.member;
   const c = chat(chatId)!;
   const members = c.botIds.map((x) => bot(x)).filter(Boolean) as Bot[];
   const ours = sameState();
@@ -3245,7 +3259,7 @@ async function groupTurn(chatId: string, first: Message) {
   for (let turns = 0; queue.length && turns < MAX_GROUP_TURNS; turns++) {
     const { id, to, hop } = queue.shift()!;
     // A member's message in a group (every bot in it theirs at Write): each bot's turn is theirs.
-    const said = await botTurn(id, chatId, { group: members, replyTo: first.replyTo, answering: to.id, ...(first.member ? { member: first.member } : {}) });
+    const said = await botTurn(id, chatId, { group: members, replyTo: first.replyTo, answering: to.id, ...(member ? { member } : {}) });
     if (!said) continue;
     const posted = [...getState().messages].reverse().find((x) => x.chatId === chatId && x.botId === id && x.text === said);
     // The user wrote again meanwhile: their new message gets its own plan; this exchange stops here.

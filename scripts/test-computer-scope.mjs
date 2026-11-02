@@ -352,6 +352,7 @@ await check("a member's stamp: kept only as it was (none, or the same as the sto
   };
   assert.deepEqual(["bot:main", "bot:iris", "g", "h", "bot:gone"].map((id) => C.cloudChatOn(st, id)), [false, true, true, false, false]);
   assert.equal(C.cloudChatOn({ ...st, workspaces: [{ id: "ws_two", chatOn: true }] }, "bot:iris"), false, "only \"cloud\"");
+  assert.equal(C.cloudChatOn({ ...st, workspaces: [{ id: "ws_two", chatOn: "mac", chatAuto: true }] }, "bot:iris"), false, "the Mac chosen, or Bops Cloud may move it later");
 });
 
 await check("a bot moved off the computer while its runner ran its routine: the runner ends that run (its thread, the routine's record, its chip and result), and starts nothing else of that bot's", () => {

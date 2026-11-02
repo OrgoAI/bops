@@ -619,6 +619,8 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...(s.apps ? { apps: s.apps } : {}),
       // Its computers' groups of bots, for the sidebar (cloud/ws-slice.ts computersOf).
       ...(s.groups ? { groups: s.groups } : {}),
+      // An Admin's: the bots whose screen opens here, by id only (the computers' ids stay in this copy: sharedScreen).
+      ...(open.role === "admin" && s.screens && Object.keys(s.screens).length ? { screens: Object.keys(s.screens).filter((id) => ids.has(id)) } : {}),
       ...(s.apps && acts.some((x) => isAppAct(x.act)) ? { appActs: acts.filter((x) => isAppAct(x.act)).map((x) => ({ key: x.key, act: x.act as MemberAppAct, at: x.at, state: x.state, ...(x.error ? { error: x.error } : {}) })) } : {}),
     },
     // What of the user's own is worth a chime meanwhile: their own news still reaches them (lib/pings.ts).

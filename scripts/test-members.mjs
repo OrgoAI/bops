@@ -93,8 +93,11 @@ const M = await import(`${root}/lib/members.ts`);
 const P = await import(`${root}/lib/plan-includes.ts`);
 const A = await import(`${root}/cloud/analytics-rules.ts`);
 const T = await import(`${root}/cloud/protocol.ts`);
-// Loaded: now it's the Mac app, whose state lives in Bops Cloud.
+// Loaded: now it's the Mac app, whose state lives in Bops Cloud. Its Bops Cloud gives people their role (cloud-caps.ts).
 delete process.env.BOPS_SELF_HOSTED;
+const Caps = await import(`${root}/lib/server/cloud-caps.ts`);
+const withRoles = async () => ({ ok: true, macs: 0, caps: ["roles"] });
+Caps.resetCloudCaps({ health: withRoles });
 
 /** Every error the route said, to hold them all to the app's words. */
 const said = new Set();
@@ -195,7 +198,7 @@ assert.deepEqual(
     ["u-jamie", "Jamie Chen", "jamie@example.com", "viewer", false],
     ["u-sam", "Sam Park", "sam@example.com", "admin", false],
   ],
-  "everyone else by name: Orgo's member is View only, and no email is a guest",
+  "everyone else by name: Orgo's member is a Member, its admin an Admin, and no email is a guest",
 );
 assert.deepEqual(
   ready.invites.map((i) => [i.email, i.role, i.expired, typeof i.expiresAt]),
@@ -211,7 +214,29 @@ assert.deepEqual(ready.seats, { plan: "max_bops", canAdd: true, limit: 5, used: 
 assert.equal(ready.seatsError, undefined);
 assert.equal(ready.orgoUrl, `https://orgo.test/workspaces?project_id=${WS}`);
 assert.equal(ready.host, "orgo");
-assert.equal(ready.fullAccess, "not_yet", "Full access isn't offered yet");
+assert.equal(ready.fullAccess, "on", "Admin is offered");
+// Admin waits for a Bops Cloud that gives people their role ("roles" on its /health): one before it would give an Admin,
+// who has no entry, no bot at all. Nothing goes to orgo-web, and making someone a Member is never held back.
+for (const health of [async () => ({ ok: true, macs: 0 }), async () => ({ ok: true, macs: 0, caps: [] }), async () => offline()]) {
+  Caps.resetCloudCaps({ health });
+  assert.equal((await get()).body.fullAccess, "not_yet");
+  const n = calls.length;
+  const asks = [
+    await route("POST", { email: "newer@example.com", role: "admin" }),
+    await route("PATCH", { invite: "pat@example.com", role: "admin" }),
+    await route("PATCH", { memberId: "u-jamie", role: "admin" }),
+  ];
+  assert.deepEqual(asks.map((x) => [x.status, x.body.code, x.body.error]), Array(3).fill([409, "FULL_ACCESS_NOT_YET", M.WORDS.fullAccessNotYet]));
+  assert.equal(calls.filter((c) => c.method !== "GET").length, calls.slice(0, n).filter((c) => c.method !== "GET").length, "nothing changed on orgo-web");
+}
+// Asked again after a no (a minute), and a yes is kept.
+let healthAsked = 0;
+Caps.resetCloudCaps({ health: async () => (healthAsked++, { ok: true, macs: 0, caps: ["roles"] }) });
+assert.equal(await Caps.cloudDoes("roles"), true);
+assert.equal(await Caps.cloudDoes("roles"), true);
+assert.equal(healthAsked, 1, "a yes is kept");
+Caps.resetCloudCaps({ health: withRoles });
+assert.equal((await get()).body.fullAccess, "on");
 assert.equal(ready.keysOnComputers, false, "nothing of Bops' on the computers");
 assert.ok(!JSON.stringify(ready).includes(KEY), "the key never goes to the window");
 // The upgrade orgo-web offers, in the app's words; seats it couldn't read; an orgo-web without times.
@@ -318,8 +343,9 @@ assert.ok(!calls.slice(n).some((c) => c.method === "POST"), "neither was sent to
 n = calls.length;
 r = await route("PATCH", { memberId: "u-sam", role: "viewer" });
 assert.deepEqual(r, { status: 200, body: { ok: true } });
-assert.deepEqual(calls.at(-1).body, { memberId: "u-sam", role: "member" });
-assert.equal(calls.at(-1).method, "PATCH");
+// An Admin made a Member: the role, then Use its computer off (they had none as a Member).
+const patched = calls.slice(n).filter((c) => c.method === "PATCH");
+assert.deepEqual(patched.map((c) => c.body), [{ memberId: "u-sam", role: "member" }, { memberId: "u-sam", bopsComputerUse: false }]);
 for (const body of [{ memberId: "u-sam" }, { memberId: "../u-sam", role: "viewer" }, { memberId: "", role: "viewer" }, { role: "viewer" }]) {
   r = await route("PATCH", body);
   assert.deepEqual([r.status, r.body.code], [400, "BAD_REQUEST"], JSON.stringify(body));
@@ -435,19 +461,12 @@ assert.equal(r.status, 200, "orgo-web decides");
 assert.equal(invited().length, before + 1);
 console.log("ok - nobody is added without orgo-web's seats");
 
-/* ---------------- 7. Full access ---------------- */
+/* ---------------- 7. Owner, Admin and Member ---------------- */
 
 list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
 replies = usual();
-// Not offered yet: View only only, and moving someone to View only always works.
-n = invited().length;
-r = await route("POST", { email: "new@example.com", role: "admin" });
-assert.deepEqual([r.status, r.body.code, r.body.error], [409, "FULL_ACCESS_NOT_YET", M.WORDS.fullAccessNotYet]);
-r = await route("PATCH", { memberId: "u-jamie", role: "admin" });
-assert.deepEqual([r.status, r.body.code], [409, "FULL_ACCESS_NOT_YET"]);
-assert.equal(invited().length, n);
-assert.equal(calls.at(-1).method === "PATCH", false, "nothing changed on Orgo");
-// Bops' own keys on the computers are said even while Full access isn't offered: people added on orgo.ai can have it.
+// Admin is offered whatever Bops keeps on the computers (Bops Cloud and orgo-web give it from the role alone), and
+// the sheet still says when its keys are there.
 for (const [k, v] of [
   ["HOSTNAME", "0.0.0.0"],
   ["TAILSCALE_AUTH_KEY", "tskey-auth-example"],
@@ -456,46 +475,116 @@ for (const [k, v] of [
   const was = process.env[k];
   process.env[k] = v;
   r = await get();
-  assert.deepEqual([r.body.fullAccess, r.body.keysOnComputers], ["not_yet", true], k);
+  assert.deepEqual([r.body.fullAccess, r.body.keysOnComputers], ["on", true], k);
   if (was === undefined) delete process.env[k];
   else process.env[k] = was;
 }
-// Offered (BOPS_MEMBERS_FULL_ACCESS=1), and nothing of Bops' on the computers: on.
-process.env.BOPS_MEMBERS_FULL_ACCESS = "1";
 r = await get();
 assert.deepEqual([r.body.fullAccess, r.body.keysOnComputers], ["on", false]);
+// Inviting an Admin: one choice, in Orgo's words, and no bots kept for them (an Admin has every bot).
 r = await route("POST", { email: "new@example.com", role: "admin" });
 assert.equal(r.status, 200);
 assert.deepEqual(calls.filter((c) => c.method === "POST").at(-1).body, { email: "new@example.com", permission: "admin" }, "Orgo's invite words: admin");
-r = await route("PATCH", { memberId: "u-jamie", role: "admin" });
-assert.equal(r.status, 200);
-assert.deepEqual(calls.at(-1).body, { memberId: "u-jamie", role: "admin" });
-// Off while Bops puts keys of its own on the computers: listening beyond this Mac, Tailscale's key, the executor's.
-for (const [k, v] of [
-  ["HOSTNAME", "0.0.0.0"],
-  ["TAILSCALE_AUTH_KEY", "tskey-auth-example"],
-  ["BOPS_COMPUTER_TOOL", "0"],
-]) {
-  const was = process.env[k];
-  process.env[k] = v;
-  r = await get();
-  assert.deepEqual([r.body.fullAccess, r.body.keysOnComputers], ["off", true], k);
+// Making someone an Admin: their Member entry stays as it was (a bridge would outlast a demotion on orgo.ai).
+{
+  const Sm = await import(`${root}/lib/server/store.ts`);
+  const Ws = await import(`${root}/lib/server/workspaces.ts`);
+  const wsOf = () => Sm.getState().workspaces?.find((w) => w.orgoProjectId === WS)?.id ?? "ws_main";
+  const entry = () => Sm.getState().workspaces?.find((w) => w.id === wsOf())?.memberAccess?.["jamie@example.com"];
+  const mapBefore = Sm.getState().workspaces?.find((w) => w.id === wsOf())?.memberAccess;
+  Ws.setMemberAccess(wsOf(), "jamie@example.com", { others: "none", bots: { boppy: "read" }, apps: "read" });
+  const before = entry();
   n = calls.length;
-  r = await route("POST", { email: "new@example.com", role: "admin" });
-  assert.deepEqual([r.status, r.body.code], [409, "FULL_ACCESS_OFF"], k);
   r = await route("PATCH", { memberId: "u-jamie", role: "admin" });
-  assert.deepEqual([r.status, r.body.code], [409, "FULL_ACCESS_OFF"], k);
-  assert.equal(calls.length, n, `${k}: Orgo isn't asked`);
-  r = await route("POST", { email: "new@example.com", role: "viewer" });
-  assert.equal(r.status, 200, `${k}: View only still works`);
-  r = await route("PATCH", { memberId: "u-sam", role: "viewer" });
-  assert.equal(r.status, 200, `${k}: moving someone to View only still works`);
-  if (was === undefined) delete process.env[k];
-  else process.env[k] = was;
+  assert.equal(r.status, 200);
+  assert.deepEqual(calls.slice(n).filter((c) => c.method === "PATCH").map((c) => c.body), [{ memberId: "u-jamie", role: "admin" }], "only the role: no bridge entry, no Use its computer");
+  assert.deepEqual(entry(), before, "their Member entry, untouched");
+  // orgo-web lists them as an Admin, saying Use its computer yes as it does for every Admin: never copied to the entry.
+  list = { members: MEMBERS.map((m) => (m.id === "u-jamie" ? { ...m, role: "admin", bopsComputerUse: true } : m)), invites: INVITES, seats: seatsOf() };
+  r = await get();
+  const jamie = r.body.people.find((p) => p.id === "u-jamie");
+  assert.equal(jamie.role, "admin", "shown as an Admin");
+  assert.equal(entry().computer, undefined, "orgo-web's yes for an Admin isn't kept as theirs");
+  assert.equal(jamie.access.computer, undefined, "nor shown as their Member access");
+  // Made a Member again: back to exactly what they had, and Use its computer off in orgo-web (it said yes while they were an Admin).
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", role: "viewer" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(
+    calls.slice(n).filter((c) => c.method === "PATCH").map((c) => c.body),
+    [{ memberId: "u-jamie", role: "member" }, { memberId: "u-jamie", bopsComputerUse: false }],
+    "the role, then Use its computer off",
+  );
+  assert.deepEqual([entry().others, entry().bots, entry().apps, entry().computer], ["none", { boppy: "read" }, "read", "none"], "what they had as a Member, never more");
+  // An Admin made on orgo.ai, with no entry, made a Member here: every bot to read, as an invite, and no computer.
+  Ws.setMemberAccess(wsOf(), "jamie@example.com", null);
+  r = await route("PATCH", { memberId: "u-jamie", role: "viewer" });
+  assert.equal(r.status, 200);
+  assert.equal(entry().others, "none");
+  assert.ok(Object.values(entry().bots).every((l) => l === "read"), "Read on the bots there now");
+  assert.deepEqual([entry().apps, entry().computer], ["read", "none"]);
+  Ws.setMemberAccess(wsOf(), "jamie@example.com", null);
+  // (As the rest of this file found it.)
+  Sm.update((st) => {
+    const w = st.workspaces?.find((x) => x.id === wsOf());
+    if (w && mapBefore === undefined) delete w.memberAccess;
+  });
+  list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+  // A waiting invite made an Admin without sending it again (orgo-web keeps it, and it carries over as they join).
+  replies[`PATCH /api/workspaces/${WS}/invite`] = (c) => json(200, { success: true, email: c.body.email, permission: c.body.permission });
+  n = invited().length;
+  r = await route("PATCH", { invite: "pat@example.com", role: "admin" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(calls.at(-1).body, { email: "pat@example.com", permission: "admin" });
+  assert.equal(invited().length, n, "no new email");
+  r = await route("PATCH", { invite: "nobody@example.com", role: "admin" });
+  assert.deepEqual([r.status, r.body.code], [404, "GONE"], "only an invite Orgo lists");
+  // orgo-web's own answer for an invite no longer waiting (accepted or cancelled since the sheet's read): gone, never
+  // "resend it"; and the project gone, a refusal. Nothing sent either way.
+  replies[`PATCH /api/workspaces/${WS}/invite`] = () => json(404, { error: "No invite to that address is waiting.", code: "INVITE_NOT_FOUND" });
+  r = await route("PATCH", { invite: "pat@example.com", role: "admin" });
+  assert.deepEqual([r.status, r.body.code, r.body.error], [404, "GONE", M.WORDS.gone], "orgo-web's real 404 body");
+  replies[`PATCH /api/workspaces/${WS}/invite`] = () => json(404, { error: "Project not found" });
+  r = await route("PATCH", { invite: "pat@example.com", role: "admin" });
+  assert.deepEqual([r.status, r.body.code], [502, "ORGO_ERROR"]);
+  // An orgo-web before that route (405, or a 404 that's no answer of the route's): said plainly, nothing sent.
+  for (const old of [() => new Response(null, { status: 405 }), undefined]) {
+    if (old) replies[`PATCH /api/workspaces/${WS}/invite`] = old;
+    else delete replies[`PATCH /api/workspaces/${WS}/invite`];
+    r = await route("PATCH", { invite: "pat@example.com", role: "admin" });
+    assert.deepEqual([r.status, r.body.code, r.body.error], [409, "INVITE_ROLE_NOT_READY", M.ADMIN_WORDS.inviteRoleNotReady]);
+  }
+  assert.equal(invited().length, n, "still no new email");
+  // An Admin's invite (nothing kept for it) made a Member with no bots sent: Read on every bot, as a new invite starts.
+  // A Member's made a Member again keeps what it has (here: nothing).
+  replies[`PATCH /api/workspaces/${WS}/invite`] = (c) => json(200, { success: true, email: c.body.email, permission: c.body.permission });
+  const inviteEntry = (email) => Sm.getState().workspaces?.find((x) => x.id === wsOf())?.memberAccess?.[email];
+  Ws.setMemberAccess(wsOf(), "old@example.com", null);
+  Ws.setMemberAccess(wsOf(), "pat@example.com", null);
+  r = await route("PATCH", { invite: "old@example.com", role: "viewer" });
+  assert.equal(r.status, 200);
+  const made = inviteEntry("old@example.com");
+  assert.ok(made && made.invite === true && made.others === "none" && Object.values(made.bots).every((l) => l === "read") && made.apps === "read", "Read on every bot, kept as the invite's");
+  r = await route("PATCH", { invite: "pat@example.com", role: "viewer" });
+  assert.equal(r.status, 200);
+  assert.equal(inviteEntry("pat@example.com"), undefined, "a Member's invite isn't given bots it didn't have");
+  Ws.setMemberAccess(wsOf(), "old@example.com", null);
+  replies = usual();
 }
-delete process.env.BOPS_MEMBERS_FULL_ACCESS;
-assert.equal(M.FULL_ACCESS_IN_BOPS, false, "this release adds people with View only");
-console.log("ok - Full access: not yet, on, and off while Bops' keys are on the computers");
+assert.equal(M.FULL_ACCESS_IN_BOPS, true, "this release has Admin");
+assert.deepEqual(M.ROLE_NAMES, { viewer: "Member", admin: "Admin" }, "the roles, plainly");
+// Your Apps for an Admin with no entry: the owner's Mac reads the apps for members once orgo-web's list says anyone is
+// in (an Admin: their Preview passwords too), whatever the entries say.
+{
+  const Af = await import(`${root}/lib/server/apps-for-members.ts`);
+  Af.notePeopleIn("ws_people", { any: false, admin: false });
+  assert.deepEqual([Af.anyoneSeesApps("ws_people"), Af.anyoneSeesApps("ws_people", "write")], [false, false], "nobody in");
+  Af.notePeopleIn("ws_people", { any: true, admin: false });
+  assert.deepEqual([Af.anyoneSeesApps("ws_people"), Af.anyoneSeesApps("ws_people", "write")], [true, false], "someone in: Read");
+  Af.notePeopleIn("ws_people", { any: true, admin: true });
+  assert.deepEqual([Af.anyoneSeesApps("ws_people"), Af.anyoneSeesApps("ws_people", "write")], [true, true], "an Admin: Write");
+}
+console.log("ok - Owner, Admin and Member: Admin offered, no bridge entry, a Member again gets what they had, an invite's role without a resend");
 
 /* ---------------- 8. Only the Bops window, only the signed-in key, only Bops Cloud ---------------- */
 
@@ -638,6 +727,10 @@ const accessOf = (body) => Object.fromEntries([...body.people.map((p) => [p.id, 
 const appsLevels = (body) => Object.fromEntries([...body.people.map((p) => [p.id, p.access.apps]), ...body.invites.map((i) => [i.email, i.access.apps])]);
 replies = usual();
 list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+// (Making an Admin a Member above kept what they get as one: started afresh here.)
+S.update((st) => {
+  for (const w of st.workspaces ?? []) delete w.memberAccess;
+});
 assert.equal(kept(), undefined, "nothing kept yet");
 r = await get();
 assert.deepEqual(accessOf(r.body), { "u-guest": NONE, "u-jamie": NONE, "u-sam": NONE, "pat@example.com": NONE, "old@example.com": NONE }, "nobody kept: no bot for anyone");
@@ -941,8 +1034,9 @@ console.log("ok - Use its computer for a member: orgo-web first, kept once it to
 {
   const raw = (k) => rawKept()[k];
   const MEMBERS_PATH = `/api/workspaces/${WS}/members`;
-  // orgo-web's list as it gives the owner: each member's bopsComputerUse (none from an orgo-web before it).
-  const says = (byId) => ({ ...list, members: MEMBERS.map((m) => (m.id in byId ? { ...m, bopsComputerUse: byId[m.id] } : m)) });
+  // orgo-web's list as it gives the owner: each member's bopsComputerUse (none from an orgo-web before it). Sam is a
+  // Member here: an Admin's yes is never followed (section 7).
+  const says = (byId) => ({ ...list, members: MEMBERS.map((m) => ({ ...m, ...(m.id === "u-sam" ? { role: "member" } : {}), ...(m.id in byId ? { bopsComputerUse: byId[m.id] } : {}) })) });
   const shown = (body, id) => body.people.find((p) => p.id === id).access.computer;
   const asked = (from) => calls.slice(from).filter((c) => c.method === "PATCH" && c.body?.bopsComputerUse !== undefined);
   const saved = list;
@@ -1494,7 +1588,8 @@ assert.deepEqual(
 );
 // No dashes anywhere the sheet or its route speak.
 for (const v of Object.values(M.WORDS)) noDashes(typeof v === "function" ? v("alex@example.com") : v);
-for (const v of [...Object.values(M.ROLE_LINES), ...Object.values(M.ROLE_NAMES)]) noDashes(v);
+for (const v of [...Object.values(M.ROLE_LINES), ...Object.values(M.ROLE_NAMES), ...Object.values(M.ADMIN_WORDS)]) noDashes(typeof v === "function" ? v("Alex") : v);
+for (const v of Object.values(M.ADMIN_WORDS)) assert.ok(!/orbit/i.test(typeof v === "function" ? v("Alex") : v), "never Orbit");
 for (const plan of ["free_bops", "pro_bops", "max_bops"])
   for (let used = 0; used <= 7; used++)
     for (let invited = 0; invited <= used; invited++) {
@@ -1525,7 +1620,7 @@ assert.deepEqual(A.cleanProperties("bops_upgrade_clicked", { surface: "members" 
 const server = readFileSync(join(root, "lib/server/members.ts"), "utf8");
 const tracked = [...server.matchAll(/trackServerEvent\(([^;]*)\);/g)].map((m) => m[1]);
 assert.deepEqual(
-  tracked.map((t) => /^"(\w+)"/.exec(t)?.[1]).sort(),
+  [...new Set(tracked.map((t) => /^"(\w+)"/.exec(t)?.[1]))].sort(),
   ["bops_member_access_changed", "bops_member_invited", "bops_member_refused", "bops_member_removed"],
   "every change is counted",
 );

@@ -37,8 +37,8 @@ import {
 } from "./protocol.ts";
 import { chatPage, chatsSeq, loadState, recentMessages, removedAfter, sendZipped, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
-import { appBotsFor, appsFor, appThreadsFor, botsOf, ownerAppsOpen, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, type SliceViewer } from "./ws-slice.ts";
-import { cancelMember, computerFor, routingOf, takeMessage } from "./turns.ts";
+import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, type SliceViewer } from "./ws-slice.ts";
+import { cancelMember, chatAutoFor, computerFor, macNewEnough, routedWorkspaces, routingOf, takeMessage } from "./turns.ts";
 
 /**
  * Shared workspaces (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -121,6 +121,8 @@ function accessOf(body: unknown): WsAccess | null {
     ...(joinedAt !== undefined ? { joinedAt } : {}),
     // Use its computer, from an orgo-web that keeps it: only a real yes or no (anything else is as if it didn't say).
     ...(typeof b.computerUse === "boolean" ? { computerUse: b.computerUse } : {}),
+    // The owner's sign in email, from an orgo-web that sends it: whether the workspace has apps (ws-slice.ts appsOpenFor).
+    ...(typeof b.ownerEmail === "string" && b.ownerEmail.trim() && b.ownerEmail.length <= 320 ? { ownerEmail: b.ownerEmail.trim() } : {}),
   };
 }
 
@@ -182,9 +184,9 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
 }
 
 /**
- * Who the caller is to the workspace, as ws-slice.ts sharedSlice takes it: orgo-web's role, their email (their
- * access is kept by it), user id (a guest's is), when their membership began (access set before isn't theirs) and
- * their Use its computer as orgo-web says it.
+ * Who the caller is to the workspace, as ws-slice.ts sharedSlice takes it: orgo-web's role (an Admin has every bot:
+ * ws-slice.ts viewerAccess), their email (their access is kept by it), user id (a guest's is), when their membership
+ * began (access set before isn't theirs), their Use its computer as orgo-web says it, and the owner's email (apps).
  */
 const viewerOf = (user: CloudUser, access: WsAccess): SliceViewer => ({
   role: access.role,
@@ -192,6 +194,7 @@ const viewerOf = (user: CloudUser, access: WsAccess): SliceViewer => ({
   ...(user.email ? { email: user.email } : {}),
   ...(access.joinedAt !== undefined ? { joinedAt: access.joinedAt } : {}),
   ...(access.computerUse !== undefined ? { computerUse: access.computerUse } : {}),
+  ...(access.ownerEmail !== undefined ? { ownerEmail: access.ownerEmail } : {}),
 });
 
 /* ---------------- Open streams, and orgo-web's notice ---------------- */
@@ -244,7 +247,10 @@ export async function watchProject(req: IncomingMessage, res: ServerResponse, us
   const sub = serveStream(req, res, target, hub, {
     caller: user.id,
     every,
-    // Asked afresh: false once they're out or the project is another workspace now. Orgo not saying is
+    // Asked afresh: false once they're out or the project is another workspace now; "end" (plainly: they reconnect, and
+    // are asked afresh) once their role or Use its computer changed, as what the stream carries was worked out for what
+    // they had (an Admin made a member hears only their bots from the next stream, even when orgo-web's notice never
+    // came). Orgo not saying is
     // no answer once (null), and ends the stream UNSURE_LOOKS in a row: coming back asks again, so a
     // member orgo-web can't vouch for doesn't watch on.
     still: async () => {
@@ -255,7 +261,12 @@ export async function watchProject(req: IncomingMessage, res: ServerResponse, us
         return "end";
       }
       unsure = 0;
-      return !!now && now.ownerUserId === target.account && now.bopsWsId === target.ws;
+      if (!now || now.ownerUserId !== target.account || now.bopsWsId !== target.ws) return false;
+      if (now.role !== access.role || now.computerUse !== access.computerUse) {
+        kept.delete(keyOf(user.id, projectId));
+        return "end";
+      }
+      return true;
     },
     track: (end) => track(user.id, projectId, end),
     ...(scope ? { scope } : {}),
@@ -300,7 +311,7 @@ const readState: Route = {
     // The owner's app threads they aren't shown, and the bots whose app lines they are (Orgo's team with Write: ws-slice.ts appThreadsFor).
     const given = bots && viewerAccess(sliceOf(blob, target.ws).workspace, viewer);
     const apps = given && appThreadsFor(blob, given, viewer);
-    const appBots = given && appBotsFor(given, viewer, bots, ownerAppsOpen(blob));
+    const appBots = given && appBotsFor(given, viewer, bots);
     // The owner's state hasn't come up yet, or no longer has this workspace: nothing to show of it.
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     // Which workspace each chat is in, for an owner the cloud has seen nothing of since it started (live.ts).
@@ -432,11 +443,12 @@ function appAct(key: string, x: Record<string, unknown>): { key: string; act: Me
  * such" (never saying whether it exists), Read is MEMBER_APPS_READ_ONLY, a domain the workspace doesn't own or a site
  * the app doesn't have "no such", a deploy that can't be put back NOT_WAITING. The owner's Mac checks it all again.
  */
-function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct, open: boolean) {
-  const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)), open);
+function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct) {
+  const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)));
   const app = apps?.list.find((x) => x.name === act.app);
   if (!apps || !app) throw new HttpError(404, "No such app.");
-  if (apps.level !== "write") throw new HttpError(403, "You can see these apps. Ask the owner for Write to change them.", { code: MEMBER_APPS_READ_ONLY });
+  // Shown at Read: their level, or Orgo's team in a workspace whose owner isn't (appsOpenFor), where nothing is theirs to change.
+  if (apps.level !== "write" || appsOpenFor(viewer) !== "write") throw new HttpError(403, "You can see these apps. Ask the owner for Write to change them.", { code: MEMBER_APPS_READ_ONLY });
   const site = act.site ?? app.name;
   if (![app.name, ...(app.siteNames ?? [])].includes(site)) throw new HttpError(404, "No such app.");
   if (act.act === "domain" && !apps.owned?.some((d) => d.id === act.zone)) throw new HttpError(404, "Pick a domain this workspace has.");
@@ -575,6 +587,14 @@ let cancel: (projectId: string, userId: string) => Promise<void> = (...a) => can
 /** Whether the owner's workspace goes through Bops Cloud (turns.ts routingOf). */
 const realRouted = async (owner: string, ws: string) => (await routingOf(owner, ws)).cloud;
 let routed: (owner: string, ws: string) => Promise<boolean> = realRouted;
+/**
+ * Whether a workspace still on the owner's Mac has its members' messages written by Bops Cloud first all the same
+ * (cloudChat, then answered by the Mac): one that may move to Bops Cloud (turns.ts autoRoute) or back, or that someone
+ * switched, with the owner's last Mac new enough to answer such a message. An act queued for the Mac as before is
+ * dropped by a Mac that has heard of a move meanwhile (lib/server/member-acts.ts); one written first never is.
+ */
+const realStoredFirst = async (owner: string, ws: string) => (await macNewEnough(owner)) && (chatAutoFor(owner) || (await routedWorkspaces(null, owner)).has(ws));
+let storedFirst: (owner: string, ws: string) => Promise<boolean> = realStoredFirst;
 let count: (userId: string) => Promise<void> = countAct;
 
 /**
@@ -616,7 +636,7 @@ const actIn: Route = {
     const slice = sliceOf(blob, target.ws, viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
-    if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act, ownerAppsOpen(blob));
+    if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
     else {
       const bots = botsTouched(blob, slice, body.act);
       // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.
@@ -628,8 +648,8 @@ const actIn: Route = {
     const computer = computerUseOf(slice.workspace, viewer);
     // Telling work on a bot's computer more, or letting it go on (computerAct): only with Use its computer.
     if (!computer && computerAct(blob, slice, body.act)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
-    // A workspace whose chat goes through Bops Cloud: a message in a one bot chat is written here now (cloudChat).
-    if (body.act.act === "chat" && (await routed(target.account, target.ws))) {
+    // A workspace whose chat goes through Bops Cloud, or may move there: a message in a chat is written here now (cloudChat).
+    if (body.act.act === "chat" && ((await routed(target.account, target.ws)) || (await storedFirst(target.account, target.ws)))) {
       const chatAct = body.act;
       if (slice.chats.some((c) => c.id === chatAct.chatId)) return cloudChat(res, { user: user!, role, target, viewer, projectId, key: body.key, act: chatAct, asked });
     }
@@ -642,6 +662,8 @@ const actIn: Route = {
       at: Date.now(),
       act: body.act,
       ...(computer ? { computer: true as const } : {}),
+      // An Admin, as orgo-web said it just now (asked afresh): the owner's Mac from 0.0.38 gives them every bot. Older Macs go by the entry.
+      ...(role.role === "admin" ? { role: "admin" as const } : {}),
     };
     // One row per member and key (cloud_pending_dedupe): the same act sent again adds nothing.
     await queue(target.account, "member", payload, `member:${user!.id}:${body.key}`, new Date(Date.now() + MEMBER_ACT_MS));
@@ -661,8 +683,9 @@ const actIn: Route = {
  * again under the owner's lock on the state as it is then (in their view, Write on the bot), written once by their key
  * with their stamp as orgo-web vouched for them, and its answer owed to the bot's computer when the owner let them use
  * it (else the message stays, with a note that the bot won't answer). An orgo-web notice for them that lands meanwhile
- * takes it back. A group, or a bot with no computer: the owner's Mac answers it (a "member" event for the message written), and
- * while that Mac is away the chat says so. 202 with the message's id, and macOn so an app from before says "Sending…"
+ * takes it back. A group, a bot with no computer, or a workspace still on the owner's Mac (its row, read under the lock:
+ * storedFirst): the owner's Mac answers it (a "member" event for the message written), and while that Mac is away the
+ * chat says so. 202 with the message's id, and macOn so an app from before says "Sending…"
  * until it lands, as it does at once.
  */
 async function cloudChat(
@@ -680,7 +703,15 @@ async function cloudChat(
     text: act.text,
     ...(act.replyTo ? { replyTo: act.replyTo } : {}),
     // orgo-web's word on Use its computer goes with the turn: its claim, beats and resume go by it (turns.ts memberStill).
-    member: { ...who, ref: key, ...(role.joinedAt !== undefined ? { joinedAt: role.joinedAt } : {}), projectId, ...(role.computerUse !== undefined ? { computerUse: role.computerUse } : {}) },
+    member: {
+      ...who,
+      ref: key,
+      ...(role.joinedAt !== undefined ? { joinedAt: role.joinedAt } : {}),
+      projectId,
+      ...(role.computerUse !== undefined ? { computerUse: role.computerUse } : {}),
+      // An Admin's turn goes by that (turns.ts memberStill): every bot and its computer. A notice that they're not one ends it.
+      ...(role.role === "admin" ? { role: "admin" as const } : {}),
+    },
     check: (locked) => {
       const slice = sliceOf(locked, target.ws, viewer);
       if (!slice.workspace) throw new HttpError(404, "No such workspace");
@@ -694,6 +725,8 @@ async function cloudChat(
     },
     still: () => (noticed.get(keyOf(user.id, projectId))?.n ?? 0) <= o.asked,
     macAway: !isOn(target.account),
+    // Answered by the bot's computer only while the workspace goes through Bops Cloud as its row says now.
+    byRow: true,
   });
   if (taken.fresh && taken.where === "mac") {
     const payload: MemberActPayload = {
@@ -707,6 +740,7 @@ async function cloudChat(
       stored: true,
       messageId: String(taken.message.id),
       ...(use ? { computer: true as const } : {}),
+      ...(role.role === "admin" ? { role: "admin" as const } : {}),
     };
     // Kept until the Mac opens (a day at most): the message is there already, and the chat says the bot answers then.
     await queue(target.account, "member", payload, `member:${user.id}:${key}`, new Date(Date.now() + STORED_ACT_MS));
@@ -742,8 +776,8 @@ export const routes: Route[] = [readState, actIn, changed];
 /**
  * For tests: forget every answer kept, and use this clock, this way to reach orgo-web, this wait between
  * an open stream's looks, this way to read an owner's state, and these ways to queue a member's act for the
- * owner's Mac, tell whether it's on, drop what waits, count acts, end what's owed on a computer and tell whether
- * a workspace's chat goes through Bops Cloud (unset: the real ones).
+ * owner's Mac, tell whether it's on, drop what waits, count acts, end what's owed on a computer, tell whether
+ * a workspace's chat goes through Bops Cloud, and whether its members' messages are written here first (unset: the real ones).
  */
 export function resetMembers(
   opts: {
@@ -757,6 +791,7 @@ export function resetMembers(
     count?: (userId: string) => Promise<void>;
     cancel?: (projectId: string, userId: string) => Promise<void>;
     routed?: (owner: string, ws: string) => Promise<boolean>;
+    storedFirst?: (owner: string, ws: string) => Promise<boolean>;
   } = {},
 ) {
   kept.clear();
@@ -772,4 +807,5 @@ export function resetMembers(
   cancel = opts.cancel ?? ((...a) => cancelMember(...a));
   // A test that fakes the owner's state fakes the switch too: off, unless it says.
   routed = opts.routed ?? (opts.state ? async () => false : realRouted);
+  storedFirst = opts.storedFirst ?? (opts.state ? async () => false : realStoredFirst);
 }

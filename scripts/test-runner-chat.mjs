@@ -148,6 +148,29 @@ await check("a turn is claimed, answered in its context on Bops Cloud's clock, a
   assert.equal(TC.turnsRunning(), false);
 });
 
+await check("an Admin's turn (TurnMember.role, as Bops Cloud found it taking their words) is answered as an Admin's: the role goes down to the turn", async () => {
+  reset();
+  const T = Date.now();
+  state.messages.push({ id: "m_admin", chatId: "bot:max", role: "user", text: "hi", at: T });
+  answers.set("claim", claimed("t_admin", "m_admin", T, 0, { userId: "u3", email: "u3@example.com", name: "Ivy", ref: "k3", projectId: "p1", role: "admin" }));
+  let seen;
+  R.runnerChatForTests({
+    identity: async () => "same",
+    answer: async (chatId, messageId, member) => {
+      seen = member;
+      return { text: null };
+    },
+  });
+  await R.answerTurn(ev("t_admin", "m_admin"));
+  assert.deepEqual(seen, { userId: "u3", email: "u3@example.com", name: "Ivy", ref: "k3", role: "admin" });
+  // Any other role Bops Cloud might send is no role: a member's turn, by their entry.
+  reset();
+  state.messages.push({ id: "m_other", chatId: "bot:max", role: "user", text: "hi", at: T });
+  answers.set("claim", claimed("t_other", "m_other", T, 0, { userId: "u3", name: "Ivy", ref: "k4", role: "owner" }));
+  await R.answerTurn(ev("t_other", "m_other"));
+  assert.deepEqual(seen, { userId: "u3", name: "Ivy", ref: "k4" });
+});
+
 await check("a row of another chat or bot, or one added with no turn, is as it was", () => {
   const plain = { id: "x", chatId: "bot:max", role: "bot", botId: "max", text: "x", at: 5 };
   assert.deepEqual(TC.stamp(plain), plain);

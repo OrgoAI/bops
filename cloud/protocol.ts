@@ -345,6 +345,18 @@ export type PhoneOwnerRemove = { number: string };
 export const CLOUD_TUNNEL_HEADER = "x-bops-cloud";
 
 /**
+ * What this Bops Cloud does that an app may wait for, said on GET /health (CloudHealth.caps). "roles": it gives an
+ * Admin (orgo-web's role) every bot, Your Apps at Write and Use its computer whatever the owner's entries say
+ * (ws-slice.ts viewerAccess, turns.ts memberStill), and shows members a workspace's apps. The owner's Mac offers Admin,
+ * and says Your Apps reach people, only once its Bops Cloud says so (lib/server/cloud-caps.ts): before that, an Admin
+ * with no entry would see no bot at all there.
+ */
+export const CLOUD_CAPS = ["roles"] as const;
+export type CloudCap = (typeof CLOUD_CAPS)[number];
+/** GET /health: the database answers (`ok`), how many Macs hold a tunnel, and CLOUD_CAPS (none from a Bops Cloud before them). */
+export type CloudHealth = { ok: boolean; macs: number; caps?: string[] };
+
+/**
  * AI credit (orgo-web's public.bops_ai_credit, which both sides read): what the user's bots spend on
  * OpenAI, AgentPhone, Typesafe and texted codes, at what Orgo pays for it, in micro-dollars (1 cent =
  * 10,000). When it's used up, a call that would spend more is answered 402 with this code (and
@@ -427,15 +439,19 @@ export const isBilling = (x: unknown): x is BopsBilling => x === "plan" || x ===
  * What billing by use gives and costs, as the app shows it when orgo-web's answer doesn't say (orgo-web's
  * own numbers win: lib/bops-billing.ts), and what the cloud holds a user billed by use to:
  *
- * - `computerHourlyCents`: the Bops computer (Orgo's Large: 4 cores, 16 GB, 80 GB) by the hour while it
- *   works, from Orgo credit. Asleep (suspended after 15 minutes nobody uses it) it costs nothing.
+ * - `computerHourlyCents`: the Bops computer at Orgo's Large (4 cores, 16 GB, 80 GB) by the hour while it
+ *   works, from Orgo credit: what every one costs that an app sends no size for. Asleep (suspended after 15
+ *   minutes nobody uses it) it costs nothing.
+ * - `computerFromHourlyCents`: the same at Orgo's Medium (2 cores, 8 GB, 80 GB), the smallest size a Bops
+ *   computer is made at, which bops.bot says it costs from (orgo-web lists each size's own price:
+ *   lib/bops-billing.ts SizeOffer).
  * - `numberMonthlyCents`: a phone number's month, from Orgo credit, as any number bought through the
  *   cloud (pricing.ts). A number the user had with a plan before stays theirs.
  * - `startCents`: the Orgo credit a new Orgo account starts with (orgo-web's signup credit, not Bops').
  * - `phoneNumbers`: how many numbers the user may hold, each paid for. `emails`: the main bot's inbox,
  *   free (cloud/plans.ts sets it up); a bot that has one from before keeps it.
  */
-export const BOPS_USAGE = { computerHourlyCents: 11, numberMonthlyCents: 300, startCents: 500, phoneNumbers: 5, emails: 1 } as const;
+export const BOPS_USAGE = { computerHourlyCents: 11, computerFromHourlyCents: 5.5, numberMonthlyCents: 300, startCents: 500, phoneNumbers: 5, emails: 1 } as const;
 
 /**
  * The oldest Mac app that knows billing by use (it shows the Orgo balance, never Bops' plans, and adds
@@ -687,7 +703,13 @@ export const WS_ROLES: readonly WsRole[] = ["owner", "admin", "member"];
  * (project_members.bops_computer_use, set by the owner's Mac: lib/server/orgo.ts MEMBER_COMPUTER_ROUTE). Bops Cloud goes
  * by it (cloud/ws-slice.ts computerUseOf); an orgo-web from before it sends none, and the owner's state says instead.
  */
-export type WsAccess = { role: WsRole; ownerUserId: string; bopsWsId: string | null; name: string; joinedAt?: number; computerUse?: boolean };
+/**
+ * `ownerEmail`: the owner's sign in email, from an orgo-web that sends it: a workspace whose owner is Orgo's own team
+ * (@orgo.ai) has Your Apps for the people in it (cloud/ws-slice.ts appsOpenFor). From an orgo-web that doesn't, none.
+ * An `admin` (Orgo's role) has every bot, Your Apps at Write and Use its computer in Bops, whatever the owner's state
+ * keeps for them (cloud/ws-slice.ts viewerAccess); only the owner deletes the workspace.
+ */
+export type WsAccess = { role: WsRole; ownerUserId: string; bopsWsId: string | null; name: string; joinedAt?: number; computerUse?: boolean; ownerEmail?: string };
 /** The code a project with no Bops workspace of its own is refused with (one "bops" project would show every workspace). */
 export const WS_NOT_SHAREABLE = "not_shareable";
 
@@ -733,6 +755,12 @@ export type SharedWsSlice = {
   groups?: SharedGroup[];
   /** The site each bot shown works on (lib/types.ts BotSite, Workspace.botSites): only with `apps`, by bot id. */
   sites?: Record<string, { app: string; site: string }>;
+  /**
+   * For an Admin alone: the Orgo computer each bot shown works on, by bot id (cloud/ws-slice.ts screensOf), so their Bops
+   * streams its screen with their own Orgo key (orgo-web hands the screen's password only to the owner and Admins). None
+   * for anyone else, for a bot on the owner's Mac, and from a Bops Cloud before roles.
+   */
+  screens?: Record<string, string>;
 };
 /** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
 export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
@@ -835,7 +863,23 @@ export type MemberActBody = { key: string; act: MemberAct };
  * when it took the act. `stored`: a chat act Bops Cloud wrote already (`messageId`), in a workspace whose chat goes through
  * it, for a bot with no computer: the owner's Mac answers that message, and adds none.
  */
-export type MemberActPayload = { projectId: string; wsId: string; member: { userId: string; email?: string; name: string }; joinedAt?: number; key: string; at: number; act: MemberAct; computer?: true; stored?: true; messageId?: string };
+/**
+ * `role`: "admin" when orgo-web said they're an Admin as Bops Cloud took it (asked afresh): the owner's Mac from 0.0.38
+ * gives them every bot, Your Apps at Write and Use its computer (lib/server/member-acts.ts). An older Mac ignores it.
+ */
+export type MemberActPayload = {
+  projectId: string;
+  wsId: string;
+  member: { userId: string; email?: string; name: string };
+  joinedAt?: number;
+  key: string;
+  at: number;
+  act: MemberAct;
+  computer?: true;
+  stored?: true;
+  messageId?: string;
+  role?: "admin";
+};
 /**
  * 202. `macOn`: the owner's Bops is connected now (false: it waits up to MEMBER_ACT_MS for it). In a workspace whose chat
  * goes through Bops Cloud (cloud/turns.ts), a chat act is written at once: `stored` with the message's id (`messageId`)
@@ -873,13 +917,20 @@ export const MEMBER_ACT_MS = 10 * 60_000;
 export const STORED_ACT_MS = 24 * 3600_000;
 
 /**
- * Chat through Bops Cloud (cloud/turns.ts). A workspace switched to it (bops.chat_routing, off by default) has every
+ * Chat through Bops Cloud (cloud/turns.ts). A workspace switched to it (bops.chat_routing) has every
  * message someone says in a one bot chat written by Bops Cloud first: a member's (POST /v1/ws/<id>/act), and the
  * owner's own from their Bops (POST /v1/chats/<chatId>/send, ChatSendBody). It checks who may (the owner always; a
  * member with Write on the bot, and Use its computer for an answer), writes the message once by its key, and owes the
  * answer as a turn: the runner on the bot's computer hears it on its own stream (GET /v1/runner/live, RunnerTurnEvent),
  * claims it (RunnerClaim), beats while it runs and says it's done. Bops Cloud wakes the computer when no runner listens.
  * Every viewer hears the message, the answer and where the turn stands (LiveTurn) on the stream they already watch.
+ *
+ * Nobody has to switch it: with BOPS_CHAT_AUTO on for the owner, Bops Cloud moves a workspace there by itself once every
+ * computer its bots work on has a runner the owner's Mac set up and saw running that connected at CLOUD_CHAT_MIN_VERSION
+ * or newer (set_by "auto"), and back to the Mac whenever one can't answer (set_by "auto", or "auto-held" for a wake
+ * refused, which waits a day). A choice the owner (POST /v1/chat-routing {mode: "mac" | "cloud"}) or Orgo's staff made
+ * is never moved, either way; {mode: "auto"} gives it back. The owner's state carries it on each workspace
+ * (Workspace.chatOn "cloud", or "mac" for a choice of the Mac; chatAuto while Bops Cloud may move it).
  */
 /** What the owner's Bops sends: its own key for the message (its id is "msg_o_<key>"), the words, and the message it replies to. */
 export type ChatSendBody = { key: string; text: string; replyTo?: string };
@@ -896,13 +947,22 @@ export const MESSAGE_TAKEN = "message_taken";
 export const CHAT_NEEDS_UPDATE = "chat_needs_update";
 /** The first Bops whose Mac keeps to chat through Bops Cloud (runners kept up on identity, Use its computer, stored messages). */
 export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
+/**
+ * The first Bops with the owner's switch in Settings, General (components/app/chat-switch.tsx): Bops Cloud moves a
+ * workspace to it by itself (cloud/turns.ts autoRoute) only for an owner whose last Mac is at this or newer, so an
+ * owner it moves can always choose their Mac again in the app.
+ */
+export const CHAT_AUTO_MIN_VERSION = "0.0.38";
+/** 409 on the owner's switch turned back on ("auto") where Bops Cloud doesn't move workspaces for them yet (BOPS_CHAT_AUTO). */
+export const CHAT_AUTO_OFF = "chat_auto_off";
 /** On a runner's stream, an event "turn": answer this message (`seq`: its write, so the runner reads messages up to it first). */
 export type RunnerTurnEvent = { id: string; messageId: string; chatId: string; botId: string; seq: number };
 /** On a runner's stream, an event "turn-cancel": stop that turn and write nothing more for it (its member was removed, or it was taken back). */
 export type RunnerCancelEvent = { id: string };
 /** Who said the message a turn answers, when a member did (Bops Cloud vouched): what the bot is told, and checked again as it claims. */
 /** `computerUse`: what orgo-web said of their Use its computer when the message was taken (WsAccess.computerUse), which the turn goes by after. */
-export type TurnMember = { userId: string; email?: string; name: string; ref: string; joinedAt?: number; projectId?: string; computerUse?: boolean };
+/** `role`: "admin" when orgo-web said so as the message was taken (an Admin's turn needs no entry: cloud/turns.ts memberStill). None: a member. */
+export type TurnMember = { userId: string; email?: string; name: string; ref: string; joinedAt?: number; projectId?: string; computerUse?: boolean; role?: "admin" };
 /**
  * POST /v1/runner/turns/<id>/claim, answered 200: the turn is this runner's until it stops beating. `now`: Bops Cloud's
  * clock, which the answer's times are taken from (a computer's own can lag after it wakes); `humanAt` the message's

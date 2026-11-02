@@ -2,6 +2,7 @@
 
 import type { AppHosting, AppsForMembers, IngotToken } from "./hosted-apps";
 import type { Chain } from "./chain";
+import type { ComputerSize } from "./bops-billing";
 import type { MemberAccessMap, MemberWho } from "./member-access";
 import type { Ping } from "./pings";
 import type { SharedOpen } from "./shared";
@@ -300,11 +301,19 @@ export type Workspace = {
   memberAccess?: MemberAccessMap;
   /**
    * Whose chat goes through Bops Cloud first: "cloud" when every message here, the owner's and their people's, is
-   * taken by Bops Cloud, which checks who may, keeps it and has the bot's computer answer. Unset: as before (the
-   * owner's Mac answers). Off by default, turned on a workspace at a time. Then only Bops Cloud writes a member's
-   * stamp on a message here (cloud/computer-scope.ts cloudChatOn, memberStampKept).
+   * taken by Bops Cloud, which checks who may, keeps it and has the bot's computer answer. Then only Bops Cloud writes
+   * a member's stamp on a message here (cloud/computer-scope.ts cloudChatOn, memberStampKept). "mac": the owner (or
+   * Orgo) chose the owner's Mac, which answers as before. Unset: the Mac answers for now. Bops Cloud writes it, from
+   * its switch (cloud/turns.ts), and puts it back on every save; only "cloud" means the cloud path.
    */
-  chatOn?: "cloud";
+  chatOn?: "cloud" | "mac";
+  /**
+   * Bops Cloud moves this workspace's chat by itself (cloud/turns.ts autoRoute): to it once every computer its bots
+   * work on has a runner that answers, back to the Mac whenever one can't. Unset: it doesn't (someone chose, or it
+   * isn't on for this account). Bops Cloud writes it; a computer someone else can use gets a runner for it too
+   * (lib/server/runner-install.ts sharedRunnerOk), and Settings, General says so.
+   */
+  chatAuto?: boolean;
   /**
    * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
    * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
@@ -1091,6 +1100,19 @@ export type ThreadReply = {
  * without Use its computer, so no bot answers it, and a turn that reads it later takes it as said, never as what to do.
  */
 export type MemberSaid = MemberWho & { ref?: string; noUse?: true };
+/**
+ * A member as their turn goes by them (chat.ts TurnOptions.member): MemberSaid, and `role` "admin" when Bops Cloud or
+ * the owner's Mac found them an Admin as it took what they said (cloud/protocol.ts TurnMember.role, member-acts.ts
+ * adminOf). An Admin's turn has every bot at Write and Your Apps at Write, whatever Workspace.memberAccess keeps for
+ * them. Never kept on a Message, a thread or a session (saidOf): a role is orgo-web's, asked afresh each time.
+ */
+export type MemberTurn = MemberSaid & { role?: "admin" };
+/** What a member said goes down as (Message.member, a thread's reply, a session's): MemberTurn without its role. */
+export function saidOf(m: MemberTurn): MemberSaid {
+  const said: MemberTurn = { ...m };
+  delete said.role;
+  return said;
+}
 /** How one of the viewer's own acts in a shared workspace stands, until the owner's Bops has written it (Message.memberSend). */
 export type MemberSend = { state: "sending" | "waiting" | "failed"; error?: string; key: string };
 
@@ -1673,6 +1695,18 @@ export type AppState = {
    */
   credits?: { out: boolean; at: number; usage?: true; computer?: true };
   /**
+   * Billed by use, the size of the user's free Bops computer (lib/bops-billing.ts ComputerSize): the one it
+   * is, as Orgo's plan read last said, or the one they picked before there was one, which it's made at
+   * (lib/server/plan.ts makeFree). Shared by every Mac of theirs, so a computer made again (deleted on
+   * Orgo's site) comes back the same size. Unset: none known yet, and a new one is made at Orgo's default.
+   */
+  computerSize?: ComputerSize;
+  /**
+   * When the user answered Pick your computer (components/app/computer-size.tsx), once per account: kept
+   * their computer's size or switched it. Unset: it's asked, of a user billed by use, when Orgo lists sizes.
+   */
+  computerSizeChosenAt?: number;
+  /**
    * A Connected App (or a vault key) just finished connecting for a bot, and the window offers that bot's
    * starter routines for it (GET /api/routines/suggestions). One at a time; cleared once answered or
    * dismissed (POST /api/routines/suggestions, /api/routines/suggestions/dismiss).
@@ -1771,6 +1805,8 @@ export type RunnerState = {
   at: number;
   upgrading?: { version: string; buildId: string; by: string; at: number };
   down?: { status: string; at: number };
+  /** Set up on a computer someone else can use (runner-install.ts sharedRunnerOk): on its identity alone, so never given a key, even by a Mac just started. */
+  shared?: boolean;
 };
 
 /** A new task's words that put it on the user's Mac (lib/server/where.ts chooseWhere), and a routine's (routineOnMac). */

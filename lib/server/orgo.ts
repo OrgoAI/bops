@@ -8,6 +8,7 @@ import { RTC_SHRUNK_MS } from "@/lib/rtc";
 import { recordUsage } from "./usage";
 import { getState, stateEpoch, update } from "./store";
 import { MAIN_WORKSPACE, WORKSPACE_APPS_SINCE, type Workspace } from "@/lib/types";
+import type { ComputerSize } from "@/lib/bops-billing";
 import type { DeployState } from "@/lib/hosted-apps";
 import type { SharedRole, SharedWorkspace } from "@/lib/shared";
 import { folderKey, moveWorkspaceFolder } from "./workspace-skills";
@@ -356,7 +357,13 @@ export async function sharedWorkspaces(): Promise<SharedWorkspace[]> {
   const list = (await call<{ workspaces?: OrgoWorkspace[] }>("GET", "/workspaces")).workspaces ?? [];
   return list
     .filter((w) => (w.role === "admin" || w.role === "member") && w.product === "bops" && typeof w.bops_ws_id === "string" && !!w.bops_ws_id)
-    .map((w) => ({ projectId: w.id, name: w.name, owner: typeof w.owner_email === "string" ? w.owner_email : "", role: w.role as SharedRole }));
+    .map((w) => ({
+      projectId: w.id,
+      name: w.name,
+      owner: typeof w.owner_email === "string" ? w.owner_email : "",
+      role: w.role as SharedRole,
+      orgoUrl: `${orgoOrigin()}/workspaces?project_id=${encodeURIComponent(w.id)}`,
+    }));
 }
 
 /**
@@ -691,7 +698,13 @@ export const orgoMembers = {
   /** Take someone's access away (Orgo stops their open screens within seconds). */
   remove: (key: string, workspace: string, memberId: string) =>
     callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "DELETE", body: { memberId } }),
-  /** Change what someone can do. Orgo's words here: "member" (View only) or "admin" (Full access). */
+  /**
+   * Change a waiting invite's role without sending it again (no new link, no email): "viewer" (a Member) or "admin". An
+   * orgo-web before it answers 404 or 405 with no "Invite not found" (lib/server/members.ts says to resend it then).
+   */
+  setInviteRole: (key: string, workspace: string, email: string, permission: "viewer" | "admin") =>
+    callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/invite`, { method: "PATCH", body: { email, permission } }),
+  /** Change someone's role. Orgo's words here: "member" (a Member) or "admin" (an Admin). */
   setRole: (key: string, workspace: string, memberId: string, role: "member" | "admin") =>
     callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "PATCH", body: { memberId, role } }),
   /** Use its computer for a member, on or off (MEMBER_COMPUTER_ROUTE): orgo-web keeps it and goes by it. */
@@ -758,8 +771,10 @@ export const orgo = {
    * `free`: the user's one free Bops computer (bops_free), off their Orgo plan, at the template's size
    * whatever the plan (Orgo sets it; no `ram` is sent). Orgo makes it only when the user has none yet,
    * in their own "bops" workspace, from Orgo's Bops template; otherwise this is an ordinary create.
+   * `size` with `free` (bops_size): billed by use, the size it's made at, one Orgo listed in its plan read
+   * (lib/server/plan.ts makeFree). Without one Orgo makes it Large, as for every app before sizes.
    */
-  create: async (name: string, opts: { ram?: number; free?: boolean; wsId?: string } = {}) => {
+  create: async (name: string, opts: { ram?: number; free?: boolean; wsId?: string; size?: ComputerSize } = {}) => {
     const epoch = stateEpoch();
     // Never made again for a waking code: a new computer isn't a computer waking.
     const c = made(
@@ -770,7 +785,7 @@ export const orgo = {
           workspace_id: await orgoProjectFor(opts.wsId),
           name,
           template_ref: BOPS_TEMPLATE,
-          ...(opts.free ? { bops_free: true } : opts.ram ? { ram: opts.ram } : {}),
+          ...(opts.free ? { bops_free: true, ...(opts.size ? { bops_size: opts.size } : {}) } : opts.ram ? { ram: opts.ram } : {}),
         },
         { wait: false, timeoutMs: MAKE_MS },
       ),
@@ -778,6 +793,30 @@ export const orgo = {
     changed();
     recordUsage("computer.create", {}, epoch);
     return c;
+  },
+
+  /**
+   * Switch the free Bops computer to `size` (lib/server/computer-size.ts switchSize), the way Orgo's plan
+   * read said (`change`): billed by the hour, Orgo's switch for it (POST /api/bops/computer/size), which
+   * bills the new size from the moment it changes; part of the user's Orgo plan, Orgo's own resize (PATCH
+   * /api/computers/{id}/resize), under the plan's rules. Either may restart it (`restarted`). Its disk stays.
+   */
+  setSize: (computerId: string, size: ComputerSize, change: "bops" | "plan") =>
+    change === "bops"
+      ? call<{ size?: string; changed?: boolean; restarted?: boolean | null }>("POST", "/bops/computer/size", { size }, { timeoutMs: MAKE_MS })
+      : call<{ restarted?: boolean | null }>("PATCH", `/computers/${computerId}/resize`, { size }, { timeoutMs: MAKE_MS }),
+
+  /** Restart a computer (Orgo's POST /api/computers/{id}/restart): what's open on it closes. Only when the user asked for what needs it. */
+  restart: (computerId: string) => call("POST", `/computers/${computerId}/restart`, undefined, { timeoutMs: MAKE_MS }),
+
+  /**
+   * A computer changed size: whether Orgo streams it over WebRTC is asked afresh (it needs 4 cores), not
+   * left to a refusal or a shrunk stream from before (rtcRefused, rtcShrank), which would keep a computer
+   * grown back to Large on VNC for minutes.
+   */
+  forgetStream: (computerId: string) => {
+    rtcRefused.delete(computerId);
+    rtcShrank.delete(computerId);
   },
 
   /**

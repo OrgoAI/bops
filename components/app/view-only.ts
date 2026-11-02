@@ -15,7 +15,11 @@
  * opens them asks readAllowed first.
  */
 
-/** The calls that still go while it's open: the switcher (leaving, switching, its names), signing in and out, notices, usage events, what's on screen, the user's own vault, account and name. */
+/**
+ * The calls that still go while it's open: the switcher (leaving, switching, its names, and an Admin's live screen of a
+ * bot there, /api/workspaces/shared/screen, which takes the computer from the shared copy), signing in and out,
+ * notices, usage events, what's on screen, the user's own vault, account and name.
+ */
 const ALLOWED = [
   /^\/api\/workspaces(\/|\?|$)/,
   /^\/api\/auth\//,

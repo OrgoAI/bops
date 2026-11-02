@@ -181,7 +181,7 @@ let compactSays = { ok: true };
 const kept = [];
 let appFails = null;
 
-const { memberEvent } = await import(`${root}/lib/server/member-acts.ts`);
+const { memberEvent, resetAdmins } = await import(`${root}/lib/server/member-acts.ts`);
 // `computer`: Bops Cloud vouched for their Use its computer (as orgo-web keeps it), unless `computer: false`.
 const event = (act, o = {}) => ({
   projectId: "proj_acme",
@@ -192,6 +192,8 @@ const event = (act, o = {}) => ({
   at: o.at ?? Date.now(),
   act,
   ...(o.computer === false ? {} : { computer: true }),
+  ...(o.role ? { role: o.role } : {}),
+  ...(o.stored ? { stored: true, messageId: o.messageId } : {}),
 });
 const warned = [];
 console.warn = (line) => warned.push(String(line));
@@ -263,6 +265,15 @@ await check("a member's chat queued before the workspace was switched to Bops Cl
   await memberEvent(event({ act: "chat", chatId: "bot:max", text: "hi" }), "e_sw");
   assert.deepEqual(did, []);
   assert.ok(warned.some((w) => w.includes("e_sw") && w.includes("through Bops Cloud")));
+});
+
+await check("a workspace whose owner chose the Mac, or that Bops Cloud may move later, is still the Mac's: a queued chat is answered here", async () => {
+  for (const ws of [{ chatOn: "mac" }, { chatAuto: true }]) {
+    fresh();
+    Object.assign(state.workspaces[1], ws);
+    await memberEvent(event({ act: "chat", chatId: "bot:max", text: "hi" }), "e_mac");
+    assert.equal(did[0]?.[0], "chat", JSON.stringify(ws));
+  }
 });
 
 await check("a message Bops Cloud wrote already is answered only while they still may: Use its computer turned off since (a group with a computer), or Write taken away", async () => {
@@ -558,6 +569,75 @@ await check("Your Apps: refused at Read, from before they joined, apps not open 
   fresh({ ownerEmail: "owner@orgo.ai" });
   await memberEvent(event({ act: "deploy", app: "shop" }, { member: SAM }), "e");
   assert.ok(!did.some((d) => d[0] === "deployApp"), "an email apps aren't open to");
+});
+
+/* ---------------- An Admin (Orgo's role, MemberActPayload.role) ---------------- */
+
+const ADA = { userId: "user_ada", email: "ada@example.com", name: "Ada" };
+await check("an Admin with no entry chats with every bot, replies, answers and uses its computer; with no role, the same act is refused", async () => {
+  fresh();
+  await memberEvent(event({ act: "chat", chatId: "bot:ivy", text: "Plan the week" }, { member: ADA, role: "admin", key: "key_admin_001", computer: false }), "e_ad1");
+  assert.deepEqual(did.map((d) => d.slice(0, 2)), [["chat", "bot:ivy"]], "a bot nobody gave them, with no entry at all");
+  // The role goes down to the turn (chat.ts TurnOptions.member): it decides what the bot does for them, not an entry.
+  assert.deepEqual(did[0][4], { ...ADA, ref: "key_admin_001", role: "admin" });
+  await memberEvent(event({ act: "reply", sessionId: "t-max", text: "Window seat" }, { member: ADA, role: "admin", key: "key_admin_002", computer: false }), "e_ad2");
+  await memberEvent(event({ act: "answer", askId: "ask-1", reply: "once" }, { member: ADA, role: "admin", key: "key_admin_003" }), "e_ad3");
+  await memberEvent(event({ act: "chat", chatId: "g-both", text: "Both of you" }, { member: ADA, role: "admin", key: "key_admin_004" }), "e_ad4");
+  assert.deepEqual(did.map((d) => d[0]), ["chat", "reply", "answer", "chat"], "Use its computer too, whatever Bops Cloud's flag says");
+  assert.equal(did[3][4].role, "admin", "a group's turn too");
+  assert.equal(did[1][5].role, undefined, "a reply in a thread is kept without the role");
+  // The owner's own logins stay theirs, and work on the owner's Mac too: an Admin is no owner.
+  did.length = 0;
+  await memberEvent(event({ act: "answer", askId: "ask-gmail", reply: "always" }, { member: ADA, role: "admin", key: "key_admin_005" }), "e_ad5");
+  await memberEvent(event({ act: "reply", sessionId: "t-onmac", text: "go" }, { member: ADA, role: "admin", key: "key_admin_006" }), "e_ad6");
+  assert.deepEqual(did, [], "the owner's logins and Mac stay the owner's");
+  // No role: their entry (none) counts, as for anyone.
+  fresh();
+  await memberEvent(event({ act: "chat", chatId: "bot:ivy", text: "hi" }, { member: ADA, key: "key_admin_007" }), "e_ad7");
+  assert.deepEqual(did, []);
+  assert.ok(warned.some((w) => w.includes("e_ad7") && w.includes("not done")));
+});
+
+await check("an Admin's act on an app: Your Apps at Write with no entry, while apps are open to the owner", async () => {
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  await memberEvent(event({ act: "deploy", app: "shop" }, { member: ADA, role: "admin", key: "key_admin_app1" }), "e_ad_app");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(did.some((d) => d[0] === "deployApp"), "deployed");
+  fresh({ ownerEmail: "owner@example.com" });
+  kept.length = 0;
+  await memberEvent(event({ act: "deploy", app: "shop" }, { member: ADA, role: "admin", key: "key_admin_app2" }), "e_ad_app2");
+  assert.ok(!did.some((d) => d[0] === "deployApp"), "never where apps aren't open to the owner");
+});
+
+await check("a stored message from an Admin hours ago: an Admin only while orgo-web's list says so now, never when it can't be asked", async () => {
+  const hoursAgo = Date.now() - 3 * 3_600_000;
+  const stored = (key) => event({ act: "chat", chatId: "bot:ivy", text: "Later" }, { member: ADA, role: "admin", key, at: hoursAgo, stored: true, messageId: `msg_${key}` });
+  const withMessage = (key) => state.messages.push({ id: `msg_${key}`, chatId: "bot:ivy", role: "user", text: "Later", at: hoursAgo });
+  let asked = 0;
+  // Still an Admin on orgo-web: answered.
+  fresh();
+  withMessage("key_stored_01");
+  resetAdmins({ key: async () => "owner-key", list: async () => (asked++, { status: 200, json: { members: [{ id: "user_ada", email: "ada@example.com", role: "admin" }] } }) });
+  await memberEvent(stored("key_stored_01"), "e_st1");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(did.map((d) => d[0]), ["answer"]);
+  assert.deepEqual(did[0][3], { ...ADA, ref: "key_stored_01", role: "admin" }, "answered as an Admin's turn");
+  assert.equal(asked, 1, "orgo-web asked once");
+  // Made a Member since (the notice lost): their entry counts, and they have none.
+  fresh();
+  withMessage("key_stored_02");
+  resetAdmins({ key: async () => "owner-key", list: async () => ({ status: 200, json: { members: [{ id: "user_ada", email: "ada@example.com", role: "member" }] } }) });
+  await memberEvent(stored("key_stored_02"), "e_st2");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(did, [], "not answered");
+  // orgo-web can't be asked: not an Admin.
+  fresh();
+  withMessage("key_stored_03");
+  resetAdmins({ key: async () => "owner-key", list: async () => null });
+  await memberEvent(stored("key_stored_03"), "e_st3");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(did, []);
+  resetAdmins();
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

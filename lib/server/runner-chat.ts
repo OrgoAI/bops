@@ -1,6 +1,6 @@
 import "server-only";
 import { TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnMember } from "@/cloud/protocol";
-import type { AppApproval, MemberSaid } from "@/lib/types";
+import type { AppApproval, MemberTurn } from "@/lib/types";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
 import { getState, pullState, stateReady } from "./store";
@@ -46,7 +46,7 @@ type Box = {
   /** Turns being answered here, by id. */
   running: Map<string, TurnContext>;
   /** Tests: what runs the turn (chat.ts answerMessage), and how this runner makes sure it's on its own computer. */
-  answer?: (chatId: string, messageId: string, member?: MemberSaid) => Promise<{ paused?: boolean } | null>;
+  answer?: (chatId: string, messageId: string, member?: MemberTurn) => Promise<{ paused?: boolean } | null>;
   identity?: () => Promise<"same" | "copy" | "unknown">;
   beatMs?: number;
   retryMs?: number[];
@@ -169,8 +169,12 @@ function cancel(id: string) {
   box.running.delete(id);
 }
 
-/** What a member's turn tells the bot of who's talking (Message.member). */
-const saidBy = (m: TurnMember | undefined): MemberSaid | undefined => (m ? { userId: m.userId, ...(m.email ? { email: m.email } : {}), name: m.name, ref: m.ref } : undefined);
+/**
+ * What a member's turn tells the bot of who's talking (Message.member), and their role as Bops Cloud found it taking
+ * their words (TurnMember.role: an Admin's turn has every bot and Your Apps at Write, chat.ts TurnOptions.member).
+ */
+const saidBy = (m: TurnMember | undefined): MemberTurn | undefined =>
+  m ? { userId: m.userId, ...(m.email ? { email: m.email } : {}), name: m.name, ref: m.ref, ...(m.role === "admin" ? { role: "admin" as const } : {}) } : undefined;
 
 /** The turn's beats while `run` runs, then its end: done (with its tapback), paused for an OK, or nothing (taken back). */
 async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }) {

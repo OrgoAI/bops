@@ -52,8 +52,26 @@ export const FRESH_MS = 3_600_000;
 /** While a site's newest deploy is queued or running, it's read again this often. */
 export const DEPLOYING_MS = 30_000;
 
-/** Whether anyone the workspace is shared with has Your Apps at Read or more (`level`: at that level or more). */
-export const anyoneSeesApps = (wsId: string, level: "read" | "write" = "read") => Object.values(getState().workspaces?.find((w) => w.id === wsId)?.memberAccess ?? {}).some((a) => permits(appsLevelOf(a), level));
+/**
+ * Who orgo-web's list last said is in each workspace besides the owner (members.ts notePeople, wherever this Mac reads
+ * it: the People sheet, the look at the runners): anyone, and an Admin, joined or invited. In memory only: until the
+ * list is read again after a restart, the entries alone say it.
+ */
+const people = ((globalThis as unknown as { bopsPeopleIn?: Map<string, { any: boolean; admin: boolean }> }).bopsPeopleIn ??= new Map());
+export function notePeopleIn(wsId: string, seen: { any: boolean; admin: boolean }) {
+  people.set(wsId, seen);
+}
+
+/**
+ * Whether anyone the workspace is shared with may be shown its apps (`level`: at that level or more): someone with Your
+ * Apps there, or (as orgo-web's list said) an Admin, who has Write with no entry, and for Read anyone in it at all:
+ * Bops Cloud shows each viewer only what's theirs (cloud/ws-slice.ts appsFor).
+ */
+export const anyoneSeesApps = (wsId: string, level: "read" | "write" = "read") => {
+  const p = people.get(wsId);
+  if (p && (level === "read" ? p.any || p.admin : p.admin)) return true;
+  return Object.values(getState().workspaces?.find((w) => w.id === wsId)?.memberAccess ?? {}).some((a) => permits(appsLevelOf(a), level));
+};
 
 /** JSON with every object's keys in order (as cloud/ws-slice.ts canonical), to tell whether what's shown changed. */
 const canonical = (v: unknown) => JSON.stringify(v, (_k, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as Record<string, unknown>)[k]])) : x));

@@ -9,7 +9,7 @@ import { checkCreditAccess } from "./credit.ts";
 import { migrate, query } from "./db.ts";
 import * as deleteUser from "./delete-user.ts";
 import { HttpError, matches, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
-import { BOPS_DEVICE_HEADER, COMPUTER_NOT_ALLOWED } from "./protocol.ts";
+import { BOPS_DEVICE_HEADER, CLOUD_CAPS, COMPUTER_NOT_ALLOWED, type CloudHealth } from "./protocol.ts";
 import * as handles from "./handles.ts";
 import * as hooks from "./hooks.ts";
 import * as lines from "./lines.ts";
@@ -46,7 +46,8 @@ const health: Route = {
       await query("SELECT 1");
       dbOk = true;
     } catch {}
-    sendJson(res, dbOk ? 200 : 503, { ok: dbOk, macs: tunnel.connectedCount() });
+    const body: CloudHealth = { ok: dbOk, macs: tunnel.connectedCount(), caps: [...CLOUD_CAPS] };
+    sendJson(res, dbOk ? 200 : 503, body);
   },
 };
 
@@ -84,8 +85,8 @@ function requestUrl(req: IncomingMessage): URL | null {
 }
 
 /**
- * Which app a signed-in call came from: kept with the user's account, and an app too old for the cloud
- * is told to update (app-version.ts). Bops for iPhone's version is its own: it never stands in for the Mac's.
+ * Which app a signed-in call came from: kept with the user's account (a Mac's, never a computer's runner's), and an
+ * app too old for the cloud is told to update (app-version.ts). Bops for iPhone's version is its own: it never stands in for the Mac's.
  * A Mac's app that a newer one locked out of the user's state, and that runs its routines all the same,
  * is refused the proxies (state.ts behindState). A computer's runner stops its own on that.
  */
@@ -95,7 +96,9 @@ async function appCheck(req: IncomingMessage, user: CloudUser, path: string) {
     noteIphoneVersion(user.id, version);
     return requireIphoneVersion(version);
   }
-  noteAppVersion(user.id, version);
+  // The Mac's only: a computer's runner is a Bops the Mac set up, and saying it would stand in for the Mac (turns.ts,
+  // whether the owner's Bops keeps to chat through Bops Cloud).
+  if (!user.computer) noteAppVersion(user.id, version);
   requireAppVersion(path, version);
   if (!user.computer) await requireUsageAppVersion(user.id, path, version);
   if (!user.computer && path.startsWith("/proxy/") && (await state.behindState(req, user.id))) throw state.behindRefusal(path);

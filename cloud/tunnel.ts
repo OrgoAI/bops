@@ -135,6 +135,18 @@ export async function queueForMac(userId: string, kind: PendingKind, payload: un
   sendEvent(mac, r.rows[0]);
 }
 
+/**
+ * Hand the user's connected Mac what waits for it now (events another write put in bops.cloud_pending inside its own
+ * transaction: cloud/turns.ts handing a workspace's turns back to the Mac). Nothing when no Mac is connected: it gets
+ * them as it connects. One sent already isn't sent twice.
+ */
+export async function deliverWaitingTo(userId: string): Promise<void> {
+  const mac = macs.get(userId);
+  if (!mac) return;
+  await mac.caughtUp;
+  await deliverWaiting(mac);
+}
+
 type PendingRow = { id: string; kind: PendingKind; payload: unknown; created_at: Date };
 
 /** When this process last cleared out old events. */

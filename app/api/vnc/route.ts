@@ -33,7 +33,7 @@ export async function GET(request: Request) {
   const computerId = c.computerId;
   try {
     const info = await orgo.streamInfo(computerId);
-    const plan: StreamPlan = { password: info.password };
+    const plan: StreamPlan = { password: info.password, computerId };
     if (viaOrgo) {
       const ws = `${orgoOrigin().replace(/^http/, "ws")}/desktops/${encodeURIComponent(computerId)}/ws`;
       const token = `token=${encodeURIComponent(info.password)}`;

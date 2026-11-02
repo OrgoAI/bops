@@ -326,7 +326,13 @@ test("the owner sees every bot of the workspace; anyone else only the bots the o
   assert.deepEqual(view(blob, OWNER_VIEW), { bots: ["a", "b"], chats: ["bot:a", "bot:b", "both", "just-a", "odd"], sessions: ["s-a", "s-b"], routines: ["r-a", "r-b"], watches: ["w-a", "w-b"] });
   const ann = { bots: ["a"], chats: ["bot:a", "just-a"], sessions: ["s-a"], routines: ["r-a"], watches: ["w-a"] };
   assert.deepEqual(view(blob, member()), ann, "a's chats and its things; not the group with b, nor anything of b's");
-  assert.deepEqual(view(blob, member({ role: "admin" })), ann, "an admin is held to what they were given too");
+  // An Admin: every bot and everything of each, whatever was kept for them (none here), but a chat with a bot that isn't one.
+  const all = { bots: ["a", "b"], chats: ["bot:a", "bot:b", "both", "just-a"], sessions: ["s-a", "s-b"], routines: ["r-a", "r-b"], watches: ["w-a", "w-b"] };
+  assert.deepEqual(view(blob, member({ role: "admin" })), all, "an Admin has every bot");
+  assert.deepEqual(view(team({}), member({ role: "admin", email: "nobody@acme.com" })), all, "with no entry at all");
+  assert.deepEqual(view(team({ "ann@acme.com": { others: "none", bots: { a: "none", b: "none" } } }), member({ role: "admin" })), all, "and over an entry of None");
+  assert.deepEqual(view(team({ "ann@acme.com": { others: "write", bots: {}, at: 5 } }), member({ role: "admin", joinedAt: 10 })), all, "and over an entry from before they joined");
+  assert.deepEqual(sharedSlice(blob, "ws_acme", member({ role: "admin" })).levels, { a: "write", b: "write" }, "at Write");
   assert.deepEqual(view(blob, { role: "owner", id: "u-ann", email: "ann@acme.com" }), view(blob, OWNER_VIEW), "the owner is never held to an entry");
   // The teammate a's chat is asking is b, hidden: not named either.
   assert.deepEqual(sharedSlice(blob, "ws_acme", member()).chats[0], { id: "bot:a", kind: "bot", botIds: ["a"], workspaceId: "ws_acme", asking: {} });
@@ -391,7 +397,7 @@ test("Use its computer as orgo-web says it: bops-role's computerUse is read (a r
   assert.equal(computerUseOf(ws(blob("none")), member({ computerUse: true })), false, "turned off in the owner's state");
   // orgo-web's no: off, whatever the owner's state keeps.
   assert.equal(computerUseOf(ws(blob("use")), member({ computerUse: false })), false, "orgo-web's no wins");
-  assert.equal(computerUseOf(ws(blob("use")), member({ role: "admin", computerUse: false })), false, "an admin the same");
+  assert.equal(computerUseOf(ws(blob("none")), member({ role: "admin", computerUse: false })), true, "an Admin always: orgo-web never keeps one off");
   // The owner always; from an orgo-web that doesn't say, the owner's state alone (as before).
   assert.equal(computerUseOf(ws(blob()), { ...OWNER_VIEW, computerUse: false }), true, "the owner always");
   assert.equal(computerUseOf(ws(blob("use")), member()), true);
@@ -518,7 +524,6 @@ test("the owner's apps stay the owner's: anyone given the bot at Read sees no ap
   const goal = "Work on Tess's app recipe-box. It's the Ingot repo p1/recipe-box (Ingot is Orgo's source control). Tess puts it live from the Apps page.";
   const blob = {
     ...team({ "kim@example.com": { others: "none", bots: { a: "read" } }, "tom@orgo.ai": { others: "none", bots: { a: "read" } } }),
-    account: { user: { id: OWNER, email: "owner@orgo.ai" } },
     sessions: [
       { id: "s-a", botId: "a", chatId: "bot:a", title: "A's thread", goal: "Plan the week" },
       { id: "s-app", botId: "a", chatId: "bot:a", sentVia: "you", title: "Work on recipe-box", goal, app: { wsId: "ws_acme", name: "recipe-box" }, steps: [{ at: 1, tool: "setup", detail: "Pulled the newest recipe-box into /workspace/apps/recipe-box" }] },
@@ -541,8 +546,9 @@ test("the owner's apps stay the owner's: anyone given the bot at Read sees no ap
     { id: "m8", chatId: "bot:a", role: "bot", botId: "a", text: "Here's the week.", resultOf: "s-a", sessionIds: ["s-a"], at: 8 },
   ];
   assert.deepEqual([...appThreadsOf(blob)], ["s-app", "s-mac", "s-split"], "work_on_app's task, its move to the Mac and what was split off it");
-  // At Read, whatever their email (an @orgo.ai one too) or role: none of it, though apps are open in this workspace.
-  for (const viewer of [member({ id: "u-kim", email: "kim@example.com" }), member({ id: "u-tom", email: "tom@orgo.ai" }), member({ id: "u-kim", email: "kim@example.com", role: "admin" })]) {
+  // At Read, whatever their email (an @orgo.ai one too): none of it, though apps are open in this workspace (orgo-web says its owner is Orgo's team).
+  const ownerEmail = "owner@orgo.ai";
+  for (const viewer of [member({ id: "u-kim", email: "kim@example.com", ownerEmail }), member({ id: "u-tom", email: "tom@orgo.ai", ownerEmail })]) {
     const slice = sharedSlice(blob, "ws_acme", viewer);
     assert.deepEqual(ids(slice.sessions), ["s-a"], `${viewer.email} ${viewer.role}: no app thread`);
     assert.deepEqual(ids(slice.approvals ?? []), ["ap-2"], "nor what one waits on");
@@ -553,6 +559,8 @@ test("the owner's apps stay the owner's: anyone given the bot at Read sees no ap
     const text = JSON.stringify({ slice, read });
     for (const word of ["recipe-box", "Recipe Box", "Ingot", "ingot", "Apps page", "/workspace/apps", "app_1", "Couldn't work on the app"]) assert.ok(!text.includes(word), `nothing says ${word}`);
   }
+  // An Admin has Write on the bot: its app threads too, there.
+  assert.deepEqual(ids(sharedSlice(blob, "ws_acme", member({ id: "u-kim", email: "kim@example.com", role: "admin", ownerEmail })).sessions), ["s-a", "s-app", "s-mac", "s-split"]);
   // The owner's own devices: all of it, as before.
   assert.deepEqual(ids(sharedSlice(blob, "ws_acme", OWNER_VIEW).sessions), ["s-a", "s-app", "s-mac", "s-split"]);
   assert.deepEqual(ids(sharedSlice(blob, "ws_acme", OWNER_VIEW).approvals ?? []), ["ap-1", "ap-2"]);
@@ -570,24 +578,29 @@ test("in a workspace of Orgo's team, a member with Write on a bot sees its app t
     ],
     appApprovals: [{ id: "ap-1", botId: "a", chatId: "bot:a", threadId: "s-app", action: "Push to Ingot" }],
   };
-  // Apps go by the owner's own email, from their state (ws-slice.ts ownerAppsOpen), never the viewer's.
-  const ownedBy = (email?: string) => ({ ...people, ...work, ...(email ? { account: { user: { id: OWNER, email } } } : {}) });
+  // Apps go by the owner's own email as orgo-web says it (SliceViewer.ownerEmail), never the viewer's, nor the owner's upload.
+  const blob = { ...people, ...work };
+  const ownedBy = (email?: string) => (v: SliceViewer): SliceViewer => ({ ...v, ...(email ? { ownerEmail: email } : {}) });
   const rows = [
     { id: "m1", chatId: "bot:a", role: "system", text: "Building Recipe Box", madeApp: { appId: "app_1", version: 1 }, at: 1 },
     { id: "m2", chatId: "bot:a", role: "bot", botId: "a", text: "Committed it.", resultOf: "s-app", sessionIds: ["s-app"], at: 2 },
     { id: "m3", chatId: "bot:b", role: "system", text: "Couldn't work on the app", appNote: true, at: 3 },
   ];
-  const read = (blob: ReturnType<typeof ownedBy>, viewer: SliceViewer) => {
+  const read = (owner: ReturnType<typeof ownedBy>, who: SliceViewer) => {
+    const viewer = owner(who);
     const slice = sharedSlice(blob, "ws_acme", viewer);
     const access = viewerAccess(blob.workspaces[0], viewer);
     const bots = botsOf(slice);
-    return { slice, messages: ids(sharedMessages(rows, bots, handedByOthers(blob, bots), appThreadsFor(blob, access, viewer), appBotsFor(access, viewer, bots, ownerAppsOpen(blob)))) };
+    return { slice, messages: ids(sharedMessages(rows, bots, handedByOthers(blob, bots), appThreadsFor(blob, access, viewer), appBotsFor(access, viewer, bots))) };
   };
   const tom = member({ id: "u-tom", email: "tom@orgo.ai" });
   const kim = member({ id: "u-kim", email: "kim@example.com" });
   const rae = member({ id: "u-rae", email: "rae@orgo.ai" });
   const orgo = ownedBy("owner@orgo.ai");
-  assert.equal(ownerAppsOpen(orgo), true);
+  assert.equal(ownerAppsOpen(orgo(tom)), true);
+  // The owner's upload saying it's Orgo's team counts for nothing (a Mac never uploads its account, and anyone can upload anything).
+  const said = { ...blob, account: { user: { id: OWNER, email: "owner@orgo.ai" } } };
+  assert.deepEqual(ids(sharedSlice(said, "ws_acme", kim).sessions), ["s-a"], "an upload naming an @orgo.ai account opens nothing");
   for (const viewer of [tom, kim]) {
     const x = read(orgo, viewer);
     assert.deepEqual(ids(x.slice.sessions), ["s-a", "s-app"], `${viewer.email}: a's app thread (Write), not b's (Read or not given)`);
@@ -599,10 +612,10 @@ test("in a workspace of Orgo's team, a member with Write on a bot sees its app t
   assert.deepEqual(ids(r.slice.sessions), ["s-a"], "Read: no app thread, an @orgo.ai email or not");
   assert.deepEqual(ids(r.slice.approvals ?? []), []);
   assert.deepEqual(r.messages, [], "Read: no app line");
-  for (const [why, blob] of [["an owner of example.com", ownedBy("owner@example.com")], ["an owner whose email isn't known", ownedBy()]] as const) {
-    assert.equal(ownerAppsOpen(blob), false, why);
+  for (const [why, owner] of [["an owner of example.com", ownedBy("owner@example.com")], ["an owner whose email isn't known", ownedBy()]] as const) {
+    assert.equal(ownerAppsOpen(owner(tom)), false, why);
     for (const viewer of [tom, kim, rae]) {
-      const x = read(blob, viewer);
+      const x = read(owner, viewer);
       assert.deepEqual(ids(x.slice.sessions), ["s-a"], `${why}, ${viewer.email}: no app thread`);
       assert.deepEqual(ids(x.slice.approvals ?? []), [], `${why}, ${viewer.email}: nor what one waits on`);
       assert.deepEqual(x.messages, [], `${why}, ${viewer.email}: no app line`);
@@ -1200,7 +1213,7 @@ const actOwner: Record<string, unknown> = {
 /** What each act route test queued, as the owner's Mac would get it, and what was dropped. */
 const queued: { owner: string; kind: string; payload: MemberActPayload; dedupe: string; expires: Date }[] = [];
 const dropped: string[] = [];
-function actFakes(opts: { on?: boolean; owner?: Record<string, unknown> } = {}) {
+function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string } = {}) {
   queued.length = 0;
   dropped.length = 0;
   resetMembers({
@@ -1214,6 +1227,8 @@ function actFakes(opts: { on?: boolean; owner?: Record<string, unknown> } = {}) 
   roles["act-tom proj-act"] = { role: "admin", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
   roles["act-owner proj-act"] = { role: "owner", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
   roles["act-sam proj-old"] = { role: "member", ownerUserId: "act-owner", bopsWsId: null, name: "bops" };
+  // The owner's email, as orgo-web's bops-role says it (whether the workspace has apps).
+  if (opts.ownerEmail) for (const k of ["act-sam proj-act", "act-tom proj-act", "act-owner proj-act"]) roles[k] = { ...roles[k], ownerEmail: opts.ownerEmail };
   emails["act-sam"] = "sam@example.com";
   emails["act-tom"] = "tom@orgo.ai";
 }
@@ -1334,16 +1349,17 @@ test("an ask the owner alone answers, and a member's name made plain", () => {
 test("over HTTP: in a workspace of Orgo's team, an app thread's ask is a Write member's to answer, whatever their email; in one whose owner isn't, nobody is told it's there", async () => {
   const ask = (key: string) => ({ key, act: { act: "answer", askId: "ask-app", reply: "once" } });
   const stop = (key: string) => ({ key, act: { act: "stop", sessionIds: ["t-app"] } });
-  // actOwner's state names no account; the other names one whose email isn't @orgo.ai: an @orgo.ai member gets nothing there either.
-  for (const owner of [actOwner, { ...actOwner, account: { user: { id: "act-owner", email: "owner@example.com" } } }]) {
-    actFakes({ owner });
+  // orgo-web says no owner's email, or one that isn't @orgo.ai (or the owner's upload names an @orgo.ai account, which
+  // counts for nothing): an @orgo.ai member gets nothing there either, an Admin neither.
+  for (const [ownerEmail, owner] of [[undefined, actOwner], ["owner@example.com", actOwner], [undefined, { ...actOwner, account: { user: { id: "act-owner", email: "owner@orgo.ai" } } }]] as const) {
+    actFakes({ owner, ownerEmail });
     for (const who of ["act-sam", "act-tom"]) {
       assert.equal((await act(who, ask("k_app_00001"))).status, 404, `${who}: never told the ask is there`);
       assert.equal((await act(who, stop("k_app_00002"))).status, 404, `${who}: nor the thread`);
     }
     assert.equal(queued.length, 0);
   }
-  actFakes({ owner: { ...actOwner, account: { user: { id: "act-owner", email: "owner@orgo.ai" } } } });
+  actFakes({ ownerEmail: "owner@orgo.ai" });
   assert.equal((await act("act-sam", ask("k_app_00003"))).status, 202);
   assert.equal((await act("act-tom", ask("k_app_00004"))).status, 202);
   assert.equal((await act("act-sam", stop("k_app_00005"))).status, 202);
@@ -1406,9 +1422,8 @@ test("Your Apps as a level of its own: kept when it's a level, none when missing
 
 /* ---------------- Your Apps: what a member is shown of the apps, and what they may do to them ---------------- */
 
-/** An @orgo.ai owner's workspace with apps (ws-slice.ts ownerAppsOpen); `owner` another owner's email, or none for a state that names no account. */
-const appsBlob = (apps: Record<string, unknown> | undefined, more: Record<string, unknown> = {}, owner: string | null = "owner@orgo.ai"): Record<string, unknown> => ({
-  ...(owner ? { account: { user: { id: "apps-owner", email: owner } } } : {}),
+/** A workspace with apps, as a real Mac uploads it (no account): whether its owner is Orgo's team is orgo-web's to say (viewers' ownerEmail). */
+const appsBlob = (apps: Record<string, unknown> | undefined, more: Record<string, unknown> = {}): Record<string, unknown> => ({
   workspaces: [
     {
       id: "ws_apps",
@@ -1442,7 +1457,8 @@ const appsBlob = (apps: Record<string, unknown> | undefined, more: Record<string
   bots: [{ id: "max", name: "Max", workspaceId: "ws_apps" }, { id: "zed", name: "Zed", workspaceId: "ws_apps" }],
   chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_apps" }],
 });
-const TOM_VIEW: SliceViewer = { role: "member", email: "tom@orgo.ai", id: "u-tom" };
+const STAFF_OWNER = "owner@orgo.ai";
+const TOM_VIEW: SliceViewer = { role: "member", email: "tom@orgo.ai", id: "u-tom", ownerEmail: STAFF_OWNER };
 
 test("Your Apps at Read, in a workspace of Orgo's team: the apps by name, their sites, history, deploys and members' acts; never ids, tokens, variables, error text or the owner's email", () => {
   const s = sharedSlice(appsBlob({ apps: "read" }), "ws_apps", TOM_VIEW);
@@ -1465,7 +1481,7 @@ test("Your Apps at Read, in a workspace of Orgo's team: the apps by name, their 
 });
 
 test("Your Apps at Write adds each site's settings and the workspace's domains, whatever the member's email; nothing for None, an older entry, the owner, a workspace whose owner isn't Orgo's team, or no apps", () => {
-  const SAM_VIEW: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam" };
+  const SAM_VIEW: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam", ownerEmail: STAFF_OWNER };
   for (const viewer of [TOM_VIEW, SAM_VIEW]) {
     const w = sharedSlice(appsBlob({ apps: "write" }), "ws_apps", viewer);
     assert.equal(w.apps?.level, "write", viewer.email);
@@ -1477,12 +1493,24 @@ test("Your Apps at Write adds each site's settings and the workspace's domains, 
     ["an entry an older Bops wrote (no level)", appsBlob(undefined), TOM_VIEW],
     ["set before they joined", appsBlob({ apps: "write", at: 5 }), { ...TOM_VIEW, joinedAt: 10 }],
     ["the owner", appsBlob({ apps: "write" }), OWNER_VIEW],
-    ["an owner of example.com, for an @orgo.ai member", appsBlob({ apps: "write" }, {}, "owner@example.com"), TOM_VIEW],
-    ["an owner of example.com, for anyone else", appsBlob({ apps: "write" }, {}, "owner@example.com"), SAM_VIEW],
-    ["a state that names no account", appsBlob({ apps: "write" }, {}, null), TOM_VIEW],
-    ["a workspace with no apps", appsBlob({ apps: "write" }, { hostedApps: undefined }), TOM_VIEW],
+    ["an owner of example.com, for anyone not of Orgo's team", appsBlob({ apps: "write" }), { ...SAM_VIEW, ownerEmail: "owner@example.com" }],
+    ["an orgo-web that doesn't say the owner's email", appsBlob({ apps: "write" }), { role: "member", email: "sam@example.com", id: "u-sam" }],
+    ["an upload naming an @orgo.ai account, from an owner orgo-web says isn't", { ...appsBlob({ apps: "write" }), account: { user: { id: "apps-owner", email: "owner@orgo.ai" } } }, { ...SAM_VIEW, ownerEmail: "owner@example.com" }],
   ] as const)
     assert.equal("apps" in sharedSlice(blob as Record<string, unknown>, "ws_apps", viewer as SliceViewer), false, why);
+  // Orgo's own team sees a workspace's apps wherever they're shown it, only to read where its owner isn't Orgo's team.
+  const capped = sharedSlice(appsBlob({ apps: "write" }), "ws_apps", { ...TOM_VIEW, ownerEmail: "owner@example.com" }).apps;
+  assert.equal(capped?.level, "read", "read only");
+  assert.equal(capped?.list[0].settings, undefined);
+  assert.equal(capped?.owned, undefined);
+  assert.equal(sharedSlice(appsBlob({ apps: "write" }), "ws_apps", { role: "member", email: "tom@orgo.ai", id: "u-tom" }).apps?.level, "read", "an orgo-web that doesn't say: the viewer's own email still counts");
+  // A workspace with no apps on the web yet: Your Apps all the same, empty, at their level (a brand new workspace).
+  assert.deepEqual(sharedSlice(appsBlob({ apps: "write" }, { hostedApps: undefined, appsForMembers: undefined }), "ws_apps", TOM_VIEW).apps, { level: "write", at: 0, list: [] });
+  assert.deepEqual(sharedSlice(appsBlob({ apps: "read" }, { hostedApps: undefined, appsForMembers: undefined }), "ws_apps", TOM_VIEW).apps, { level: "read", at: 0, list: [] });
+  assert.equal("apps" in sharedSlice(appsBlob({ apps: "none" }, { hostedApps: undefined }), "ws_apps", TOM_VIEW), false, "None still hides it");
+  // An Admin: Write, with no entry at all.
+  assert.deepEqual(sharedSlice(appsBlob({ apps: "write" }, { hostedApps: undefined }), "ws_apps", { role: "admin", email: "ada@example.com", id: "u-ada", ownerEmail: STAFF_OWNER }).apps, { level: "write", at: 0, list: [] });
+  assert.equal(sharedSlice(appsBlob({ apps: "none" }), "ws_apps", { role: "admin", email: "tom@orgo.ai", id: "u-tom", ownerEmail: STAFF_OWNER }).apps?.level, "write", "an Admin over an entry of None");
 });
 
 test("Your Apps: each site's Preview, where members deploy (its link, newest deploy, what it serves, whether it asks for a password), and where each deploy went; its password at Write only; nothing new from an owner's Bops before Preview", () => {
@@ -1496,7 +1524,7 @@ test("Your Apps: each site's Preview, where members deploy (its link, newest dep
     shop.deploys = [{ ...shop.deploys[0], env: "prod" }, { ...shop.deploys[1], env: "preview" }];
     return blob;
   };
-  const SAM_VIEW: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam" };
+  const SAM_VIEW: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam", ownerEmail: STAFF_OWNER };
   const read = sharedSlice(withPreview({ apps: "read" }), "ws_apps", TOM_VIEW);
   const seen = read.apps!.list[0];
   assert.deepEqual(seen.sites, [
@@ -1516,12 +1544,14 @@ test("Your Apps: each site's Preview, where members deploy (its link, newest dep
   assert.ok(!JSON.stringify(read).includes(PASSWORD), "never the password at Read");
   // At Write (the owner gave them all of Your Apps), whatever their email: the password beside its link.
   for (const viewer of [TOM_VIEW, SAM_VIEW]) assert.equal(sharedSlice(withPreview({ apps: "write" }), "ws_apps", viewer).apps!.list[0].sites![0].previewPassword, PASSWORD, viewer.email);
+  // An Admin given nothing has Your Apps at Write: the password too.
+  assert.equal(sharedSlice(withPreview({ apps: "write" }), "ws_apps", { role: "admin", email: "ada@example.com", id: "u-ada", ownerEmail: STAFF_OWNER }).apps!.list[0].sites![0].previewPassword, PASSWORD, "an Admin");
   for (const [why, blob, viewer] of [
     ["None", withPreview({ apps: "none" }), TOM_VIEW],
     ["an entry an older Bops wrote (no level)", withPreview({}), TOM_VIEW],
     ["set before they joined", withPreview({ apps: "write", at: 5 }), { ...TOM_VIEW, joinedAt: 10 }],
-    ["someone the owner gave nothing", withPreview({ apps: "write" }), { role: "member", email: "kim@example.com", id: "u-kim" }],
-    ["an admin given nothing", withPreview({ apps: "write" }), { role: "admin", email: "ada@example.com", id: "u-ada" }],
+    ["someone the owner gave nothing", withPreview({ apps: "write" }), { role: "member", email: "kim@example.com", id: "u-kim", ownerEmail: STAFF_OWNER }],
+    ["Orgo's team where the owner isn't (read only)", withPreview({ apps: "write" }), { ...TOM_VIEW, ownerEmail: "owner@example.com" }],
     ["the owner (their own page reads it)", withPreview({ apps: "write" }), OWNER_VIEW],
   ] as const)
     assert.ok(!JSON.stringify(sharedSlice(blob as Record<string, unknown>, "ws_apps", viewer as SliceViewer)).includes(PASSWORD), why);
@@ -1548,9 +1578,9 @@ test("over HTTP: in a workspace of Orgo's team, Your Apps at Write deploys, goes
     drop: async () => {},
     count: async () => {},
   });
-  roles["apps-tom proj-apps"] = { role: "member", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps" };
+  roles["apps-tom proj-apps"] = { role: "member", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps", ownerEmail: STAFF_OWNER };
   emails["apps-tom"] = "tom@orgo.ai";
-  roles["apps-sam proj-apps"] = { role: "member", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps" };
+  roles["apps-sam proj-apps"] = { role: "member", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps", ownerEmail: STAFF_OWNER };
   emails["apps-sam"] = "sam@example.com";
   const go = (a: unknown, key: string, user = "apps-tom") => act(user, { key, act: a }, "proj-apps");
   assert.equal((await go({ act: "deploy", app: "shop" }, "k_app_00001")).status, 202);
@@ -1578,12 +1608,16 @@ test("over HTTP: in a workspace of Orgo's team, Your Apps at Write deploys, goes
   await refused({ act: "settings", app: "shop", port: 70000 }, 400);
   ((blob.workspaces as Record<string, Record<string, unknown>>[])[0].memberAccess as Record<string, Record<string, unknown>>)["tom@orgo.ai"].apps = "read";
   await refused({ act: "deploy", app: "shop" }, 403, "member_apps_read_only");
-  // Write again, in a workspace whose owner isn't Orgo's team (or whose state names no account): no such app, for anyone.
+  // Write again, in a workspace whose owner isn't Orgo's team (or orgo-web doesn't say): no such app for anyone, and
+  // Orgo's team sees it to read only. The owner's upload naming an @orgo.ai account changes none of it.
   ((blob.workspaces as Record<string, Record<string, unknown>>[])[0].memberAccess as Record<string, Record<string, unknown>>)["tom@orgo.ai"].apps = "write";
-  blob.account = { user: { id: "apps-owner", email: "owner@example.com" } };
-  await refused({ act: "deploy", app: "shop" }, 404);
-  await refused({ act: "deploy", app: "shop" }, 404, undefined, "apps-sam");
-  delete blob.account;
-  await refused({ act: "settings", app: "shop", port: 8080 }, 404);
+  blob.account = { user: { id: "apps-owner", email: "owner@orgo.ai" } };
+  for (const ownerEmail of ["owner@example.com", undefined]) {
+    for (const k of ["apps-tom proj-apps", "apps-sam proj-apps"]) roles[k] = { role: "member", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps", ...(ownerEmail ? { ownerEmail } : {}) };
+    resetMembers({ state: async () => blob, queue: async (owner, kind, payload, dedupe, expires) => void queued.push({ owner, kind, payload: payload as MemberActPayload, dedupe, expires }), isOn: () => true, drop: async () => {}, count: async () => {} });
+    await refused({ act: "deploy", app: "shop" }, 403, "member_apps_read_only");
+    await refused({ act: "deploy", app: "shop" }, 404, undefined, "apps-sam");
+    await refused({ act: "settings", app: "shop", port: 8080 }, 403, "member_apps_read_only");
+  }
   assert.equal(queued.length, n, "nothing refused was queued");
 });

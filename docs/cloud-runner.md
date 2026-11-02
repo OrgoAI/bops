@@ -175,7 +175,8 @@ the routine's next run waits for it. Only a computer deleted ends it.
    invite still open); Orgo, which counts a live share link too, has the last word (409
    `full_access_member`). Neither is waited on: each look asks again.
    The one exception is a shared workspace whose chat goes through Bops Cloud (`Workspace.chatOn`
-   "cloud", a switch per workspace, off by default): see "Shared workspaces on the cloud path" below.
+   "cloud"), or that Bops Cloud may move there by itself (`Workspace.chatAuto`, unless the owner chose the
+   Mac): see "Shared workspaces on the cloud path" below.
 2. The server bundle the app ships (`scripts/server-bundle.sh`, run by `scripts/release.sh`: the
    release build, stripped and checked for leaked secrets, in `Resources/runner`; on a dev Mac the
    newest in `dist-runner/`) goes up through Orgo's file uploads to `/opt/bops/runner/incoming`. One
@@ -481,8 +482,14 @@ send them (release steps).
 
 ## Shared workspaces on the cloud path
 
-A workspace someone else can use, once its chat goes through Bops Cloud (`Workspace.chatOn` "cloud"), keeps
-a runner on its computers so its bots answer with no Mac open (`runner-install.ts` sharedRunnerOk, keepUp):
+A workspace someone else can use, once its chat goes through Bops Cloud (`Workspace.chatOn` "cloud"), or while
+Bops Cloud may move it there by itself (`Workspace.chatAuto`, never once the owner chose the Mac), keeps a
+runner on its computers so its bots answer with no Mac open (`runner-install.ts` sharedRunnerOk, keepUp);
+Bops Cloud moves its chat once that runner connects (`cloud/README.md` "Chat through Bops Cloud", by itself).
+A Mac from before (0.0.36, 0.0.37) keeps one only once the chat goes through Bops Cloud and takes it down
+before that; a newer Mac then waits half an hour before it sets it up again (each try uploads the runner and
+wakes the computer), and the two settle once the chat moves. The runner's state says it's shared
+(`RunnerState.shared`), so a Mac just started never gives it a key on the way back:
 
 - Only a computer whose bots are all of that one workspace. One that also serves another workspace's bots
   (a private one, or the free computer shared by several) gets no runner: that workspace's people could
@@ -548,11 +555,30 @@ Chat through Bops Cloud for a shared workspace (one workspace first), in this or
    computer on in People says "Orgo can't change Use its computer yet" and stays off.
 2. Bops Cloud: migration `0015_chat_turns.sql`, then the deploy (the switch is off for every workspace).
 3. The Mac release (`CLOUD_CHAT_MIN_VERSION`), with the note on Use its computer above; the owner turns it
-   on for the people who should have it.
+   on for the people who should have it. (By itself, below, a shared workspace's runner needs a Mac with
+   `chatAuto`, 0.0.38.)
 4. The owner opens the updated Bops on every Mac of theirs once (runners set up on identity, the chat loop).
 5. orgo-web: `VM_IDENTITY_SHARED=admins` (staff owners) once the routes that reach a computer have been
    audited (orgo-web CLAUDE.md), then the switch for the workspace (`POST /v1/internal/chat-routing`, or the
    owner's Bops).
+
+Chat through Bops Cloud by default (`BOPS_CHAT_AUTO`), after the above:
+
+1. Before the deploy, read only: `chat_routing` by mode and `set_by`. A row `mode='mac'` with `set_by`
+   'owner' or 'staff' that someone wrote only to say `allowHourly` (before this change that made it a choice)
+   would hold that workspace on the Mac for good: set its `set_by` to NULL.
+2. Deploy Bops Cloud with `BOPS_CHAT_AUTO` unset (nothing moves).
+3. Mac 0.0.38 (the switch in Settings, General, and the shared workspace default) with the normal release.
+   It must come before anything moves: an owner Bops Cloud moves has to be able to choose their Mac again in
+   the app, and 0.0.36 and 0.0.37 have no switch. Bops Cloud holds to that by itself too: it moves only an
+   owner whose last Mac is at `CHAT_AUTO_MIN_VERSION` (0.0.38) or newer, and the owner's switch turned back on
+   is refused (409 `chat_auto_off`) while `BOPS_CHAT_AUTO` doesn't cover them.
+4. A canary: `BOPS_CHAT_AUTO` set to the test accounts' Orgo user ids, comma separated, with those accounts on
+   0.0.38. Check a test workspace moves (`set_by` 'auto', `chatOn` "cloud" in its state) and answers with every
+   Mac closed, and that its switch turned off moves it back to the Mac.
+5. Once 0.0.38 has spread (most owners' last Mac on it), "on". Every eligible workspace moves within about a
+   minute of the deploy that turns it on (each runner reconnects); an owner still on an older Mac moves once
+   that Mac updates. Undo: "revert" and a deploy (the moved ones go back with their mirror), then unset.
 
 Before this Bops ships (identity: the identity spec's rollout, `vm-identity-spec.md` 5):
 

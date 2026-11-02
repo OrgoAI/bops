@@ -687,11 +687,12 @@ await check("the switcher lists workspaces shared with the user, who shared each
   const html = renderToStaticMarkup(h(WorkspaceSwitcher, { opened: true, state: own(), sharedList: [listed, { projectId: "p2", name: "Ops", owner: "", role: "admin" }] }));
   const t = text(html);
   assert.match(t, /Shared with you/);
-  assert.match(t, /Acme Shared by dana@acme\.test View only/);
-  assert.match(t, /Ops Shared with you Full access/);
+  assert.match(t, /Acme Shared by dana@acme\.test Member/);
+  assert.match(t, /Ops Shared with you Admin/);
   assert.match(t, /Mine/);
   assert.equal(sharedBy({ owner: "" }), "Shared with you");
-  assert.equal(roleLabel("admin"), "Full access");
+  assert.equal(roleLabel("admin"), "Admin");
+  assert.deepEqual([roleLabel("member"), roleLabel("owner")], ["Member", "Owner"]);
   // Open: its name at the top, checked under Shared with you, and not among the user's own (nothing to rename or delete).
   const open = renderToStaticMarkup(h(WorkspaceSwitcher, { opened: true, state: shownState(), sharedList: [] }));
   assert.match(text(open), /^ ?Acme /);
@@ -772,7 +773,8 @@ await check("nothing else that would change a shared workspace is offered: a thr
   assert.ok(!/>Delete</.test(done) && !done.includes('aria-label="More"'));
   const where = renderToStaticMarkup(h(ThreadSheet, { state, session: state.sessions[1], onClose: noop, onShowComputer: noop }));
   assert.ok(!/>Stop</.test(where));
-  assert.match(where, /class="flex gap-1\.5 pt-0\.5" inert=""/, "Your Mac or its computer: shown, never picked");
+  assert.ok(!/class="flex gap-1\.5 pt-0\.5"/.test(where), "Your Mac or its computer: no buttons that do nothing, the owner picks");
+  assert.match(where, /It starts as soon as the owner picks\./);
   // The sidebar's thread row (a search lists it, flat): no ×. The same row in the user's own has one.
   const sideProps = { chatId: "bot:boppy", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {}, search: "find" };
   const side = renderToStaticMarkup(h(Sidebar, { ...sideProps, state }));
@@ -1528,12 +1530,25 @@ await check("a thread of the user's own that ended waiting for a sign in on its 
   // Still at work (its screen hit the sign in a moment ago): nothing to carry on.
   const working = { ...waits, status: "running", endedAt: undefined };
   assert.ok(!/I signed in/.test(text(sheet({ ...mine, sessions: [working] }, working))));
-  // The owner's, in a workspace shared with the user: shown, inert.
+  // The owner's, in a workspace shared with a Member: a line saying only the owner can, never buttons that do nothing.
   const c = cloudState();
   c.state.sessions = [{ ...waits }];
   const st = viewState(own(), { ...listed, role: "member", wsId: WS }, c, {});
   const html = sheet(st, st.sessions[0]);
-  assert.match(html, /inert=""[^]*I signed in/, "can't be answered there");
+  assert.ok(!/I signed in/.test(html) && !/Sign in for/.test(html), "a Member can't answer it there");
+  assert.match(text(html), /Only the owner can answer this\./);
+  assert.ok(!/inert=""[^]*Dismiss/.test(html), "nothing switched off that still looks like a button");
+  // An Admin with Write on the bot and its screen: they sign in at the shared screen themselves.
+  const sa = viewState(own(), { ...listed, role: "admin", wsId: WS }, c, {});
+  const admin = { ...sa, shared: { ...sa.shared, role: "admin", levels: { ...(sa.shared.levels ?? {}), [sa.sessions[0].botId]: "write" }, screens: [sa.sessions[0].botId] } };
+  const adminHtml = text(sheet(admin, admin.sessions[0]));
+  assert.match(adminHtml, /Sign in for /);
+  assert.match(adminHtml, /I signed in/);
+  assert.match(adminHtml, /needs you to sign in/);
+  assert.ok(!/Only the owner can answer this/.test(adminHtml));
+  // Without the screen (its bot works on the owner's Mac, or Bops Cloud doesn't share it): the owner's again.
+  const noScreen = { ...admin, shared: { ...admin.shared, screens: [] } };
+  assert.match(text(sheet(noScreen, noScreen.sessions[0])), /Only the owner can answer this\./);
 });
 
 await check("an @orgo.ai owner's app work never reaches the window of anyone they share the workspace with, whatever their email; an app line shows only where apps are shown", async () => {
@@ -1863,7 +1878,9 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   // The workspace's owner decides, not who's looking: any viewer given Your Apps sees an Orgo team owner's apps, and
   // nobody sees apps in a workspace whose owner isn't Orgo's team.
   assert.equal(A.appsShown({ ...v, account: { user: { email: "sam@example.com" } } }), true, "a viewer outside Orgo's team sees an Orgo team owner's apps");
-  assert.equal(A.appsShown({ ...v, shared: { ...v.shared, owner: "dana@acme.test" } }), false, "an owner outside Orgo's team: no apps");
+  // Orgo's own team sees what Bops Cloud sent of a workspace whose owner isn't (read only, the cloud's to cap); anyone else nothing.
+  assert.equal(A.appsShown({ ...v, shared: { ...v.shared, owner: "dana@acme.test" } }), true, "a viewer of Orgo's team, an owner outside it");
+  assert.equal(A.appsShown({ ...v, account: { user: { email: "sam@example.com" } }, shared: { ...v.shared, owner: "dana@acme.test" } }), false, "an owner and a viewer outside Orgo's team: no apps");
   // An act on an app: sent, pending until the owner's Bops keeps it on the app, then gone (its ok and said show there).
   const sent = [];
   const r = await actWith(copy, { act: "deploy", app: "shop" }, "key_deploy_01", sam, async (body) => (sent.push(JSON.parse(body)), { status: 202, body: { ok: true, macOn: true } }));
@@ -1884,6 +1901,42 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   assert.deepEqual([no.status, no.code], [403, "member_apps_read_only"]);
   const gone = await actWith(copy, { act: "deploy", app: "blog" }, "key_deploy_04", sam, async () => assert.fail("not sent"));
   assert.equal(gone.status, 404);
+});
+
+await check("an Admin sees a bot's computer live, with Take control and orgo.ai; a Member with Use its computer is pointed at orgo.ai; anyone else reads where its work shows; the role is said under the name", async () => {
+  const { ComputerView } = await import(pathToFileURL(`${root}/components/app/computer.tsx`).href);
+  const { roleHere, SHARED_SCREEN_WORDS } = await import(`${root}/lib/shared.ts`);
+  const orgoUrl = `https://orgo.test/workspaces?project_id=${PROJECT}`;
+  const c = cloudState();
+  // Bops Cloud names the computer for an Admin alone; the window keeps only which bots, never the computer's id.
+  const admin = viewState(own(), { ...listed, role: "admin", wsId: WS, orgoUrl }, { ...c, role: "admin", state: { ...c.state, screens: { boppy: "comp-owner-1" } } }, {});
+  assert.deepEqual(admin.shared.screens, ["boppy"]);
+  assert.ok(!JSON.stringify(admin).includes("comp-owner-1"), "the computer's id stays in the server's copy");
+  const panel = (st) => renderToStaticMarkup(h(ComputerView, { state: st, bot: st.bots[0], display: 99, onDisplay: noop, follow: { on: true, auto: noop, resume: noop }, mode: "panel" }));
+  const a = panel(admin);
+  assert.match(a, /data-shared-screen/, "the screen itself");
+  assert.ok(text(a).includes(SHARED_SCREEN_WORDS.control) && text(a).includes(SHARED_SCREEN_WORDS.open), text(a));
+  assert.ok(a.includes(`href="${orgoUrl.replace(/&/g, "&amp;")}"`));
+  // A Member with Use its computer: the line, and orgo.ai to watch it.
+  const user = viewState(own(), { ...listed, role: "member", wsId: WS, orgoUrl }, { ...c, state: { ...c.state, computer: "use", screens: { boppy: "comp-owner-1" } } }, {});
+  assert.equal(user.shared.screens, undefined, "a member's window never has screens, whatever comes");
+  const m = text(panel(user));
+  assert.match(m, /Dana's Boppy works on the owner's computer\. Its work shows in the chat\./);
+  assert.ok(m.includes(SHARED_SCREEN_WORDS.watch));
+  assert.ok(!panel(user).includes("data-shared-screen"));
+  // Without it: the line alone.
+  const plain = text(panel(viewState(own(), { ...listed, role: "member", wsId: WS, orgoUrl }, c, {})));
+  assert.ok(!plain.includes("orgo.ai"), plain);
+  // On the owner's Mac: never a screen, never a link.
+  const onMac = viewState(own(), { ...listed, role: "admin", wsId: WS, orgoUrl }, { ...c, state: { ...c.state, bots: [{ ...c.state.bots[0], runsOn: "mac" }], screens: { boppy: "comp-owner-1" } } }, {});
+  assert.ok(!panel(onMac).includes("data-shared-screen") && !text(panel(onMac)).includes("orgo.ai"));
+  // The role, plainly, under the workspace's name.
+  assert.deepEqual(["admin", "member"].map(roleHere), ["You're an Admin here", "You're a Member here"]);
+  const header = renderToStaticMarkup(h(WorkspaceSwitcher, { opened: false, state: admin, sharedList: [] }));
+  assert.match(text(header), /You're an Admin here/);
+  // Its screen's plan is read from the shared workspace's own route (never /api/vnc, the user's own bot of that id).
+  assert.equal(callAllowed("GET", "/api/workspaces/shared/screen?bot=boppy"), true);
+  assert.equal(callAllowed("GET", "/api/vnc?bot=boppy&display=99"), false);
 });
 
 console.log(`${passed} passed, ${failures} failed`);
