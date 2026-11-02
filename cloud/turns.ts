@@ -308,6 +308,8 @@ const chatReady = (v: unknown): v is string => typeof v === "string" && /^\d{1,4
 
 /** Each runner that connected since this Bops Cloud started, by "<user>\0<device>": the Bops it runs, and when. */
 const proved = new Map<string, { version: string; at: number }>();
+/** The owners with one (an owner's save looks no further when none of theirs connected: nothing of theirs can move here). */
+const provedUsers = new Set<string>();
 /** When each computer last couldn't answer a turn, by "<user>\0<device>", and whether that holds it on the Mac. */
 const broken = new Map<string, { at: number; hold: boolean }>();
 /** A computer that couldn't answer (a wake refused, no runner, too late): a workspace Bops Cloud moved goes back to the Mac. */
@@ -385,8 +387,8 @@ export function autoMoves(blob: Record<string, unknown>, rows: Map<string, Routi
   return out;
 }
 
-/** The look under way for each owner (autoRoute), and whether another was asked for meanwhile. */
-const routing = new Map<string, { again: boolean; done: Promise<void> }>();
+/** The look under way for each owner (autoRoute), whether another was asked for meanwhile, and the state as last written, when the asker had it. */
+const routing = new Map<string, { again: boolean; blob?: Record<string, unknown>; done: Promise<void> }>();
 
 /**
  * Move the owner's workspaces Bops Cloud may move, as autoMoves says (one look at a time per owner; one asked for
@@ -394,20 +396,24 @@ const routing = new Map<string, { again: boolean; done: Promise<void> }>();
  * connects, when the owner's state is written (runners set up, taken down or failed, bots moved, a newer Mac), and
  * when a computer couldn't answer a turn. A move is written under the owner's lock, and only over a row nobody chose
  * (an owner's or staff's choice made a moment before stands), with the mirror on the state (every Bops hears it).
+ * `blob`: the owner's state as just written (their save), so the look needn't read it.
  */
-export function autoRoute(userId: string): Promise<void> {
+export function autoRoute(userId: string, blob?: Record<string, unknown>): Promise<void> {
   const was = routing.get(userId);
   if (was) {
     was.again = true;
+    was.blob = blob;
     return was.done;
   }
-  const box = { again: false, done: Promise.resolve() };
+  const box: { again: boolean; blob?: Record<string, unknown>; done: Promise<void> } = { again: false, blob, done: Promise.resolve() };
   routing.set(userId, box);
   box.done = (async () => {
     try {
       do {
+        const seenBlob = box.blob;
         box.again = false;
-        await routeOnce(userId).catch((e: Error) => console.warn(`[turns] moving ${userId}'s chat: ${e.message}`));
+        box.blob = undefined;
+        await routeOnce(userId, seenBlob).catch((e: Error) => console.warn(`[turns] moving ${userId}'s chat: ${e.message}`));
       } while (box.again);
     } finally {
       routing.delete(userId);
@@ -416,8 +422,9 @@ export function autoRoute(userId: string): Promise<void> {
   return box.done;
 }
 
-async function routeOnce(userId: string) {
-  const on = chatAutoFor(userId);
+async function routeOnce(userId: string, written?: Record<string, unknown>) {
+  // Nothing moves here without a runner of theirs that connected since the start.
+  const on = chatAutoFor(userId) && provedUsers.has(userId);
   const seenRows = await routedWorkspaces(null, userId);
   // Nothing to move back (none Bops Cloud moved to it), and nothing moves to it: no state read.
   const movedHere = [...seenRows.values()].some((r) => r.mode === "cloud" && !chosen(r));
@@ -431,7 +438,7 @@ async function routeOnce(userId: string) {
     broken: (c) => broken.get(rkey(userId, deviceIdOf(userId, c))),
     now,
   });
-  const blob = ((await loadState(userId))?.state ?? {}) as Record<string, unknown>;
+  const blob = written ?? (((await loadState(userId))?.state ?? {}) as Record<string, unknown>);
   if (!autoMoves(blob, seenRows, seen(Date.now())).length) return;
   const out = await tx(async (c) => {
     await lockUser(c, userId);
@@ -882,7 +889,10 @@ const runnerLive: Route = {
     ).catch(() => {});
     // It answers from here on (autoMoves): what it runs, and since when (a computer that couldn't answer before can now).
     const said = appVersionOf(req);
-    if (said && !done) proved.set(k, { version: said, at: Date.now() });
+    if (said && !done) {
+      proved.set(k, { version: said, at: Date.now() });
+      provedUsers.add(userId);
+    }
     // A wake waiting for it carries on now, and what it's owed goes to it.
     for (const w of [...(waiters.get(k) ?? [])]) w();
     for (const t of await owedTo(userId, c.device)) if (!done) stream.write("turn", await eventOf(t));
@@ -1373,6 +1383,7 @@ export async function turnById(userId: string, id: string): Promise<TurnRow | nu
 export function resetTurns(opts: { wake?: AskWake } = {}) {
   askWake = opts.wake ?? askOrgo;
   proved.clear();
+  provedUsers.clear();
   broken.clear();
 }
 

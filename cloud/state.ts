@@ -603,7 +603,7 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   // Who may have their messages run on the bots' computers may have changed: turns of anyone who may not end now.
   if (!user.computer) void recheckTurns(user.id).catch((e: Error) => console.warn(`[state] turns recheck: ${e.message}`));
   // A runner set up, taken down or failed, a bot moved, a newer Mac: a workspace's chat may move (turns.ts autoRoute).
-  if (!user.computer) void autoRoute(user.id);
+  if (!user.computer) void autoRoute(user.id, written);
 }
 
 /** A build from before: its whole state, messages and all, the Mac's own `version` kept as given. */
