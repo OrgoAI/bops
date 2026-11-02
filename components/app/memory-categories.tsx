@@ -1306,7 +1306,7 @@ export function MemoryPage({
                 <button
                   onClick={() => void run("sort-older")}
                   disabled={!!busy}
-                  title="Sorts 300 more of the older facts. Uses a little AI credit."
+                  title="Sorts 300 more of the older facts. Uses a little credit."
                   className="rounded-full bg-[#F2F2F0] px-2 py-0.5 text-[11.5px] font-medium leading-[14px] text-[#3A3A38] hover:bg-[#EAEAE7] disabled:opacity-40"
                 >
                   Sort older

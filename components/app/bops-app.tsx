@@ -884,7 +884,8 @@ function Bops({ state }: { state: AppState | null }) {
         onShowMac={openMac}
         onShowScreen={showScreen}
         onUpgrade={() => {
-          trackEvent("bops_upgrade_clicked", { surface: "chat" });
+          // Billed by use, it's Add credit (chat-view.tsx OutOfCredit counts that itself): nothing to upgrade.
+          if (!state.credits?.usage) trackEvent("bops_upgrade_clicked", { surface: "chat" });
           openSettings("plan");
         }}
         peek={!panelOpen && <ComputerPeek state={state} bot={bot} onOpen={() => setPanelOpen(true)} />}
@@ -2114,7 +2115,7 @@ export function Settings({
   else if (pane === "plan")
     body = (
       <>
-        <PaneHead title="Plan and credit" sub="Your Bops plan and AI credit, and the inboxes and numbers it pays for." />
+        <PaneHead title="Plan and credit" sub="What you pay for Bops, your credit, and your bots' inboxes and numbers." />
         <PlanAndCredit state={state} />
       </>
     );

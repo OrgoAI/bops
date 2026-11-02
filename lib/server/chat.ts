@@ -16,7 +16,7 @@ import { ORBIT_OWNER_ONLY, ORBIT_TOOL_NAMES, ORBIT_TOOLS, orbitNote, orbitNowLin
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { openaiClient } from "./openai-client";
 import { contactLine, createBot, namesTheUser } from "./bots";
-import { creditsOut, noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
+import { creditsOut, noteOutOfCredit, outOfCreditWords } from "./cloud";
 import { noOwnComputer } from "./plan";
 import { agentLabel, agentName, agentNamed, aiOf, modelShort, paysLabel, readyAgents } from "@/lib/agents";
 import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, routineSent, settingsOf, TAPBACK_EMOJI, TAPBACKS, workBot, workspaceOf, type AppApproval, type Bot, type ChannelKind, type Delivery, type Message, type ReplyDraft, type Routine, type RoutineRun, type Schedule, type Session, type SkillProposal, type Tapback } from "@/lib/types";
@@ -1049,7 +1049,7 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
 export async function answerForApp(botId: string, app: { title: string; chatId: string }, question: string, json: boolean) {
   const b = bot(botId);
   if (!b) throw new Error("The bot that made this app is gone.");
-  if (await creditsOut()) throw new Error("Your AI credit is used up.");
+  if (await creditsOut()) throw new Error("Your credit is used up.");
   const owner = ownerName();
   const ours = sameState();
   const others = getState().bots.filter((x) => x.id !== botId && workspaceOf(x) === workspaceOf(b) && asksNow(botId, x.id));
@@ -3040,7 +3040,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // A routine's run that failed: said by routines.ts, where it's recorded and sent on.
     if (bg) return { text: null, error: noteOutOfCredit(e) ? NO_CREDIT_FOR_ROUTINES : (e as Error).message };
     // Out of AI credit: said plainly here, and never sent on by email, text or a channel (null).
-    addMessage({ chatId, role: "bot", botId, text: noteOutOfCredit(e) ? OUT_OF_CREDIT : `Something went wrong on my side: ${(e as Error).message}`, replyTo: opts.replyTo });
+    addMessage({ chatId, role: "bot", botId, text: noteOutOfCredit(e) ? outOfCreditWords() : `Something went wrong on my side: ${(e as Error).message}`, replyTo: opts.replyTo });
     return { text: null };
   } finally {
     // Still drawing a picture: it keeps typing until that's in (drawFor).
@@ -3101,7 +3101,7 @@ async function drawFor(chatId: string, botId: string, p: { prompt: string; shape
     const images = await makeImage(botId, p.prompt, p.shape, p.from);
     if (ours()) addMessage({ chatId, role: "bot", botId, text: "", images, picture: { prompt: p.prompt } });
   } catch (e) {
-    if (ours()) addMessage({ chatId, role: "bot", botId, text: noteOutOfCredit(e) ? OUT_OF_CREDIT : `I couldn't make that picture: ${(e as Error).message}` });
+    if (ours()) addMessage({ chatId, role: "bot", botId, text: noteOutOfCredit(e) ? outOfCreditWords() : `I couldn't make that picture: ${(e as Error).message}` });
   } finally {
     const left = (drawing.get(key) ?? 1) - 1;
     if (left) drawing.set(key, left);

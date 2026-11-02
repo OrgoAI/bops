@@ -337,11 +337,11 @@ await test("no bot to pick: How often is off, and says why", () => {
 await test("the line under it: who checks, how often, what for the access picked, and the checks a day each using AI credit", () => {
   const [, morning, hourly, quarter] = HOW_OFTEN.map((o) => o.schedule);
   assert.equal(HOW_OFTEN[0].schedule, undefined, "Only when asked makes no routine");
-  assert.equal(checkLine("Max", "Gmail", "read", hourly), "Max checks Gmail every hour and tells you what's new. That's 24 checks a day, and each one uses AI credit.");
-  assert.equal(checkLine("Max", "Gmail", "read", quarter), "Max checks Gmail every 15 minutes and tells you what's new. That's 96 checks a day, and each one uses AI credit.");
+  assert.equal(checkLine("Max", "Gmail", "read", hourly), "Max checks Gmail every hour and tells you what's new. That's 24 checks a day, and each one uses credit.");
+  assert.equal(checkLine("Max", "Gmail", "read", quarter), "Max checks Gmail every 15 minutes and tells you what's new. That's 96 checks a day, and each one uses credit.");
   assert.equal(
     checkLine("Ivy", "Gmail", "act", hourly),
-    "Ivy checks Gmail every hour and handles what's new. Asks you before it sends, posts, deletes or pays. That's 24 checks a day, and each one uses AI credit.",
+    "Ivy checks Gmail every hour and handles what's new. Asks you before it sends, posts, deletes or pays. That's 24 checks a day, and each one uses credit.",
   );
   assert.equal(checkLine("Max", "Hacker News", "read", morning, "America/Los_Angeles"), "Max checks Hacker News every day at 8 AM and tells you what's new.");
   assert.equal(checkLine("Max", "Notion", "act", morning), "Max checks Notion every day at 8 AM and handles what's new. Asks you before it sends, posts, deletes or pays.");

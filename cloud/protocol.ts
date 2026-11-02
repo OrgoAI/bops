@@ -62,7 +62,7 @@ export type CloudSession = {
    * a number and an email only as BOPS_TIERS says (Free none, Pro 1, Max 5; the cloud refuses a
    * purchase past it, and the app makes no inbox past it). An older cloud leaves it out: no limits.
    */
-  plan?: { tier: BopsTier; limits: boolean };
+  plan?: { tier: BopsTier; limits: boolean; billing?: BopsBilling };
 };
 
 /**
@@ -247,8 +247,14 @@ export type MacToCloud =
  */
 export type PendingKind = "agentphone" | "call" | "slack" | "plan" | "member";
 
-/** A number the cloud holds for a plan, as the Mac keeps it on the bot (Bot.phone, Bot.phoneLine). */
-export type PlanPhone = { number: string; numberId: string; agentId: string; status: PlanItemStatus; problem?: string };
+/**
+ * A number the cloud holds for a plan, as the Mac keeps it on the bot (Bot.phone, Bot.phoneLine).
+ * `renewal`: the event is about a number's month instead (billing by use, cloud/numbers-renew.ts), on
+ * whichever bot has the number: "paused" when its month couldn't be paid from the user's Orgo credit
+ * (given back at `releaseAt` if it still isn't), "ready" once it's paid again, "released" when it was
+ * given back unpaid.
+ */
+export type PlanPhone = { number: string; numberId: string; agentId: string; status: PlanItemStatus; problem?: string; renewal?: { releaseAt?: string } };
 /** An inbox the cloud made for a plan, as the Mac keeps it on the bot (Bot.email, Bot.mail). */
 export type PlanInbox = { email: string; inboxId: string; podId: string; handle: string; status: PlanItemStatus; problem?: string };
 /** How a plan's number or inbox stands (bops.phone_lines.status, bops.mail_inboxes.status). */
@@ -256,12 +262,15 @@ export type PlanItemStatus = "setting_up" | "ready" | "broken" | "paused" | "rel
 
 /**
  * What a "plan" event says. `botId` is the main bot of the default workspace (`workspaceId`) the
- * items are for. `phone`/`email`: the plan's number and inbox as they stand now (ready, paused,
- * released…); absent: nothing changed there. `handle`: the default workspace's handle, `auto` when
- * the cloud picked it (the app then offers to change it).
+ * items are for (for a number's month, `phone.renewal`: the bot and workspace the number is for, as
+ * far as the cloud knows). `phone`/`email`: the plan's number and inbox as they stand now (ready,
+ * paused, released…); absent: nothing changed there. `handle`: the default workspace's handle, `auto`
+ * when the cloud picked it (the app then offers to change it).
  */
 export type CloudPlanPayload = {
   tier: BopsTier;
+  /** How the user is billed now (bops.plans.billing); an older cloud leaves it out, which is "plan". */
+  billing?: BopsBilling;
   botId: string | null;
   workspaceId: string;
   phone?: PlanPhone;
@@ -363,6 +372,13 @@ export const PLAN_REQUIRED = "plan_required";
 export const PLAN_LIMIT = "plan_limit";
 
 /**
+ * A text out from a number paused because its month couldn't be paid from Orgo credit (billing by use,
+ * cloud/numbers-renew.ts): 402 with this code and `billing: "usage"`. Not AI_CREDIT_EMPTY: there may be
+ * some credit left, just less than the number's month.
+ */
+export const NUMBER_UNPAID = "number_unpaid";
+
+/**
  * Bops' plans (profiles.bops_tier in orgo-web, which keeps the same table in lib/bops-plans.ts): the
  * price a month in cents and the AI credit each brings, in micro-dollars, and what each includes.
  * Free's credit comes once, at the first use of Bops; Pro's and Max's each month they're paid for,
@@ -389,6 +405,46 @@ export const BOPS_TIERS = {
 } as const;
 
 export type BopsTier = keyof typeof BOPS_TIERS;
+
+/**
+ * How orgo-web bills the user's Bops (its profiles.bops_billing), said with the tier in its plan notice
+ * and its GET /api/bops/plan, and kept by the cloud with it (bops.plans.billing):
+ *
+ * - "plan": Bops' own plans above (Free, Pro, Max) and Bops' AI credit. Every user from before, and
+ *   every user while orgo-web's BOPS_USAGE_BILLING is off. A user given a month more of their plan
+ *   before they move is on "plan" until then.
+ * - "usage": no Bops plan. The user is an ordinary Orgo account on whatever Orgo plan they have and
+ *   pays for what they use from their Orgo credit: the Bops computer by the hour while it works, free
+ *   while it sleeps, and AI at Orgo's rate. orgo-web's two credit functions (bops_ai_credit_balance and
+ *   bops_ai_credit_spend, cloud/credit.ts) answer from the Orgo balance for them, so the cloud reads and
+ *   spends the same way for both. The tier kept for them is free_bops and means nothing: the cloud holds
+ *   them to BOPS_USAGE, never to Free.
+ */
+export type BopsBilling = "plan" | "usage";
+export const isBilling = (x: unknown): x is BopsBilling => x === "plan" || x === "usage";
+
+/**
+ * What billing by use gives and costs, as the app shows it when orgo-web's answer doesn't say (orgo-web's
+ * own numbers win: lib/bops-billing.ts), and what the cloud holds a user billed by use to:
+ *
+ * - `computerHourlyCents`: the Bops computer (Orgo's Large: 4 cores, 16 GB, 80 GB) by the hour while it
+ *   works, from Orgo credit. Asleep (suspended after 15 minutes nobody uses it) it costs nothing.
+ * - `numberMonthlyCents`: a phone number's month, from Orgo credit, as any number bought through the
+ *   cloud (pricing.ts). A number the user had with a plan before stays theirs.
+ * - `startCents`: the Orgo credit a new Orgo account starts with (orgo-web's signup credit, not Bops').
+ * - `phoneNumbers`: how many numbers the user may hold, each paid for. `emails`: the main bot's inbox,
+ *   free (cloud/plans.ts sets it up); a bot that has one from before keeps it.
+ */
+export const BOPS_USAGE = { computerHourlyCents: 11, numberMonthlyCents: 300, startCents: 500, phoneNumbers: 5, emails: 1 } as const;
+
+/**
+ * The oldest Mac app that knows billing by use (it shows the Orgo balance, never Bops' plans, and adds
+ * credit on Orgo). The cloud answers an older one 426 for a user billed by use (cloud/app-version.ts
+ * requireUsageAppVersion), since it would show them Free and sell them Bops credit nothing spends.
+ * The release that carries billing by use must be this version or later: 0.0.33 to 0.0.37 shipped
+ * without it, so this is the first version after them. Raise it if the release lands later.
+ */
+export const USAGE_MIN_APP_VERSION = "0.0.38";
 
 /**
  * Who a call through the cloud's proxies is for, sent by the app with each one (lib/server/usage.ts

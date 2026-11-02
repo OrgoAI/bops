@@ -6,7 +6,7 @@ import { aiLine, CLOUD_HONOURS_CALL_SETTINGS, headerLine, lineVoiceNote, replies
 import { onCount, todayOf } from "@/lib/sequences";
 import { ownMemory } from "@/lib/chain";
 import { appsStayLine, botChatId, CALL_VOICES, live, settingsOf, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type BotSettings, type CallVoice, type Session } from "@/lib/types";
-import { readOnly, you, your, yourMac } from "@/lib/shared";
+import { numberPausedUntil, readOnly, you, your, yourMac } from "@/lib/shared";
 import type { AutopilotSection } from "./autopilot";
 import { autopilotOf } from "./autopilot";
 import { ComputerChoice, ContactActions, contactOf, DeleteBot, Field, GetEmail, GetNumber, GLASS, HowIWork, PlanNeeded, PlanRoom, Uses, usePhonePlan, type PhonePlan } from "./bot-panel";
@@ -280,7 +280,7 @@ export function BotSettingsBody({
   const paused = `paused until ${you(state)} upgrade${state.shared ? "s" : ""} again`;
   const emailSummary = b.email ? (b.mail?.paused ? `${b.email} · ${paused}` : W.emailSummary(b.email, onCount(set, "email"))) : W.noEmail;
   const phoneSummary = reach
-    ? [W.phoneSummary(spacedPhone(reach), voiceShown(b, set), onCount(set, "phone")), set.answersCalls === false && W.notTaking, b.phoneLine?.paused && paused].filter(Boolean).join(" · ")
+    ? [W.phoneSummary(spacedPhone(reach), voiceShown(b, set), onCount(set, "phone")), set.answersCalls === false && W.notTaking, b.phoneLine?.paused && numberPausedUntil(state, b.phoneLine.unpaid)].filter(Boolean).join(" · ")
     : line && main && !b.isMain
       ? W.reachedThrough(main.name)
       : W.noNumber;
@@ -417,7 +417,7 @@ function AiBody({ state, bot: b, links }: { state: AppState; bot: Bot; links: Se
       {state.businessData && (
         <Segmented
           title="Business data"
-          hint={b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from AI credit"}
+          hint={b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from your credit"}
           value={b.dataOff ? "off" : "on"}
           options={[
             ["on", "On"],
@@ -502,7 +502,7 @@ function PhoneBody({ state, bot: b, set, reach, today, older, onOpenChat }: { st
     <div className="flex flex-col" data-phone-body>
       <div className="-mx-4">
         <Field
-          label={line && b.isMain ? W.teamNumber(line.type === "imessage" ? "iMessage" : "texts") : b.phoneLine?.paused ? `mobile · paused until ${you(state)} upgrade${state.shared ? "s" : ""} again` : W.phoneLabel}
+          label={line && b.isMain ? W.teamNumber(line.type === "imessage" ? "iMessage" : "texts") : b.phoneLine?.paused ? `mobile · ${numberPausedUntil(state, b.phoneLine.unpaid)}` : W.phoneLabel}
           value={number}
           empty={W.noNumber}
         />

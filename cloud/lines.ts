@@ -97,6 +97,7 @@ export async function recordLine(userId: string, n: { id?: string | null; phoneN
          plan = phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' AND phone_lines.plan,
          agent_id = CASE WHEN phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' THEN phone_lines.agent_id END,
          paused_at = CASE WHEN phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' THEN phone_lines.paused_at END,
+         unpaid = phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' AND phone_lines.unpaid,
          updated_at = now()`,
       [digits, userId, n.id ?? null, `+1${digits}`, opts.botId ?? null, opts.workspaceId ?? null, !!opts.open, CLAIM_MINUTES],
     );

@@ -51,9 +51,10 @@ export type Bot = {
   /**
    * Its AgentPhone line (lib/server/phone.ts): the number, and the AgentPhone agent it's attached to.
    * `plan`: it came with the user's Pro or Max plan (Bops Cloud set it up, lib/server/cloud-plan.ts);
-   * `paused`: that plan ended, so calls and texts to it go unanswered until the user upgrades again.
+   * `paused`: that plan ended, so calls and texts to it go unanswered until the user upgrades again,
+   * or (with `unpaid`, billing by use) its month couldn't be paid from the user's Orgo credit, until it is.
    */
-  phoneLine?: { numberId: string; agentId: string; plan?: boolean; paused?: boolean };
+  phoneLine?: { numberId: string; agentId: string; plan?: boolean; paused?: boolean; unpaid?: boolean };
   /** The voice it speaks in on calls (voiceFor in lib/server/call.ts), kept so Bops Cloud answers its calls in the same one while the Mac is away. */
   voice?: string;
   /**
@@ -1666,8 +1667,11 @@ export type AppState = {
    * The user's AI credit ran out: Bops Cloud refused a call that would spend it (402 ai_credit_empty).
    * The bots stop asking the cloud for AI work and the chat shows it with Upgrade, until a read of
    * the plan (GET /api/plan, /api/account) shows credit again. Unset otherwise.
+   * `usage`: the user is billed by use, so it's their Orgo credit, and the chat says Add credit.
+   * `computer`: only the computer can't wake (Orgo credit below an hour of it, lib/bops-billing.ts
+   * canWake): the chat says so, but AI work still goes while some credit is left.
    */
-  credits?: { out: boolean; at: number };
+  credits?: { out: boolean; at: number; usage?: true; computer?: true };
   /**
    * A Connected App (or a vault key) just finished connecting for a bot, and the window offers that bot's
    * starter routines for it (GET /api/routines/suggestions). One at a time; cleared once answered or

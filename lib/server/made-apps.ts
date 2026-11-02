@@ -142,7 +142,7 @@ async function build(appId: string, botId: string, change: string, lineId: strin
       if (m) m.text = text;
     });
   try {
-    if (await creditsOut()) throw new Error("Your AI credit is used up.");
+    if (await creditsOut()) throw new Error("Your credit is used up.");
     const now = await codeFor(appId);
     // Changing one made on another Mac whose code couldn't be fetched: never a new app over it.
     if (app.version && !now) throw new Error("Couldn't get its code from Orgo. Try again in a moment.");
@@ -185,7 +185,7 @@ async function build(appId: string, botId: string, change: string, lineId: strin
     if (built) versionSaved(built, n);
     say(n === 1 ? `Made ${app.title}` : `${app.title} updated to v${n}`);
   } catch (e) {
-    const why = noteOutOfCredit(e) ? "Your AI credit is used up." : (e as Error).message;
+    const why = noteOutOfCredit(e) ? "Your credit is used up." : (e as Error).message;
     set((a) => {
       delete a.building;
       a.error = why.slice(0, 300);
@@ -395,7 +395,7 @@ export async function bridge(appId: string, method: string, args: Record<string,
 }
 
 async function ask(app: MadeApp, prompt: string, json: boolean) {
-  if (await creditsOut()) throw new Error("Your AI credit is used up.");
+  if (await creditsOut()) throw new Error("Your credit is used up.");
   const r = await client.responses.create(
     {
       model: LIGHT(),

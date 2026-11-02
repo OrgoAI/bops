@@ -2,7 +2,7 @@ import "server-only";
 import { compactBlocked, heard } from "@/lib/chat-summary";
 import { redact } from "@/lib/secret-patterns";
 import type { ChatSummary, MemberSaid, Message } from "@/lib/types";
-import { creditsOut, noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
+import { creditsOut, noteOutOfCredit, outOfCreditWords } from "./cloud";
 import { openaiClient } from "./openai-client";
 import { LIGHT, speedFor, tierParam, withSpeed } from "./routing";
 import { addMessage, bot, chat, getState, ownerName, sameState, session, stateEpoch, update } from "./store";
@@ -221,14 +221,14 @@ export async function compactChat(chatId: string, member?: MemberSaid): Promise<
   if (!c) return { ok: false, error: "No such chat.", status: 404 };
   const blocked = compactBlocked(c, getState().messages, (id) => bot(id)?.name);
   if (blocked) return { ok: false, error: blocked, status: 409 };
-  if (await creditsOut()) return { ok: false, error: OUT_OF_CREDIT, status: 402 };
+  if (await creditsOut()) return { ok: false, error: outOfCreditWords(), status: 402 };
   const ours = sameState();
   try {
     const done = await inTurn(chatId, () => bringUp(chatId, c.botIds[0], true));
     if (!done || !ours()) return { ok: false, error: "That didn't compact. Try again.", status: 409 };
   } catch (e) {
     console.warn(`[chat-summary] compact ${chatId}: ${(e as Error)?.message ?? e}`);
-    return { ok: false, error: noteOutOfCredit(e) ? OUT_OF_CREDIT : "That didn't compact. Try again.", status: 502 };
+    return { ok: false, error: noteOutOfCredit(e) ? outOfCreditWords() : "That didn't compact. Try again.", status: 502 };
   }
   addMessage({ chatId, role: "system", text: member ? `Compacted by ${member.name}` : "Compacted", compacted: true, ...(member ? { member } : {}) });
   return { ok: true };

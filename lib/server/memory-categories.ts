@@ -955,7 +955,7 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
   }
   const todo = pending.slice(0, PER_RUN);
   if (todo.length && (await creditsOut())) {
-    index.error = "Out of AI credit: new things wait until there's more.";
+    index.error = "Out of credit: new things wait until there's more.";
     if (ours()) save(ws, index);
     return;
   }
@@ -978,7 +978,7 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
     const got = await sortFacts(batch, knownFor(index, batch), epoch, ours);
     if (got === "gone" || !ours()) return void (stopped = true);
     if (got === "credit") {
-      index.error = "Out of AI credit: new things wait until there's more.";
+      index.error = "Out of credit: new things wait until there's more.";
       return void (stopped = true);
     }
     if (got === "down") {

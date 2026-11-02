@@ -1,9 +1,9 @@
 import { config } from "./config.ts";
-import { creditLeft, creditsOn, OUT_OF_CREDIT, outOfCredit, shortOfCredit } from "./credit.ts";
+import { billingFor, creditLeft, creditsOn, creditWords, outOfCredit, shortOfCredit } from "./credit.ts";
 import { query, sessionUsed } from "./db.ts";
 import { HttpError } from "./http.ts";
 import { tokenCost, turnHold } from "./pricing.ts";
-import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "./protocol.ts";
+import { AI_CREDIT_EMPTY, AI_CREDIT_LOW, type BopsBilling } from "./protocol.ts";
 import { recordTokens } from "./usage.ts";
 
 /**
@@ -145,11 +145,12 @@ const dollars = (micros: number) => `$${(Math.max(0, micros) / 1e6).toFixed(2)}`
 const turnsIn = (json: unknown): Seen[] => (isObject(json) && Array.isArray(json.data) ? (json.data as Turn[]) : []).filter((t): t is Seen => typeof t?.id === "string");
 const lead = () => (guardTiming.everyMs + guardTiming.stopMs) / 1000;
 
-const emptyVerdict = (): Verdict => ({ code: AI_CREDIT_EMPTY, message: OUT_OF_CREDIT });
+/** In the words for how the user is billed (credit.ts creditWords): AI credit on Bops' plans, Orgo credit billed by use. */
+const emptyVerdict = (billing: BopsBilling): Verdict => ({ code: AI_CREDIT_EMPTY, message: creditWords(billing).empty });
 // No amounts in these: an app before 0.0.16 sends a task's failure on by email, text or channel too.
-const lowVerdict = (): Verdict => ({ code: AI_CREDIT_LOW, message: "It needs more AI credit than you have left, so it's stopped. Upgrade in Settings to keep it going." });
+const lowVerdict = (billing: BopsBilling): Verdict => ({ code: AI_CREDIT_LOW, message: creditWords(billing).stopped });
 /** When it couldn't be decided in time (or something failed on the way). */
-const unsureVerdict = (): Verdict => ({ code: AI_CREDIT_LOW, message: "It was stopped while your AI credit was checked. Ask again to pick it up." });
+const unsureVerdict = (): Verdict => ({ code: AI_CREDIT_LOW, message: "It was stopped while your credit was checked. Ask again to pick it up." });
 
 const usersWatched = (userId: string) => [...(byUser.get(userId) ?? [])];
 const startingFor = (userId: string) => [...(starting.get(userId) ?? [])];
@@ -179,9 +180,9 @@ export async function admitTurn(userId: string, session: string | undefined, mod
   setTimeout(() => release(userId, claim), 60_000).unref?.();
   try {
     const left = await creditLeft(userId);
-    if (left <= 0) throw outOfCredit();
+    if (left <= 0) throw outOfCredit(await billingFor(userId));
     const held = usersWatched(userId).reduce((sum, w) => sum + w.held, 0) + startingFor(userId).reduce((sum, c) => sum + c.micros, 0);
-    if (held > left) throw shortOfCredit();
+    if (held > left) throw shortOfCredit(await billingFor(userId));
   } catch (e) {
     release(userId, claim);
     throw e;
@@ -492,7 +493,8 @@ async function decide(w: Watched, got: Look, left: number, room: number): Promis
       why = null;
       return 0;
     }
-    why = left <= 0 ? emptyVerdict() : lowVerdict();
+    const billing = await billingFor(w.userId);
+    why = left <= 0 ? emptyVerdict(billing) : lowVerdict(billing);
     const need = w.rate * guardTiming.resumeS;
     const recent = w.resumedAt.filter((at) => guardClock.now() - at < guardTiming.resumeWindowMs);
     const userStopped = w.userStoppedAt >= s.at - guardTiming.stopMs;

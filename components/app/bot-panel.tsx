@@ -23,7 +23,7 @@ import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
-import { readOnly, you, your, Your, yourMac } from "@/lib/shared";
+import { numberPausedUntil, readOnly, you, your, Your, yourMac } from "@/lib/shared";
 import { BOOK_A_CALL } from "@/lib/links";
 import { aiKinds, aiLine, SETTINGS_WORDS, teamLine, type SettingsSection } from "@/lib/bot-settings";
 import { onCount } from "@/lib/sequences";
@@ -271,7 +271,7 @@ function Details({
       <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
         <Field
           label={
-            line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : b.phoneLine?.paused ? `mobile · paused until ${you(state)} upgrade${state.shared ? "s" : ""} again` : "mobile · texts and calls"
+            line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : b.phoneLine?.paused ? `mobile · ${numberPausedUntil(state, b.phoneLine.unpaid)}` : "mobile · texts and calls"
           }
           value={reach ? prettyPhone(reach) : undefined}
           empty={line && main ? `Text ${main.name} at ${prettyPhone(line.phone)}: ${main.name} passes work to ${b.name}.` : "No number yet."}
@@ -348,7 +348,7 @@ function Details({
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="text-[13px] font-semibold leading-4">Business data</span>
             <span className="text-[12px] leading-4 text-[#6B6B6B]">
-              {b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from AI credit"}
+              {b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from your credit"}
             </span>
           </div>
           <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">

@@ -258,7 +258,8 @@ export const NOTES = {
   deleted: (_owner: string, bot: string) => `${bot}'s computer was deleted, so ${bot} can't answer this.`,
   noHours: (_owner: string, bot: string) => `${bot}'s computer is out of Free hours for today, so ${bot} can't answer this.`,
   hourly: (owner: string, bot: string) => `${bot}'s computer is paid by the hour, and ${owner} hasn't let messages wake it, so ${bot} can't answer this.`,
-  noCredit: (owner: string, bot: string) => `${owner} is out of AI credit, so ${bot} can't answer this.`,
+  // Only a wake Orgo refused for want of Orgo credit (billing by use) says this.
+  noCredit: (owner: string, bot: string) => `${owner} is out of Orgo credit, so ${bot}'s computer can't wake up. ${owner} can add credit in Settings.`,
   paused: (_owner: string, bot: string) => `${bot}'s computer is paused, so ${bot} can't answer this.`,
   cant: (_owner: string, bot: string) => `${bot}'s computer couldn't wake up, so ${bot} can't answer this. Send it again later.`,
   late: (_owner: string, bot: string) => `${bot}'s computer didn't wake up in time. Send it again to try once more.`,

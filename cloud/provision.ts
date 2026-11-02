@@ -31,6 +31,8 @@ import { recordUsage } from "./usage.ts";
  *
  * When the plan ends, its number and inbox are paused (plans.ts stops answering on them), and given
  * back 30 days later (releaseAfterPause). Upgrading again before then picks them up as they were.
+ * Billed by use, a number whose month can't be paid from the user's Orgo credit is paused and given
+ * back the same way (pauseUnpaidLine, numbers-renew.ts), and comes back once its month is paid.
  */
 
 /** What the Mac keeps for a bot, as far as the plan cares (lib/types.ts Bot). */
@@ -79,6 +81,14 @@ async function planLine(userId: string): Promise<LineRow | null> {
     [userId],
   );
   return r.rows[0] ?? null;
+}
+
+/**
+ * Whether the user still has a plan's number (not given back): a user billed by use keeps the one they
+ * had (plans.ts settles it like a plan's), but is never bought one for nothing.
+ */
+export async function hasPlanLine(userId: string): Promise<boolean> {
+  return !!(await planLine(userId));
 }
 
 /** Whether the main bot has a number that isn't the plan's: its own (Bot.phone), the workspace's, or a line the cloud has for it. */
@@ -146,7 +156,7 @@ export async function ensurePlanPhone(userId: string, main: MainBot): Promise<{ 
     // texting a new number in those 15 minutes would become its owner. The app opens it when it shows
     // the user the number (lib/server/cloud-plan.ts); the user's verified numbers count as them meanwhile.
     await recordLine(userId, number, { botId: main.bot.id, workspaceId: MAIN_WORKSPACE });
-    await query("UPDATE bops.phone_lines SET plan = true, agent_id = $2, status = 'setting_up', paused_at = NULL, problem = NULL, updated_at = now() WHERE digits = $1", [digits, agentId]);
+    await query("UPDATE bops.phone_lines SET plan = true, agent_id = $2, status = 'setting_up', paused_at = NULL, unpaid = false, problem = NULL, updated_at = now() WHERE digits = $1", [digits, agentId]);
     // Its texts and calls come to the cloud through the agent's webhook, whose secret the cloud keeps.
     // One already there is left as it is: registering it again would change its secret under
     // deliveries on their way.
@@ -320,27 +330,102 @@ export async function pausePlanItems(userId: string): Promise<{ phone?: PlanPhon
   return { ...(lines.rows[0] ? { phone: phoneOut(lines.rows[0]) } : {}), ...(inboxes.rows[0] ? { email: inboxOut(inboxes.rows[0]) } : {}) };
 }
 
-/** How long a paused plan's number and inbox are kept before they're given back. */
+/** How long a paused plan's number and inbox are kept before they're given back (a number paused for its month too). */
 export const RELEASE_AFTER_DAYS = 30;
+
+/** A line as the Mac hears about its month (billing by use): with the bot and workspace it's for, and when it was paused. */
+export type UnpaidLine = LineRow & { bot_id: string | null; workspace_id: string | null; paused_at: Date | null };
+
+const UNPAID_COLUMNS = "digits, number_id, e164, agent_id, status, problem, bot_id, workspace_id, paused_at";
+
+/** When a line paused for its month is given back if it's still unpaid. */
+export const releaseAt = (pausedAt: Date) => new Date(pausedAt.getTime() + RELEASE_AFTER_DAYS * 86_400_000);
+
+/** A line paused for its month, as the Mac is told it: "paused" with the day it goes, "ready" once paid, "released" when it went. */
+export const unpaidOut = (r: UnpaidLine): PlanPhone => ({
+  ...phoneOut(r),
+  renewal: r.status === "paused" && r.paused_at ? { releaseAt: releaseAt(r.paused_at).toISOString() } : {},
+});
+
+/**
+ * Billing by use (numbers-renew.ts): a number whose month couldn't be paid from the user's Orgo credit is
+ * paused as a plan's is (calls and texts on it go unanswered, texts out from it are refused: plans.ts
+ * lineStopped, sendingStopped), marked unpaid, and given back RELEASE_AFTER_DAYS later if it still is
+ * (releaseAfterPause). Only while it's still the month that wasn't paid (`paidUntil`, as text), so a
+ * pass that paid it meanwhile keeps it. Null when nothing changed (paused already, or paid).
+ */
+export async function pauseUnpaidLine(digits: string, paidUntil: string): Promise<UnpaidLine | null> {
+  const r = await query<UnpaidLine>(
+    `UPDATE bops.phone_lines SET status = 'paused', unpaid = true, paused_at = now(), checked_at = now(), updated_at = now()
+     WHERE digits = $1 AND paid_until = $2::timestamptz AND status IN ('setting_up', 'ready', 'broken')
+     RETURNING ${UNPAID_COLUMNS}`,
+    [digits, paidUntil],
+  );
+  return r.rows[0] ?? null;
+}
+
+/**
+ * Its month is paid (`paidUntil`, as text, the month it was paused for): a number paused for it is back
+ * on at once, and paid until a `month` (an interval) from now, so it's billed monthly from today. Null
+ * when it wasn't paused for its month.
+ */
+export async function resumePaidLine(digits: string, paidUntil: string, month: string): Promise<UnpaidLine | null> {
+  const r = await query<UnpaidLine>(
+    `UPDATE bops.phone_lines SET status = 'ready', unpaid = false, paused_at = NULL, paid_until = now() + $3::interval, checked_at = now(), updated_at = now()
+     WHERE digits = $1 AND paid_until = $2::timestamptz AND unpaid AND status = 'paused'
+     RETURNING ${UNPAID_COLUMNS}`,
+    [digits, paidUntil, month],
+  );
+  return r.rows[0] ?? null;
+}
+
+/**
+ * The user is no longer billed by use (orgo-web moved them back to Bops' plans): their numbers paused
+ * for a month are back on, since nothing bills a number by the month there. What came back.
+ */
+export async function resumeUnbilledLines(): Promise<(UnpaidLine & { user_id: string })[]> {
+  const r = await query<UnpaidLine & { user_id: string }>(
+    `UPDATE bops.phone_lines l SET status = 'ready', unpaid = false, paused_at = NULL, checked_at = now(), updated_at = now()
+     WHERE l.unpaid AND l.status = 'paused'
+       AND NOT EXISTS (SELECT 1 FROM bops.plans p WHERE p.user_id = l.user_id AND p.billing = 'usage')
+     RETURNING ${UNPAID_COLUMNS.split(", ").map((c) => `l.${c}`).join(", ")}, l.user_id`,
+  );
+  return r.rows;
+}
+
+/**
+ * What's given back once paused for RELEASE_AFTER_DAYS: a plan's number and inbox while the user is still
+ * on Free and not billed by use (one billed by use keeps what they had, plans.ts), and a number paused for
+ * its month while the user is still billed by use.
+ */
+const LINE_GOES = `l.status = 'paused' AND l.paused_at < now() - make_interval(days => $1)
+  AND ((l.plan AND COALESCE(p.tier, 'free_bops') = 'free_bops' AND COALESCE(p.billing, 'plan') = 'plan') OR (l.unpaid AND p.billing = 'usage'))`;
 
 /** Runs one user's release holding their plan lock (plans.ts), so a plan setting things up again can't run at the same time. */
 type Guard = <T>(userId: string, work: () => Promise<T>) => Promise<T>;
 
+/** Where the Mac hears about a number given back for its month: the bot and workspace it's for. */
+export type LineFor = { botId: string | null; workspaceId: string | null };
+
 /**
- * Give back what was paused 30 days ago and still is (the user is still on Free): the number to
- * AgentPhone (DELETE /v1/numbers/{id}), the inbox to AgentMail. Each is looked at again under the
- * user's lock (`guard`) before it goes, so an upgrade that came meanwhile keeps it. Each released one
- * is told to its user's Mac through `tell`. A provider that fails, or isn't set up here, leaves it
- * paused (and still the user's), for the next sweep.
+ * Give back what was paused 30 days ago and still is (LINE_GOES): the number to AgentPhone
+ * (DELETE /v1/numbers/{id}), the inbox to AgentMail. Each is looked at again under the user's lock
+ * (`guard`) before it goes, so an upgrade, or a month paid, that came meanwhile keeps it. Each released
+ * one is told to its user's Mac through `tell` (with the bot and workspace for a number given back for
+ * its month). A provider that fails, or isn't set up here, leaves it paused (and still the user's), for
+ * the next sweep.
  */
-export async function releaseAfterPause(tell: (userId: string, item: { phone?: PlanPhone; email?: PlanInbox }) => Promise<void>, guard: Guard = (_userId, work) => work()): Promise<number> {
+export async function releaseAfterPause(
+  tell: (userId: string, item: { phone?: PlanPhone; email?: PlanInbox }, on?: LineFor) => Promise<void>,
+  guard: Guard = (_userId, work) => work(),
+): Promise<number> {
   let released = 0;
-  const lines = await query<LineRow & { user_id: string }>(
-    `SELECT l.digits, l.number_id, l.e164, l.agent_id, l.status, l.problem, l.user_id
+  const lines = await query<UnpaidLine & { user_id: string; unpaid: boolean }>(
+    `SELECT l.digits, l.number_id, l.e164, l.agent_id, l.status, l.problem, l.user_id, l.bot_id, l.workspace_id, l.paused_at, l.unpaid
      FROM bops.phone_lines l
      JOIN bops.cloud_accounts a ON a.user_id = l.user_id
      LEFT JOIN bops.plans p ON p.user_id = l.user_id
-     WHERE l.plan AND l.status = 'paused' AND l.paused_at < now() - make_interval(days => $1) AND COALESCE(p.tier, 'free_bops') = 'free_bops'
+     WHERE ${LINE_GOES}
      LIMIT 100`,
     [RELEASE_AFTER_DAYS],
   );
@@ -350,8 +435,8 @@ export async function releaseAfterPause(tell: (userId: string, item: { phone?: P
         `SELECT a.agentphone_sub_account AS sub FROM bops.phone_lines l
          JOIN bops.cloud_accounts a ON a.user_id = l.user_id
          LEFT JOIN bops.plans p ON p.user_id = l.user_id
-         WHERE l.digits = $1 AND l.user_id = $2 AND l.plan AND l.status = 'paused' AND l.paused_at < now() - make_interval(days => $3) AND COALESCE(p.tier, 'free_bops') = 'free_bops'`,
-        [l.digits, l.user_id, RELEASE_AFTER_DAYS],
+         WHERE l.digits = $2 AND l.user_id = $3 AND ${LINE_GOES}`,
+        [RELEASE_AFTER_DAYS, l.digits, l.user_id],
       );
       const sub = still.rows[0]?.sub;
       if (!still.rowCount) return false;
@@ -373,12 +458,13 @@ export async function releaseAfterPause(tell: (userId: string, item: { phone?: P
     }).catch((e: Error) => (console.warn(`[provision] ${l.user_id}: couldn't give back ${l.e164}: ${e.message}`), false));
     if (!gone) continue;
     released++;
-    await tell(l.user_id, { phone: phoneOut({ ...l, status: "released", problem: null }) }).catch(() => {});
+    const out = { ...l, status: "released" as const, problem: null };
+    await (l.unpaid ? tell(l.user_id, { phone: unpaidOut(out) }, { botId: l.bot_id, workspaceId: l.workspace_id }) : tell(l.user_id, { phone: phoneOut(out) })).catch(() => {});
   }
   const inboxes = await query<InboxRow & { user_id: string }>(
     `SELECT i.inbox_id, i.pod_id, i.email, i.handle, i.status, i.problem, i.user_id
      FROM bops.mail_inboxes i LEFT JOIN bops.plans p ON p.user_id = i.user_id
-     WHERE i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $1) AND COALESCE(p.tier, 'free_bops') = 'free_bops'
+     WHERE i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $1) AND COALESCE(p.tier, 'free_bops') = 'free_bops' AND COALESCE(p.billing, 'plan') = 'plan'
      LIMIT 100`,
     [RELEASE_AFTER_DAYS],
   );
@@ -386,7 +472,7 @@ export async function releaseAfterPause(tell: (userId: string, item: { phone?: P
     const gone = await guard(i.user_id, async () => {
       const still = await query(
         `SELECT 1 FROM bops.mail_inboxes i LEFT JOIN bops.plans p ON p.user_id = i.user_id
-         WHERE i.inbox_id = $1 AND i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $2) AND COALESCE(p.tier, 'free_bops') = 'free_bops'`,
+         WHERE i.inbox_id = $1 AND i.plan AND i.status = 'paused' AND i.paused_at < now() - make_interval(days => $2) AND COALESCE(p.tier, 'free_bops') = 'free_bops' AND COALESCE(p.billing, 'plan') = 'plan'`,
         [i.inbox_id, RELEASE_AFTER_DAYS],
       );
       if (!still.rowCount) return false;

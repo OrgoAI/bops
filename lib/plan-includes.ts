@@ -1,8 +1,16 @@
 /**
- * What each Bops plan includes, in the words the app and bops.bot show (keep site/index.html's
- * pricing in step: scripts/test-site.mjs checks it says the same words), and why a plan has no room
- * for one more phone number, email or computer. The numbers are BOPS_TIERS (cloud/protocol.ts),
- * which orgo-web and Bops Cloud hold each plan to:
+ * What Bops costs, in the words the app and bops.bot show, and why there's no room for one more phone
+ * number, email or computer. Two ways (cloud/protocol.ts BopsBilling):
+ *
+ * Billing by use (USAGE_CARD; bops.bot's pricing changes to the same words at the switch date, not
+ * before, so the site never advertises it while Pro and Max are still sold): no plan. The user pays for what they use from their Orgo credit, the
+ * Bops computer by the hour while it works and nothing while it sleeps, AI at Orgo's rate; a new Orgo
+ * account starts with Orgo's $5 of credit.
+ * The numbers are BOPS_USAGE's, which Bops Cloud holds them to (orgo-web's own answer wins in the
+ * app: lib/bops-billing.ts).
+ *
+ * Bops' own plans (PLAN_CARDS), which the app shows only while orgo-web still bills by them (its
+ * BOPS_USAGE_BILLING off). The numbers are BOPS_TIERS, which orgo-web and Bops Cloud hold each plan to:
  *
  * - Free: $5 of AI credit once, the one free Bops computer (10 hours a month, 4 cores, 16 GB,
  *   multi-screen), any number of bots sharing it; no phone number, no email.
@@ -15,7 +23,13 @@
  *
  * Shared by the server and the app (no server imports).
  */
-import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
+import { BOPS_TIERS, BOPS_USAGE, type BopsTier } from "@/cloud/protocol";
+
+/** Where the plan's limits stand: one of Bops' plans, or billing by use ("usage"). */
+export type RoomTier = BopsTier | "usage";
+
+/** Cents as money: "$0.11", "$3", "$5". */
+const cents = (c: number) => (c % 100 === 0 ? `$${c / 100}` : `$${(c / 100).toFixed(2)}`);
 
 /** One line on a plan's card: something it includes, or (`no`) something it doesn't. */
 export type PlanLine = { text: string; no?: true };
@@ -34,7 +48,33 @@ const included = (tier: BopsTier) => {
   return n === 1 ? "1 computer included" : `Up to ${n} computers`;
 };
 
-/** The three plans, as the account sheet and bops.bot list them. An Orgo plan is never one of these. */
+/**
+ * Billing by use, as the account sheet and bops.bot say it: one card, no plan to pick. `hourlyCents` and
+ * `numberCents` are orgo-web's when it said them (the app's), else BOPS_USAGE's (bops.bot's).
+ */
+export function usageCard(p: { hourlyCents?: number; numberCents?: number } = {}) {
+  const hourly = cents(p.hourlyCents ?? BOPS_USAGE.computerHourlyCents);
+  const number = cents(p.numberCents ?? BOPS_USAGE.numberMonthlyCents);
+  return {
+    name: "Pay only for what you use",
+    price: "$0",
+    per: "/month",
+    computers: { title: "Your own Bops computer", detail: "4 cores, 16 GB RAM, 80 GB, multi-screen. It sleeps when nothing's using it." },
+    lines: [
+      { text: `Your computer: ${hourly} an hour while it works, free while it sleeps` },
+      { text: "AI at Orgo's rate" },
+      { text: `New Orgo accounts start with $${BOPS_USAGE.startCents / 100} of credit` },
+      { text: "As many bots as you like, sharing it" },
+      { text: "1 email for your main bot, free" },
+      { text: `A phone number for ${number} a month` },
+    ],
+  } satisfies Omit<PlanCard, "tier">;
+}
+
+/** The card bops.bot shows, at BOPS_USAGE's prices. */
+export const USAGE_CARD = usageCard();
+
+/** The three plans, as the account sheet listed them before billing by use. An Orgo plan is never one of these. */
 export const PLAN_CARDS: PlanCard[] = [
   {
     tier: "free_bops",
@@ -137,12 +177,18 @@ const MAX = BOPS_TIERS.max_bops;
 /** The upgrade button for a short: "Purchase a plan" from Free, "Upgrade to Max" from Pro. */
 export const upgradeLabel = (upgrade: "plan" | "max") => (upgrade === "plan" ? "Purchase a plan" : "Upgrade to Max");
 
+/** Billing by use's limits on numbers and emails: nothing to upgrade to, so no button. */
+const USAGE_NUMBERS_FULL = `You have ${BOPS_USAGE.phoneNumbers} phone numbers, the most one account can have for now.`;
+const USAGE_EMAIL = "Bops includes 1 email, for your main bot.";
+
 /**
  * Whether `bot` may have one more phone number, with `held` numbers on the account now (the main
  * bot's from the plan included): null when it may. On Pro the one number is the main bot's, which the
- * plan sets up itself. The words are Bops Cloud's refusal's (cloud/plans.ts numberRefusal), exactly.
+ * plan sets up itself. Billed by use, any bot may, up to BOPS_USAGE's, each paid from Orgo credit. The
+ * words are Bops Cloud's refusal's (cloud/plans.ts numberRefusal), exactly.
  */
-export function numberShort(tier: BopsTier, held: number, bot: { isPlanBot: boolean }): PlanRoomShort | null {
+export function numberShort(tier: RoomTier, held: number, bot: { isPlanBot: boolean }): PlanRoomShort | null {
+  if (tier === "usage") return held < BOPS_USAGE.phoneNumbers ? null : { text: USAGE_NUMBERS_FULL, upgrade: null };
   if (tier === "free_bops") return { text: `Free doesn't include a phone number. Pro includes ${BOPS_TIERS.pro_bops.phoneNumbers}, and Max up to ${MAX.phoneNumbers}.`, upgrade: "plan" };
   if (tier === "pro_bops") {
     if (bot.isPlanBot && held < BOPS_TIERS.pro_bops.phoneNumbers) return null;
@@ -151,8 +197,12 @@ export function numberShort(tier: BopsTier, held: number, bot: { isPlanBot: bool
   return held < MAX.phoneNumbers ? null : { text: `Max includes up to ${MAX.phoneNumbers} phone numbers, and you have ${MAX.phoneNumbers}.`, upgrade: null };
 }
 
-/** The same for an email, in the same words: `held` is how many of the user's bots have an inbox. */
-export function emailShort(tier: BopsTier, held: number, bot: { isPlanBot: boolean }): PlanRoomShort | null {
+/**
+ * The same for an email, in the same words: `held` is how many of the user's bots have an inbox. Billed
+ * by use, the main bot's is free (Bops Cloud sets it up) and is the one; a bot that has one keeps it.
+ */
+export function emailShort(tier: RoomTier, held: number, bot: { isPlanBot: boolean }): PlanRoomShort | null {
+  if (tier === "usage") return bot.isPlanBot ? null : { text: USAGE_EMAIL, upgrade: null };
   if (tier === "free_bops") return { text: `Free doesn't include an email. Pro includes ${BOPS_TIERS.pro_bops.emails}, and Max up to ${MAX.emails}.`, upgrade: "plan" };
   if (tier === "pro_bops") {
     if (bot.isPlanBot) return null;
@@ -180,7 +230,7 @@ export function computerShort(tier: BopsTier, held: number, more = 1): PlanRoomS
  * MemberSeats): the plan, how many people it includes besides the user (null: no limit), how many
  * have access or an invite still waiting, and how many Pro and Max include.
  */
-export type PeopleRoom = { plan: BopsTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number } };
+export type PeopleRoom = { plan: RoomTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number } };
 
 /** What Pro and Max include, from BOPS_TIERS: named in the People sheet only when orgo-web's seats leave their caps out. */
 export const PEOPLE_CAPS = { pro_bops: BOPS_TIERS.pro_bops.people, max_bops: BOPS_TIERS.max_bops.people } as const;
@@ -200,6 +250,12 @@ export const peopleAside = (s: PeopleRoom) => (s.limit === null ? null : `${s.us
  */
 export function peopleShort(s: PeopleRoom, { withAccess, invited }: { withAccess: number; invited: number }): (PlanRoomShort & { note?: string }) | null {
   const max = s.caps.max_bops;
+  // Billed by use, the people come with the Orgo plan (orgo-web's numbers): more is Orgo's to sell, not the app's.
+  if (s.plan === "usage") {
+    if (s.limit === null || s.used < s.limit) return null;
+    const keep = s.used > s.limit ? ` The ${peopleCount(s.used)} with access keep it.` : "";
+    return { text: `Your Orgo plan includes ${s.limit === 0 ? "no one else" : peopleCount(s.limit)}.${keep} Upgrade your Orgo plan on orgo.ai to add more.`, upgrade: null };
+  }
   if (s.plan === "free_bops" || s.limit === 0) {
     const keep = withAccess === 1 ? "The 1 person who has access keeps it." : `The ${withAccess} people who have access keep it.`;
     return { text: `Free doesn't include adding people. ${withAccess > 0 ? keep : `Pro includes ${s.caps.pro_bops}, and Max up to ${max}.`}`, upgrade: "plan" };

@@ -23,8 +23,8 @@ const users: string[] = [];
 let orgo: Listening, cloud: Listening;
 let agentphone: Awaited<ReturnType<typeof fakeProvider>>, agentmail: Awaited<ReturnType<typeof fakeProvider>>;
 
-/** What orgo-web says each user's plan is (GET /api/bops/plan). */
-const orgoTiers = new Map<string, string>();
+/** What orgo-web says each user's plan is (GET /api/bops/plan): a tier, or the whole answer (billing by use). */
+const orgoTiers = new Map<string, string | Record<string, unknown>>();
 
 /** AgentPhone, per sub-account: numbers (with their agent and routing), agents (with their webhook). */
 type FakeNumber = { id: string; phoneNumber: string; externalId?: string; agentId?: string | null; voiceRouting: { method: string }; sub: string; released?: boolean };
@@ -51,7 +51,10 @@ before(async () => {
       const userId = /^Bearer key-(.+)$/.exec(req.headers.authorization ?? "")?.[1];
       if (!userId) return void res.writeHead(401).end("{}");
       if (req.url === "/api/user/profile") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: userId, email: `${userId}@example.com` }));
-      if (req.url === "/api/bops/plan" && orgoTiers.has(userId)) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ tier: orgoTiers.get(userId) }));
+      if (req.url === "/api/bops/plan" && orgoTiers.has(userId)) {
+        const said = orgoTiers.get(userId);
+        return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(typeof said === "string" ? { tier: said } : said));
+      }
       res.writeHead(404).end("{}");
     }),
   );
@@ -663,4 +666,111 @@ test("after a number is given back, the plan's next one goes on the same agent a
   const before = await kept();
   assert.equal((await delivery(fresh.agent_id, { from: "+12125550123", body: "still there?" })).status, 200);
   assert.equal(await kept(), before + 1, "kept for the Mac, not taken for the number given back");
+});
+
+/* ---------------- Billed by use ---------------- */
+
+const kept = async (userId: string) => (await query<{ tier: string; billing: string }>("SELECT tier, billing FROM bops.plans WHERE user_id = $1", [userId])).rows[0];
+
+test("billed by use: the notice is taken with any tier or none, a billing it doesn't know is refused, and an Orgo tier is never taken for Free", async () => {
+  const { id } = await paidUser();
+  assert.equal((await notice({ userId: id, billing: "metered", at: at() })).status, 400, "billing it doesn't know");
+  assert.equal((await notice({ userId: id, tier: "hacker_v2", at: at() })).status, 400, "an Orgo tier on Bops' plans isn't Free");
+  assert.equal((await notice({ userId: id, tier: "hacker_v2", billing: "plan", at: at() })).status, 400);
+  assert.equal(await kept(id), undefined, "nothing kept from those");
+  const r = await notice({ userId: id, billing: "usage", tier: "hacker_v2", at: at() });
+  assert.deepEqual(r, { status: 200, json: { ok: true, applied: true } });
+  assert.deepEqual(await kept(id), { tier: "free_bops", billing: "usage" });
+  // A notice from an orgo-web from before billing by use (no billing) keeps how the user is billed.
+  assert.equal((await notice({ userId: id, tier: "free_bops", at: at(1000) })).json?.applied, true);
+  assert.deepEqual(await kept(id), { tier: "free_bops", billing: "usage" });
+  // orgo-web moving them back says so.
+  assert.equal((await notice({ userId: id, tier: "pro_bops", billing: "plan", at: at(2000) })).json?.applied, true);
+  assert.deepEqual(await kept(id), { tier: "pro_bops", billing: "plan" });
+  await settle(id);
+});
+
+test("billed by use: the main bot gets its inbox free and no number is bought; the session says usage", async () => {
+  const { id } = await paidUser();
+  await notice({ userId: id, billing: "usage", at: at() });
+  await until(async () => (await inbox(id))[0]?.status === "ready", "the inbox");
+  const told = await until(async () => (await planEvents(id)).find((e) => (e.email as { status?: string } | undefined)?.status === "ready"), "told the Mac");
+  assert.equal(told.billing, "usage");
+  assert.equal(told.phone, undefined);
+  assert.equal(bought(id).length, 0, "no number bought for them");
+  assert.equal((await line(id)).length, 0);
+  const s = await call(cloud.url, "POST", "/v1/session", { key: keyOf(id), headers: { "x-bops-version": "9.0.0" } });
+  assert.equal(s.status, 200, s.text);
+  assert.deepEqual(s.json.plan, { tier: "free_bops", limits: false, billing: "usage" });
+});
+
+test("a Pro user moved to billing by use keeps the plan's number and inbox: never paused, never given back", async () => {
+  const { id } = await paidUser();
+  await notice({ userId: id, tier: "pro_bops", at: at() });
+  const [l] = await until(async () => ((await line(id))[0]?.status === "ready" && (await inbox(id))[0]?.status === "ready" ? line(id) : null), "set up");
+  await notice({ userId: id, billing: "usage", tier: "free_bops", at: at(1000) });
+  const moved = await until(async () => (await planEvents(id)).find((e) => e.billing === "usage"), "told the Mac");
+  assert.equal(moved.tier, "free_bops");
+  assert.deepEqual([(await line(id))[0].status, (await inbox(id))[0].status], ["ready", "ready"], "nothing paused");
+  // Even one paused from before (Free, then moved), 31 days on, is picked up again rather than given back.
+  await query("UPDATE bops.phone_lines SET status = 'paused', paused_at = now() - interval '31 days' WHERE user_id = $1", [id]);
+  await query("UPDATE bops.mail_inboxes SET status = 'paused', paused_at = now() - interval '31 days' WHERE user_id = $1", [id]);
+  await sweep();
+  assert.deepEqual([(await line(id))[0].status, (await inbox(id))[0].status], ["paused", "paused"], "not given back");
+  await settle(id, { force: true });
+  assert.deepEqual([(await line(id))[0].status, (await inbox(id))[0].status], ["ready", "ready"], "picked up again");
+  assert.equal((await line(id))[0].number_id, l.number_id);
+  assert.equal(bought(id).length, 1);
+});
+
+test("with plan limits on, a user billed by use buys numbers (paid from credit) up to their most; the tier kept is never Free's no", async () => {
+  const { id } = await paidUser();
+  process.env.BOPS_PLAN_LIMITS = "1";
+  await notice({ userId: id, billing: "usage", at: at() });
+  await until(async () => (await inbox(id))[0]?.status === "ready", "settled");
+  const buy = () => call(cloud.url, "POST", "/proxy/agentphone/v1/numbers", { key: keyOf(id), json: { country: "US", areaCode: "415", type: "sms" }, headers: { "x-bops-version": "9.0.0" } });
+  for (let i = 0; i < 5; i++) {
+    const r = await buy();
+    assert.equal(r.status, 200, r.text);
+  }
+  const r = await buy();
+  assert.equal(r.status, 402);
+  assert.equal(r.json.code, "plan_limit");
+  assert.equal(r.json.upgrade, undefined, "nothing to upgrade to");
+  assert.equal(r.json.error, "You have 5 phone numbers, the most one account can have for now.");
+  assert.equal(bought(id).length, 5);
+});
+
+test("a session start that hears billing by use from orgo-web keeps it, so a notice that never came is made up for", async () => {
+  const { id } = await paidUser();
+  orgoTiers.set(id, { billing: "usage", balanceCents: 412, computer: { size: "Large", hourlyCents: 11, asleepFree: true } });
+  const r = await call(cloud.url, "POST", "/v1/session", { key: keyOf(id), headers: { "x-bops-version": "9.0.0" } });
+  assert.equal(r.status, 200, r.text);
+  await until(async () => (await kept(id))?.billing === "usage", "kept from the session");
+  assert.equal((await query("SELECT source FROM bops.plans WHERE user_id = $1", [id])).rows[0].source, "session");
+  // An answer with billing it doesn't know is no answer: nothing changes.
+  orgoTiers.set(id, { billing: "metered" });
+  await call(cloud.url, "POST", "/v1/session", { key: keyOf(id), headers: { "x-bops-version": "9.0.0" } });
+  await settle(id);
+  assert.equal((await kept(id)).billing, "usage");
+});
+
+test("an app too old to know billing by use is told to update, for a user billed by use only; its state still goes through", async () => {
+  const { id } = await paidUser();
+  const other = await paidUser();
+  const ask = (userId: string, path: string, version?: string) => call(cloud.url, "GET", path, { key: keyOf(userId), headers: version ? { "x-bops-version": version } : {} });
+  await notice({ userId: id, billing: "usage", at: at() });
+  const { forgetBilling } = await import("../app-version.ts");
+  forgetBilling();
+  const r = await ask(id, "/v1/usage", "0.0.32");
+  assert.equal(r.status, 426);
+  // 0.0.33 to 0.0.37 shipped without billing by use: held to it too.
+  assert.equal((await ask(id, "/v1/usage", "0.0.37")).status, 426);
+  assert.equal(r.json.code, "app_update_required");
+  assert.match(r.json.error, /Update Bops from bops\.bot/);
+  assert.equal((await ask(id, "/v1/usage")).status, 426, "an app that doesn't say");
+  assert.notEqual((await ask(id, "/v1/state", "0.0.32")).status, 426, "its state's calls still go through");
+  assert.notEqual((await ask(id, "/v1/usage", "0.0.38")).status, 426);
+  assert.notEqual((await ask(other.id, "/v1/usage", "0.0.32")).status, 426, "a user on Bops' plans isn't held to it");
+  await settle(id);
 });

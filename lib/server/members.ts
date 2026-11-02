@@ -158,17 +158,19 @@ function refusalOf(got: Got, { invite = false, email }: { invite?: boolean; emai
 function seatsFromOrgo(raw: unknown): MemberSeats | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const s = raw as Record<string, unknown>;
-  if ((s.product !== undefined && s.product !== "bops") || typeof s.plan !== "string" || !Object.hasOwn(BOPS_TIERS, s.plan) || typeof s.can_add !== "boolean") return undefined;
+  // Billed by use, orgo-web says plan "usage" (the seats its Orgo plan has); never an Orgo plan's key taken for Free.
+  const known = typeof s.plan === "string" && (s.plan === "usage" || Object.hasOwn(BOPS_TIERS, s.plan));
+  if ((s.product !== undefined && s.product !== "bops") || !known || typeof s.can_add !== "boolean") return undefined;
   const used = whole(s.used);
   const limit = s.limit === null ? null : whole(s.limit);
   if (used === undefined || limit === undefined) return undefined;
   const caps = s.caps && typeof s.caps === "object" ? (s.caps as Record<string, unknown>) : {};
   return {
-    plan: s.plan as BopsTier,
+    plan: s.plan as BopsTier | "usage",
     canAdd: s.can_add,
     limit,
     used,
-    upgrade: s.upgrade_tier === "pro_bops" ? "plan" : s.upgrade_tier === "max_bops" ? "max" : null,
+    upgrade: s.plan === "usage" ? null : s.upgrade_tier === "pro_bops" ? "plan" : s.upgrade_tier === "max_bops" ? "max" : null,
     caps: { pro_bops: whole(caps.pro_bops) ?? PEOPLE_CAPS.pro_bops, max_bops: whole(caps.max_bops) ?? PEOPLE_CAPS.max_bops },
   };
 }

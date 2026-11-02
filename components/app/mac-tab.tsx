@@ -40,7 +40,7 @@ export function MacSettings({ state }: { state: AppState }) {
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">Your Mac</span>
             <span className="flex items-center gap-1.5 text-[13px] leading-[19px] text-[#6B6B6B]">
               <span className={`size-2 rounded-full ${m?.ready ? "bg-[#2BB673]" : "bg-[#C9C9C6]"}`} />
-              {m?.ready ? "Bots can browse here in a Chrome of their own, on your home internet, with Bops AI credit. They can't use your Mac's apps for now." : (m?.reason ?? "Checking…")}
+              {m?.ready ? "Bots can browse here in a Chrome of their own, on your home internet, on your credit. They can't use your Mac's apps for now." : (m?.reason ?? "Checking…")}
             </span>
           </div>
           {/* An install of Codex that failed (it runs bots' tools here) starts again; anything else is looked at again. */}

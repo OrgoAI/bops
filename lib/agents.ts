@@ -24,13 +24,13 @@ export const AGENTS: Record<AgentKind, { name: string; maker: string; pays: Agen
 
 /** Ways to pay that show in an agent's Pays with, disabled, and why. */
 export const PAYS_SOON: Partial<Record<AgentKind, Partial<Record<AgentPays, string>>>> = {
-  claude: { credit: "Bops credit for Claude Code needs Bops Cloud to carry it first." },
-  codex: { credit: "Bops credit for Codex needs Bops Cloud to carry it first.", plan: "A ChatGPT plan for Codex needs a check of OpenAI's terms first." },
-  opencode: { credit: "Bops credit for OpenCode needs Bops Cloud to carry it first." },
+  claude: { credit: "Credit for Claude Code needs Bops Cloud to carry it first." },
+  codex: { credit: "Credit for Codex needs Bops Cloud to carry it first.", plan: "A ChatGPT plan for Codex needs a check of OpenAI's terms first." },
+  opencode: { credit: "Credit for OpenCode needs Bops Cloud to carry it first." },
 };
 /** The ways to pay each kind shows in its editor, in order. */
 export const PAYS_SHOWN: Record<AgentKind, AgentPays[]> = { bops: ["credit"], claude: ["credit", "plan", "key"], codex: ["credit", "plan", "key"], opencode: ["credit", "key"], agy: [] };
-export const PAYS_NAMES: Record<AgentPays, string> = { credit: "Bops credit", plan: "Plan", key: "Your key" };
+export const PAYS_NAMES: Record<AgentPays, string> = { credit: "Credit", plan: "Plan", key: "Your key" };
 
 /** The models an agent can be told to use, the kind's default first. OpenCode's name their provider; any other `provider/model` of those three works too. */
 export const MODELS: { id: string; kind: AgentKind; label: string; short: string; note?: string }[] = [
@@ -194,9 +194,9 @@ const planOf = (x: Pick<BotAgent, "account">, state: Pick<AppState, "brains">, c
   return (acct && signInOn(acct, computerId)?.account?.plan) ?? acct?.signIns?.[0]?.account?.plan;
 };
 
-/** How it pays, in a few words: "Bops AI credit", "your Max plan", "your Anthropic key". `computerId`: where its plan is signed in. */
+/** How it pays, in a few words: "credit", "your Max plan", "your Anthropic key". `computerId`: where its plan is signed in. */
 export function paysLabel(x: Pick<BotAgent, "kind" | "pays" | "model" | "account">, state: Pick<AppState, "brains">, computerId?: string) {
-  if (x.pays === "credit") return "Bops AI credit";
+  if (x.pays === "credit") return "credit";
   if (x.pays === "key") return `your ${keyVendor(x)} key`;
   return `your ${planName(planOf(x, state, computerId))}`;
 }
@@ -216,7 +216,7 @@ export function agentTag(x: Pick<BotAgent, "id" | "kind" | "pays" | "model" | "a
   const same = agents.filter((y) => y.kind === x.kind && (x.kind !== "opencode" || model(y) === model(x)));
   if (same.length < 2 || !same.some((y) => y.id === x.id)) return undefined;
   const host = workBot(at.bot, at.state.bots).computerId;
-  const word = (y: Pick<BotAgent, "kind" | "pays" | "model" | "account">) => (y.pays === "credit" ? "Bops credit" : y.pays === "key" ? `${keyVendor(y)} key` : planName(planOf(y, at.state, host)));
+  const word = (y: Pick<BotAgent, "kind" | "pays" | "model" | "account">) => (y.pays === "credit" ? "Credit" : y.pays === "key" ? `${keyVendor(y)} key` : planName(planOf(y, at.state, host)));
   const mine = word(x);
   const before = same.slice(0, same.findIndex((y) => y.id === x.id)).filter((y) => word(y) === mine).length;
   return before ? `${mine} ${before + 1}` : mine;
@@ -258,7 +258,7 @@ export type AgentState = {
 export function agentState(x: BotAgent, b: Bot, state: Pick<AppState, "bots" | "brains" | "host">, keys?: ReadonlySet<string>): AgentState {
   const soon = AGENTS[x.kind].soon;
   if (soon) return { ready: false, line: AGENTS[x.kind].maker, soon };
-  if (x.kind === "bops") return { ready: true, line: `${x.model ? modelShort("bops", x.model) : "OpenAI"} · Bops credit` };
+  if (x.kind === "bops") return { ready: true, line: `${x.model ? modelShort("bops", x.model) : "OpenAI"} · Credit` };
   if (!BRAINS_ON) return { ready: false, line: "Not in this version of Bops" };
   const name = AGENTS[x.kind].name;
   if (state.host === "mac") return { ready: false, line: `${name} runs on a cloud computer. Your bots work on this Mac.` };
@@ -325,7 +325,7 @@ const bopsRun = (b: Pick<Bot, "id" | "ai" | "brain" | "workspaceId">, state: Pic
     agent: x,
     kind: "bops",
     ...(x.model ? { model: x.model } : {}),
-    ...(gone ? { gone: `Stopped: ${gone.what} ${gone.why}. Reply and it carries on with Bops agent.`, goneNote: `${gone.what} ${gone.why}, so Bops agent does this, on your AI credit.` } : {}),
+    ...(gone ? { gone: `Stopped: ${gone.what} ${gone.why}. Reply and it carries on with Bops agent.`, goneNote: `${gone.what} ${gone.why}, so Bops agent does this, on your credit.` } : {}),
   };
 };
 

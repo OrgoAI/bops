@@ -10,7 +10,7 @@ import { openaiClient } from "./openai-client";
 import { botChatId, CALL_VOICES, isCallVoice, live, MAX_PERSONA_CHARS, settingsOf, type Bot } from "@/lib/types";
 import { handleMessage } from "./chat";
 import { callEnded, callStarted } from "./attention";
-import { noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
+import { noteOutOfCredit, outOfCreditWords } from "./cloud";
 import { chose, decide } from "./decide";
 import { memoryBlock, OWNER_WHO, saveToMemory, scopeOf } from "./memory";
 import { addMessage, bot, getState, ownerLine, ownerName, update } from "./store";
@@ -134,7 +134,7 @@ export async function startCall(botId: string, sdp: string) {
     } as never, usageTags("call", botId));
     return result as unknown as { session: { id: string }; transport: { sdp: string } };
   } catch (e) {
-    if (noteOutOfCredit(e)) throw new Error(OUT_OF_CREDIT);
+    if (noteOutOfCredit(e)) throw new Error(outOfCreditWords());
     throw e;
   }
 }

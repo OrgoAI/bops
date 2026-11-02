@@ -417,7 +417,8 @@ its one free Bops computer; Pro and Max also bring the main bot a number and an 
   nothing and refuses nothing. On, the cloud checks at start that it can use the two tables and
   functions, and won't start without them.
 - Counted but at $0 for now: Composio and Honcho (one named price each in `pricing.ts`). Not
-  counted yet: numbers' monthly renewals after the first, and AgentMail.
+  counted yet: numbers' monthly renewals after the first on Bops' plans (billed by use, they are:
+  see Billing by use), and AgentMail.
 
 ### Plans
 
@@ -484,6 +485,39 @@ at most once a minute):
   orgo-web is asked first, so a plan just bought counts. `CloudSession.plan` tells the app the tier,
   and the app holds each plan to its emails (`lib/server/mail.ts`: the Mac makes inboxes in its own
   AgentMail pod) and shows why instead of "Get a number" or "Get an email".
+
+#### Billing by use
+
+orgo-web may bill a user by what they use instead of by a Bops plan (`BopsBilling` in `protocol.ts`; its
+`profiles.bops_billing`, behind its `BOPS_USAGE_BILLING` switch). It says so with the tier, in the notice
+(`{userId, billing: "usage", at}`; a tier, if it sends one, may be an Orgo plan's key and is ignored) and
+in `GET /api/bops/plan` (`billing: "usage"`). The cloud keeps it with the tier in `bops.plans.billing`
+(migration 0017), under the same `at`; a notice or an answer without `billing` (an orgo-web from before)
+keeps how the user is billed as it is, and `billing` the cloud doesn't know is refused (400), never taken
+for Free. For such a user:
+
+- **Credit:** orgo-web's `bops_ai_credit_balance` and `bops_ai_credit_spend` answer from their Orgo credit
+  (Orgo's rate), so the gate, the turn guard and every use work as before. Only the words change: a 402
+  says "You're out of Orgo credit, ... Add credit in Settings" with `billing: "usage"`, a 403 or a stopped
+  task the same way (`credit.ts creditWords`). No Bops $5 at the session.
+- **Number and inbox:** nothing is paused or given back for being "on Free". The main bot gets its inbox
+  (free); a plan's number they had stays theirs (picked up again if it was paused), and none is bought for
+  them. With plan limits on, they buy numbers (each paid from their credit, as any purchase through the
+  proxy) up to `BOPS_USAGE.phoneNumbers` (5), then `{code: "plan_limit"}` with nothing to upgrade to.
+- **A number's month** (`numbers-renew.ts`, from the hourly sweep, before its releases): each number but
+  the plan's they kept (free) is charged $3 a month from their credit, once per month (`paid_until`,
+  migration 0018, and a ref per line and month, so a pass cut short never charges twice). A month the
+  credit can't pay (less left than a month, or orgo-web refusing the spend) pauses the number as a
+  plan's is (`unpaid`, `paused_at`: calls and texts to it go unanswered, a text out is refused 402
+  `{code: "number_unpaid", billing: "usage"}`), and the Mac is told on the bot that has it (a `plan`
+  event whose `phone.renewal` says when it's given back; the app says it in that bot's chat). Each pass
+  asks for the same month again: paid, it's back on at once and paid a month from that day; still
+  unpaid 30 days after the pause, it's given back as a plan's is (`releaseAfterPause`). Moved back to
+  Bops' plans, a number paused for its month is back on.
+- **Old apps:** a Mac app older than `USAGE_MIN_APP_VERSION` (or one that doesn't say) is answered 426
+  (`app_update_required`) on everything but its state's calls (`app-version.ts requireUsageAppVersion`):
+  it would show them Free and sell them Bops credit nothing spends.
+- **Events:** `bops_plan_changed` and the `plan` property name it `usage`.
 
 ### Deleting a user
 

@@ -219,6 +219,9 @@ list = { ...list, seats: seatsOf({ plan: "pro_bops", limit: 2, used: 4, can_add:
 assert.deepEqual((await get()).body.seats, { plan: "pro_bops", canAdd: false, limit: 2, used: 4, upgrade: "max", caps: { pro_bops: 2, max_bops: 5 } });
 list = { ...list, seats: seatsOf({ plan: "free_bops", limit: 0, can_add: false, upgrade_tier: "pro_bops", caps: undefined }) };
 assert.deepEqual((await get()).body.seats, { plan: "free_bops", canAdd: false, limit: 0, used: 4, upgrade: "plan", caps: { pro_bops: 2, max_bops: 5 } });
+// Billed by use: the seats are the Orgo plan's, said as plan "usage"; nothing to upgrade to in the app.
+list = { ...list, seats: seatsOf({ plan: "usage", plan_name: "Orgo Starter", basis: "orgo_plan", limit: 1, used: 1, can_add: false, upgrade_tier: "pro_bops" }) };
+assert.deepEqual((await get()).body.seats, { plan: "usage", canAdd: false, limit: 1, used: 1, upgrade: null, caps: { pro_bops: 2, max_bops: 5 } });
 list = { members: MEMBERS, invites: INVITES, seats: null, seats_error: "PLAN_UNAVAILABLE" };
 r = await get();
 assert.equal(r.body.seats, null);

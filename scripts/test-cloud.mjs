@@ -897,6 +897,7 @@ S.update((s) => (s.credits = undefined));
 
 // The Bops plan, as the account page shows it: Orgo's answer in the app's words (money in micro-dollars, times in ms).
 assert.deepEqual(await L.readBopsPlan(KEY), {
+  billing: "plan",
   tier: "pro_bops",
   name: "Pro",
   priceCents: 2000,
@@ -904,13 +905,136 @@ assert.deepEqual(await L.readBopsPlan(KEY), {
   periodEnd: Date.parse("2026-11-06T00:00:00Z"),
   credit: { leftMicros: 19_975_000, planLeftMicros: 20_000_000, resetsAt: Date.parse("2026-11-06T00:00:00Z"), freeLeftMicros: -25_000 },
 });
+bopsPlan.answer = () => Response.json({ tier: "free_bops", credit: {} });
+assert.deepEqual(await L.readBopsPlan(KEY), { billing: "plan", tier: "free_bops", name: "Free", priceCents: 0 }, "no balance in the answer: none made up");
+// A tier this app doesn't know, or an Orgo plan's, is never taken for Free: no answer at all.
 bopsPlan.answer = () => Response.json({ tier: "something_new", credit: {} });
-assert.deepEqual(await L.readBopsPlan(KEY), { tier: "free_bops", name: "Free", priceCents: 0 }, "no balance in the answer: none made up");
-// An Orgo plan is never a Bops one: Free until Orgo says Pro or Max.
+assert.equal(await L.readBopsPlan(KEY), null);
 bopsPlan.answer = () => Response.json({ tier: "scale_v2", name: "Scale", credit: { left_micros: 0 } });
-assert.deepEqual(await L.readBopsPlan(KEY), { tier: "free_bops", name: "Free", priceCents: 0, credit: { leftMicros: 0, planLeftMicros: 0, freeLeftMicros: 0 } });
+assert.equal(await L.readBopsPlan(KEY), null);
 bopsPlan.answer = null;
 assert.equal(await L.readBopsPlan(KEY), null, "an Orgo without Bops plans");
+
+/* Billing by use (lib/bops-billing.ts): orgo-web's answer read in one place, never taken for Free. */
+const B = await import(`${root}/lib/bops-billing.ts`);
+bopsPlan.answer = () => Response.json({ billing: "usage", tier: "hacker_v2", balanceCents: 412, computer: { size: "Large", hourlyCents: 11, asleepFree: true }, numberMonthlyCents: 300 });
+assert.deepEqual(await L.readBopsPlan(KEY), {
+  billing: "usage",
+  tier: null,
+  name: "Pay as you go",
+  priceCents: 0,
+  usage: { balanceCents: 412, computer: { size: "Large", hourlyCents: 11, asleepFree: true }, numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing" },
+});
+// Snake case too, Orgo's own top up page when it names one, and its numbers over the app's.
+bopsPlan.answer = () => Response.json({ billing: "usage", balance_cents: 0, computer: { hourly_cents: 12 }, number_monthly_cents: 350, top_up_url: "https://www.orgo.ai/settings/billing?topup=1" });
+assert.deepEqual((await L.readBopsPlan(KEY)).usage, { balanceCents: 0, computer: { size: "Large", hourlyCents: 12, asleepFree: true }, numberMonthlyCents: 350, topUpUrl: "https://www.orgo.ai/settings/billing?topup=1" });
+// Nothing said: BOPS_USAGE's prices, and no balance made up.
+bopsPlan.answer = () => Response.json({ billing: "usage" });
+assert.deepEqual((await L.readBopsPlan(KEY)).usage, { computer: { size: "Large", hourlyCents: 11, asleepFree: true }, numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing" });
+// orgo-web's own answer, as its readBopsUsagePlan writes it (orgo-web lib/billing/bops-plan.ts; its
+// lib/bops-usage-move.pg.test.ts checks the same fields): the flat fields win, and its nested ones alone read the same.
+const ORGO_USAGE = {
+  tier: "free_bops", name: "Usage", billing: "usage", extension: null,
+  usage: { orgo_tier: "free", balance_cents: 800, out_of_credit: false, computer_credit_cents: 300, ai_markup_percent: 10,
+    computer: { id: "d1", size: "large", cpu: 4, ram_gb: 16, disk_gb: 80, billing: "hourly", running_cents_per_hour: 11, asleep_cents_per_hour: 0, idle_sleep_minutes: 15, wake_needs_cents: 11 },
+    phone_number_cents_per_month: 300, free_phone_numbers: 0, free_emails: 1,
+    add_credit: { checkout: "/api/credits/checkout", card_on_file: "/api/credits/card-on-file", page: "https://www.orgo.ai/settings/billing#credits" } },
+  balanceCents: 800, computer: { size: "Large", hourlyCents: 11, asleepFree: true, wakeNeedsCents: 11, creditCents: 300 },
+  numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing#credits", outOfCredit: false,
+};
+const orgoUsage = { balanceCents: 800, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300 }, numberMonthlyCents: 300, topUpUrl: "https://www.orgo.ai/settings/billing#credits" };
+bopsPlan.answer = () => Response.json(ORGO_USAGE);
+assert.deepEqual((await L.readBopsPlan(KEY)).usage, orgoUsage);
+const nestedOnly = { ...ORGO_USAGE };
+for (const flat of ["balanceCents", "computer", "numberMonthlyCents", "topUpUrl", "outOfCredit"]) delete nestedOnly[flat];
+bopsPlan.answer = () => Response.json(nestedOnly);
+assert.deepEqual((await L.readBopsPlan(KEY)).usage, { ...orgoUsage, computer: { size: "Large", hourlyCents: 11, asleepFree: true, creditCents: 300 } });
+// Its month before billing by use, nested: the day it ends.
+bopsPlan.answer = () => Response.json({ billing: "plan", tier: "max_bops", extension: { tier: "max_bops", ends_at: "2026-12-05T00:00:00Z", kept_free: true }, credit: { left_micros: 1 } });
+assert.equal((await L.readBopsPlan(KEY)).extensionEndsAt, Date.parse("2026-12-05T00:00:00Z"));
+// What the computer may spend decides a wake, not the whole balance (a plan's allowance pays AI only).
+assert.equal(B.canWake({ balanceCents: 800, computer: { hourlyCents: 11, creditCents: 5 } }), false);
+// A balance Orgo didn't say never locks AI work: out of credit clears on any read without one.
+S.update((s) => (s.credits = { out: true, at: Date.now(), usage: true }));
+bopsPlan.answer = () => Response.json({ billing: "usage" });
+await L.readBopsPlan(KEY);
+assert.equal(S.getState().credits, undefined);
+// Billing it doesn't know: no answer, never Free.
+bopsPlan.answer = () => Response.json({ billing: "metered", tier: "free_bops" });
+assert.equal(await L.readBopsPlan(KEY), null);
+// A month more of Pro: the plan as before, with the day it ends, and the sheet's words for it.
+bopsPlan.answer = () => Response.json({ billing: "plan", tier: "pro_bops", extensionEndsAt: "2026-12-03T17:00:00Z", credit: { left_micros: 1, plan_left_micros: 1, free_left_micros: 0 } });
+const moving = await L.readBopsPlan(KEY);
+assert.equal(moving.tier, "pro_bops");
+assert.equal(moving.extensionEndsAt, Date.parse("2026-12-03T17:00:00Z"));
+assert.equal(B.extensionLine(moving.extensionEndsAt), "Your current plan stays as it is until Dec 3, then you pay only for what you use.");
+// Out of credit clears once Orgo shows some; when it was the computer that couldn't wake, once there's an hour of it.
+S.update((s) => (s.credits = { out: true, at: Date.now(), usage: true }));
+bopsPlan.answer = () => Response.json({ billing: "usage", balanceCents: 5 });
+await L.readBopsPlan(KEY);
+assert.equal(S.getState().credits, undefined);
+S.update((s) => (s.credits = { out: true, at: Date.now(), usage: true, computer: true }));
+await L.readBopsPlan(KEY);
+assert.equal(S.getState().credits?.computer, true, "5 cents can't wake an 11 cent hour");
+bopsPlan.answer = () => Response.json({ billing: "usage", balanceCents: 11 });
+await L.readBopsPlan(KEY);
+assert.equal(S.getState().credits, undefined);
+// Only the computer can't wake: AI work isn't stopped by it.
+S.update((s) => (s.credits = { out: true, at: Date.now(), usage: true, computer: true }));
+assert.equal(await Cl.creditsOut(), false);
+S.update((s) => (s.credits = undefined));
+assert.equal(B.canWake({ balanceCents: 10, computer: { hourlyCents: 11 } }), false);
+assert.equal(B.canWake({ computer: { hourlyCents: 11 } }), true, "a balance Orgo didn't say isn't a short one");
+bopsPlan.answer = null;
+
+// Billed by use (Bops Cloud's session says so): the bots' words say Orgo credit and Add credit, Bops' plans
+// and credit aren't sold from the app, numbers and the main bot's inbox are allowed, and an owner's view drops the Add credit.
+const usageSession = { ...SESSION, plan: { tier: "free_bops", limits: true, billing: "usage" } };
+await withSession(usageSession);
+assert.equal(Cl.billedByUse(), true);
+assert.equal(Cl.outOfCreditWords(), "I'm out of Orgo credit, so I've stopped. Add credit in Settings to keep me going.");
+const refused = L.usageRefusal();
+assert.equal(refused.status, 409);
+assert.deepEqual(await refused.json(), {
+  error: "Bops plans aren't sold any more. You pay only for what you use, from your Orgo credit. Add credit on Orgo.",
+  code: "bops_usage_billing",
+  url: "https://www.orgo.ai/settings/billing",
+});
+const PR = await import(`${root}/lib/server/plan-room.ts`);
+assert.equal(PR.planRoom().tier, "usage");
+assert.equal(P.planNeededForNumber(), false, "a number is bought, paid from credit, never needs a plan");
+const PI = await import(`${root}/lib/plan-includes.ts`);
+assert.equal(PI.numberShort("usage", 4, { isPlanBot: false }), null);
+assert.deepEqual(PI.numberShort("usage", 5, { isPlanBot: false }), { text: "You have 5 phone numbers, the most one account can have for now.", upgrade: null });
+assert.equal(PI.emailShort("usage", 0, { isPlanBot: true }), null, "the main bot's inbox is free");
+assert.deepEqual(PI.emailShort("usage", 1, { isPlanBot: false }), { text: "Bops includes 1 email, for your main bot.", upgrade: null });
+assert.equal(PI.peopleShort({ plan: "usage", limit: 2, used: 1, caps: { pro_bops: 2, max_bops: 5 } }, { withAccess: 1, invited: 0 }), null);
+assert.deepEqual(PI.peopleShort({ plan: "usage", limit: 0, used: 0, caps: { pro_bops: 2, max_bops: 5 } }, { withAccess: 0, invited: 0 }), {
+  text: "Your Orgo plan includes no one else. Upgrade your Orgo plan on orgo.ai to add more.",
+  upgrade: null,
+});
+const SH = await import(`${root}/lib/shared.ts`);
+assert.equal(SH.ownerCredit(Cl.outOfCreditWords()), "I'm out of Orgo credit, so I've stopped.");
+// The card bops.bot and the sheet show, with orgo-web's prices when it said them; no dashes, no Bops plan named.
+assert.deepEqual(PI.usageCard({ hourlyCents: 12, numberCents: 350 }).lines.map((l) => l.text).slice(0, 3), ["Your computer: $0.12 an hour while it works, free while it sleeps", "AI at Orgo's rate", "New Orgo accounts start with $5 of credit"]);
+for (const line of [PI.USAGE_CARD.name, PI.USAGE_CARD.computers.detail, ...PI.USAGE_CARD.lines.map((l) => l.text), B.OUT_OF_CREDIT_WAKE, B.extensionLine(Date.now())])
+  assert.ok(!/[\u2013\u2014]|Orbit|\bPro\b|\bMax\b/.test(line), line);
+// Orgo turning a wake down for want of credit: the asleep words, and the chat's card, for a user billed by use.
+const FH = await import(`${root}/lib/server/free-hours.ts`);
+const O = await import(`${root}/lib/server/orgo.ts`);
+const noCredit = Object.assign(new O.OrgoError("Add credit to start this computer.", 402), { code: "INSUFFICIENT_COMPUTE_CREDIT" });
+assert.equal(FH.computerOutOfCredit(noCredit), B.OUT_OF_CREDIT_WAKE);
+assert.deepEqual(S.getState().credits && { ...S.getState().credits, at: 0 }, { out: true, at: 0, usage: true, computer: true });
+S.update((s) => (s.credits = undefined));
+assert.equal(FH.computerOutOfCredit(Object.assign(new O.OrgoError("x", 402), { code: "bops_free_hours" })), undefined);
+// orgo-web's code in any case: BOPS_OUT_OF_CREDIT is bops_out_of_credit.
+assert.equal(FH.computerOutOfCredit(Object.assign(new O.OrgoError("You are out of Orgo credit.", 402), { code: "BOPS_OUT_OF_CREDIT" })), B.OUT_OF_CREDIT_WAKE);
+S.update((s) => (s.credits = undefined));
+await withSession(SESSION);
+assert.equal(Cl.billedByUse(), false);
+assert.equal(L.usageRefusal(), null);
+assert.equal(FH.computerOutOfCredit(noCredit), undefined, "on Bops' plans, Orgo's own codes aren't read as Orgo credit");
+assert.equal(Cl.outOfCreditWords(), Cl.OUT_OF_CREDIT);
 
 // Paying and managing: Orgo's checkout or billing page for the browser, asked with the Orgo key; its refusals in plain words.
 const billing = [];
@@ -1234,6 +1358,13 @@ assert.ok(said().some((t) => t.includes("+1 (415) 555-0142") && t.includes("in t
 assert.deepEqual([main().email, main().mail.inboxId, main().mail.plan], ["boppy@test.bops.bot", "boppy@test.bops.bot", true]);
 assert.deepEqual([mainWs().mailSlug, mainWs().mailClaimed, mainWs().mailPick?.offer], ["test", true, true], "the app offers to change the address Bops picked");
 assert.equal(said().length - before, 2, "said once, however often it's handed over");
+// A move to billing by use (or any plan the session doesn't have): the session is asked for again, so the
+// limits and the words that go by it follow at once; nothing is said in the chat for it.
+n = cloud.requests.length;
+before = said().length;
+assert.equal((await planEvent("p_usage", { tier: "free_bops", billing: "usage", botId: main().id, workspaceId: MAIN_WORKSPACE })).status, 200);
+await until(() => since(n).some((r) => r.path === "/v1/session"), "the session asked for again");
+assert.equal(said().length, before);
 // "Keep test": the offer goes.
 r = await HANDLE.POST(new Request("http://127.0.0.1:3210/api/mail/handle", { method: "POST", body: JSON.stringify({ workspaceId: MAIN_WORKSPACE, keep: true }) }));
 assert.equal(mainWs().mailPick, undefined);
@@ -1273,6 +1404,32 @@ await assert.rejects(P.sendText(main().id, "+12125550123", "Hello"), /paused/);
 assert.equal(since(n).filter((r) => r.path.startsWith("/proxy/agentphone/v1/messages")).length, 0, "no text out from a paused number");
 assert.equal((await planEvent("p3", { tier: "free_bops", botId: main().id, workspaceId: MAIN_WORKSPACE, phone: { ...phone, status: "released" }, email: { ...inbox, status: "released" } })).status, 200);
 assert.deepEqual([main().phone, main().phoneLine, main().email, main().mail], [undefined, undefined, undefined, undefined]);
+// Billed by use, a number of the bot's own whose month the Orgo credit couldn't pay: paused (marked, said once, no
+// text out), back on once paid, and given back 30 days on; never taken for the plan's.
+{
+  S.update((s) => {
+    s.bots[0].phone = "+14155550177";
+    s.bots[0].phoneLine = { numberId: "num_month", agentId: "agent_month" };
+  });
+  const month = { number: "+14155550177", numberId: "num_month", agentId: "", renewal: {} };
+  const monthEvent = (id, phone) => planEvent(id, { tier: "free_bops", billing: "usage", botId: main().id, workspaceId: MAIN_WORKSPACE, phone: { ...month, ...phone } });
+  before = said().length;
+  for (const id of ["m1", "m1"]) assert.equal((await monthEvent(id, { status: "paused", renewal: { releaseAt: "2026-12-20T12:00:00.000Z" } })).status, 200);
+  assert.deepEqual(main().phoneLine, { numberId: "num_month", agentId: "agent_month", paused: true, unpaid: true });
+  assert.deepEqual(said().slice(before), [
+    `${main().name}'s number +1 (415) 555-0177 is paused because your Orgo credit ran out: calls and texts to it go unanswered. Add credit to keep it. It's given back on Dec 20 if still unpaid.`,
+  ]);
+  n = cloud.requests.length;
+  await assert.rejects(P.sendText(main().id, "+12125550123", "Hello"), /paused because the Orgo credit ran out/);
+  assert.equal(since(n).filter((r) => r.path.startsWith("/proxy/agentphone/v1/messages")).length, 0, "no text out from a number paused for its month");
+  assert.equal((await monthEvent("m2", { status: "ready" })).status, 200);
+  assert.deepEqual(main().phoneLine, { numberId: "num_month", agentId: "agent_month" }, "back on, still not the plan's");
+  assert.equal(said().at(-1), `${main().name}'s number +1 (415) 555-0177 is back on.`);
+  before = said().length;
+  for (const id of ["m3", "m3b"]) assert.equal((await monthEvent(id, { status: "released" })).status, 200);
+  assert.deepEqual([main().phone, main().phoneLine], [undefined, undefined]);
+  assert.deepEqual(said().slice(before), [`${main().name}'s number +1 (415) 555-0177 was given back, 30 days after your Orgo credit ran out.`], "said once");
+}
 // With the cloud's plan limits on, Free gets no new inbox and no number to buy.
 await withSession({ ...SESSION, agentmail: { podId: "pod_u1", apiKey: "am_pod_key", domain: "bops.bot", handle: "test", handles: { [MAIN_WORKSPACE]: { handle: "test", auto: false, changesLeft: 3 } } }, plan: { tier: "free_bops", limits: true } });
 made = inboxesMade.length;

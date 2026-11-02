@@ -6,7 +6,7 @@ import { open, seal } from "./crypto.ts";
 import { ensureUserRow, query, tx } from "./db.ts";
 import { handlesOf, MAIN_WORKSPACE } from "./handles.ts";
 import { HttpError, sendJson, type Route } from "./http.ts";
-import { atSession, tierOf } from "./plans.ts";
+import { atSession, planOf } from "./plans.ts";
 import type { CloudSession } from "./protocol.ts";
 import { verifyChannels } from "./verify.ts";
 
@@ -348,8 +348,17 @@ async function setUp(user: CloudUser): Promise<CloudSession> {
     treg: !!config.tregToken(),
     verify: verifyChannels(),
     slack: slackApp(),
-    plan: { tier: await tierOf(user.id), limits: config.planLimits() },
+    plan: await sessionPlan(user.id),
   };
+}
+
+/**
+ * The plan for the session: the tier, whether this cloud holds plans to what they include, and, for a
+ * user billed by use, `billing: "usage"` (left out otherwise, so an older app reads it as before).
+ */
+async function sessionPlan(userId: string): Promise<NonNullable<CloudSession["plan"]>> {
+  const p = await planOf(userId);
+  return { tier: p.tier, limits: config.planLimits(), ...(p.billing === "usage" ? { billing: p.billing } : {}) };
 }
 
 /** Bops' Slack app, when this cloud takes its events: they're checked with its signing secret, and where they go is checked through Composio. */

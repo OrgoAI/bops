@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { bearer, type CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
-import { creditLeft, creditsOn, outOfCredit, requireCredit } from "./credit.ts";
+import { billingFor, creditLeft, creditsOn, outOfCredit, requireCredit } from "./credit.ts";
 import { seal } from "./crypto.ts";
 import { banksOn, botIdsOn, grantsOn, inboxesOn, linesOn, ownerNumbers, type Blob as StateBlob, type Level } from "./computer-scope.ts";
 import { accountDeleted, isDeleted, objectInfo, objectOwner, ownObject, query, sessionUsed } from "./db.ts";
@@ -14,7 +14,7 @@ import { HttpError, readBody, refuseUpgrade, type Route, type Upgrade } from "./
 import { recordLine } from "./lines.ts";
 import { refuseSecondPlanNumber, requireRoomForNumber, sendingStopped } from "./plans.ts";
 import { imageModelPriced, numberCost, smsSegments } from "./pricing.ts";
-import { COMPUTER_NOT_ALLOWED, PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
+import { COMPUTER_NOT_ALLOWED, NUMBER_UNPAID, PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
 import { accountFor, composioUserId, honchoPrefix, ownsWorkspace, podKeyOf } from "./session.ts";
 import { loadState } from "./state.ts";
 import { DELETED_CLOSE } from "./tunnel.ts";
@@ -764,12 +764,20 @@ function countText(call: Call) {
   counted(recordUsage(call.user.id, "agentphone.sms", mms ? 1 : smsSegments(text), { direction: "out", ...(mms ? { mms: true } : {}) }));
 }
 
-/** A text out from a plan's number that's paused (the plan ended) or given back is refused, as calls and texts to it go unanswered (plans.ts). */
+/** What a text out from a number paused for its month is refused with (NUMBER_UNPAID). */
+const NUMBER_UNPAID_WORDS = "This number is paused because your Orgo credit ran out. Add credit to text from it again.";
+
+/**
+ * A text out from a plan's number that's paused (the plan ended), from one paused because its month
+ * couldn't be paid from Orgo credit (billing by use, numbers-renew.ts), or from one given back, is
+ * refused, as calls and texts to it go unanswered (plans.ts).
+ */
 async function notFromPausedNumber(call: Call) {
   const body = isObject(call.json) ? call.json : {};
   const id = (x: unknown) => (typeof x === "string" ? x : "");
-  if (await sendingStopped(call.user.id, id(body.number_id ?? body.numberId), id(body.agent_id ?? body.agentId)))
-    throw new HttpError(402, "This number is paused while you're on Free. Upgrade to text from it again.", { code: PLAN_REQUIRED, upgrade: true });
+  const stopped = await sendingStopped(call.user.id, id(body.number_id ?? body.numberId), id(body.agent_id ?? body.agentId));
+  if (stopped === "unpaid") throw new HttpError(402, NUMBER_UNPAID_WORDS, { code: NUMBER_UNPAID, billing: "usage" });
+  if (stopped) throw new HttpError(402, "This number is paused while you're on Free. Upgrade to text from it again.", { code: PLAN_REQUIRED, upgrade: true });
 }
 
 /**
@@ -1461,7 +1469,7 @@ function holdForTreg(call: Call, asked: number): Promise<number> {
     const held = tregHeld.get(user) ?? { n: 0, micros: 0 };
     if (held.n >= TREG_AT_ONCE) throw new HttpError(429, "Too many business data lookups at once. Try again in a moment.");
     const cap = creditsOn() ? Math.min(asked, Math.max(0, (await creditLeft(user)) - held.micros) / 1_000_000) : asked;
-    if (cap <= 0) throw held.n > 0 ? new HttpError(429, "Your other business data lookups are using what's left of your AI credit. Try again in a moment.") : outOfCredit();
+    if (cap <= 0) throw held.n > 0 ? new HttpError(429, "Your other business data lookups are using what's left of your credit. Try again in a moment.") : outOfCredit(await billingFor(user));
     const mine = Math.ceil(cap * 1_000_000);
     held.n += 1;
     held.micros += mine;

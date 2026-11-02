@@ -205,6 +205,8 @@ const PICK_WAITS_MS = 24 * 3600_000;
 function inboxAllowed(b: Bot) {
   const plan = cloudOn() ? cloudSessionNow()?.plan : undefined;
   if (!plan?.limits) return true;
+  // Billed by use: the main bot's inbox (free), and any bot's it has already.
+  if (plan.billing === "usage") return !!b.mail || isPlanBot(b);
   if (plan.tier === "free_bops") return false;
   if (b.mail || isPlanBot(b)) return true;
   if (plan.tier !== "max_bops" || !b.mailWanted) return false;

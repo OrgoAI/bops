@@ -27,9 +27,10 @@ type OneOf = { readonly one: readonly string[] };
 type SomeOf = { readonly some: readonly string[] };
 type Rule = "bool" | "count" | "ms" | "cents" | "version" | "task" | "slug" | "route" | OneOf | SomeOf;
 
-const TIER = { one: ["free_bops", "pro_bops", "max_bops"] } as const;
+/** A Bops plan, or "usage" for a user billed by use (cloud/plans.ts planLabel): the plan a user is on as events name it. */
+const TIER = { one: ["free_bops", "pro_bops", "max_bops", "usage"] } as const;
 const OUTCOME = {
-  one: ["done", "failed", "stopped", "paused_for_takeover", "out_of_credit", "short_of_credit", "free_hours_used", "not_started", "computer_failed"],
+  one: ["done", "failed", "stopped", "paused_for_takeover", "out_of_credit", "short_of_credit", "free_hours_used", "computer_out_of_credit", "not_started", "computer_failed"],
 } as const;
 
 /** Every event, who sends it, and its own properties (each with the rule its value must fit). */
@@ -38,6 +39,8 @@ export const EVENTS = {
   bops_app_opened: { by: "app", props: {} },
   bops_app_updated: { by: "app", props: { from_version: "version" } },
   bops_upgrade_clicked: { by: "app", props: { surface: { one: ["chat", "bot_panel", "members"] } } },
+  // Add credit on Orgo (billing by use): where it was clicked. The amount is chosen on Orgo, never seen here.
+  bops_add_credit_clicked: { by: "app", props: { surface: { one: ["account", "chat", "computer"] } } },
   bops_members_opened: { by: "app", props: { people: "count" } },
 
   // The Mac's server (posthog-node): what the user does in Bops.

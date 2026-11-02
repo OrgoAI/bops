@@ -855,7 +855,7 @@ await test("a usage limit waits on the user with Finish on Bops agent and Wait; 
   let t = await ended(t1);
   assert.equal(t.status, "done", t.error);
   const resets = new Date(1760032800 * 1000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  assert.equal(t.answer, `Claude Code reached your Max plan's usage limit until ${resets}. I can finish this on Bops agent, on your AI credit, or wait.`);
+  assert.equal(t.answer, `Claude Code reached your Max plan's usage limit until ${resets}. I can finish this on Bops agent, on your credit, or wait.`);
   assert.deepEqual(t.options, ["Finish on Bops agent", "Wait"]);
   assert.equal(t.brainRun.waits, "limit");
   assert.equal(t.brainRun.said, t.answer);
@@ -1089,7 +1089,7 @@ await test("at its key's quota, Codex waits on the user with Finish on Bops agen
   const s = X.startSession({ botId: main.id, goal: "QUOTA: the report", title: "Report", where: "cloud", fresh: true });
   const t = await ended(s.id);
   assert.equal(t.status, "done", t.error);
-  assert.equal(t.answer, "Codex reached what your OpenAI key allows. I can finish this on Bops agent, on your AI credit, or wait.");
+  assert.equal(t.answer, "Codex reached what your OpenAI key allows. I can finish this on Bops agent, on your credit, or wait.");
   assert.deepEqual(t.options, ["Finish on Bops agent", "Wait"]);
   assert.equal(t.brainRun.waits, "limit");
   assert.equal(A.needsYou(t), true);
@@ -1099,7 +1099,7 @@ await test("its provider not answering: Try again carries it on on Codex; the Va
   const s = X.startSession({ botId: main.id, goal: "OVERLOAD: the totals", title: "Totals", where: "cloud", fresh: true });
   let t = await ended(s.id);
   assert.equal(t.status, "done", t.error);
-  assert.equal(t.answer, "OpenAI isn't answering right now. I can try again, or finish this on Bops agent, on your AI credit.");
+  assert.equal(t.answer, "OpenAI isn't answering right now. I can try again, or finish this on Bops agent, on your credit.");
   assert.deepEqual(t.options, ["Try again", "Finish on Bops agent"]);
   assert.equal(t.brainRun.waits, "down");
   flagOn("up");
@@ -1430,10 +1430,10 @@ await test("the thread's words have no long dashes", () => {
   ];
   for (const w of shown) assert.ok(!/[–—]|\bOrbit\b/.test(w) && !/[A-Za-z]-[A-Za-z]/.test(w.replaceAll("some-model", "")), w);
   for (const w of [C.claudeDriver.note("Maya"), C.codexDriver.note("Maya"), C.opencodeDriver.note("Maya")]) assert.ok(!/[–—]|\bOrbit\b/.test(w), w);
-  assert.equal(C.stoppedWords(plan, "model", "x", "Boppy's computer", "pro", "Rook"), "Your Pro plan can't use Opus 5.5. Pick another model for new threads in Rook's profile. I can finish this on Bops agent, on your AI credit, or wait.\n\nOptions: Finish on Bops agent | Wait");
-  assert.equal(C.stoppedWords(oc, "down", "x", "Boppy's computer"), "DeepInfra isn't answering right now. I can try again, or finish this on Bops agent, on your AI credit.\n\nOptions: Try again | Finish on Bops agent");
+  assert.equal(C.stoppedWords(plan, "model", "x", "Boppy's computer", "pro", "Rook"), "Your Pro plan can't use Opus 5.5. Pick another model for new threads in Rook's profile. I can finish this on Bops agent, on your credit, or wait.\n\nOptions: Finish on Bops agent | Wait");
+  assert.equal(C.stoppedWords(oc, "down", "x", "Boppy's computer"), "DeepInfra isn't answering right now. I can try again, or finish this on Bops agent, on your credit.\n\nOptions: Try again | Finish on Bops agent");
   assert.match(C.stoppedWords(key, "vault", "x", "Boppy's computer"), /^Waiting for your Vault\. It allows 30 key uses an hour, so this starts again by itself in a few minutes\. .*\n\nOptions: Finish on Bops agent \| Wait$/);
-  assert.match(C.stoppedWords(plan, "limit", "Claude AI usage limit reached|1760032800", "Boppy's computer", "max"), /^Claude Code reached your Max plan's usage limit until .+\. I can finish this on Bops agent, on your AI credit, or wait\.\n\nOptions: Finish on Bops agent \| Wait$/);
+  assert.match(C.stoppedWords(plan, "limit", "Claude AI usage limit reached|1760032800", "Boppy's computer", "max"), /^Claude Code reached your Max plan's usage limit until .+\. I can finish this on Bops agent, on your credit, or wait\.\n\nOptions: Finish on Bops agent \| Wait$/);
   assert.equal(C.limitPick("Try again."), "retry");
 });
 

@@ -83,7 +83,7 @@ export function setBotAi(botId: string, o: AiOp, out: { added?: string } = {}): 
       const x = find(o.agentId);
       if (o.pays !== undefined && o.pays !== x.pays) {
         cliOk(x.kind, o.pays);
-        if (x.kind === "bops") throw new BrainError("Bops agent runs on Bops credit.", 400);
+        if (x.kind === "bops") throw new BrainError("Bops agent runs on your credit.", 400);
         // Another way to pay: its model and account start over (the old account's model may not be the new one's).
         x.pays = o.pays;
         delete x.model;

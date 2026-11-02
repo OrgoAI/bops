@@ -4,6 +4,7 @@ import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { alwaysScope, toDo } from "@/lib/permission";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { trackEvent } from "@/lib/analytics";
 import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, withRemoteTyping, workBot, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
@@ -835,7 +836,7 @@ export function ChatView({
               <div className="absolute inset-0 bg-gradient-to-t from-white from-45% via-white/80 via-75% to-white/0" />
             </div>
           {/* The viewer's own credit, which a shared workspace's bots (the owner's) don't run on. */}
-          {state.credits?.out && !state.shared && <OutOfCredit onUpgrade={onUpgrade} />}
+          {state.credits?.out && !state.shared && <OutOfCredit credits={state.credits} onUpgrade={onUpgrade} />}
           {(appAsks.length > 0 || threadAsks.length > 0) && (
             <div className="mb-2.5 flex max-h-[45vh] flex-col gap-2 overflow-y-auto">
               {/* A shared workspace's asks are the owner's to answer, but for a bot the viewer has at Write: shown, answered only then. */}
@@ -3256,11 +3257,13 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
 }
 
 /**
- * The user's AI credit is used up (state.credits): the bots are paused until there's more. Upgrade
- * opens the Account sheet. While it shows, Bops asks Orgo again whenever the app comes back to the
- * front (the user may have just paid in the browser), and the card goes once there's credit.
+ * The user's credit is used up (state.credits): the bots are paused until there's more. Upgrade opens
+ * the Account sheet. Billed by use (`usage`), it's their Orgo credit and the button says Add credit (the
+ * sheet's Add credit on Orgo); `computer`: only the computer can't wake for want of it. While it shows,
+ * Bops asks Orgo again whenever the app comes back to the front (the user may have just paid in the
+ * browser), and the card goes once there's credit.
  */
-function OutOfCredit({ onUpgrade }: { onUpgrade?: () => void }) {
+function OutOfCredit({ credits, onUpgrade }: { credits: NonNullable<AppState["credits"]>; onUpgrade?: () => void }) {
   useEffect(() => {
     const check = () => void fetch("/api/plan?fresh=1", { cache: "no-store" }).catch(() => {});
     window.addEventListener("focus", check);
@@ -3268,10 +3271,22 @@ function OutOfCredit({ onUpgrade }: { onUpgrade?: () => void }) {
   }, []);
   return (
     <div className="mb-2.5 flex items-center gap-3 rounded-[16px] bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_#E2E2DF]">
-      <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#3A3A38]">Out of AI credit. Your bots are paused until you add more.</span>
+      <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#3A3A38]">
+        {!credits.usage
+          ? "Out of AI credit. Your bots are paused until you add more."
+          : credits.computer
+            ? "Out of Orgo credit. Your computer stays asleep until you add more."
+            : "Out of Orgo credit. Your bots are paused until you add more."}
+      </span>
       {onUpgrade && (
-        <button onClick={onUpgrade} className="shrink-0 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
-          Upgrade
+        <button
+          onClick={() => {
+            if (credits.usage) trackEvent("bops_add_credit_clicked", { surface: "chat" });
+            onUpgrade();
+          }}
+          className="shrink-0 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white"
+        >
+          {credits.usage ? "Add credit" : "Upgrade"}
         </button>
       )}
     </div>
