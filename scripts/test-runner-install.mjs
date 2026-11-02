@@ -1411,6 +1411,58 @@ await check("a shared workspace whose chat goes through Bops Cloud keeps its run
   two.bots[0] = { ...two.bots[0], computerId: undefined, computer: "shared" };
   assert.equal(I.sharedRunnerOk(two, C1), false, "the free computer serving two workspaces");
   assert.equal(I.sharedRunnerOk({ ...state, workspaces: [{ id: "ws_main" }] }, C1), false, "the switch off");
+  // Bops Cloud may move it by itself (chatAuto): kept too, unless the owner chose the Mac.
+  assert.equal(I.sharedRunnerOk({ ...state, workspaces: [{ id: "ws_main", chatAuto: true }] }, C1), true, "Bops Cloud may move it");
+  assert.equal(I.sharedRunnerOk({ ...state, workspaces: [{ id: "ws_main", chatOn: "mac", chatAuto: true }] }, C1), false, "the owner chose the Mac");
+  assert.equal(I.sharedRunnerOk({ ...state, workspaces: [{ id: "ws_main", chatOn: "mac" }] }, C1), false, "the Mac, chosen");
+  assert.equal(I.sharedRunnerOk({ ...two, workspaces: [{ id: "ws_main", chatAuto: true }, { id: "ws_two", chatAuto: true }] }, C1), false, "never two workspaces");
+});
+
+await check("a shared workspace Bops Cloud may move by itself gets its runner on identity alone, so Bops Cloud can move it; one whose owner chose the Mac gets none; another Mac's take down waits a while", async () => {
+  // Bops Cloud may move it (chatAuto), identity answering: set up with no key, marked shared on its state.
+  reset();
+  orgo.full = true;
+  state.workspaces[0].chatAuto = true;
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().keyMade, runner().auth, runner().shared], ["running", undefined, "identity", true]);
+  assert.equal(keyCalls("PUT"), 0, "never the account's key");
+  noSecrets();
+  // A key on it, or its identity refused: no runner and no key, as on the cloud path.
+  for (const [ident, key] of [["403", false], ["200", true]]) {
+    reset();
+    orgo.full = true;
+    state.workspaces[0].chatAuto = true;
+    orgo.ident = ident;
+    pc(C1).key = key;
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().error], ["failed", "someone else can use this workspace"], `ident=${ident} key=${key}`);
+    assert.equal(keyCalls("PUT"), 0);
+  }
+  // The owner chose the Mac (chatOn "mac"): as with the switch off, nothing sent.
+  reset();
+  orgo.full = true;
+  state.workspaces[0].chatOn = "mac";
+  orgo.ident = "200";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error, orgo.bash.length], ["failed", "someone else can use this workspace", 0]);
+  // A Mac from before (it keeps none there yet) took it down a moment ago: not set up again until a while has gone by.
+  reset();
+  orgo.full = true;
+  state.workspaces[0].chatAuto = true;
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  state.runners = { [C1]: { status: "failed", version: "0.0.29", buildId: "buildA1", by: "mac-old", error: "someone else can use this workspace", at: Date.now() } };
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().by, orgo.bash.length], ["failed", "mac-old", 0], "waits");
+  state.runners[C1].at = Date.now() - 31 * 60_000;
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().shared], ["running", true], "then set up");
+  // The switch changing changes what a look depends on: the next minute looks again.
+  T.check(0);
+  state.workspaces[0].chatOn = "mac";
+  assert.ok(T.check().looking, "a look for the switch");
 });
 
 await check("every command it sends is shell that parses, and the wrapper too", () => {

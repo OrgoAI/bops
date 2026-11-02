@@ -84,8 +84,8 @@ function requestUrl(req: IncomingMessage): URL | null {
 }
 
 /**
- * Which app a signed-in call came from: kept with the user's account, and an app too old for the cloud
- * is told to update (app-version.ts). Bops for iPhone's version is its own: it never stands in for the Mac's.
+ * Which app a signed-in call came from: kept with the user's account (a Mac's, never a computer's runner's), and an
+ * app too old for the cloud is told to update (app-version.ts). Bops for iPhone's version is its own: it never stands in for the Mac's.
  * A Mac's app that a newer one locked out of the user's state, and that runs its routines all the same,
  * is refused the proxies (state.ts behindState). A computer's runner stops its own on that.
  */
@@ -95,7 +95,9 @@ async function appCheck(req: IncomingMessage, user: CloudUser, path: string) {
     noteIphoneVersion(user.id, version);
     return requireIphoneVersion(version);
   }
-  noteAppVersion(user.id, version);
+  // The Mac's only: a computer's runner is a Bops the Mac set up, and saying it would stand in for the Mac (turns.ts,
+  // whether the owner's Bops keeps to chat through Bops Cloud).
+  if (!user.computer) noteAppVersion(user.id, version);
   requireAppVersion(path, version);
   if (!user.computer) await requireUsageAppVersion(user.id, path, version);
   if (!user.computer && path.startsWith("/proxy/") && (await state.behindState(req, user.id))) throw state.behindRefusal(path);

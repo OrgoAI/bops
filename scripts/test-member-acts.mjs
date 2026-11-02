@@ -265,6 +265,15 @@ await check("a member's chat queued before the workspace was switched to Bops Cl
   assert.ok(warned.some((w) => w.includes("e_sw") && w.includes("through Bops Cloud")));
 });
 
+await check("a workspace whose owner chose the Mac, or that Bops Cloud may move later, is still the Mac's: a queued chat is answered here", async () => {
+  for (const ws of [{ chatOn: "mac" }, { chatAuto: true }]) {
+    fresh();
+    Object.assign(state.workspaces[1], ws);
+    await memberEvent(event({ act: "chat", chatId: "bot:max", text: "hi" }), "e_mac");
+    assert.equal(did[0]?.[0], "chat", JSON.stringify(ws));
+  }
+});
+
 await check("a message Bops Cloud wrote already is answered only while they still may: Use its computer turned off since (a group with a computer), or Write taken away", async () => {
   fresh({ samComputer: "none" });
   state.messages.push({ id: "msg_m_sam_g1", chatId: "g-max", role: "user", text: "hi", at: 5, member: { ...SAM, ref: "key_00000001" } });

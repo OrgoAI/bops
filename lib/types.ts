@@ -300,11 +300,19 @@ export type Workspace = {
   memberAccess?: MemberAccessMap;
   /**
    * Whose chat goes through Bops Cloud first: "cloud" when every message here, the owner's and their people's, is
-   * taken by Bops Cloud, which checks who may, keeps it and has the bot's computer answer. Unset: as before (the
-   * owner's Mac answers). Off by default, turned on a workspace at a time. Then only Bops Cloud writes a member's
-   * stamp on a message here (cloud/computer-scope.ts cloudChatOn, memberStampKept).
+   * taken by Bops Cloud, which checks who may, keeps it and has the bot's computer answer. Then only Bops Cloud writes
+   * a member's stamp on a message here (cloud/computer-scope.ts cloudChatOn, memberStampKept). "mac": the owner (or
+   * Orgo) chose the owner's Mac, which answers as before. Unset: the Mac answers for now. Bops Cloud writes it, from
+   * its switch (cloud/turns.ts), and puts it back on every save; only "cloud" means the cloud path.
    */
-  chatOn?: "cloud";
+  chatOn?: "cloud" | "mac";
+  /**
+   * Bops Cloud moves this workspace's chat by itself (cloud/turns.ts autoRoute): to it once every computer its bots
+   * work on has a runner that answers, back to the Mac whenever one can't. Unset: it doesn't (someone chose, or it
+   * isn't on for this account). Bops Cloud writes it; a computer someone else can use gets a runner for it too
+   * (lib/server/runner-install.ts sharedRunnerOk), and Settings, General says so.
+   */
+  chatAuto?: boolean;
   /**
    * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
    * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
@@ -1771,6 +1779,8 @@ export type RunnerState = {
   at: number;
   upgrading?: { version: string; buildId: string; by: string; at: number };
   down?: { status: string; at: number };
+  /** Set up on a computer someone else can use (runner-install.ts sharedRunnerOk): on its identity alone, so never given a key, even by a Mac just started. */
+  shared?: boolean;
 };
 
 /** A new task's words that put it on the user's Mac (lib/server/where.ts chooseWhere), and a routine's (routineOnMac). */

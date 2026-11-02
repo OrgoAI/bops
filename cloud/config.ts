@@ -86,6 +86,13 @@ export const config = {
    */
   wakeSecret: () => env("BOPS_CLOUD_WAKE_SECRET"),
   /**
+   * Chat through Bops Cloud by default (turns.ts autoRoute, chatAutoFor): "on" moves every owner's workspaces once their
+   * bots' computers can answer there, a list of Orgo user ids (commas) only theirs (a canary). Unset or "off": nothing
+   * moves there by itself. "revert": the same, and every workspace it moved goes back to the owner's Mac at start. A
+   * workspace it moved goes back to the Mac whenever its computers can't answer, whatever this says.
+   */
+  chatAuto: () => env("BOPS_CHAT_AUTO"),
+  /**
    * What a plan includes (BOPS_PLAN_LIMITS=1): phone numbers and emails as BOPS_TIERS says (Free
    * none, Pro 1, Max up to 5), so a purchase past the plan's is refused (proxy.ts) and the app makes
    * no inbox past it. Off (the default): anyone may, as before plans. Paid plans get their main bot's

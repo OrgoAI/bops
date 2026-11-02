@@ -873,13 +873,20 @@ export const MEMBER_ACT_MS = 10 * 60_000;
 export const STORED_ACT_MS = 24 * 3600_000;
 
 /**
- * Chat through Bops Cloud (cloud/turns.ts). A workspace switched to it (bops.chat_routing, off by default) has every
+ * Chat through Bops Cloud (cloud/turns.ts). A workspace switched to it (bops.chat_routing) has every
  * message someone says in a one bot chat written by Bops Cloud first: a member's (POST /v1/ws/<id>/act), and the
  * owner's own from their Bops (POST /v1/chats/<chatId>/send, ChatSendBody). It checks who may (the owner always; a
  * member with Write on the bot, and Use its computer for an answer), writes the message once by its key, and owes the
  * answer as a turn: the runner on the bot's computer hears it on its own stream (GET /v1/runner/live, RunnerTurnEvent),
  * claims it (RunnerClaim), beats while it runs and says it's done. Bops Cloud wakes the computer when no runner listens.
  * Every viewer hears the message, the answer and where the turn stands (LiveTurn) on the stream they already watch.
+ *
+ * Nobody has to switch it: with BOPS_CHAT_AUTO on for the owner, Bops Cloud moves a workspace there by itself once every
+ * computer its bots work on has a runner the owner's Mac set up and saw running that connected at CLOUD_CHAT_MIN_VERSION
+ * or newer (set_by "auto"), and back to the Mac whenever one can't answer (set_by "auto", or "auto-held" for a wake
+ * refused, which waits a day). A choice the owner (POST /v1/chat-routing {mode: "mac" | "cloud"}) or Orgo's staff made
+ * is never moved, either way; {mode: "auto"} gives it back. The owner's state carries it on each workspace
+ * (Workspace.chatOn "cloud", or "mac" for a choice of the Mac; chatAuto while Bops Cloud may move it).
  */
 /** What the owner's Bops sends: its own key for the message (its id is "msg_o_<key>"), the words, and the message it replies to. */
 export type ChatSendBody = { key: string; text: string; replyTo?: string };
@@ -896,6 +903,14 @@ export const MESSAGE_TAKEN = "message_taken";
 export const CHAT_NEEDS_UPDATE = "chat_needs_update";
 /** The first Bops whose Mac keeps to chat through Bops Cloud (runners kept up on identity, Use its computer, stored messages). */
 export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
+/**
+ * The first Bops with the owner's switch in Settings, General (components/app/chat-switch.tsx): Bops Cloud moves a
+ * workspace to it by itself (cloud/turns.ts autoRoute) only for an owner whose last Mac is at this or newer, so an
+ * owner it moves can always choose their Mac again in the app.
+ */
+export const CHAT_AUTO_MIN_VERSION = "0.0.38";
+/** 409 on the owner's switch turned back on ("auto") where Bops Cloud doesn't move workspaces for them yet (BOPS_CHAT_AUTO). */
+export const CHAT_AUTO_OFF = "chat_auto_off";
 /** On a runner's stream, an event "turn": answer this message (`seq`: its write, so the runner reads messages up to it first). */
 export type RunnerTurnEvent = { id: string; messageId: string; chatId: string; botId: string; seq: number };
 /** On a runner's stream, an event "turn-cancel": stop that turn and write nothing more for it (its member was removed, or it was taken back). */

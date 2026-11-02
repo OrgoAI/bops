@@ -145,5 +145,29 @@ await check("Bops Cloud says the chat isn't its: answered here; refused otherwis
   assert.equal(await C.sendThroughCloud("bot:max", "x"), "failed");
 });
 
+await check("a workspace whose owner chose the Mac (chatOn \"mac\") isn't the cloud's", () => {
+  state.workspaces[1].chatOn = "mac";
+  assert.equal(C.sendsThroughCloud("bot:max", {}), false);
+  state.workspaces[1].chatOn = "cloud";
+});
+
+await check("the owner's switch goes to Bops Cloud as the owner, and the state is read after; refused, Bops Cloud's words", async () => {
+  asked.length = 0;
+  pulls = 0;
+  next = [{ status: 200, body: { ok: true, cloud: false, allowHourly: false } }];
+  assert.deepEqual(await C.setChatRouting("ws_acme", "mac"), { ok: true });
+  assert.equal(asked[0].url, "https://bops-cloud.test/v1/chat-routing");
+  assert.deepEqual([asked[0].headers.Authorization, asked[0].headers["x-bops-user"], asked[0].body], ["Bearer key-owner", "u_owner", { wsId: "ws_acme", mode: "mac" }]);
+  assert.equal(pulls, 1);
+  next = [{ status: 409, body: { error: "Update Bops to 0.0.36 or newer on every Mac first.", code: "chat_needs_update" } }];
+  assert.deepEqual(await C.setChatRouting("ws_acme", "auto"), { error: "Update Bops to 0.0.36 or newer on every Mac first.", status: 409 });
+  assert.equal(asked[1].body.mode, "auto");
+  next = [failedWith("ECONNREFUSED")];
+  assert.equal((await C.setChatRouting("ws_acme", "auto")).status, 502);
+  online = false;
+  assert.equal((await C.setChatRouting("ws_acme", "auto")).status, 409, "not signed in to Bops Cloud");
+  online = true;
+});
+
 console.log(`cloud chat: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
