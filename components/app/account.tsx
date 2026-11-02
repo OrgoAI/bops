@@ -28,18 +28,22 @@ import {
   type TopUpInfo,
   type TopUpNext,
 } from "@/lib/credit-topup";
-import { freeHoursWords, PLAN_CARDS } from "@/lib/plan-includes";
+import { trackEvent } from "@/lib/analytics";
+import { canWake, centsText, extensionLine, type BopsBilling, type UsageTerms } from "@/lib/bops-billing";
+import { freeHoursWords, PLAN_CARDS, usageCard, type PlanLine } from "@/lib/plan-includes";
+import { BOPS_TIERS } from "@/cloud/protocol";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { signOutOfOrgo as signOutAsking, UNSENT } from "./sign-in";
 import { AskInPlace, refreshState } from "./ui";
 
 /*
- * The account: who you are on Orgo, your Bops plan (Free, Pro or Max; an Orgo plan doesn't change it,
- * and everyone is on Free until they pay) and the AI credit left when Orgo says, with a way to add some
- * once, what your bots used this month and last, and the inboxes and numbers they have. A sheet
- * over the app, like Settings. Everything comes from GET /api/account, which reads Orgo with your key
- * on the server; paying for Pro or Max, and managing it, happen in the browser.
+ * The account: who you are on Orgo, what you pay for Bops and the credit left when Orgo says, what your
+ * bots used this month and last, and the inboxes and numbers they have. A sheet over the app, like
+ * Settings. Everything comes from GET /api/account, which reads Orgo with your key on the server.
+ * Billed by use (lib/bops-billing.ts), it's your Orgo credit, added on Orgo in the browser. On Bops' own
+ * plans (Free, Pro or Max, while orgo-web still bills by them), the AI credit with a way to add some
+ * once, and paying for Pro or Max, and managing it, in the browser.
  */
 
 /** The initials on the avatar: the Orgo name, else the email, else the name in Settings. */
@@ -130,7 +134,15 @@ export function PlanAndCredit({ state }: { state: AppState }) {
   const user = info?.user ?? state.account?.user ?? null;
   return (
     <>
-      {user ? info || (failed && !loading) ? <YourPlan plan={info?.bops} known={!!info} onPlan={setBops} userId={user.id} /> : <Placeholder title="Your plan" /> : <Notice>Sign in with Orgo to see your plan.</Notice>}
+      {user ? (
+        info || (failed && !loading) ? (
+          <YourPlan plan={info?.bops} billing={info?.bops?.billing ?? info?.billing} known={!!info} onPlan={setBops} userId={user.id} />
+        ) : (
+          <Placeholder title="Your plan" />
+        )
+      ) : (
+        <Notice>Sign in with Orgo to see your plan.</Notice>
+      )}
       {info && <Reach info={info} />}
     </>
   );
@@ -183,19 +195,143 @@ const RANK: Record<BopsTier, number> = { free_bops: 0, pro_bops: 1, max_bops: 2 
 type Open = "pro_bops" | "max_bops" | "manage";
 
 /**
- * The Bops plan: Free, Pro or Max, with the user's marked. AI credit pays for what the bots do (models,
- * calls, texts) at what it costs Orgo. `plan` is orgo-web's answer (GET /api/bops/plan); without one
- * (Orgo has no Bops plans yet, or didn't answer) the user is on Free, and the balance isn't shown.
- * `known` is false when the account itself didn't load: no plan is marked then. Upgrading opens
- * Stripe's checkout, and Manage plan Stripe's billing page, in the browser; the sheet reads the plan
- * again when Bops comes back to the front. On every plan, AI credit can be added once under the
- * balance (AddCredit); `onPlan` takes the plan read again after that.
+ * What the user pays for Bops. `plan` is orgo-web's answer (GET /api/bops/plan), `billing` how they're
+ * billed (orgo-web's, else Bops Cloud's word at the session), each missing when nobody said.
+ *
+ * - Billed by use: their Orgo credit left (OrgoBalance, with Add credit on Orgo) and what things cost
+ *   (UsageCard). No plan to pick.
+ * - Given a month more of their plan: that plan's credit as before, the day it ends, and what they'll
+ *   pay from then (UsageCard). No upgrades.
+ * - Otherwise Bops' own plans (orgo-web still bills by them): Free, Pro or Max, with the user's marked
+ *   only when orgo-web said it (`known`, and a plan: never taken for Free). Upgrading opens Stripe's
+ *   checkout, and Manage plan Stripe's billing page, in the browser; on every plan, AI credit can be
+ *   added once under the balance (AddCredit); `onPlan` takes the plan read again after that.
+ *
+ * The sheet reads it all again when Bops comes back to the front.
  */
-function YourPlan({ plan, known, onPlan, userId }: { plan: BopsPlan | null | undefined; known: boolean; onPlan: (plan: BopsPlan) => void; userId: string }) {
+function YourPlan({ plan, billing, known, onPlan, userId }: { plan: BopsPlan | null | undefined; billing?: BopsBilling; known: boolean; onPlan: (plan: BopsPlan) => void; userId: string }) {
+  if (billing === "usage")
+    return (
+      <Section title="Your plan">
+        {plan?.usage && <OrgoBalance usage={plan.usage} />}
+        <UsageCard usage={plan?.usage} mark="Current" />
+      </Section>
+    );
+  if (plan?.tier && plan.extensionEndsAt)
+    return (
+      <Section title="Your plan">
+        <Balance plan={plan} onPlan={onPlan} userId={userId} />
+        <div className="rounded-[14px] bg-[#F7F7F6] p-4 text-[12.5px] leading-[18px] text-[#3A3A38]">
+          <span className="font-semibold">{plan.name}.</span> {extensionLine(plan.extensionEndsAt)}
+        </div>
+        <ComputerTime plan={plan} />
+        <UsageCard mark={`From ${day(plan.extensionEndsAt)}`} />
+      </Section>
+    );
+  return <BopsPlans plan={plan} known={known} onPlan={onPlan} userId={userId} />;
+}
+
+/**
+ * Billing by use in the sheet: one card, the same words as bops.bot (lib/plan-includes.ts usageCard),
+ * at orgo-web's prices when it said them. `mark`: the tag in its corner ("Current", or the day it starts).
+ */
+function UsageCard({ usage, mark }: { usage?: UsageTerms; mark: string }) {
+  const c = usageCard({ hourlyCents: usage?.computer.hourlyCents, numberCents: usage?.numberMonthlyCents });
+  return (
+    <div className="flex flex-col gap-3 rounded-[14px] p-4 shadow-[0_0_0_1.5px_#0A0A0A]">
+      <span className="flex min-h-5 items-center justify-between gap-2">
+        <span className="text-[13px] font-semibold leading-5">{c.name}</span>
+        <span className="rounded-full bg-[#F2F2F0] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3A3A38]">{mark}</span>
+      </span>
+      <ComputerBox title={c.computers.title} detail={c.computers.detail} />
+      <Lines lines={c.lines} />
+    </div>
+  );
+}
+
+/** How many computers a card includes, before anything else it does (paper, not highlighter: yellow only marks what needs you). */
+function ComputerBox({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="flex items-start gap-2 rounded-[10px] bg-[#F7F7F6] px-2.5 py-2">
+      <svg width="16" height="16" viewBox="0 0 20 20" className="mt-px shrink-0" aria-hidden>
+        <rect x="2" y="3" width="16" height="11" rx="2" fill="none" stroke="#0A0A0A" strokeWidth="1.6" />
+        <path d="M7 17.5h6M10 14v3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-[13px] font-semibold leading-[18px] text-ink">{title}</span>
+        <span className="text-[12px] leading-4 text-[#3A3A38]">{detail}</span>
+      </span>
+    </div>
+  );
+}
+
+/** A card's lines: a check for what it includes, a dash for what it doesn't. */
+function Lines({ lines }: { lines: PlanLine[] }) {
+  return (
+    <ul className="flex flex-1 flex-col gap-1">
+      {lines.map((line) => (
+        <li key={line.text} className={`flex items-start gap-1.5 text-[12.5px] leading-[18px] ${line.no ? "text-[#8A8A88]" : "text-[#3A3A38]"}`}>
+          <svg width="12" height="12" viewBox="0 0 12 12" className="mt-[3px] shrink-0" aria-hidden>
+            {line.no ? (
+              <path d="M3 6h6" fill="none" stroke="#C9C9C6" strokeWidth="1.5" strokeLinecap="round" />
+            ) : (
+              <path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#9A9A98" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            )}
+          </svg>
+          {line.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * Billed by use: the Orgo credit left (only when Orgo said it), which pays for the computer's hours and
+ * the bots' AI alike, and Add credit, which opens Orgo's own top up in the browser (the sheet reads the
+ * balance again when Bops comes back to the front). Below what an hour of the computer costs, Orgo
+ * won't wake it: the sheet says so.
+ */
+function OrgoBalance({ usage }: { usage: UsageTerms }) {
+  const out = !canWake(usage);
+  const add = () => {
+    trackEvent("bops_add_credit_clicked", { surface: "account" });
+    window.open(usage.topUpUrl, "_blank");
+  };
+  return (
+    <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex items-center gap-4 p-4">
+        <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#6B6B6B]">Your computer&apos;s hours and your bots&apos; AI come out of your Orgo credit.</span>
+        {usage.balanceCents !== undefined && (
+          <div className="flex shrink-0 flex-col items-end gap-1" data-tip="Your Orgo credit, the same balance as on orgo.ai">
+            <span className="text-[24px] font-semibold leading-7 tracking-[-0.02em] tabular-nums">{centsText(usage.balanceCents)}</span>
+            <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">Orgo credit left</span>
+          </div>
+        )}
+      </div>
+      {out && (
+        <span className="border-t border-[#F0F0EE] px-4 py-3 text-[12.5px] leading-[18px] text-[#3A3A38]">
+          You&apos;re out of Orgo credit, so your bots are paused and your computer stays asleep. Add credit to keep them going.
+        </span>
+      )}
+      <div className="flex border-t border-[#F0F0EE] px-4 py-3">
+        <button onClick={add} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
+          Add credit on Orgo
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Bops' own plans, while orgo-web still bills by them: Free, Pro or Max, with the user's marked. AI
+ * credit pays for what the bots do (models, calls, texts) at what it costs Orgo.
+ */
+function BopsPlans({ plan, known, onPlan, userId }: { plan: BopsPlan | null | undefined; known: boolean; onPlan: (plan: BopsPlan) => void; userId: string }) {
   const [busy, setBusy] = useState<Open | null>(null);
   // What the last button said, under it: "Upgrades open soon." is a note, anything else an error.
   const [said, setSaid] = useState<{ what: Open; text: string; soon: boolean } | null>(null);
-  const current: BopsTier | null = known ? (plan?.tier ?? "free_bops") : null;
+  // Only the plan orgo-web said: none marked when it didn't (never taken for Free).
+  const current: BopsTier | null = known ? (plan?.tier ?? null) : null;
   /** Open Orgo's page for it in the browser: checkout for a plan, or the billing page. */
   const open = async (what: Open) => {
     setBusy(what);
@@ -245,32 +381,8 @@ function YourPlan({ plan, known, onPlan, userId }: { plan: BopsPlan | null | und
                   {p.per && <span className="text-[12.5px] text-[#6B6B6B]">{p.per}</span>}
                 </span>
               </div>
-              {/* How many computers the plan includes, before anything else it does (paper, not highlighter: yellow only marks what needs you). */}
-              <div className="flex items-start gap-2 rounded-[10px] bg-[#F7F7F6] px-2.5 py-2">
-                <svg width="16" height="16" viewBox="0 0 20 20" className="mt-px shrink-0" aria-hidden>
-                  <rect x="2" y="3" width="16" height="11" rx="2" fill="none" stroke="#0A0A0A" strokeWidth="1.6" />
-                  <path d="M7 17.5h6M10 14v3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
-                </svg>
-                <span className="flex min-w-0 flex-col gap-0.5">
-                  <span className="text-[13px] font-semibold leading-[18px] text-ink">{p.computers.title}</span>
-                  <span className="text-[12px] leading-4 text-[#3A3A38]">{p.computers.detail}</span>
-                </span>
-              </div>
-              <ul className="flex flex-1 flex-col gap-1">
-                {p.lines.map((line) => (
-                  <li key={line.text} className={`flex items-start gap-1.5 text-[12.5px] leading-[18px] ${line.no ? "text-[#8A8A88]" : "text-[#3A3A38]"}`}>
-                    {/* A check for what the plan includes, a dash for what it doesn't. */}
-                    <svg width="12" height="12" viewBox="0 0 12 12" className="mt-[3px] shrink-0" aria-hidden>
-                      {line.no ? (
-                        <path d="M3 6h6" fill="none" stroke="#C9C9C6" strokeWidth="1.5" strokeLinecap="round" />
-                      ) : (
-                        <path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#9A9A98" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                      )}
-                    </svg>
-                    {line.text}
-                  </li>
-                ))}
-              </ul>
+              <ComputerBox title={p.computers.title} detail={p.computers.detail} />
+              <Lines lines={p.lines} />
               {a && (
                 <div className="flex flex-col gap-1.5">
                   <button
@@ -318,25 +430,29 @@ function Balance({ plan, onPlan, userId }: { plan: BopsPlan; onPlan: (plan: Bops
   const topUp = useTopUp(onPlan);
   const canAdd = !!topUp.info && !topUp.info.off;
   const c = plan.credit;
-  const paid = plan.tier !== "free_bops";
-  const monthly = plan.tier === "max_bops" ? 200_000_000 : 20_000_000;
+  const paid = !!plan.tier && plan.tier !== "free_bops";
+  // The plan's monthly credit, from the plan table (Pro's or Max's), never a number of its own.
+  const monthly = BOPS_TIERS[plan.tier ?? "free_bops"].creditMicros;
+  // Given a month more of the plan: nothing renews or is bought, so no upgrade talk.
+  const moving = !!plan.extensionEndsAt;
   // Credit added once is kept with what's left of the one-time $5: neither expires.
-  const added = !!c && (c.topUps === true || c.freeLeftMicros > 5_000_000);
+  const once = BOPS_TIERS.free_bops.creditMicros;
+  const added = !!c && (c.topUps === true || c.freeLeftMicros > once);
   const line =
     paid && plan.status === "past_due"
       ? "Payment failed. Update your card in Manage plan."
       : !c
-        ? paid && plan.cancelAtPeriodEnd && plan.periodEnd
+        ? paid && plan.cancelAtPeriodEnd && plan.periodEnd && !moving
           ? `Your plan ends ${day(plan.periodEnd)}.`
           : ""
         : !paid
           ? added
             ? "Includes credit you added, which doesn't expire."
-            : `${credit(c.freeLeftMicros)} left of your one-time $5.`
+            : `${credit(c.freeLeftMicros)} left of your one-time ${credit(once)}.`
           : [
               `${credit(c.planLeftMicros)} of ${credit(monthly)} left${c.resetsAt ? `, resets ${day(c.resetsAt)}` : ""}.`,
-              c.freeLeftMicros > 0 ? (added ? `Plus ${credit(c.freeLeftMicros)} that doesn't expire.` : `Plus ${credit(c.freeLeftMicros)} of your one-time $5.`) : "",
-              plan.cancelAtPeriodEnd && plan.periodEnd ? `Ends ${day(plan.periodEnd)}.` : "",
+              c.freeLeftMicros > 0 ? (added ? `Plus ${credit(c.freeLeftMicros)} that doesn't expire.` : `Plus ${credit(c.freeLeftMicros)} of your one-time ${credit(once)}.`) : "",
+              plan.cancelAtPeriodEnd && plan.periodEnd && !moving ? `Ends ${day(plan.periodEnd)}.` : "",
             ]
               .filter(Boolean)
               .join(" ");
@@ -355,7 +471,7 @@ function Balance({ plan, onPlan, userId }: { plan: BopsPlan; onPlan: (plan: Bops
       {c && c.leftMicros <= 0 && (
         <span className="border-t border-[#F0F0EE] px-4 py-3 text-[12.5px] leading-[18px] text-[#3A3A38]">
           You&apos;re out of AI credit, so your bots are paused.
-          {canAdd ? " Add credit below to keep them going." : paid ? " It comes back when your plan renews, or upgrade for more." : " Upgrade to keep them going."}
+          {canAdd ? " Add credit below to keep them going." : moving ? "" : paid ? " It comes back when your plan renews, or upgrade for more." : " Upgrade to keep them going."}
         </span>
       )}
       {canAdd && <AddCredit plan={plan} topUp={topUp} onPlan={onPlan} userId={userId} />}
@@ -856,8 +972,8 @@ function Spend({ spend }: { spend: NonNullable<UsageTotals["spend"]> }) {
     <div className="flex flex-col gap-2.5 border-b border-[#F0F0EE] px-4 pb-3.5 pt-3.5">
       <span className="flex items-baseline justify-between gap-3 text-[12px] leading-4 text-[#6B6B6B]">
         <span>
-          {spend.charged ? "AI credit used" : "What it cost"}
-          {!spend.charged && <span className="text-[#9A9A98]"> · not taken from your AI credit yet</span>}
+          {spend.charged ? "Credit used" : "What it cost"}
+          {!spend.charged && <span className="text-[#9A9A98]"> · not taken from your credit yet</span>}
         </span>
         <span className="text-[13px] font-semibold tabular-nums text-ink">{spent(spend.costMicros)}</span>
       </span>

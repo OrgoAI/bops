@@ -457,7 +457,7 @@ export async function getData(botId: string, endpointId: string, input: unknown,
   const ask: AskSpec = {
     action: "Use a paid lookup",
     resources: [e.id],
-    preview: `${what ? `${what}\n` : ""}${e.id} on treg, about ${price(e)} from your AI credit.\n\n${clip(JSON.stringify(input ?? {}, null, 1), 1200)}`,
+    preview: `${what ? `${what}\n` : ""}${e.id} on treg, about ${price(e)} from your Orgo credit.\n\n${clip(JSON.stringify(input ?? {}, null, 1), 1200)}`,
     kind: "data",
   };
   // Money from the user's AI credit: Just do it doesn't cover it, an Always allow they saved for this lookup does.

@@ -922,13 +922,13 @@ export function stoppedWords(r: Pick<AgentRun, "kind" | "agent" | "model">, why:
   const vendor = keyVendor({ ...r.agent, model: r.model });
   const resets = why === "limit" ? resetsAt(said) : undefined;
   const until = resets ? ` until ${resets}` : "";
-  const finish = "I can finish this on Bops agent, on your AI credit";
+  const finish = "I can finish this on Bops agent, on your Orgo credit";
   if (why === "model")
     return `Your ${onPlan ? planName(plan) : `${vendor} key`} can't use ${agentLabel({ kind: r.kind, model: r.model }).replace(`${name} · `, "")}. Pick another model for new threads in ${bot ? `${bot}'s` : "the bot's"} profile. ${finish}, or wait.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
-  if (why === "vault") return `Waiting for your Vault. It allows 30 key uses an hour, so this starts again by itself in a few minutes. Or I can finish it on Bops agent, on your AI credit.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
+  if (why === "vault") return `Waiting for your Vault. It allows 30 key uses an hour, so this starts again by itself in a few minutes. Or I can finish it on Bops agent, on your Orgo credit.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
   if (why === "down") {
     const who = r.kind === "claude" ? "Claude" : r.kind === "codex" ? "OpenAI" : (ROUTE_NAMES[r.model?.split("/")[0] as keyof typeof ROUTE_NAMES] ?? "Its provider");
-    return `${who} isn't answering right now. I can try again, or finish this on Bops agent, on your AI credit.\n\nOptions: ${TRY_AGAIN} | ${FINISH_ON_BOPS}`;
+    return `${who} isn't answering right now. I can try again, or finish this on Bops agent, on your Orgo credit.\n\nOptions: ${TRY_AGAIN} | ${FINISH_ON_BOPS}`;
   }
   const what =
     why === "limit"

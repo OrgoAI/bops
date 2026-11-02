@@ -417,7 +417,7 @@ function AiBody({ state, bot: b, links }: { state: AppState; bot: Bot; links: Se
       {state.businessData && (
         <Segmented
           title="Business data"
-          hint={b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from AI credit"}
+          hint={b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from Orgo credit"}
           value={b.dataOff ? "off" : "on"}
           options={[
             ["on", "On"],

@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
 import { BLOCKER_LABEL, botChatId, BRAINS_ON, CLI_NAMES, COMPACTED, computerStaysDown, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, memberOf, memberThread, othersThread, outsideThread, ownerSent, pausedForOk, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitsForOk, workBot, workspaceOf, type AppApproval, type Bot, type CliKind, type MemberSaid, type Routine, type Session, type Takeover, type TaskRoute, type ThreadReply } from "@/lib/types";
 import type { MemberWho } from "@/lib/member-access";
-import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
+import { CloudError, creditsOut, executorKey, noteOutOfCredit, outOfCreditWords, outOfCreditError, shortOfCredit } from "./cloud";
 import { browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
 import { computerAsleepError, computerWakingError, madeByThisServer, madeReady, orgo, OrgoError, screenId, wakeWaitMs, type OrgoScreen } from "./orgo";
@@ -53,7 +53,7 @@ import { HOLD_MS, holdsScreen, screenLabel, screenMap, screenNo } from "@/lib/sc
 import { appsOpen } from "@/lib/apps-access";
 import { builtinSkills } from "@/lib/builtin-skills";
 import { watching } from "./presence";
-import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
+import { computerOutOfCredit, freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 import { brainById, ensureBrainTools, signInStatus } from "./brains";
 import { alsoSpec, brainName, BrainStopped, cliCompact, cliDriver, cliTurn, closeCli, closeTerminal, limitPick, openRun, openShell, openTerminal, signInWords, stoppedWords } from "./cli-agents";
 import { aiOf, hasProfile, isCli, pickAgent, threadAgent, type AgentRun } from "@/lib/agents";
@@ -1044,7 +1044,7 @@ export async function compactThread(sessionId: string, by?: MemberSaid): Promise
   if (blocked) return { ok: false, error: blocked, status: 409 };
   // A CLI agent isn't on AI credit (run).
   const b = bot(s.botId);
-  if (out && !(b && cliFor(s, b))) return { ok: false, error: OUT_OF_CREDIT, status: 402 };
+  if (out && !(b && cliFor(s, b))) return { ok: false, error: outOfCreditWords(), status: 402 };
   const computer = carriedOnBy(s);
   if (computer && !runnerSince(computer, COMPACT_SINCE)) return { ok: false, error: "Its computer's Bops needs to update first.", status: 409 };
   stopped.delete(sessionId);
@@ -3356,13 +3356,14 @@ async function run(sessionId: string) {
     }
     const credit = !stopped.has(sessionId) && noteOutOfCredit(e);
     // Not started or stopped by Bops Cloud for want of more AI credit, with some left (cloud/turn-guard.ts): not out of it.
-    const low = stopped.has(sessionId) ? undefined : (shortOfCredit(e) ?? freeHoursUsed(e));
+    const asleep = stopped.has(sessionId) ? undefined : computerOutOfCredit(e);
+    const low = stopped.has(sessionId) ? undefined : (shortOfCredit(e) ?? freeHoursUsed(e) ?? asleep);
     // Stopped: by the user, as they took the screen over or opened its terminal, or as its brain went (brainLeft).
     const error = stopped.has(sessionId)
       ? (brainStops.get(sessionId) ??
         (getState().takeover?.sessionId === sessionId ? (getState().takeover?.terminal ? IN_TERMINAL : "Paused while you took over") : (stopReasons.get(sessionId) ?? "Stopped by you")))
       : credit
-        ? OUT_OF_CREDIT
+        ? outOfCreditWords()
         : (low ?? (e as Error).message);
     // A Compact its run didn't get to (compactThread), said quietly in the thread, and it can be pressed again. A run that
     // was only to compact ends as the thread stood, as one that compacted does: nothing in the chat, nor sent anywhere.
@@ -3386,7 +3387,9 @@ async function run(sessionId: string) {
           ? "out_of_credit"
           : freeHoursUsed(e)
             ? "free_hours_used"
-            : low
+            : asleep
+              ? "computer_out_of_credit"
+              : low
               ? "short_of_credit"
               : "failed",
       startedAt,
@@ -3399,7 +3402,7 @@ async function run(sessionId: string) {
     // Out of AI credit, or short of it: said once, plainly, in the chat only (never by email, text or a channel).
     if (again) {
       // (Said when the run before failed.)
-    } else if (credit) addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: OUT_OF_CREDIT, sessionIds: [sessionId], resultOf: sessionId });
+    } else if (credit) addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: outOfCreditWords(), sessionIds: [sessionId], resultOf: sessionId });
     else if (low) addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: `I couldn't finish ${s.title}${onMac ? " on your Mac" : ""}: ${error}`, sessionIds: [sessionId], resultOf: sessionId, bops: true });
     else if (!stopped.has(sessionId)) {
       const failed = addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: `I couldn't finish ${s.title}${onMac ? " on your Mac" : ""}: ${error}`, sessionIds: [sessionId], resultOf: sessionId, bops: true });
@@ -3820,7 +3823,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string 
     }
   await syncSteps(sessionId, agentSessionId, seen, at);
   if (creditStopped === AI_CREDIT_EMPTY) throw outOfCreditError();
-  if (creditStopped === AI_CREDIT_LOW) throw new CloudError(failure ?? "It needs more AI credit than you have left.", 402, AI_CREDIT_LOW);
+  if (creditStopped === AI_CREDIT_LOW) throw new CloudError(failure ?? "It needs more credit than you have left.", 402, AI_CREDIT_LOW);
   if (failure) throw new Error(failure);
 }
 

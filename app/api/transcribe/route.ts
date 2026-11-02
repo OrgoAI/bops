@@ -1,6 +1,6 @@
 import { notReady } from "@/lib/server/ready";
 import { MAX_RECORDING, transcribe } from "@/lib/server/transcribe";
-import { noteOutOfCredit, OUT_OF_CREDIT } from "@/lib/server/cloud";
+import { noteOutOfCredit, outOfCreditWords } from "@/lib/server/cloud";
 
 /** The chat's mic: a recording (form field `audio`, and `botId` the chat is with), back as text. */
 export async function POST(request: Request) {
@@ -16,7 +16,7 @@ export async function POST(request: Request) {
   try {
     return Response.json({ text: await transcribe(audio, typeof botId === "string" && botId ? botId : undefined) });
   } catch (e) {
-    if (noteOutOfCredit(e)) return Response.json({ error: OUT_OF_CREDIT }, { status: 402 });
+    if (noteOutOfCredit(e)) return Response.json({ error: outOfCreditWords() }, { status: 402 });
     return Response.json({ error: (e as Error).message }, { status: 502 });
   }
 }

@@ -44,7 +44,8 @@ export type Invite = { email: string; role: MemberRole; expiresAt: number | null
  * invites still waiting. `upgrade`: the plan with more room ("plan" from Free, "max" from Pro).
  */
 export type MemberSeats = {
-  plan: BopsTier;
+  /** The Bops plan, or "usage": billed by use, the seats are the Orgo plan's. */
+  plan: BopsTier | "usage";
   canAdd: boolean;
   limit: number | null;
   used: number;

@@ -12,7 +12,7 @@ export async function GET() {
 }
 
 /** What the sign-in actions answer now: Bops doesn't sign in to ChatGPT or Codex (lib/server/mac.ts). */
-const SIGN_IN_GONE = "Bops doesn't sign in to Codex anymore. Bots use Bops AI credit for all their work, on your Mac too.";
+const SIGN_IN_GONE = "Bops doesn't sign in to Codex anymore. Bots use your Orgo credit for all their work, on your Mac too.";
 
 /**
  * { action: "install" } installs the Codex CLI again if it's still missing (Retry), from the app on

@@ -348,7 +348,7 @@ function Details({
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="text-[13px] font-semibold leading-4">Business data</span>
             <span className="text-[12px] leading-4 text-[#6B6B6B]">
-              {b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from AI credit"}
+              {b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from Orgo credit"}
             </span>
           </div>
           <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">

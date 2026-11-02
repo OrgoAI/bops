@@ -1,6 +1,7 @@
 import "server-only";
 import type { CloudPlanPayload, PlanInbox, PlanPhone } from "@/cloud/protocol";
 import { botChatId, type Bot } from "@/lib/types";
+import { cloudSession, cloudSessionNow } from "./cloud";
 import { adoptHandle } from "./mail";
 import { tellCloudLine } from "./phone-lines";
 import { addMessage, bot, sameState, update } from "./store";
@@ -102,8 +103,15 @@ function takeInbox(b: Bot, e: PlanInbox, workspaceId: string) {
   else say(b, `${b.name} has an email address now, with your plan: ${e.email}.`);
 }
 
-/** Take a "plan" event into the state. A bot this Mac doesn't have (deleted since) is skipped. */
+/**
+ * Take a "plan" event into the state. A bot this Mac doesn't have (deleted since) is skipped. A plan or a
+ * way of paying that isn't the session's (a move to billing by use, an upgrade) has the session asked
+ * for again, so the limits and the words that go by it (CloudSession.plan) follow at once.
+ */
 export async function adoptPlan(p: CloudPlanPayload) {
+  const session = cloudSessionNow();
+  const was = session?.plan;
+  if (session && (!was || was.tier !== p.tier || (was.billing ?? "plan") !== (p.billing ?? "plan"))) void cloudSession(true).catch(() => {});
   const b = p.botId ? bot(p.botId) : undefined;
   if (p.handle) adoptHandle(p.workspaceId, p.handle.handle, { offer: p.handle.auto && !!p.email && p.email.status !== "paused" && !b?.mail?.plan });
   if (!b) return;

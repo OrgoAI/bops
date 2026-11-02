@@ -1,5 +1,6 @@
 import "server-only";
-import { cloudOn } from "./cloud";
+import { OUT_OF_CREDIT_CODES, OUT_OF_CREDIT_WAKE } from "@/lib/bops-billing";
+import { billedByUse, cloudOn, noteComputerOutOfCredit } from "./cloud";
 import { orgo, OrgoError } from "./orgo";
 import { orgoKey } from "./orgo-auth";
 import { onPostgres, onRunner } from "./persist";
@@ -73,7 +74,7 @@ export async function wakeForUser(computerId: string): Promise<string | undefine
     return undefined;
   } catch (e) {
     if (e instanceof OrgoError && e.status === 409 && /not suspended/i.test(e.said ?? "")) return undefined;
-    return freeHoursUsed(e) ?? (e instanceof OrgoError && e.status === 402 && e.said ? e.said : "Try again in a moment.");
+    return freeHoursUsed(e) ?? computerOutOfCredit(e) ?? (e instanceof OrgoError && e.status === 402 && e.said ? e.said : "Try again in a moment.");
   }
 }
 
@@ -89,6 +90,18 @@ export function startActivityBeat() {
  * for any other error. Without the code, told by the words: this month's, or this week's from an Orgo
  * that still counts by the week.
  */
+/**
+ * Billed by use, Orgo wouldn't wake or start the computer for want of Orgo credit (402 with one of
+ * lib/bops-billing.ts OUT_OF_CREDIT_CODES; bops_out_of_credit on any billing): the app's words for it,
+ * and the chat's out of credit card is shown (noteComputerOutOfCredit). Undefined for any other error.
+ */
+export function computerOutOfCredit(e: unknown): string | undefined {
+  if (!(e instanceof OrgoError) || e.status !== 402 || !e.code || !OUT_OF_CREDIT_CODES.has(e.code)) return undefined;
+  if (e.code !== "bops_out_of_credit" && !billedByUse()) return undefined;
+  noteComputerOutOfCredit();
+  return OUT_OF_CREDIT_WAKE;
+}
+
 export function freeHoursUsed(e: unknown): string | undefined {
   if (!(e instanceof OrgoError) || e.status !== 402) return undefined;
   return e.code === "bops_free_hours" || /used its \d+ hours this (?:month|week)\b/.test(e.said ?? "") ? e.said : undefined;

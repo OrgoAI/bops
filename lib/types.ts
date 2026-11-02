@@ -1666,8 +1666,11 @@ export type AppState = {
    * The user's AI credit ran out: Bops Cloud refused a call that would spend it (402 ai_credit_empty).
    * The bots stop asking the cloud for AI work and the chat shows it with Upgrade, until a read of
    * the plan (GET /api/plan, /api/account) shows credit again. Unset otherwise.
+   * `usage`: the user is billed by use, so it's their Orgo credit, and the chat says Add credit.
+   * `computer`: only the computer can't wake (Orgo credit below an hour of it, lib/bops-billing.ts
+   * canWake): the chat says so, but AI work still goes while some credit is left.
    */
-  credits?: { out: boolean; at: number };
+  credits?: { out: boolean; at: number; usage?: true; computer?: true };
   /**
    * A Connected App (or a vault key) just finished connecting for a bot, and the window offers that bot's
    * starter routines for it (GET /api/routines/suggestions). One at a time; cleared once answered or

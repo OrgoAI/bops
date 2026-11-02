@@ -71,7 +71,7 @@ export const isNothing = (text: string) => /^\s*NOTHING\.?\s*$/i.test(text);
  * What a chat run fails with while the user's AI credit is used up (chat.ts backgroundTurn). Said in the
  * bot's chat once, never sent by text, email or a channel: like a task's (sessions.ts).
  */
-export const NO_CREDIT_FOR_ROUTINES = "Out of AI credit. Upgrade in Settings to keep routines running.";
+export const NO_CREDIT_FOR_ROUTINES = "Out of credit. Add credit in Settings to keep routines running.";
 
 /** A text is kept to this many characters; the rest is in Bops. */
 const TEXT_MAX = 600;

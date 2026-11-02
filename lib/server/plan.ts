@@ -1,6 +1,7 @@
 import "server-only";
 import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
 import type { BopsPlan } from "@/lib/account";
+import { billingIn, canWake, extensionEndIn, msOf, orgoTopUpPage, usageTermsIn } from "@/lib/bops-billing";
 import { pendingFrom, savedCardFrom, type PendingTopUp, type SavedCard } from "@/lib/credit-topup";
 import { botChatId, freeComputerBot, workspaceOf, type Bot } from "@/lib/types";
 import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, ownOnOrgoPlan, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
@@ -51,8 +52,9 @@ export function postOrgo<T>(key: string, path: string, body: unknown, headers?: 
 
 /* ---------------- Bops' own plan: AI credit ---------------- */
 
-/** GET /api/bops/plan as orgo-web answers it. */
-type BopsPlanAnswer = {
+/** GET /api/bops/plan as orgo-web answers it (billing by use's fields: lib/bops-billing.ts). */
+export type BopsPlanAnswer = {
+  billing?: unknown;
   tier?: string;
   name?: string;
   price_cents?: number;
@@ -75,25 +77,41 @@ function computerTimeOf(t: BopsPlanAnswer["computer_time"]): Pick<BopsPlan, "com
   return { computerTime: { usedSeconds: Math.max(0, used), limitSeconds: limit, resetsAt: resets } };
 }
 
-/** An ISO time or Unix seconds, as Unix ms. */
-const msOf = (t: string | number | null | undefined) => (typeof t === "number" ? t * 1000 : typeof t === "string" && !Number.isNaN(Date.parse(t)) ? Date.parse(t) : undefined);
-
 /**
- * The user's Bops plan and AI credit, read from Orgo with their key (orgo-web's GET /api/bops/plan,
- * which also gives a new user their one-time $5). Null when Orgo didn't answer, or doesn't have Bops
- * plans yet. Credit to spend clears the app's "out of AI credit" (state.credits).
+ * The user's Bops plan and credit, read from Orgo with their key (orgo-web's GET /api/bops/plan, which
+ * also gives a new user on Bops' plans their one-time $5). Null when Orgo didn't answer, or doesn't have
+ * Bops plans yet, or said something this app doesn't know: billing it doesn't know, or a tier that isn't
+ * one of Bops' plans (never taken for Free). Billed by use, it's the Orgo balance and what things cost
+ * (lib/bops-billing.ts). Credit to spend clears the app's "out of credit" (state.credits).
  */
 export async function readBopsPlan(key: string): Promise<BopsPlan | null> {
   const got = await askOrgo<BopsPlanAnswer>(key, "/api/bops/plan");
-  if (!got.ok) return null;
-  const a = got.json;
-  const tier: BopsTier = a.tier === "pro_bops" || a.tier === "max_bops" ? a.tier : "free_bops";
+  if (!got.ok || !got.json || typeof got.json !== "object") return null;
+  return bopsPlanFrom(got.json);
+}
+
+/** orgo-web's answer as the app keeps it (readBopsPlan), or null when it isn't one this app knows. Exported for the tests. */
+export function bopsPlanFrom(a: BopsPlanAnswer): BopsPlan | null {
+  const billing = billingIn(a as Record<string, unknown>);
+  if (!billing) return null;
+  if (billing === "usage") {
+    const usage = usageTermsIn(a as Record<string, unknown>, orgoOrigin());
+    const plan: BopsPlan = { billing, tier: null, name: "Pay as you go", priceCents: 0, usage };
+    // Enough to spend clears "out of credit"; when it was the computer that couldn't wake, enough for an hour of it.
+    const out = getState().credits;
+    if (out?.out && (usage.balanceCents ?? 0) > 0 && (!out.computer || canWake(usage))) update((st) => (st.credits = undefined));
+    return plan;
+  }
+  if (a.tier !== "free_bops" && a.tier !== "pro_bops" && a.tier !== "max_bops") return null;
+  const tier: BopsTier = a.tier;
+  const ends = extensionEndIn(a as Record<string, unknown>);
   const c = a.credit ?? {};
   // Only Orgo's own numbers: without a balance, there's no credit to show (never a made-up one).
   const known = typeof c.left_micros === "number" && Number.isFinite(c.left_micros);
   // Credit added once is in free_left_micros with what's left of the one-time $5 (it never expires either).
   const topUps = Array.isArray(a.grants) && a.grants.some((x) => x?.kind === "topup");
   const plan: BopsPlan = {
+    billing,
     tier,
     name: BOPS_TIERS[tier].name,
     priceCents: BOPS_TIERS[tier].priceCents,
@@ -112,6 +130,7 @@ export async function readBopsPlan(key: string): Promise<BopsPlan | null> {
         }
       : {}),
     ...(computerTimeOf(a.computer_time) ?? {}),
+    ...(ends ? { extensionEndsAt: ends } : {}),
   };
   if ((plan.credit?.leftMicros ?? 0) > 0 && getState().credits?.out) update((st) => (st.credits = undefined));
   return plan;
@@ -135,6 +154,19 @@ export async function bopsBillingLink(key: string, what: { tier: "pro_bops" | "m
   if (got.status === 404 || got.json.code === "bops_plans_off") return { error: "Upgrades open soon.", status: got.status === 404 ? 404 : 503, soon: true };
   if (got.json.code === "no_bops_plan") return { error: "You don't have a paid plan to manage yet.", status: 409 };
   return { error: typeof got.json.error === "string" ? got.json.error : `Orgo couldn't open that page (${got.status}). Try again in a minute.`, status: 502 };
+}
+
+/**
+ * Billed by use (Bops Cloud said so at the session), Bops' plans and Bops' AI credit aren't sold: what
+ * the app's checkout, manage and credit routes answer instead (409), in the user's words, pointing at
+ * Orgo credit. orgo-web refuses the same for an older app (its own 409); this keeps a new app from asking.
+ */
+export function usageRefusal(): Response | null {
+  if (cloudSessionNow()?.plan?.billing !== "usage") return null;
+  return Response.json(
+    { error: "Bops plans aren't sold any more. You pay only for what you use, from your Orgo credit. Add credit on Orgo.", code: "bops_usage_billing", url: orgoTopUpPage(orgoOrigin()) },
+    { status: 409 },
+  );
 }
 
 /* ---------------- Adding AI credit once ---------------- */
@@ -288,10 +320,11 @@ async function readPlan(key: string): Promise<OrgoPlan | null> {
   const deal = typeof s?.planLimits?.maxDesktops === "number" || typeof s?.planLimits?.maxRamPerUser === "number";
   const free = l && "bops_free_computer_id" in l ? { freeComputerId: typeof l.bops_free_computer_id === "string" ? l.bops_free_computer_id : null } : {};
   // The Bops plan decides a bot's own computer where Bops Cloud holds plans to what they include and
-  // Orgo counts Bops computers (lib/orgo-plans.ts OrgoPlan.bops).
+  // Orgo counts Bops computers (lib/orgo-plans.ts OrgoPlan.bops). Billed by use there's no Bops plan:
+  // every computer but the Bops one is the Orgo plan's (or by the hour), as for any Orgo account.
   const session = cloudOn() ? cloudSessionNow()?.plan : undefined;
   const bops =
-    session?.limits && typeof l?.bops_computers_limit === "number"
+    session?.limits && session.billing !== "usage" && typeof l?.bops_computers_limit === "number"
       ? { bops: { tier: session.tier, limit: l.bops_computers_limit, extras: Array.isArray(l.bops_max_computer_ids) ? l.bops_max_computer_ids.filter((x): x is string => typeof x === "string") : [] } }
       : {};
   return { tier, name: tier ? planName(tier) : undefined, computers, inUse: counted?.inUse, ...(memory ? { memory } : {}), ...(deal ? { deal } : {}), ...free, ...bops, ...(l ? {} : { limitsUnread: true as const }) };

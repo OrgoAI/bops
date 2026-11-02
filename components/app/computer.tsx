@@ -14,6 +14,7 @@ import { WatchBadge, WatchOverlay } from "./watch-overlay";
 import { EmailCard, PaymentCard, SignInCard } from "./screen-cards";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
+import { canWake, OUT_OF_CREDIT_WAKE } from "@/lib/bops-billing";
 import { freeHoursOutLine } from "@/lib/plan-includes";
 import { AppLogo, botApps } from "./apps";
 import { botBezel, botOnInk, botWash, MonitorIcon, post, screenNo } from "./ui";
@@ -148,7 +149,11 @@ export function ComputerView({
   // Free's computer with its hours used (10 a month): nothing wakes it till they start over.
   const plan = usePlan(state);
   const time = c.freeComputer ? plan?.bops?.computerTime : undefined;
-  const hoursOut = !!time && time.usedSeconds >= time.limitSeconds;
+  // Billed by use, Orgo wakes it only with credit for an hour of it (lib/bops-billing.ts canWake): out of
+  // Orgo credit (the balance Orgo last said, or the cloud or a wake said so), it stays asleep, and says so.
+  const usage = plan?.bops?.usage;
+  const creditOut = !!(usage ? !canWake(usage) : state.credits?.out && state.credits.usage);
+  const hoursOut = (!!time && time.usedSeconds >= time.limitSeconds) || creditOut;
   const holding = new Map(state.sessions.filter((s) => here(s.botId) && s.display !== undefined).map((s) => [s.display!, s]));
   // Screens a thread's helpers are using belong to that thread too.
   for (const s of state.sessions.filter((x) => here(x.botId) && live(x)))
@@ -507,7 +512,8 @@ export function ComputerView({
   // A screen a thread just left (or keeps while it asks you something) shows what it left there, not the Home screen.
   const leftHere = !!infoOn(display)?.left || infoOn(display)?.kind === "held";
   const showingReal = view === "desktop" || view === "reader" || !!takeover || busy || !!read?.blocker || card === "email" || (picked ? picked === "real" : leftHere);
-  const screen = asleep ? <AsleepScreen bot={b} host={c} waking={inUse} hoursOut={hoursOut && time ? freeHoursOutLine(time) : undefined} /> : takeover ? real(true) : showingReal ? real(false) : <HomeScreen state={state} bot={b} />;
+  const asleepLine = creditOut ? OUT_OF_CREDIT_WAKE : hoursOut && time ? freeHoursOutLine(time) : undefined;
+  const screen = asleep ? <AsleepScreen bot={b} host={c} waking={inUse} hoursOut={asleepLine} /> : takeover ? real(true) : showingReal ? real(false) : <HomeScreen state={state} bot={b} />;
 
   return (
     <div
@@ -681,7 +687,15 @@ export function ComputerView({
                 <button
                   onClick={() => void takeControl()}
                   disabled={asleep && hoursOut}
-                  title={asleep && hoursOut ? "Your Bops computer has used its free hours" : asleep ? "Wake the computer and drive this screen yourself" : "Pause the bot here and drive the screen yourself"}
+                  title={
+                    asleep && creditOut
+                      ? "Your Orgo credit ran out, so your computer stays asleep"
+                      : asleep && hoursOut
+                        ? "Your Bops computer has used its free hours"
+                        : asleep
+                          ? "Wake the computer and drive this screen yourself"
+                          : "Pause the bot here and drive the screen yourself"
+                  }
                   className="flex items-center gap-1.5 rounded-full bg-ink py-1.5 pl-2 pr-3.5 text-[13px] font-semibold leading-4 text-white disabled:cursor-default disabled:bg-[#B0B0AD]"
                 >
                   <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>

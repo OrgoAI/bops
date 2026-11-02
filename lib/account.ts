@@ -3,15 +3,25 @@
  * builds it on the server, so the Orgo key never reaches the page.
  */
 import type { BopsTier } from "@/cloud/protocol";
+import type { BopsBilling, UsageTerms } from "@/lib/bops-billing";
 
 /**
- * The user's Bops plan and AI credit (orgo-web's GET /api/bops/plan, read with their Orgo key): Free
- * has $5 of AI credit once, Pro $20 and Max $200 each month, with nothing carried over; on any plan,
- * credit can be added once (lib/credit-topup.ts), and that never expires. Money in micro-dollars
- * (1 cent = 10,000), times in Unix ms.
+ * The user's Bops plan and credit (orgo-web's GET /api/bops/plan, read with their Orgo key), one of two
+ * ways (lib/bops-billing.ts):
+ *
+ * - `billing` "plan": Bops' own plans. Free has $5 of AI credit once, Pro $20 and Max $200 each month,
+ *   with nothing carried over; on any plan, credit can be added once (lib/credit-topup.ts), and that
+ *   never expires. `extensionEndsAt`: the user was given a month more of it, free, and pays only for
+ *   what they use from then on.
+ * - `billing` "usage": no Bops plan (`tier` null). They pay for what they use from their Orgo credit
+ *   (`usage`: the balance, the computer's hourly price, a number's month, where to add credit).
+ *
+ * Money in micro-dollars (1 cent = 10,000) unless named cents, times in Unix ms.
  */
 export type BopsPlan = {
-  tier: BopsTier;
+  billing: BopsBilling;
+  /** The Bops plan; null when billed by use (there's none). */
+  tier: BopsTier | null;
   name: string;
   priceCents: number;
   /** Stripe's word for a paid plan: "active", "trialing", "past_due"… Missing on Free. */
@@ -33,6 +43,10 @@ export type BopsPlan = {
   };
   /** On Free, the free Bops computer's month (orgo-web lib/bops-free-hours.ts): how long it ran, of how long, and when it starts over. */
   computerTime?: { usedSeconds: number; limitSeconds: number; resetsAt: number };
+  /** Billed by use: what they pay, and the Orgo credit they have left. */
+  usage?: UsageTerms;
+  /** On Bops' plans, when the month more of it ends and billing by use starts. */
+  extensionEndsAt?: number;
 };
 
 /** Plan and billing, read from Orgo with the signed-in key. Each part is missing when Orgo didn't answer it. */
@@ -116,6 +130,11 @@ export type AccountInfo = {
    * out, self-hosted, or a hosted server: AI credit is for Bops Cloud).
    */
   bops?: BopsPlan | null;
+  /**
+   * How Bops Cloud said the user is billed at the session (CloudSession.plan.billing): what the sheet goes
+   * by when orgo-web's answer didn't come. Missing when the cloud didn't say (an older cloud, or none).
+   */
+  billing?: BopsBilling;
   /** Orgo pages to open in the browser. */
   links: { billing: string; usage: string };
   usage: { thisMonth: UsageTotals; lastMonth: UsageTotals; monthStart: number; lastMonthStart: number };

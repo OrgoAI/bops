@@ -1039,7 +1039,7 @@ assert.deepEqual(
   [waitingOk, main.id, S.stateDevice() ?? undefined, "Use a paid lookup", ["acme.company_lookup"], "data", undefined],
   "the request: whose, what kind of thing, to what, asked by this Bops",
 );
-assert.match(okAsk.preview, /Look up a company's numbers\nacme\.company_lookup on treg, about \$0\.50 from your AI credit\.\n\n\{\n "domain": "acme\.example"\n\}/, "exactly what will happen");
+assert.match(okAsk.preview, /Look up a company's numbers\nacme\.company_lookup on treg, about \$0\.50 from your Orgo credit\.\n\n\{\n "domain": "acme\.example"\n\}/, "exactly what will happen");
 assert.deepEqual(okAsk.resume, { engine: "responses", responseId: "resp_ok1", callId: "call_ok1", call: { name: "get_data", arguments: JSON.stringify(DEAR) } }, "what resumes it: the response it paused in and the call");
 s = S.session(waitingOk);
 assert.deepEqual([s.status, s.display, s.blocker, s.responseId], ["queued", undefined, undefined, "resp_ok1"], "waiting, holding no screen");

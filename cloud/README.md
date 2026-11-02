@@ -485,6 +485,29 @@ at most once a minute):
   and the app holds each plan to its emails (`lib/server/mail.ts`: the Mac makes inboxes in its own
   AgentMail pod) and shows why instead of "Get a number" or "Get an email".
 
+#### Billing by use
+
+orgo-web may bill a user by what they use instead of by a Bops plan (`BopsBilling` in `protocol.ts`; its
+`profiles.bops_billing`, behind its `BOPS_USAGE_BILLING` switch). It says so with the tier, in the notice
+(`{userId, billing: "usage", at}`; a tier, if it sends one, may be an Orgo plan's key and is ignored) and
+in `GET /api/bops/plan` (`billing: "usage"`). The cloud keeps it with the tier in `bops.plans.billing`
+(migration 0017), under the same `at`; a notice or an answer without `billing` (an orgo-web from before)
+keeps how the user is billed as it is, and `billing` the cloud doesn't know is refused (400), never taken
+for Free. For such a user:
+
+- **Credit:** orgo-web's `bops_ai_credit_balance` and `bops_ai_credit_spend` answer from their Orgo credit
+  (Orgo's rate), so the gate, the turn guard and every use work as before. Only the words change: a 402
+  says "You're out of Orgo credit, ... Add credit in Settings" with `billing: "usage"`, a 403 or a stopped
+  task the same way (`credit.ts creditWords`). No Bops $5 at the session.
+- **Number and inbox:** nothing is paused or given back for being "on Free". The main bot gets its inbox
+  (free); a plan's number they had stays theirs (picked up again if it was paused), and none is bought for
+  them. With plan limits on, they buy numbers (each paid from their credit, as any purchase through the
+  proxy) up to `BOPS_USAGE.phoneNumbers` (5), then `{code: "plan_limit"}` with nothing to upgrade to.
+- **Old apps:** a Mac app older than `USAGE_MIN_APP_VERSION` (or one that doesn't say) is answered 426
+  (`app_update_required`) on everything but its state's calls (`app-version.ts requireUsageAppVersion`):
+  it would show them Free and sell them Bops credit nothing spends.
+- **Events:** `bops_plan_changed` and the `plan` property name it `usage`.
+
 ### Deleting a user
 
 orgo-web's account deletion (`lib/account-deletion/job.ts`, its `bops_cloud` step) sends

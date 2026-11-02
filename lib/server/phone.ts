@@ -1236,8 +1236,11 @@ export async function phoneStatus() {
   };
 }
 
-/** Whether a number needs Pro or Max here: Bops Cloud holds Free to its plan (CloudSession.plan) and the user is on Free. */
+/**
+ * Whether a number needs Pro or Max here: Bops Cloud holds Free to its plan (CloudSession.plan) and the
+ * user is on Free. Never for a user billed by use: they buy one, paid from their Orgo credit.
+ */
 export const planNeededForNumber = () => {
   const plan = cloudOn() ? cloudSessionNow()?.plan : undefined;
-  return !!plan?.limits && plan.tier === "free_bops";
+  return !!plan?.limits && plan.billing !== "usage" && plan.tier === "free_bops";
 };

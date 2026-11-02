@@ -1,7 +1,7 @@
 // Tests for the landing page's download buttons (site/download.js) in a real browser: on a Mac they open
 // Get First Access (email or skip, then the download and the done state) with what's new in the newest
 // release at its foot, anywhere else the old note, and without JS they simply download. And its pricing:
-// the same three plans, in the same words, as the app's (lib/plan-includes.ts PLAN_CARDS). The page is served
+// billing by use, in the same words as the app's (lib/plan-includes.ts USAGE_CARD). The page is served
 // from site/ by python3's http.server; PostHog is a stub that records its calls (nothing reaches
 // posthog.com), the DMG is a fake attachment, and /download/latest.json is missing unless a test serves it.
 // Usage: node scripts/test-site.mjs   (SHOTS=<folder> also saves screenshots of the card and its done state)
@@ -10,20 +10,21 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { createServer } from "node:net";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, devices } from "playwright";
 
 // The app's plan cards, to hold the page's pricing to: lib/plan-includes.ts imports "@/cloud/protocol" the way Next resolves it.
-const repo = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+// A path, not a URL's: a checkout under a folder with a space in its name works too.
+const repo = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("@/")) return next(pathToFileURL(`${repo}/${specifier.slice(2)}.ts`).href, context);
     return next(specifier, context);
   },
 });
-const { PLAN_CARDS } = await import(`${repo}/lib/plan-includes.ts`);
+const { USAGE_CARD } = await import(`${repo}/lib/plan-includes.ts`);
 
-const site = new URL("../site", import.meta.url).pathname;
+const site = fileURLToPath(new URL("../site", import.meta.url));
 const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 const port = await new Promise((resolve) => {
   const s = createServer().listen(0, "127.0.0.1", () => {
@@ -342,8 +343,9 @@ await test("without JS, a button simply downloads", async () => {
   await p.context().close();
 });
 
-await test("pricing shows the app's three plans, line for line, and fits from a phone to a desktop", async () => {
-  const want = PLAN_CARDS.map((c) => ({ tier: c.tier, name: c.name, price: `${c.price}${c.per ?? ""}`, computers: c.computers, lines: c.lines.map((l) => ({ text: l.text, no: !!l.no })) }));
+await test("pricing shows billing by use as the app says it, line for line, and fits from a phone to a desktop", async () => {
+  const c = USAGE_CARD;
+  const want = [{ tier: "usage", name: c.name, price: `${c.price}${c.per ?? ""}`, computers: c.computers, lines: c.lines.map((l) => ({ text: l.text, no: !!l.no })) }];
   for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 1180 }, { width: 390, height: 844 }]) {
     const p = await page({ viewport });
     const got = await p.locator("#pricing .plan").evaluateAll((plans) =>
@@ -357,21 +359,19 @@ await test("pricing shows the app's three plans, line for line, and fits from a 
       })),
     );
     assert.deepEqual(got, want, `${viewport.width}px`);
-    assert.deepEqual(
-      got.map((c) => c.computers.title),
-      ["1 computer included", "1 computer included", "Up to 3 computers"],
-    );
-    // The count is the first thing under the price, ahead of the lines.
+    // The prices people ask about first, word for word.
+    assert.ok(got[0].lines.some((l) => l.text === "Your computer: $0.11 an hour while it works, free while it sleeps"));
+    assert.ok(got[0].lines.some((l) => l.text === "AI at Orgo's rate"));
+    assert.ok(got[0].lines.some((l) => l.text === "$5 to start"));
+    // No Bops plans are sold any more: none named.
+    assert.doesNotMatch(await p.locator("#pricing").innerText(), /\b(Pro|Max)\b|\$20|\$200|AI credit/);
+    // The computer is the first thing under the price, ahead of the lines.
     const first = await p.locator("#pricing .plan").evaluateAll((plans) => plans.map((el) => el.children[1]?.className));
-    assert.deepEqual(first, ["plan-computers", "plan-computers", "plan-computers"]);
+    assert.deepEqual(first, ["plan-computers"]);
     // Nothing runs off the side, and no dashes in the copy.
     const wide = await p.evaluate(() => [...document.querySelectorAll("#pricing .plan")].some((el) => el.getBoundingClientRect().right > document.documentElement.clientWidth + 1));
     assert.equal(wide, false, `${viewport.width}px: a plan runs off the screen`);
     assert.doesNotMatch(await p.locator("#pricing").innerText(), /[\u2013\u2014]/);
-    // Side by side on a desktop, one under another on a phone.
-    const tops = await p.locator("#pricing .plan").evaluateAll((plans) => plans.map((el) => Math.round(el.getBoundingClientRect().top)));
-    if (viewport.width >= 1180) assert.equal(new Set(tops).size, 1, "three across");
-    if (viewport.width < 900) assert.equal(new Set(tops).size, 3, "stacked");
     assert.deepEqual(p.errors, []);
     await noIdentify(p);
     await p.context().close();

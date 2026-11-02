@@ -1,5 +1,6 @@
 import "server-only";
 import { MAIN_WORKSPACE, workspaceOf, type Bot } from "@/lib/types";
+import type { RoomTier } from "@/lib/plan-includes";
 import { cloudOn, cloudSessionNow } from "./cloud";
 import { getState } from "./store";
 
@@ -9,10 +10,12 @@ import { getState } from "./store";
  * inboxes the user's bots have. Null where Bops Cloud doesn't hold plans to what they include
  * (self-hosted, BOPS_PLAN_LIMITS off, or an older cloud): then numbers and emails are as before.
  */
-export function planRoom() {
+export function planRoom(): { tier: RoomTier; numbers: number; emails: number } | null {
   const plan = cloudOn() ? cloudSessionNow()?.plan : undefined;
   if (!plan?.limits) return null;
-  return { tier: plan.tier, numbers: numbersHeld(), emails: emailsHeld(plan.tier !== "free_bops") };
+  // Billed by use: no Bops plan, so BOPS_USAGE's limits (the main bot's inbox free, numbers paid for), never Free's.
+  const tier: RoomTier = plan.billing === "usage" ? "usage" : plan.tier;
+  return { tier, numbers: numbersHeld(), emails: emailsHeld(tier !== "free_bops") };
 }
 
 /** The bot a paid plan brings a number and an inbox to: the default workspace's main bot. */

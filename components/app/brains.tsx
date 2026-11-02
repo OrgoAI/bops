@@ -9,7 +9,7 @@ import { undash } from "./side-group";
 import { currentWorkspace, post, teamOf } from "./ui";
 
 /*
- * Brain (lib/server/brains.ts): what a bot's tasks run on. Bops agent, Bops' own, on AI credit; or a brain
+ * Brain (lib/server/brains.ts): what a bot's tasks run on. Bops agent, Bops' own, on Orgo credit; or a brain
  * the user brings: Claude Code, signed in with their own Claude plan through Claude Code's own sign-in on
  * the bot's computer (the user does it on that live screen; Bops never sees the login), or on their own
  * Anthropic key from the Vault; or Codex on their own OpenAI key. In Settings, a row for Bops agent and one
@@ -40,7 +40,7 @@ export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: 
 /**
  * A thread's badge (BrainBadge, chat-view.tsx): the brain that runs it (threadRunner), or Bops agent for one
  * that stays there while its bot's tasks run on a brain now (it started on Bops agent, or Bops agent took it
- * over), so the user can tell it's on AI credit. Nothing for the rest, nor in a build without brains (BRAINS_ON).
+ * over), so the user can tell it's on Orgo credit. Nothing for the rest, nor in a build without brains (BRAINS_ON).
  */
 export function threadBadge(s: Session, state: AppState): { kind: CliKind | "agent"; title: string } | undefined {
   if (!BRAINS_ON) return undefined;
@@ -48,7 +48,7 @@ export function threadBadge(s: Session, state: AppState): { kind: CliKind | "age
   if (who && who !== "agent") return { kind: who, title: `${CLI_NAMES[who]} ran this` };
   const b = state.bots.find((x) => x.id === s.botId);
   if (who !== "agent" || !b || !isCli(defaultAgent(b, state).kind) || brainRuns(b, state) === "none" || s.runsOn === "mac") return undefined;
-  return { kind: "agent", title: s.brainRun?.started ? "Bops agent took this over, so it finishes it, on AI credit" : "Started on Bops agent, so it finishes there, on AI credit" };
+  return { kind: "agent", title: s.brainRun?.started ? "Bops agent took this over, so it finishes it, on Orgo credit" : "Started on Bops agent, so it finishes there, on Orgo credit" };
 }
 
 /** "Sam's computer": the computer `b` works on (its own, or the one it shares). */
@@ -155,7 +155,7 @@ function useVaultKeys() {
 /* ---------------- Settings ---------------- */
 
 /**
- * Settings, Brain: Bops agent first (on AI credit, with the bots on it), then each brain the user added, and
+ * Settings, Brain: Bops agent first (on Orgo credit, with the bots on it), then each brain the user added, and
  * Add a brain. `onShowScreen`: a sign-in started, show that bot's screen (Settings closes); `onOpenVault`:
  * to add a key there.
  */
@@ -170,7 +170,7 @@ export function BrainSettings({ state, onShowScreen, onOpenVault }: { state: App
       <div className="flex items-end justify-between gap-3">
         <div className="flex flex-col gap-0.5">
           <span className="text-[13px] font-semibold">Brain</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">What your bots work with. Bops agent runs on AI credit. Claude Code and Codex run on your own plan or key.</span>
+          <span className="text-[12px] leading-4 text-[#6B6B6B]">What your bots work with. Bops agent runs on Orgo credit. Claude Code and Codex run on your own plan or key.</span>
         </div>
         {!adding && (
           <button onClick={() => setAdding(true)} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
@@ -185,7 +185,7 @@ export function BrainSettings({ state, onShowScreen, onOpenVault }: { state: App
         <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0 last:border-0 last:pb-0">
           <div className="flex min-h-7 items-center gap-2">
             <span className="min-w-0 truncate text-[13.5px] font-medium leading-[18px]">Bops agent</span>
-            <span className="min-w-0 truncate text-[12px] leading-4 text-[#9A9A98]">AI credit</span>
+            <span className="min-w-0 truncate text-[12px] leading-4 text-[#9A9A98]">Orgo credit</span>
           </div>
           <div className="flex flex-wrap items-center gap-1">
             {agent.length ? agent.map((b) => <BotChip key={b.id} bot={b} tip={`${b.name} works with Bops agent`} />) : <span className="text-[12px] leading-4 text-[#9A9A98]">No bot uses it</span>}
@@ -518,7 +518,7 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
   // A task on this Mac runs on Bops agent, whatever its brain (sessions.ts run).
   const where = brainRuns(b, state);
   const runs = !now
-    ? "Bops agent, on AI credit"
+    ? "Bops agent, on Orgo credit"
     : now.auth === "key"
       ? `${BRAIN_NAMES[now.kind]} on your ${now.kind === "codex" ? "OpenAI" : "Anthropic"} key`
       : going
@@ -530,8 +530,8 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
     ? runs
     : where === "none"
       ? state.host === "mac"
-        ? "Your bots work on this Mac, so they run on Bops agent, on AI credit"
-        : `${b.name} works on your Mac, so its tasks run on Bops agent, on AI credit`
+        ? "Your bots work on this Mac, so they run on Bops agent, on Orgo credit"
+        : `${b.name} works on your Mac, so its tasks run on Bops agent, on Orgo credit`
       : where === "some"
         ? `${runs} · tasks on your Mac run on Bops agent`
         : runs;

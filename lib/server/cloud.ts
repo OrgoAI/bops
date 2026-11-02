@@ -188,8 +188,16 @@ export function shortOfCredit(e: unknown): string | undefined {
   return typeof message === "string" && message ? message : e.message;
 }
 
-/** What a bot says, once, in place of the error, when the credit ran out under it. */
+/** What a bot says, once, in place of the error, when the credit ran out under it (Bops' plans: outOfCreditWords). */
 export const OUT_OF_CREDIT = "I'm out of AI credit, so I've stopped. Upgrade in Settings to keep me going.";
+/** The same for a user billed by use: their Orgo credit, and Add credit, never Upgrade. */
+export const OUT_OF_ORGO_CREDIT = "I'm out of Orgo credit, so I've stopped. Add credit in Settings to keep me going.";
+
+/** Whether Bops Cloud said, at the session, that the user is billed by use (CloudSession.plan.billing). */
+export const billedByUse = () => cloudOn() && cloudSessionNow()?.plan?.billing === "usage";
+
+/** What a bot says when the credit ran out under it, in the words for how the user is billed. */
+export const outOfCreditWords = () => (billedByUse() ? OUT_OF_ORGO_CREDIT : OUT_OF_CREDIT);
 
 /**
  * Mark the AI credit used up when `e` says so (state.credits: the chat shows it with Upgrade, and the
@@ -197,12 +205,22 @@ export const OUT_OF_CREDIT = "I'm out of AI credit, so I've stopped. Upgrade in 
  */
 export function noteOutOfCredit(e: unknown): boolean {
   if (!outOfCredits(e)) return false;
-  if (!getState().credits?.out) update((s) => (s.credits = { out: true, at: Date.now() }));
+  const c = getState().credits;
+  if (!c?.out || c.computer) update((s) => (s.credits = { out: true, at: Date.now(), ...(billedByUse() ? { usage: true as const } : {}) }));
   return true;
 }
 
+/**
+ * Billed by use, Orgo wouldn't wake the user's computer for want of credit (free-hours.ts
+ * computerOutOfCredit): the chat shows the out of credit card, saying the computer stays asleep, until
+ * a read of the plan shows enough credit to wake it. AI work isn't stopped by it.
+ */
+export function noteComputerOutOfCredit() {
+  if (!getState().credits?.out) update((s) => (s.credits = { out: true, at: Date.now(), usage: true, computer: true }));
+}
+
 /** What a bot's work fails with when it doesn't start for want of AI credit (creditsOut). */
-export const outOfCreditError = () => new CloudError(OUT_OF_CREDIT, 402, AI_CREDIT_EMPTY);
+export const outOfCreditError = () => new CloudError(outOfCreditWords(), 402, AI_CREDIT_EMPTY);
 
 /** How long "out of AI credit" stands before Orgo is asked again (a month renewed, a plan paid for elsewhere). */
 const CREDIT_RECHECK_MS = 5 * 60_000;
@@ -213,12 +231,15 @@ const CREDIT_RECHECK_MS = 5 * 60_000;
  */
 export async function creditsOut(): Promise<boolean> {
   const c = getState().credits;
-  if (!c?.out || !cloudOn()) return false;
+  // Only the computer can't wake: AI work still goes on what's left.
+  if (!c?.out || c.computer || !cloudOn()) return false;
   if (Date.now() - c.at < CREDIT_RECHECK_MS) return true;
   const key = await loadOrgoKey();
   const { readBopsPlan } = await import("./plan");
   const plan = key ? await readBopsPlan(key).catch(() => null) : null;
   // Still out, or Orgo didn't say: asked again in a few minutes.
-  if (getState().credits?.out) update((s) => (s.credits = { out: true, at: Date.now() }));
+  if (getState().credits?.out) update((s) => (s.credits = { ...s.credits!, out: true, at: Date.now() }));
+  // Billed by use, it's the Orgo balance (lib/bops-billing.ts).
+  if (plan?.usage) return (plan.usage.balanceCents ?? 0) <= 0;
   return !plan?.credit || plan.credit.leftMicros <= 0;
 }

@@ -1,7 +1,7 @@
 import type { CloudUsage } from "@/cloud/protocol";
 import type { AccountInfo, OrgoBilling, SpendKind, TokenSource, UsageTotals } from "@/lib/account";
 import { bopsComputers, planName, planShort, planShortText, planUp } from "@/lib/orgo-plans";
-import { cloudJson, cloudOn } from "@/lib/server/cloud";
+import { cloudJson, cloudOn, cloudSessionNow } from "@/lib/server/cloud";
 import { loadOrgoKey, orgoKey, signedInUser } from "@/lib/server/orgo-auth";
 import { prettyPhone } from "@/lib/server/phone";
 import { askOrgo, orgoPages, orgoPlan, readBopsPlan } from "@/lib/server/plan";
@@ -36,12 +36,17 @@ export async function GET() {
     viaCloud ? cloudUsage(monthStart, now.getTime() + 60_000) : null,
     viaCloud ? cloudUsage(lastMonthStart, monthStart) : null,
   ]);
+  // Billed by use with no balance in orgo-web's answer: Orgo's own (GET /api/credits), the same money.
+  const usage = bops?.usage;
+  const filled = usage && usage.balanceCents === undefined && orgo?.creditsCents !== undefined ? { ...bops!, usage: { ...usage, balanceCents: orgo.creditsCents } } : bops;
+  const billing = viaCloud ? cloudSessionNow()?.plan?.billing : undefined;
   const info: AccountInfo = {
     user,
     signedInAt: state.account?.signedInAt,
     // Signed in per the state but no key in the Keychain (locked, or it refused this build): say so, not "sign in".
     orgo: orgo ?? (user ? { status: "no-key" } : null),
-    ...(bops !== undefined ? { bops } : {}),
+    ...(filled !== undefined ? { bops: filled } : {}),
+    ...(billing ? { billing } : {}),
     links: { billing: pages.plan, usage: pages.usage },
     usage: {
       thisMonth: totals(events.filter((e) => e.at >= monthStart), monthStart, cloudThis),

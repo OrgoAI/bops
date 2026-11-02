@@ -195,4 +195,4 @@ export function ownerCall(text: string): string {
 }
 
 /** A bot's line Bops wrote for it (out of AI credit), as a viewer reads it: what to do about the owner's credit is the owner's (ownerVoice). */
-export const ownerCredit = (text: string) => (/^I'm out of AI credit, so I've stopped\./.test(text) ? text.replace(/\s*Upgrade in Settings to [^.]*\.?$/, "") : text);
+export const ownerCredit = (text: string) => (/^I'm out of (?:AI|Orgo) credit, so I've stopped\./.test(text) ? text.replace(/\s*(?:Upgrade|Add credit) in Settings to [^.]*\.?$/, "") : text);

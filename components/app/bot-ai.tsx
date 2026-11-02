@@ -68,7 +68,7 @@ export function threadKind(s: Pick<Session, "agent" | "brainRun" | "onBopsAgent"
 export function threadAgentWords(s: Session, b: Bot | undefined, state: AppState): { label: string; pays?: string } {
   const kind = threadKind(s);
   const model = s.agent?.kind === kind ? s.agent.model : undefined;
-  if (kind === "bops") return { label: agentLabel({ kind, model }), pays: "Bops AI credit" };
+  if (kind === "bops") return { label: agentLabel({ kind, model }), pays: "Orgo credit" };
   const x = b ? aiOf(b, state).agents.find((y) => y.id === (s.brainRun?.agentId ?? s.agent?.id) && y.kind === kind) : undefined;
   if (!b || !x) return { label: agentLabel({ kind, model }) };
   const tag = agentTag(x, { bot: b, state });
@@ -648,7 +648,7 @@ export function BotAiSection({
           </div>
           {shared && <SharedWarning bot={b} words={shared} ro={ro || workBot(b, state.bots).id === b.id} />}
           <span className={quiet}>
-            {BRAINS_ON ? `Each thread runs on the agent you pick, with ${b.name}'s own accounts. Chat, memory and calls stay on Bops AI credit.` : "Chat, threads, memory and calls run on Bops AI credit."}
+            {BRAINS_ON ? `Each thread runs on the agent you pick, with ${b.name}'s own accounts. Chat, memory and calls stay on Orgo credit.` : "Chat, threads, memory and calls run on Orgo credit."}
             {BRAINS_ON && where === "some" ? " Threads on your Mac use Bops agent." : ""}
           </span>
           {ro && (

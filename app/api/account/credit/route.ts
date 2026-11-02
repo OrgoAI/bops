@@ -1,7 +1,7 @@
 import { isTopUpAmount, TOPUP_AMOUNT_RULE } from "@/lib/credit-topup";
 import { cloudOn } from "@/lib/server/cloud";
 import { loadOrgoKey } from "@/lib/server/orgo-auth";
-import { buyCreditOnCard, CREDIT_OFF, creditCheckoutLink, readCreditCard } from "@/lib/server/plan";
+import { buyCreditOnCard, CREDIT_OFF, creditCheckoutLink, readCreditCard, usageRefusal } from "@/lib/server/plan";
 import { trackServerEvent } from "@/lib/server/analytics";
 import { notReady } from "@/lib/server/ready";
 
@@ -25,6 +25,8 @@ export async function GET() {
   const key = await loadOrgoKey();
   if (!key) return Response.json({ error: "Sign in with Orgo first." }, { status: 401 });
   if (!cloudOn()) return Response.json({ off: true });
+  // Billed by use, credit is Orgo's, added on Orgo: nothing to buy here.
+  if (usageRefusal()) return Response.json({ off: true });
   const read = await readCreditCard(key);
   return "error" in read ? Response.json({ error: read.error }, { status: read.status }) : Response.json(read);
 }
@@ -42,6 +44,8 @@ export async function GET() {
 export async function POST(request: Request) {
   const unready = notReady();
   if (unready) return unready;
+  const usage = usageRefusal();
+  if (usage) return usage;
   const body = (await request.json().catch(() => null)) as { amount_cents?: unknown; card_handle?: unknown; idempotency_key?: unknown } | null;
   const amount = body?.amount_cents;
   if (!isTopUpAmount(amount)) return Response.json({ error: TOPUP_AMOUNT_RULE, code: "invalid_amount" }, { status: 400 });

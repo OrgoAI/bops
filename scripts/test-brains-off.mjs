@@ -234,7 +234,7 @@ await check("a new task for a bot set to a brain runs on Bops agent, on AI credi
 });
 
 await check("a thread Claude Code ran carries on with Bops agent, with what Claude Code did, and its answers are the bot's own", async () => {
-  const answer = "Claude Code reached your Max plan's usage limit until 5:00 PM. I can finish this on Bops agent, on your AI credit, or wait.";
+  const answer = "Claude Code reached your Max plan's usage limit until 5:00 PM. I can finish this on Bops agent, on your Orgo credit, or wait.";
   S.update((s) =>
     s.sessions.push(
       brainThread("ses_cc", {
@@ -293,7 +293,7 @@ await check("a thread whose brain waited for a sign-in carries on with Bops agen
 });
 
 await check("Wait, to a thread its brain left at its limit, is the user's words for Bops agent: this build has no such reply", async () => {
-  const answer = "Claude Code reached your Max plan's usage limit until 5:00 PM. I can finish this on Bops agent, on your AI credit, or wait.";
+  const answer = "Claude Code reached your Max plan's usage limit until 5:00 PM. I can finish this on Bops agent, on your Orgo credit, or wait.";
   S.update((s) =>
     s.sessions.push(
       brainThread("ses_lw", {
@@ -427,7 +427,7 @@ await check("a bot's profile has no Brain and no badge for the brain it was set 
     assert.match(t, new RegExp(`${b.name} Chief of Staff · runs the team`), section);
     // Its AI section (bot-ai.tsx) is Bops agent's alone: no CLI agent, no Add, no terminal.
     assert.doesNotMatch(t, /\bBrain\b|their brain|Claude Code|Codex|OpenCode|\bagy\b|Open in terminal|Open its terminal|\+ Add|Sign in with your Claude plan/, section);
-    if (section === "details") assert.match(t, /▾ AI Default Bops agent Agents it can run Bops agent Default OpenAI · Bops credit Thinking/, t);
+    if (section === "details") assert.match(t, /▾ AI Default Bops agent Agents it can run Bops agent Default OpenAI · Orgo credit Thinking/, t);
   }
 });
 

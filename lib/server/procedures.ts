@@ -2,7 +2,7 @@ import "server-only";
 import { APIError, OpenAIError } from "openai";
 import { live, workspaceOf, type Bot, type Message, type Session, type SkillRef } from "@/lib/types";
 import { openaiClient } from "./openai-client";
-import { noteOutOfCredit, shortOfCredit } from "./cloud";
+import { billedByUse, noteOutOfCredit, shortOfCredit } from "./cloud";
 import { bot, chat, getState, ownerName, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { createSkill, findRef, publishSkill, refsOf, SkillError, skillDetail, updateSkill } from "./workspace-skills";
@@ -333,7 +333,7 @@ export async function draftSkill(botId: string, chatId: string, opts: { sessionI
     recordTokens("chat", res.model, res.usage, botId, epoch);
     raw = JSON.parse(res.output_text);
   } catch (e) {
-    if (noteOutOfCredit(e)) return { error: "You're out of AI credit. Upgrade in Settings to draft a skill." };
+    if (noteOutOfCredit(e)) return { error: billedByUse() ? "You're out of Orgo credit. Add credit in Settings to draft a skill." : "You're out of AI credit. Upgrade in Settings to draft a skill." };
     const short = shortOfCredit(e);
     if (short) return { error: undash(short) };
     console.warn(`[skills] draft: ${(e as Error).message}`);

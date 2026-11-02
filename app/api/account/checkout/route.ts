@@ -1,5 +1,5 @@
 import { loadOrgoKey } from "@/lib/server/orgo-auth";
-import { bopsBillingLink } from "@/lib/server/plan";
+import { bopsBillingLink, usageRefusal } from "@/lib/server/plan";
 import { trackServerEvent } from "@/lib/server/analytics";
 import { notReady } from "@/lib/server/ready";
 
@@ -14,6 +14,8 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   const unready = notReady();
   if (unready) return unready;
+  const usage = usageRefusal();
+  if (usage) return usage;
   const { tier } = (await request.json().catch(() => ({}))) as { tier?: unknown };
   if (tier !== "pro_bops" && tier !== "max_bops") return Response.json({ error: "Pick Pro or Max." }, { status: 400 });
   const key = await loadOrgoKey();
