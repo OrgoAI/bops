@@ -25,7 +25,7 @@ const staff = newUserId("orgo"); // fakeOrgo gives an "edge-orgo-..." id an @org
 const plain = newUserId("member"); // ...and anyone else @example.com
 const PROJECT = "13131313-3434-5656-7878-909090909090";
 const roles: Record<string, unknown> = {};
-const role = (r: "admin" | "member", more: Record<string, unknown> = {}) => ({ role: r, ownerUserId: owner, bopsWsId: "ws_brand", name: "Brand", ownerEmail: "owner@orgo.ai", ...more });
+const role = (r: "admin" | "member", more: Record<string, unknown> = {}) => ({ role: r, ownerUserId: owner, bopsWsId: "ws_studio", name: "Studio", ownerEmail: "owner@orgo.ai", ...more });
 
 before(async () => {
   await prepareDb();
@@ -53,8 +53,8 @@ const ownerState = () => ({
   workspaces: [
     { id: "ws_main", name: "Main" },
     {
-      id: "ws_brand",
-      name: "Brand",
+      id: "ws_studio",
+      name: "Studio",
       createdAt: 1,
       memberAccess: { [`${plain}@example.com`]: entry },
       hostedApps: { shop: { botId: "max", computerId: "comp-1", projectId: "proj-1", url: "https://shop.example.dev", sites: [{ name: "shop" }] } },
@@ -63,12 +63,12 @@ const ownerState = () => ({
   ],
   bots: [
     { id: "boppy", name: "Boppy", isMain: true },
-    { id: "max", name: "Max", isMain: true, workspaceId: "ws_brand", computerId: "comp-max", computer: "own" },
-    { id: "ivy", name: "Ivy", workspaceId: "ws_brand" },
+    { id: "max", name: "Max", isMain: true, workspaceId: "ws_studio", computerId: "comp-max", computer: "own" },
+    { id: "ivy", name: "Ivy", workspaceId: "ws_studio" },
   ],
   chats: [
-    { id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_brand" },
-    { id: "bot:ivy", kind: "bot", botIds: ["ivy"], workspaceId: "ws_brand" },
+    { id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_studio" },
+    { id: "bot:ivy", kind: "bot", botIds: ["ivy"], workspaceId: "ws_studio" },
   ],
 });
 
