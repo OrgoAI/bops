@@ -38,7 +38,7 @@ import {
 import { chatPage, chatsSeq, loadState, recentMessages, removedAfter, sendZipped, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
 import { appBotsFor, appsFor, appThreadsFor, botsOf, ownerAppsOpen, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, type SliceViewer } from "./ws-slice.ts";
-import { cancelMember, computerFor, routingOf, takeMessage } from "./turns.ts";
+import { cancelMember, chatAutoFor, computerFor, macNewEnough, routedWorkspaces, routingOf, takeMessage } from "./turns.ts";
 
 /**
  * Shared workspaces (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -575,6 +575,14 @@ let cancel: (projectId: string, userId: string) => Promise<void> = (...a) => can
 /** Whether the owner's workspace goes through Bops Cloud (turns.ts routingOf). */
 const realRouted = async (owner: string, ws: string) => (await routingOf(owner, ws)).cloud;
 let routed: (owner: string, ws: string) => Promise<boolean> = realRouted;
+/**
+ * Whether a workspace still on the owner's Mac has its members' messages written by Bops Cloud first all the same
+ * (cloudChat, then answered by the Mac): one that may move to Bops Cloud (turns.ts autoRoute) or back, or that someone
+ * switched, with the owner's last Mac new enough to answer such a message. An act queued for the Mac as before is
+ * dropped by a Mac that has heard of a move meanwhile (lib/server/member-acts.ts); one written first never is.
+ */
+const realStoredFirst = async (owner: string, ws: string) => (await macNewEnough(owner)) && (chatAutoFor(owner) || (await routedWorkspaces(null, owner)).has(ws));
+let storedFirst: (owner: string, ws: string) => Promise<boolean> = realStoredFirst;
 let count: (userId: string) => Promise<void> = countAct;
 
 /**
@@ -628,8 +636,8 @@ const actIn: Route = {
     const computer = computerUseOf(slice.workspace, viewer);
     // Telling work on a bot's computer more, or letting it go on (computerAct): only with Use its computer.
     if (!computer && computerAct(blob, slice, body.act)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
-    // A workspace whose chat goes through Bops Cloud: a message in a one bot chat is written here now (cloudChat).
-    if (body.act.act === "chat" && (await routed(target.account, target.ws))) {
+    // A workspace whose chat goes through Bops Cloud, or may move there: a message in a chat is written here now (cloudChat).
+    if (body.act.act === "chat" && ((await routed(target.account, target.ws)) || (await storedFirst(target.account, target.ws)))) {
       const chatAct = body.act;
       if (slice.chats.some((c) => c.id === chatAct.chatId)) return cloudChat(res, { user: user!, role, target, viewer, projectId, key: body.key, act: chatAct, asked });
     }
@@ -661,8 +669,9 @@ const actIn: Route = {
  * again under the owner's lock on the state as it is then (in their view, Write on the bot), written once by their key
  * with their stamp as orgo-web vouched for them, and its answer owed to the bot's computer when the owner let them use
  * it (else the message stays, with a note that the bot won't answer). An orgo-web notice for them that lands meanwhile
- * takes it back. A group, or a bot with no computer: the owner's Mac answers it (a "member" event for the message written), and
- * while that Mac is away the chat says so. 202 with the message's id, and macOn so an app from before says "Sending…"
+ * takes it back. A group, a bot with no computer, or a workspace still on the owner's Mac (its row, read under the lock:
+ * storedFirst): the owner's Mac answers it (a "member" event for the message written), and while that Mac is away the
+ * chat says so. 202 with the message's id, and macOn so an app from before says "Sending…"
  * until it lands, as it does at once.
  */
 async function cloudChat(
@@ -694,6 +703,8 @@ async function cloudChat(
     },
     still: () => (noticed.get(keyOf(user.id, projectId))?.n ?? 0) <= o.asked,
     macAway: !isOn(target.account),
+    // Answered by the bot's computer only while the workspace goes through Bops Cloud as its row says now.
+    byRow: true,
   });
   if (taken.fresh && taken.where === "mac") {
     const payload: MemberActPayload = {
@@ -742,8 +753,8 @@ export const routes: Route[] = [readState, actIn, changed];
 /**
  * For tests: forget every answer kept, and use this clock, this way to reach orgo-web, this wait between
  * an open stream's looks, this way to read an owner's state, and these ways to queue a member's act for the
- * owner's Mac, tell whether it's on, drop what waits, count acts, end what's owed on a computer and tell whether
- * a workspace's chat goes through Bops Cloud (unset: the real ones).
+ * owner's Mac, tell whether it's on, drop what waits, count acts, end what's owed on a computer, tell whether
+ * a workspace's chat goes through Bops Cloud, and whether its members' messages are written here first (unset: the real ones).
  */
 export function resetMembers(
   opts: {
@@ -757,6 +768,7 @@ export function resetMembers(
     count?: (userId: string) => Promise<void>;
     cancel?: (projectId: string, userId: string) => Promise<void>;
     routed?: (owner: string, ws: string) => Promise<boolean>;
+    storedFirst?: (owner: string, ws: string) => Promise<boolean>;
   } = {},
 ) {
   kept.clear();
@@ -772,4 +784,5 @@ export function resetMembers(
   cancel = opts.cancel ?? ((...a) => cancelMember(...a));
   // A test that fakes the owner's state fakes the switch too: off, unless it says.
   routed = opts.routed ?? (opts.state ? async () => false : realRouted);
+  storedFirst = opts.storedFirst ?? (opts.state ? async () => false : realStoredFirst);
 }
