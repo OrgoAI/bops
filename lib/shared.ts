@@ -81,6 +81,9 @@ type Viewing = { shared?: SharedOpen };
 export const isViewerOwn = (by: string | undefined, state: Viewing) => !state.shared && by === "owner";
 /** "you" to the owner, "the owner" in a workspace shared with the user (what's done there is never theirs). */
 export const you = (state: Viewing) => (state.shared ? "the owner" : "you");
+/** Until when a bot's number is paused, for its label: the plan back, or (billing by use, `unpaid`) its month paid from Orgo credit. */
+export const numberPausedUntil = (state: Viewing, unpaid?: boolean) =>
+  `paused until ${you(state)} ${unpaid ? `add${state.shared ? "s" : ""} credit` : `upgrade${state.shared ? "s" : ""} again`}`;
 /** "your" to the owner, "the owner's" in a shared workspace. */
 export const your = (state: Viewing) => (state.shared ? "the owner's" : "your");
 /** "Your", at the start of a line. */

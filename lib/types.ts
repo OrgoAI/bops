@@ -51,9 +51,10 @@ export type Bot = {
   /**
    * Its AgentPhone line (lib/server/phone.ts): the number, and the AgentPhone agent it's attached to.
    * `plan`: it came with the user's Pro or Max plan (Bops Cloud set it up, lib/server/cloud-plan.ts);
-   * `paused`: that plan ended, so calls and texts to it go unanswered until the user upgrades again.
+   * `paused`: that plan ended, so calls and texts to it go unanswered until the user upgrades again,
+   * or (with `unpaid`, billing by use) its month couldn't be paid from the user's Orgo credit, until it is.
    */
-  phoneLine?: { numberId: string; agentId: string; plan?: boolean; paused?: boolean };
+  phoneLine?: { numberId: string; agentId: string; plan?: boolean; paused?: boolean; unpaid?: boolean };
   /** The voice it speaks in on calls (voiceFor in lib/server/call.ts), kept so Bops Cloud answers its calls in the same one while the Mac is away. */
   voice?: string;
   /**

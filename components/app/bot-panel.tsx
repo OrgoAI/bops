@@ -23,7 +23,7 @@ import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
-import { readOnly, you, your, Your, yourMac } from "@/lib/shared";
+import { numberPausedUntil, readOnly, you, your, Your, yourMac } from "@/lib/shared";
 import { BOOK_A_CALL } from "@/lib/links";
 import { aiKinds, aiLine, SETTINGS_WORDS, teamLine, type SettingsSection } from "@/lib/bot-settings";
 import { onCount } from "@/lib/sequences";
@@ -271,7 +271,7 @@ function Details({
       <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
         <Field
           label={
-            line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : b.phoneLine?.paused ? `mobile · paused until ${you(state)} upgrade${state.shared ? "s" : ""} again` : "mobile · texts and calls"
+            line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : b.phoneLine?.paused ? `mobile · ${numberPausedUntil(state, b.phoneLine.unpaid)}` : "mobile · texts and calls"
           }
           value={reach ? prettyPhone(reach) : undefined}
           empty={line && main ? `Text ${main.name} at ${prettyPhone(line.phone)}: ${main.name} passes work to ${b.name}.` : "No number yet."}

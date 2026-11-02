@@ -5,8 +5,8 @@ import { db, ensureUserRow, query } from "./db.ts";
 import { currentHandle, MAIN_WORKSPACE } from "./handles.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { lineDigits } from "./lines.ts";
-import { ACCOUNT_DELETED, BOPS_TIERS, BOPS_USAGE, isBilling, PLAN_LIMIT, PLAN_REQUIRED, type BopsBilling, type BopsTier, type CloudPlanPayload } from "./protocol.ts";
-import { ensurePlanInbox, ensurePlanPhone, hasPlanLine, mainBotOf, pausePlanItems, releaseAfterPause } from "./provision.ts";
+import { ACCOUNT_DELETED, BOPS_TIERS, BOPS_USAGE, isBilling, PLAN_LIMIT, PLAN_REQUIRED, type BopsBilling, type BopsTier, type CloudPlanPayload, type PlanPhone } from "./protocol.ts";
+import { ensurePlanInbox, ensurePlanPhone, hasPlanLine, mainBotOf, pausePlanItems, releaseAfterPause, type LineFor } from "./provision.ts";
 import { queueForMac } from "./tunnel.ts";
 
 /**
@@ -38,6 +38,8 @@ import { queueForMac } from "./tunnel.ts";
  *   it had one, and the user may buy numbers up to BOPS_USAGE's, each paid from their Orgo credit like
  *   any other (the credit gate decides, never the tier kept here). orgo-web's notice says it as
  *   {userId, billing: "usage", at} (its tier, if it sends one, may be an Orgo plan's key and is ignored).
+ *   Each number past the plan's is paid a month at a time (numbers-renew.ts): one whose month the
+ *   credit can't pay is paused as a plan's is, back on once paid, and given back 30 days on (sweep).
  */
 
 const isTier = (x: unknown): x is BopsTier => typeof x === "string" && Object.hasOwn(BOPS_TIERS, x);
@@ -268,26 +270,39 @@ async function tellMac(userId: string, payload: CloudPlanPayload) {
   await queueForMac(userId, "plan", payload);
 }
 
+/**
+ * Tell the user's Mac about one of their numbers (`phone`), on the bot and workspace it's for (`on`, as
+ * the line says them), else the main bot's: a plan's given back, or (billing by use, phone.renewal) one
+ * paused for its month, back on, or given back unpaid.
+ */
+export async function tellAboutLine(userId: string, phone: PlanPhone, on?: LineFor): Promise<void> {
+  const p = await planOf(userId);
+  const botId = on?.botId ?? (await mainBotOf(userId))?.bot.id ?? null;
+  await tellMac(userId, { tier: p.tier, ...(p.billing === "usage" ? { billing: p.billing } : {}), botId, workspaceId: on?.workspaceId ?? MAIN_WORKSPACE, phone });
+}
+
 /** After a state upload (state.ts): a paid plan that was waiting for the main bot is set up now. */
 export function afterStateUpload(userId: string) {
   if (waitingForState.has(userId)) void settle(userId, { force: true });
 }
 
 /**
- * Every hour: give back what was paused 30 days ago (provision.ts releaseAfterPause, each under the
- * user's lock, so an upgrade at that moment never has its number given back under it), telling each
- * user's Mac; try again a paid plan's number or inbox that a provider failed on (broken, or cut
- * short while it was set up), so it doesn't wait for the app to open; and, billed by use, charge each
- * number past the free one its month (numbers-renew.ts).
+ * Every hour: billed by use, charge each number past the free one its month (numbers-renew.ts: one the
+ * credit can't pay is paused, one paid is back on), first, so a month paid on the last day keeps its
+ * number; give back what was paused 30 days ago (provision.ts releaseAfterPause, each under the user's
+ * lock, so an upgrade or a month paid at that moment never has its number given back under it),
+ * telling each user's Mac; and try again a paid plan's number or inbox that a provider failed on
+ * (broken, or cut short while it was set up), so it doesn't wait for the app to open.
  */
 export async function sweep(): Promise<number> {
-  const released = await releaseAfterPause(
-    async (userId, item) => {
-      const p = await planOf(userId);
-      await tellMac(userId, { tier: p.tier, ...(p.billing === "usage" ? { billing: p.billing } : {}), botId: (await mainBotOf(userId))?.bot.id ?? null, workspaceId: MAIN_WORKSPACE, ...item });
-    },
-    locked,
-  );
+  // Billing by use: a number past the free one, a month at a time from Orgo credit (numbers-renew.ts).
+  const { renewUsageNumbers } = await import("./numbers-renew.ts");
+  await renewUsageNumbers().catch((e: Error) => console.warn(`[plans] number renewals: ${e.message}`));
+  const released = await releaseAfterPause(async (userId, item, on) => {
+    if (item.phone) return tellAboutLine(userId, item.phone, on);
+    const p = await planOf(userId);
+    await tellMac(userId, { tier: p.tier, ...(p.billing === "usage" ? { billing: p.billing } : {}), botId: (await mainBotOf(userId))?.bot.id ?? null, workspaceId: MAIN_WORKSPACE, ...item });
+  }, locked);
   const stuck = await query<{ user_id: string }>(
     `SELECT DISTINCT x.user_id FROM (
        SELECT user_id FROM bops.phone_lines WHERE plan AND status IN ('setting_up', 'broken') AND updated_at < now() - interval '5 minutes'
@@ -296,9 +311,6 @@ export async function sweep(): Promise<number> {
      LIMIT 100`,
   );
   for (const s of stuck.rows) await settle(s.user_id, { force: true });
-  // Billing by use: a number past the free one, a month at a time from Orgo credit (numbers-renew.ts).
-  const { renewUsageNumbers } = await import("./numbers-renew.ts");
-  await renewUsageNumbers().catch((e: Error) => console.warn(`[plans] number renewals: ${e.message}`));
   return released;
 }
 
@@ -389,30 +401,36 @@ export async function refuseSecondPlanNumber(userId: string, externalId: unknown
 }
 
 /**
- * A plan line on this agent is stopped (paused or given back) and none on it still works: a number
- * given back leaves its agent behind, and the plan's next number goes on that same agent (found by its tag).
+ * A plan line (or one paused for its month) on this agent is stopped (paused or given back) and none on
+ * it still works: a number given back leaves its agent behind, and the plan's next number goes on that
+ * same agent (found by its tag). Says whether it was for its month (`unpaid`).
  */
-const AGENT_STOPPED = `SELECT 1 FROM bops.phone_lines WHERE user_id = $1 AND agent_id = $2 AND plan AND status IN ('paused', 'released')
-  AND NOT EXISTS (SELECT 1 FROM bops.phone_lines WHERE user_id = $1 AND agent_id = $2 AND status NOT IN ('paused', 'released')) LIMIT 1`;
+const AGENT_STOPPED = `SELECT unpaid FROM bops.phone_lines WHERE user_id = $1 AND agent_id = $2 AND (plan OR unpaid) AND status IN ('paused', 'released')
+  AND NOT EXISTS (SELECT 1 FROM bops.phone_lines WHERE user_id = $1 AND agent_id = $2 AND status NOT IN ('paused', 'released')) ORDER BY unpaid DESC LIMIT 1`;
 
 /**
- * Whether a text out from one of the user's numbers is refused: the number is a plan's that's paused
- * (the plan ended) or given back. By its AgentPhone id when the text says it (the app always does),
- * else by its agent.
+ * Whether a text out from one of the user's numbers is refused, and why: "plan", the number is a plan's
+ * that's paused (the plan ended) or given back; "unpaid", it was paused (or given back) because its
+ * month couldn't be paid from Orgo credit (billing by use); null, it isn't. By its AgentPhone id when the
+ * text says it (the app always does), else by its agent.
  */
-export async function sendingStopped(userId: string, numberId: string, agentId: string): Promise<boolean> {
+export async function sendingStopped(userId: string, numberId: string, agentId: string): Promise<"plan" | "unpaid" | null> {
   const r = numberId
-    ? await query("SELECT 1 FROM bops.phone_lines WHERE user_id = $1 AND number_id = $2 AND plan AND status IN ('paused', 'released') LIMIT 1", [userId, numberId])
+    ? await query<{ unpaid: boolean }>(
+        "SELECT unpaid FROM bops.phone_lines WHERE user_id = $1 AND number_id = $2 AND (plan OR unpaid) AND status IN ('paused', 'released') ORDER BY unpaid DESC LIMIT 1",
+        [userId, numberId],
+      )
     : agentId
-      ? await query(AGENT_STOPPED, [userId, agentId])
+      ? await query<{ unpaid: boolean }>(AGENT_STOPPED, [userId, agentId])
       : null;
-  return !!r?.rowCount;
+  const row = r?.rows[0];
+  return !row ? null : row.unpaid ? "unpaid" : "plan";
 }
 
 /**
- * Whether a call or text to one of the user's numbers goes unanswered: the number is a plan's that's
- * paused (the plan ended) or given back. By the number called when the delivery says it, else by its
- * agent (AGENT_STOPPED).
+ * Whether a call or text to one of the user's numbers goes unanswered: the number is paused (a plan's
+ * that ended, or one whose month wasn't paid) or given back. By the number called when the delivery
+ * says it, else by its agent (AGENT_STOPPED).
  */
 export async function lineStopped(userId: string, agentId: string, to: string): Promise<boolean> {
   const digits = lineDigits(to);

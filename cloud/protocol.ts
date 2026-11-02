@@ -247,8 +247,14 @@ export type MacToCloud =
  */
 export type PendingKind = "agentphone" | "call" | "slack" | "plan" | "member";
 
-/** A number the cloud holds for a plan, as the Mac keeps it on the bot (Bot.phone, Bot.phoneLine). */
-export type PlanPhone = { number: string; numberId: string; agentId: string; status: PlanItemStatus; problem?: string };
+/**
+ * A number the cloud holds for a plan, as the Mac keeps it on the bot (Bot.phone, Bot.phoneLine).
+ * `renewal`: the event is about a number's month instead (billing by use, cloud/numbers-renew.ts), on
+ * whichever bot has the number: "paused" when its month couldn't be paid from the user's Orgo credit
+ * (given back at `releaseAt` if it still isn't), "ready" once it's paid again, "released" when it was
+ * given back unpaid.
+ */
+export type PlanPhone = { number: string; numberId: string; agentId: string; status: PlanItemStatus; problem?: string; renewal?: { releaseAt?: string } };
 /** An inbox the cloud made for a plan, as the Mac keeps it on the bot (Bot.email, Bot.mail). */
 export type PlanInbox = { email: string; inboxId: string; podId: string; handle: string; status: PlanItemStatus; problem?: string };
 /** How a plan's number or inbox stands (bops.phone_lines.status, bops.mail_inboxes.status). */
@@ -256,9 +262,10 @@ export type PlanItemStatus = "setting_up" | "ready" | "broken" | "paused" | "rel
 
 /**
  * What a "plan" event says. `botId` is the main bot of the default workspace (`workspaceId`) the
- * items are for. `phone`/`email`: the plan's number and inbox as they stand now (ready, paused,
- * released…); absent: nothing changed there. `handle`: the default workspace's handle, `auto` when
- * the cloud picked it (the app then offers to change it).
+ * items are for (for a number's month, `phone.renewal`: the bot and workspace the number is for, as
+ * far as the cloud knows). `phone`/`email`: the plan's number and inbox as they stand now (ready,
+ * paused, released…); absent: nothing changed there. `handle`: the default workspace's handle, `auto`
+ * when the cloud picked it (the app then offers to change it).
  */
 export type CloudPlanPayload = {
   tier: BopsTier;
@@ -363,6 +370,13 @@ export const PLAN_REQUIRED = "plan_required";
 
 /** Max asking for more than Max includes (a sixth phone number): 402 with this code, nothing to upgrade to. */
 export const PLAN_LIMIT = "plan_limit";
+
+/**
+ * A text out from a number paused because its month couldn't be paid from Orgo credit (billing by use,
+ * cloud/numbers-renew.ts): 402 with this code and `billing: "usage"`. Not AI_CREDIT_EMPTY: there may be
+ * some credit left, just less than the number's month.
+ */
+export const NUMBER_UNPAID = "number_unpaid";
 
 /**
  * Bops' plans (profiles.bops_tier in orgo-web, which keeps the same table in lib/bops-plans.ts): the

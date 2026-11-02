@@ -9,7 +9,9 @@ import * as calls from "../calls.ts";
 import { checkCreditAccess, creditLeft } from "../credit.ts";
 import { seal } from "../crypto.ts";
 import { closeDb, ownObject, query } from "../db.ts";
+import { tellAboutLine } from "../plans.ts";
 import { costOf, smsSegments } from "../pricing.ts";
+import { releaseAfterPause } from "../provision.ts";
 import { recordUsage, recordUsageFor } from "../usage.ts";
 import { LEDGER_IN_USE, TEST_DATABASE_URL, call, dropUsers, fakeOrgo, fakeProvider, keyOf, newNumber, prepareDb, seedUser, sse, startCloud, until, type Listening } from "./core-fakes.ts";
 
@@ -97,6 +99,7 @@ before(async () => {
   agentphone = await fakeProvider((g) => {
     if (g.method === "POST" && g.path === "/v1/numbers") return { json: { id: `num_${tag}_${++n}`, phoneNumber: newNumber(), type: g.json?.type ?? "sms" } };
     if (g.method === "POST" && g.path === "/v1/messages") return { json: { id: `msg_${tag}_${++n}`, status: "queued" } };
+    if (g.method === "DELETE" && /^\/v1\/numbers\/[^/]+$/.test(g.path)) return { json: { ok: true } };
     return { status: 418, json: { error: "the fake doesn't know this" } };
   });
   typesafe = await fakeProvider(() => ({ json: { answers: {} } }));
@@ -390,6 +393,164 @@ test("billed by use, a number is spent at cost (kind phone_number) and renewed a
   assert.deepEqual(await kinds(), ["phone_number", "phone_number"]);
   assert.ok((await lines())[0].paid!.getTime() > Date.now() + 29 * 86_400_000);
   assert.equal((await usageOf(u, "agentphone.numbers")).length, 2);
+});
+
+/* ---------------- A number's month, billed by use ---------------- */
+
+/** A user billed by use with a number bought through the proxy (its first month paid), on Sam in the main workspace, as the app says it. */
+async function usageNumber(credit = 20_000_000) {
+  const u = await newUser();
+  await setCredit(u, { free: credit });
+  await billedByUse(u);
+  const bought = await as(u, "POST", "/proxy/agentphone/v1/numbers", { country: "US", type: "sms" }, NEW_APP);
+  assert.equal(bought.status, 200, bought.text);
+  await until(async () => (await phoneSpends(u)) === 1);
+  await query("UPDATE bops.phone_lines SET bot_id = 'sam', workspace_id = 'ws_main' WHERE user_id = $1 AND number_id = $2", [u, bought.json.id]);
+  return { u, numberId: bought.json.id as string, e164: bought.json.phoneNumber as string, digits: (bought.json.phoneNumber as string).slice(-10) };
+}
+const phoneSpends = async (userId: string) => (await query<{ n: number }>("SELECT count(*)::int AS n FROM public.bops_test_spends WHERE user_id = $1 AND kind = 'phone_number'", [userId])).rows[0].n;
+const lineAt = async (digits: string) =>
+  (
+    await query<{ status: string; unpaid: boolean; paused_at: Date | null; paid_until: Date | null }>(
+      "SELECT status, unpaid, paused_at, paid_until FROM bops.phone_lines WHERE digits = $1",
+      [digits],
+    )
+  ).rows[0];
+const planEvents = async (userId: string) =>
+  (await query<{ payload: Record<string, unknown> }>("SELECT payload FROM bops.cloud_pending WHERE user_id = $1 AND kind = 'plan' ORDER BY id", [userId])).rows.map((r) => r.payload);
+/** The month runs out for the user's numbers (every line of theirs, the free one too). */
+const monthRunsOut = (userId: string) => query("UPDATE bops.phone_lines SET paid_until = now() - interval '1 minute' WHERE user_id = $1", [userId]);
+const renew = async () => (await import("../numbers-renew.ts")).renewUsageNumbers();
+/** An AgentPhone delivery to one of the user's numbers through its agent (signed with the secret the cloud keeps for it). */
+async function deliver(agentId: string, to: string, channel: "sms" | "voice") {
+  const body = JSON.stringify({ event: "agent.message", channel, agentId, data: { id: `m_${randomUUID().slice(0, 6)}`, body: "hi", transcript: "hello", fromNumber: "+14155550111", toNumber: to } });
+  const ts = String(Math.floor(Date.now() / 1000));
+  const headers = {
+    "content-type": "application/json",
+    "x-webhook-id": `whd_${randomUUID().slice(0, 8)}`,
+    "x-webhook-timestamp": ts,
+    "x-webhook-signature": `sha256=${createHmac("sha256", `whsec_${agentId}`).update(`${ts}.${body}`).digest("hex")}`,
+  };
+  return fetch(`${cloud.url}/hooks/agentphone`, { method: "POST", headers, body });
+}
+
+test("billed by use, a number whose month the credit can't pay is paused (calls and texts stop, the Mac told on its bot), asked again each pass, and back on at once when paid, billed monthly from then", async () => {
+  const { u, numberId, e164, digits } = await usageNumber();
+  const agentId = `ag_${tag}_${digits}`;
+  await query("INSERT INTO bops.cloud_agents (agent_id, user_id, secret_sealed) VALUES ($1, $2, $3)", [agentId, u, seal(`whsec_${agentId}`)]);
+  await renew();
+  assert.equal((await lineAt(digits)).status, "ready", "its purchase paid the first month");
+  // The month runs out with $1 left, less than a number's month: not charged, paused.
+  await setCredit(u, { free: 1_000_000 });
+  await monthRunsOut(u);
+  await renew();
+  const paused = await lineAt(digits);
+  assert.deepEqual([paused.status, paused.unpaid], ["paused", true]);
+  assert.ok(paused.paused_at && Math.abs(paused.paused_at.getTime() - Date.now()) < 60_000);
+  assert.equal(await phoneSpends(u), 1, "nothing charged");
+  assert.equal(await creditLeft(u), 1_000_000);
+  // The Mac is told, on the bot the number is for, with the day it's given back.
+  const told = await planEvents(u);
+  assert.equal(told.length, 1);
+  assert.deepEqual(told[0], {
+    tier: "free_bops",
+    billing: "usage",
+    botId: "sam",
+    workspaceId: "ws_main",
+    phone: { number: e164, numberId, agentId: "", status: "paused", renewal: { releaseAt: new Date(paused.paused_at!.getTime() + 30 * 86_400_000).toISOString() } },
+  });
+  // Calls and texts to it go unanswered (nothing kept for the Mac), and none go out from it.
+  assert.equal((await deliver(agentId, e164, "sms")).status, 200);
+  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_pending WHERE user_id = $1 AND kind = 'agentphone'", [u])).rows[0].n, 0);
+  assert.deepEqual(await (await deliver(agentId, e164, "voice")).json(), { text: "This number is paused right now. Goodbye.", hangup: true });
+  const text = () => as(u, "POST", "/proxy/agentphone/v1/messages", { agent_id: agentId, number_id: numberId, to_number: "+14155550100", body: "hi" }, NEW_APP);
+  const sent = agentphone.got.filter((g) => g.path === "/v1/messages").length;
+  const refused = await text();
+  assert.equal(refused.status, 402, refused.text);
+  assert.deepEqual(refused.json, { error: "This number is paused because your Orgo credit ran out. Add credit to text from it again.", code: "number_unpaid", billing: "usage" });
+  assert.equal(agentphone.got.filter((g) => g.path === "/v1/messages").length, sent, "nothing reached AgentPhone");
+  // Asked again each pass: still short, never charged, and told only once.
+  await renew();
+  await renew();
+  assert.deepEqual([(await lineAt(digits)).status, await phoneSpends(u), (await planEvents(u)).length], ["paused", 1, 1]);
+  // Credit added: the next pass pays it, it's back on at once, and paid a month from today.
+  await setCredit(u, { free: 10_000_000 });
+  assert.equal(await renew(), 1);
+  const back = await lineAt(digits);
+  assert.deepEqual([back.status, back.unpaid, back.paused_at], ["ready", false, null]);
+  assert.ok(Math.abs(back.paid_until!.getTime() - (Date.now() + 30 * 86_400_000)) < 60_000, "billed monthly from the day it was paid");
+  assert.equal(await phoneSpends(u), 2);
+  assert.equal(await creditLeft(u), 7_000_000);
+  const backOn = (await planEvents(u)).at(-1)!;
+  assert.deepEqual([backOn.botId, backOn.phone], ["sam", { number: e164, numberId, agentId: "", status: "ready", renewal: {} }]);
+  assert.equal((await text()).status, 200, "texts go out again");
+  // More passes in the same month charge nothing more.
+  await renew();
+  await renew();
+  assert.equal(await phoneSpends(u), 2);
+  assert.equal((await usageOf(u, "agentphone.numbers")).length, 2);
+});
+
+test("billed by use, a number still unpaid 30 days after its pause is given back, and the Mac told; the plan's free number is never paused", async () => {
+  const { u, numberId, e164, digits } = await usageNumber();
+  // The plan's number they kept: free, never charged, so never paused for its month.
+  const planDigits = newNumber().slice(-10);
+  await query("INSERT INTO bops.phone_lines (digits, user_id, number_id, e164, plan, status) VALUES ($1, $2, $3, $4, true, 'ready')", [planDigits, u, `num_plan_${planDigits}`, `+1${planDigits}`]);
+  await query("INSERT INTO bops.cloud_numbers (digits, user_id, number_id, e164) VALUES ($1, $2, $3, $4) ON CONFLICT (digits) DO NOTHING", [digits, u, numberId, e164]);
+  await renew();
+  await setCredit(u, { free: 0 });
+  await monthRunsOut(u);
+  await renew();
+  assert.deepEqual([(await lineAt(digits)).status, (await lineAt(planDigits)).status, (await lineAt(planDigits)).unpaid], ["paused", "ready", false]);
+  // Given back only by the release (sweep's, here for this user alone), and only 30 days after the pause.
+  const tellIt = (userId: string, item: { phone?: Parameters<typeof tellAboutLine>[1] }, on?: Parameters<typeof tellAboutLine>[2]) => tellAboutLine(userId, item.phone!, on);
+  const release = () => releaseAfterPause(tellIt, (userId, work) => (userId === u ? work() : Promise.resolve(false as never)));
+  await release();
+  assert.equal((await lineAt(digits)).status, "paused", "not before 30 days");
+  await renew();
+  await query("UPDATE bops.phone_lines SET paused_at = now() - interval '31 days' WHERE digits = $1", [digits]);
+  assert.equal(await release(), 1);
+  assert.equal((await lineAt(digits)).status, "released");
+  assert.ok(agentphone.got.some((g) => g.method === "DELETE" && g.path === `/v1/numbers/${numberId}` && g.headers["x-sub-account-id"] === `sub_${u}`), "given back to AgentPhone");
+  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_numbers WHERE digits = $1", [digits])).rows[0].n, 0);
+  const gone = (await planEvents(u)).at(-1)!;
+  assert.deepEqual([gone.botId, gone.workspaceId, gone.phone], ["sam", "ws_main", { number: e164, numberId, agentId: "", status: "released", renewal: {} }]);
+  // The free number: still on, never charged; given back numbers aren't charged either.
+  assert.deepEqual([(await lineAt(planDigits)).status, (await lineAt(planDigits)).unpaid], ["ready", false]);
+  await setCredit(u, { free: 10_000_000 });
+  await renew();
+  assert.equal(await phoneSpends(u), 1, "only the purchase");
+  assert.equal((await lineAt(digits)).status, "released");
+});
+
+test("billed by use, a month charged by a pass that stopped before moving on is never charged again, nor paused for the credit it took", async () => {
+  const { u, digits } = await usageNumber(6_500_000);
+  await renew();
+  await monthRunsOut(u);
+  const { paid_until } = (await query<{ paid_until: string }>("SELECT to_char(paid_until AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS paid_until FROM bops.phone_lines WHERE digits = $1", [digits])).rows[0];
+  // That pass charged the month, then stopped: $0.50 is left, less than a month.
+  await recordUsageFor(u, "agentphone.numbers", `renew:${digits}:${paid_until}`, 1, { type: "number", renewal: true });
+  assert.equal(await creditLeft(u), 500_000);
+  assert.equal(await renew(), 1);
+  const l = await lineAt(digits);
+  assert.deepEqual([l.status, l.unpaid], ["ready", false]);
+  assert.ok(l.paid_until!.getTime() > Date.now() + 29 * 86_400_000, "moved on a month");
+  assert.equal(await phoneSpends(u), 2, "the purchase and the one month");
+  assert.equal((await planEvents(u)).length, 0, "nothing to tell");
+});
+
+test("a number paused for its month comes back on when the user is moved back to Bops' plans: nothing bills it by the month there", async () => {
+  const { u, digits } = await usageNumber();
+  await renew();
+  await setCredit(u, { free: 0 });
+  await monthRunsOut(u);
+  await renew();
+  assert.equal((await lineAt(digits)).status, "paused");
+  await query("UPDATE bops.plans SET billing = 'plan', changed_at = now() WHERE user_id = $1", [u]);
+  await renew();
+  assert.deepEqual([(await lineAt(digits)).status, (await lineAt(digits)).unpaid], ["ready", false]);
+  const back = (await planEvents(u)).at(-1)!;
+  assert.deepEqual([back.billing, back.botId, (back.phone as { status: string }).status], [undefined, "sam", "ready"]);
 });
 
 test("a treg call may cost at most what's left of the credit", async () => {

@@ -14,7 +14,7 @@ import { HttpError, readBody, refuseUpgrade, type Route, type Upgrade } from "./
 import { recordLine } from "./lines.ts";
 import { refuseSecondPlanNumber, requireRoomForNumber, sendingStopped } from "./plans.ts";
 import { imageModelPriced, numberCost, smsSegments } from "./pricing.ts";
-import { COMPUTER_NOT_ALLOWED, PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
+import { COMPUTER_NOT_ALLOWED, NUMBER_UNPAID, PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
 import { accountFor, composioUserId, honchoPrefix, ownsWorkspace, podKeyOf } from "./session.ts";
 import { loadState } from "./state.ts";
 import { DELETED_CLOSE } from "./tunnel.ts";
@@ -764,12 +764,20 @@ function countText(call: Call) {
   counted(recordUsage(call.user.id, "agentphone.sms", mms ? 1 : smsSegments(text), { direction: "out", ...(mms ? { mms: true } : {}) }));
 }
 
-/** A text out from a plan's number that's paused (the plan ended) or given back is refused, as calls and texts to it go unanswered (plans.ts). */
+/** What a text out from a number paused for its month is refused with (NUMBER_UNPAID). */
+const NUMBER_UNPAID_WORDS = "This number is paused because your Orgo credit ran out. Add credit to text from it again.";
+
+/**
+ * A text out from a plan's number that's paused (the plan ended), from one paused because its month
+ * couldn't be paid from Orgo credit (billing by use, numbers-renew.ts), or from one given back, is
+ * refused, as calls and texts to it go unanswered (plans.ts).
+ */
 async function notFromPausedNumber(call: Call) {
   const body = isObject(call.json) ? call.json : {};
   const id = (x: unknown) => (typeof x === "string" ? x : "");
-  if (await sendingStopped(call.user.id, id(body.number_id ?? body.numberId), id(body.agent_id ?? body.agentId)))
-    throw new HttpError(402, "This number is paused while you're on Free. Upgrade to text from it again.", { code: PLAN_REQUIRED, upgrade: true });
+  const stopped = await sendingStopped(call.user.id, id(body.number_id ?? body.numberId), id(body.agent_id ?? body.agentId));
+  if (stopped === "unpaid") throw new HttpError(402, NUMBER_UNPAID_WORDS, { code: NUMBER_UNPAID, billing: "usage" });
+  if (stopped) throw new HttpError(402, "This number is paused while you're on Free. Upgrade to text from it again.", { code: PLAN_REQUIRED, upgrade: true });
 }
 
 /**

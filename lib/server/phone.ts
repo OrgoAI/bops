@@ -532,8 +532,9 @@ export async function sendText(botId: string, to: string, body: string, opts: { 
   const b = bot(botId);
   const line = b && lineOf(b);
   if (!b || !line) throw new Error("no phone number");
-  // A plan's number that's paused (the plan ended): Bops Cloud refuses its texts too (cloud/proxy.ts).
-  if (b.phoneLine?.paused && b.phoneLine.numberId === line.numberId) throw new Error("the number is paused while the account is on Free, so no texts go out from it");
+  // A plan's number that's paused (the plan ended), or one whose month wasn't paid: Bops Cloud refuses its texts too (cloud/proxy.ts).
+  if (b.phoneLine?.paused && b.phoneLine.numberId === line.numberId)
+    throw new Error(b.phoneLine.unpaid ? "the number is paused because the Orgo credit ran out, so no texts go out from it" : "the number is paused while the account is on Free, so no texts go out from it");
   if (optedOut(to) && !opts.evenIfStopped) throw new Error("they texted STOP, so no more texts to them");
   const text = plain(body).slice(0, 1500);
   if (dryRun()) {

@@ -1404,6 +1404,32 @@ await assert.rejects(P.sendText(main().id, "+12125550123", "Hello"), /paused/);
 assert.equal(since(n).filter((r) => r.path.startsWith("/proxy/agentphone/v1/messages")).length, 0, "no text out from a paused number");
 assert.equal((await planEvent("p3", { tier: "free_bops", botId: main().id, workspaceId: MAIN_WORKSPACE, phone: { ...phone, status: "released" }, email: { ...inbox, status: "released" } })).status, 200);
 assert.deepEqual([main().phone, main().phoneLine, main().email, main().mail], [undefined, undefined, undefined, undefined]);
+// Billed by use, a number of the bot's own whose month the Orgo credit couldn't pay: paused (marked, said once, no
+// text out), back on once paid, and given back 30 days on; never taken for the plan's.
+{
+  S.update((s) => {
+    s.bots[0].phone = "+14155550177";
+    s.bots[0].phoneLine = { numberId: "num_month", agentId: "agent_month" };
+  });
+  const month = { number: "+14155550177", numberId: "num_month", agentId: "", renewal: {} };
+  const monthEvent = (id, phone) => planEvent(id, { tier: "free_bops", billing: "usage", botId: main().id, workspaceId: MAIN_WORKSPACE, phone: { ...month, ...phone } });
+  before = said().length;
+  for (const id of ["m1", "m1"]) assert.equal((await monthEvent(id, { status: "paused", renewal: { releaseAt: "2026-12-20T12:00:00.000Z" } })).status, 200);
+  assert.deepEqual(main().phoneLine, { numberId: "num_month", agentId: "agent_month", paused: true, unpaid: true });
+  assert.deepEqual(said().slice(before), [
+    `${main().name}'s number +1 (415) 555-0177 is paused because your Orgo credit ran out: calls and texts to it go unanswered. Add credit to keep it. It's given back on Dec 20 if still unpaid.`,
+  ]);
+  n = cloud.requests.length;
+  await assert.rejects(P.sendText(main().id, "+12125550123", "Hello"), /paused because the Orgo credit ran out/);
+  assert.equal(since(n).filter((r) => r.path.startsWith("/proxy/agentphone/v1/messages")).length, 0, "no text out from a number paused for its month");
+  assert.equal((await monthEvent("m2", { status: "ready" })).status, 200);
+  assert.deepEqual(main().phoneLine, { numberId: "num_month", agentId: "agent_month" }, "back on, still not the plan's");
+  assert.equal(said().at(-1), `${main().name}'s number +1 (415) 555-0177 is back on.`);
+  before = said().length;
+  for (const id of ["m3", "m3b"]) assert.equal((await monthEvent(id, { status: "released" })).status, 200);
+  assert.deepEqual([main().phone, main().phoneLine], [undefined, undefined]);
+  assert.deepEqual(said().slice(before), [`${main().name}'s number +1 (415) 555-0177 was given back, 30 days after your Orgo credit ran out.`], "said once");
+}
 // With the cloud's plan limits on, Free gets no new inbox and no number to buy.
 await withSession({ ...SESSION, agentmail: { podId: "pod_u1", apiKey: "am_pod_key", domain: "bops.bot", handle: "test", handles: { [MAIN_WORKSPACE]: { handle: "test", auto: false, changesLeft: 3 } } }, plan: { tier: "free_bops", limits: true } });
 made = inboxesMade.length;

@@ -1,10 +1,10 @@
 import "server-only";
 import type { CloudPlanPayload, PlanInbox, PlanPhone } from "@/cloud/protocol";
-import { botChatId, type Bot } from "@/lib/types";
+import { botChatId, workspaceOf, type Bot } from "@/lib/types";
 import { cloudSession, cloudSessionNow } from "./cloud";
 import { adoptHandle } from "./mail";
 import { tellCloudLine } from "./phone-lines";
-import { addMessage, bot, sameState, update } from "./store";
+import { addMessage, bot, getState, sameState, update } from "./store";
 
 /**
  * What the user's plan brings the main bot, set up by Bops Cloud (cloud/plans.ts, cloud/provision.ts)
@@ -21,6 +21,10 @@ import { addMessage, bot, sameState, update } from "./store";
  *   texts to the number, and the app doesn't read the inbox, until the user upgrades again.
  * - released (30 days after the pause): they're gone from the bot.
  *
+ * Billed by use, an event about a number's month (PlanPhone.renewal, cloud/numbers-renew.ts) says a
+ * number paused because the Orgo credit couldn't pay its month, back on once it did, or given back 30
+ * days after the pause (takeRenewal).
+ *
  * Safe to get twice: what's already in the state isn't said again.
  */
 
@@ -31,6 +35,60 @@ const pretty = (e164: string) => {
 
 function say(b: Bot, text: string) {
   addMessage({ chatId: botChatId(b.id), role: "system", text });
+}
+
+/** Said unless it's the last thing the bot's chat says already (an event handed over twice, for a number not on the bot). */
+function sayOnce(b: Bot, text: string) {
+  const chatId = botChatId(b.id);
+  const messages = getState().messages;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].chatId !== chatId) continue;
+    if (messages[i].role === "system" && messages[i].text === text) return;
+    break;
+  }
+  say(b, text);
+}
+
+/** The day a number paused for its month is given back, as the chat says it ("Dec 20"), in this Mac's time zone. */
+function dayOf(iso: string | undefined) {
+  const d = iso ? new Date(iso) : null;
+  return d && !Number.isNaN(d.getTime()) ? d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null;
+}
+
+/**
+ * A number's month, billed by use (PlanPhone.renewal): paused because the Orgo credit couldn't pay it
+ * (calls and texts to it go unanswered, and none go out from it, until it's paid), back on once it is,
+ * or given back 30 days after the pause. Said in the chat of the bot that has the number (a workspace's
+ * number: its main bot's), and that bot's own number marked paused (`unpaid`) meanwhile, as a plan's is.
+ */
+function takeRenewal(p: PlanPhone, botId: string | null) {
+  const s = getState();
+  const own = s.bots.find((x) => x.phoneLine?.numberId === p.numberId);
+  const ws = own ? undefined : s.workspaces?.find((w) => w.line?.numberId === p.numberId);
+  const b = own ?? (ws && s.bots.find((x) => x.isMain && workspaceOf(x) === ws.id)) ?? (botId ? bot(botId) : undefined);
+  if (!b) return;
+  const day = dayOf(p.renewal?.releaseAt);
+  const text =
+    p.status === "paused"
+      ? `${b.name}'s number ${pretty(p.number)} is paused because your Orgo credit ran out: calls and texts to it go unanswered. Add credit to keep it. It's given back ${day ? `on ${day}` : "30 days after the pause"} if still unpaid.`
+      : p.status === "released"
+        ? `${b.name}'s number ${pretty(p.number)} was given back, 30 days after your Orgo credit ran out.`
+        : `${b.name}'s number ${pretty(p.number)} is back on.`;
+  if (!own?.phoneLine) return sayOnce(b, text);
+  const had = own.phoneLine;
+  const paused = p.status === "paused";
+  if (p.status !== "released" && (paused ? had.paused && had.unpaid : !had.unpaid)) return;
+  update((st) => {
+    const x = st.bots.find((y) => y.id === own.id);
+    if (x?.phoneLine?.numberId !== p.numberId) return;
+    if (p.status === "released") {
+      x.phoneLine = undefined;
+      x.phone = undefined;
+      return;
+    }
+    x.phoneLine = { numberId: x.phoneLine.numberId, agentId: x.phoneLine.agentId, ...(x.phoneLine.plan ? { plan: true } : {}), ...(paused ? { paused: true, unpaid: true } : {}) };
+  });
+  say(own, text);
 }
 
 async function takePhone(b: Bot, p: PlanPhone) {
@@ -112,6 +170,7 @@ export async function adoptPlan(p: CloudPlanPayload) {
   const session = cloudSessionNow();
   const was = session?.plan;
   if (session && (!was || was.tier !== p.tier || (was.billing ?? "plan") !== (p.billing ?? "plan"))) void cloudSession(true).catch(() => {});
+  if (p.phone?.renewal) return takeRenewal(p.phone, p.botId);
   const b = p.botId ? bot(p.botId) : undefined;
   if (p.handle) adoptHandle(p.workspaceId, p.handle.handle, { offer: p.handle.auto && !!p.email && p.email.status !== "paused" && !b?.mail?.plan });
   if (!b) return;
