@@ -1,0 +1,4 @@
+- People you add are an Admin or a Member, said plainly.
+- Admins get every bot, its computer and your apps.
+- Admins can watch and control a shared bot's computer.
+- Your Apps now shows for people in workspaces that have them.
