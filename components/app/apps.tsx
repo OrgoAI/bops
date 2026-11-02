@@ -622,7 +622,7 @@ export function checkLine(bot: string, app: string, level: AppLevel, schedule: S
   const often = `${when.charAt(0).toLowerCase()}${when.slice(1)}`;
   const what = level === "read" ? `${bot} checks ${app} ${often} and tells you what's new.` : `${bot} checks ${app} ${often} and handles what's new. Asks you before it sends, posts, deletes or pays.`;
   const n = schedule.kind === "every" ? runsADay(schedule) : 1;
-  return n > 1 ? `${what} That's ${n} checks a day, and each one uses Orgo credit.` : what;
+  return n > 1 ? `${what} That's ${n} checks a day, and each one uses credit.` : what;
 }
 
 /**

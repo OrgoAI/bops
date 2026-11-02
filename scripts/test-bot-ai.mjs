@@ -173,10 +173,10 @@ if (OFF) {
     const model = await R.POST(fromWindow({ botId: "pip", op: "update", agentId: "bops", model: "gpt-6-astra" }));
     assert.equal(model.status, 200, "Bops agent's model is still the owner's to pick");
     const section = render(h(BotAiSection, { state: S.getState(), bot: bot("boppy") }));
-    assert.match(section, /^▾ AI Default Bops agent Agents it can run Bops agent Default OpenAI · Orgo credit Thinking/, section);
+    assert.match(section, /^▾ AI Default Bops agent Agents it can run Bops agent Default OpenAI · Credit Thinking/, section);
     assert.ok(!/New thread/.test(section), "no New thread choice where there's only Bops agent");
     assert.ok(!/Claude Code|Codex|OpenCode|agy|\+ Add|Open its terminal/.test(section), section);
-    assert.match(section, /Chat, threads, memory and calls run on Orgo credit\./);
+    assert.match(section, /Chat, threads, memory and calls run on credit\./);
   });
   rmSync(scratch, { recursive: true, force: true });
   process.stdout.write(`brains off: ${passed} passed\n`);
@@ -309,7 +309,7 @@ await test("what isn't in Bops yet answers Soon, with why; a bad model, a sevent
   };
   assert.match(err({ op: "add", kind: "agy", pays: "key" }), /^400 Soon: agy signs in with a Google account/);
   assert.match(err({ op: "add", kind: "codex", pays: "plan" }), /^400 Soon: A ChatGPT plan for Codex needs a check of OpenAI's terms first\./);
-  assert.match(err({ op: "add", kind: "claude", pays: "credit" }), /^400 Soon: Orgo credit for Claude Code needs Bops Cloud to carry it first\./);
+  assert.match(err({ op: "add", kind: "claude", pays: "credit" }), /^400 Soon: Credit for Claude Code needs Bops Cloud to carry it first\./);
   assert.match(err({ op: "add", kind: "opencode", pays: "key", model: "evil.example/x" }), /^400 OpenCode can't use that model\./);
   assert.match(err({ op: "add", kind: "bops", pays: "credit" }), /^400 Bops agent is always there/);
   assert.match(err({ op: "remove", agentId: "bops" }), /^400 Bops agent is always there: it is chat's agent/);
@@ -407,7 +407,7 @@ await test("a thread runs on the agent it was given, as its bot's profile has it
   r = A.threadAgent({ ...cloud, agent: { id: "ag_forged0001", kind: "claude" } }, b, st);
   assert.equal(r.kind, "bops");
   assert.equal(r.gone, "Stopped: Boppy doesn't run Claude Code anymore. Reply and it carries on with Bops agent.");
-  assert.equal(r.goneNote, "Boppy doesn't run Claude Code anymore, so Bops agent does this, on your Orgo credit.");
+  assert.equal(r.goneNote, "Boppy doesn't run Claude Code anymore, so Bops agent does this, on your credit.");
   // Begun on one account, and the agent moved to another since.
   r = A.threadAgent({ ...cloud, agent: { id: planAgent, kind: "claude" }, brainRun: { brainId: "brain_old", agentId: planAgent, kind: "claude", computerId: "pc-main", cli: "x", started: true } }, b, st);
   assert.equal(r.kind, "bops");
@@ -512,20 +512,20 @@ await test("the AI section: its agents as tiles with the Default marked, agy Soo
   const out = render(h(BotAiSection, { state: S.getState(), bot: bot("boppy"), onShowScreen() {} }));
   // Worst first in the header, and the Default by its name (its model would push the rest out of a narrow row).
   assert.match(out, /^▾ AI Default Claude Code · 1 needs you · 1 running Agents it can run /, out);
-  assert.match(out, /Bops agent OpenAI · Orgo credit Claude Code Default Max plan · signed in here Codex Your OpenAI key/);
+  assert.match(out, /Bops agent OpenAI · Credit Claude Code Default Max plan · signed in here Codex Your OpenAI key/);
   assert.match(out, /agy Soon Google Antigravity \+ Add Thinking/);
   assert.match(out, /Threads now Bops agent: Weekly report · needs you Claude Code · Opus 5\.5: Fix the header \+ New thread Open its terminal Calls OpenAI live voice/);
-  assert.match(out, /Each thread runs on the agent you pick, with Boppy's own accounts\. Chat, memory and calls stay on Orgo credit\./);
+  assert.match(out, /Each thread runs on the agent you pick, with Boppy's own accounts\. Chat, memory and calls stay on credit\./);
   // Boppy's computer is its own, but Otto-like bots sharing it would hear the warning: Rook's plan on Pip's? none here.
   assert.ok(!/can reach/.test(out));
   plain(out, "the AI section");
   // A tile's editor: model, how it pays (Soon ones say why), its account, Make default and Remove.
   const ed = render(h(BotAiSection, { state: S.getState(), bot: bot("boppy"), editing: codexAgent, onShowScreen() {} }));
-  assert.match(ed, /Model GPT 6\.1 Sol GPT 6 Astra ▾ Pays with Orgo credit ChatGPT plan Your key Account Codex Max plan|Model GPT 6\.1 Sol GPT 6 Astra ▾ Pays with Orgo credit ChatGPT plan Your key/);
+  assert.match(ed, /Model GPT 6\.1 Sol GPT 6 Astra ▾ Pays with Credit ChatGPT plan Your key Account Codex Max plan|Model GPT 6\.1 Sol GPT 6 Astra ▾ Pays with Credit ChatGPT plan Your key/);
   assert.match(renderToStaticMarkup(h(BotAiSection, { state: S.getState(), bot: bot("boppy"), editing: codexAgent })), /title="Soon: A ChatGPT plan for Codex needs a check of OpenAI&#x27;s terms first\."/);
   assert.match(ed, /Your OpenAI key Make default Remove/);
   // What's Soon says why, in words on the page, not only on hover.
-  assert.match(ed, /Soon: Orgo credit for Codex needs Bops Cloud to carry it first\. A ChatGPT plan for Codex needs a check of OpenAI's terms first\./);
+  assert.match(ed, /Soon: Credit for Codex needs Bops Cloud to carry it first\. A ChatGPT plan for Codex needs a check of OpenAI's terms first\./);
   plain(ed, "the editor");
   // No key for it in the Vault (when the window has read the Vault's names): not ready, with Add key.
   const noKey = render(h(BotAiSection, { state: S.getState(), bot: bot("boppy"), editing: codexAgent, onAddKey() {} }));
@@ -559,7 +559,7 @@ await test("every state of a tile says what it is, with its one button", () => {
   assert.equal(tile(rookPlan, bot("rook"), { ...st, host: "mac" }), "Claude Code Claude Code runs on a cloud computer. Your bots work on this Mac.");
   assert.equal(tile(rookPlan, { ...bot("rook"), runsOn: "mac" }), "Claude Code Rook works on your Mac, so its threads use Bops agent.");
   assert.equal(tile({ id: "ag_oc00000001", kind: "opencode", pays: "key", model: "anthropic/claude-sonnet-5-5" }), "OpenCode Sonnet 5.5 · your Anthropic key");
-  assert.equal(tile({ id: "bops", kind: "bops", pays: "credit", model: "gpt-6-astra" }), "Bops agent GPT 6 Astra · Orgo credit");
+  assert.equal(tile({ id: "bops", kind: "bops", pays: "credit", model: "gpt-6-astra" }), "Bops agent GPT 6 Astra · Credit");
   // A bot that shares a computer and keeps a login there is told its logins aren't walled off.
   const shared = { ...st, bots: [...st.bots, { id: "otto", name: "Otto", role: "Outbound", color: "#E9FF3B", isMain: false, computer: "shared", workspaceId: "ws_main", ai: bot("rook").ai }] };
   assert.equal(A.sharesComputerWithLogins(shared.bots.at(-1), shared), "Otto shares Boppy's computer, so bots there can reach Otto's logins. Give Otto its own computer to keep them apart.");

@@ -752,8 +752,8 @@ await test("Settings, Brain: Bops agent first with its bots, then each brain and
   const html = renderToStaticMarkup(h(BrainSettings, { state: withBrain(view(BRAINS), "otto", "b_max"), onShowScreen: noop, onOpenVault: noop }));
   const t = text(html);
   noDashes(t, "Settings, Brain");
-  assert.match(t, /^Brain What your bots work with\. Bops agent runs on Orgo credit\. Claude Code and Codex run on your own plan or key\. Add a brain/);
-  assert.match(t, /Bops agent Orgo credit Boppy Rook Claude Code/, "Bops agent's bots: those on no brain");
+  assert.match(t, /^Brain What your bots work with\. Bops agent runs on your credit\. Claude Code and Codex run on your own plan or key\. Add a brain/);
+  assert.match(t, /Bops agent Credit Boppy Rook Claude Code/, "Bops agent's bots: those on no brain");
   assert.match(t, /Claude Code Max plan · signed in on Boppy's computer Sign in on Rook's computer/, "Rook's own computer isn't signed in");
   assert.match(t, /Otto .*Rook not picked/);
   assert.match(t, /Sign out on Boppy's computer/);
@@ -799,7 +799,7 @@ await test("a bot's Brain: Bops agent or the brains it's on, and Sign in where i
   noDashes(notHere, "a bot's Brain, not signed in");
   assert.match(notHere, /^Brain Not signed in on Rook's computer Bops agent Claude Code Claude Code 3 Sign in with your Claude plan on Rook's computer to use it\. Sign in$/);
   const agent = text(renderToStaticMarkup(h(BotBrain, { state: view(BRAINS), bot: bot("boppy"), onShowScreen: noop, className: "" })));
-  assert.equal(agent, "Brain Bops agent, on Orgo credit Bops agent Claude Code 2");
+  assert.equal(agent, "Brain Bops agent, on your credit Bops agent Claude Code 2");
   const key = text(renderToStaticMarkup(h(BotBrain, { state: withBrain(view(BRAINS), "boppy", "b_key"), bot: { ...bot("boppy"), brain: "b_key" }, onShowScreen: noop, className: "" })));
   assert.equal(key, "Brain Claude Code on your Anthropic key Bops agent Claude Code 2");
   // A sign-in going on Rook's computer: Otto, signed in on Boppy's, still says so, with no Show of Rook's screen.
@@ -810,9 +810,9 @@ await test("a bot's Brain: Bops agent or the brains it's on, and Sign in where i
   assert.match(rook, /^Brain Signing in on Rook's computer .* Claude Code's sign-in is open on its screen\. Show$/);
   // Its tasks on this Mac run on Bops agent, on AI credit, whatever its brain: it says so.
   const onMac = text(renderToStaticMarkup(h(BotBrain, { state: { ...withBrain(view(BRAINS), "boppy", "b_key"), host: "mac" }, bot: { ...bot("boppy"), brain: "b_key" }, onShowScreen: noop, className: "" })));
-  assert.equal(onMac, "Brain Your bots work on this Mac, so they run on Bops agent, on Orgo credit Bops agent Claude Code 2");
+  assert.equal(onMac, "Brain Your bots work on this Mac, so they run on Bops agent, on your credit Bops agent Claude Code 2");
   const macBot = text(renderToStaticMarkup(h(BotBrain, { state: withBrain(view(BRAINS), "rook", "b_max"), bot: { ...bot("rook"), brain: "b_max", runsOn: "mac" }, onShowScreen: noop, className: "" })));
-  assert.match(macBot, /^Brain Rook works on your Mac, so its tasks run on Bops agent, on Orgo credit Bops agent Claude Code Claude Code 3$/, macBot);
+  assert.match(macBot, /^Brain Rook works on your Mac, so its tasks run on Bops agent, on your credit Bops agent Claude Code Claude Code 3$/, macBot);
   const some = text(renderToStaticMarkup(h(BotBrain, { state: { ...withBrain(view(BRAINS), "boppy", "b_key"), mac: { ready: true } }, bot: { ...bot("boppy"), brain: "b_key", runsOn: "auto" }, onShowScreen: noop, className: "" })));
   assert.equal(some, "Brain Claude Code on your Anthropic key · tasks on your Mac run on Bops agent Bops agent Claude Code 2");
   noDashes(onMac + macBot + some, "a bot's Brain on the Mac");
@@ -865,11 +865,11 @@ await test("a thread says which brain ran it; one Claude Code ran opens in a ter
   // Bops agent finished it, Codex ran it, Bops agent ran it, or the bots work on this Mac: no terminal.
   // Bops agent finishes it while Otto is on Claude Code: it says so, as it's on AI credit.
   const finished = sheet(thread("ses_a", { onBopsAgent: true }));
-  assert.match(finished, /^Cart total Bops agent Orgo credit Otto/, finished);
+  assert.match(finished, /^Cart total Bops agent Credit Otto/, finished);
   assert.doesNotMatch(finished, /Open in terminal|Claude Code/);
   // So does one Bops agent took over (its response chain) or began, and Otto off Claude Code has no terminal.
-  assert.match(sheet(thread("ses_a", { responseId: "resp_1" })), /^Cart total Bops agent Orgo credit Otto/);
-  assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" })), /^Cart total Bops agent Orgo credit Otto/);
+  assert.match(sheet(thread("ses_a", { responseId: "resp_1" })), /^Cart total Bops agent Credit Otto/);
+  assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" })), /^Cart total Bops agent Credit Otto/);
   assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" }), { bots: view(BRAINS).bots }), /^Cart total Otto · finished/, "no badge when Otto isn't on a brain");
   // Otto's Default back to Bops agent: a thread keeps the agent it began on, so it still opens in the terminal.
   assert.match(sheet(thread("ses_a"), { bots: view(BRAINS).bots }), /Open in terminal/, "a new Default doesn't move a thread");
