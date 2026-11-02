@@ -82,7 +82,18 @@ const OWNER_BLOCKER_ASK: Record<Blocker, string> = {
   payment: "the owner's OK to pay",
   error: "the owner: the page errored",
 };
-const blockerAsk = (state: AppState, b: Blocker) => (state.shared ? OWNER_BLOCKER_ASK[b] : BLOCKER_ASK[b]);
+/**
+ * Whether the viewer does a screen ask themselves: the owner always; an Admin of a shared workspace for a sign in, a code,
+ * a captcha or a page error, when they have Write on the bot and its computer's screen is theirs to see and control
+ * (computer.tsx SharedScreen). A payment stays the owner's: it spends the owner's money.
+ */
+const screenAskMine = (state: AppState, botId: string, b: Blocker) => {
+  if (!state.shared) return true;
+  if (state.shared.role !== "admin" || b === "payment" || !canAct(state, [botId])) return false;
+  const bot = state.bots.find((x) => x.id === botId);
+  return !!bot && bot.runsOn !== "mac" && !!state.shared.screens?.includes(botId);
+};
+const blockerAsk = (state: AppState, b: Blocker, botId?: string) => (state.shared && !(botId && screenAskMine(state, botId, b)) ? OWNER_BLOCKER_ASK[b] : BLOCKER_ASK[b]);
 
 /** The bot whose text this is, so a file it links opens from its computer (see Inline). */
 const LinkedBy = createContext<string | undefined>(undefined);
@@ -2287,7 +2298,7 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
       ) : s.askWhere && live(s) ? (
         <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· where?</span>
       ) : null}
-      {waiting && <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· {s.blocker ? `needs ${blockerAsk(state, s.blocker)}` : theirs ? "needs an answer" : `needs ${ownerYou(state)}`}</span>}
+      {waiting && <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· {s.blocker ? `needs ${blockerAsk(state, s.blocker, s.botId)}` : theirs ? "needs an answer" : `needs ${ownerYou(state)}`}</span>}
       {/* Which screen it's on, live: the number on the panel's tiles. */}
       {live(s) && s.runsOn !== "mac" && s.display !== undefined && (
         <span title={`On screen ${screenNo(s.display)} of ${b?.name ?? "its bot"}'s computer`} className="shrink-0 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] tabular-nums leading-[14px] text-[#3A3A38]">
@@ -2548,7 +2559,8 @@ export function ThreadSheet({
               <div className="flex flex-col gap-2 rounded-[14px] bg-[#FBFFD9] px-3.5 py-3 shadow-[0_0_0_1px_#E8F28A]">
                 <span className="text-[13.5px] font-medium leading-[18px]">Where should {b.name} do this?</span>
                 <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">{state.shared ? "It starts as soon as the owner picks." : "It starts as soon as you pick. Your messages here go along with it."}</span>
-                <div className="flex gap-1.5 pt-0.5" inert={!!state.shared}>
+                {!state.shared && (
+                <div className="flex gap-1.5 pt-0.5">
                   <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "mac" })} className="flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
                     <MacIcon size={12} />
                     {ownerMac(state)}
@@ -2557,6 +2569,7 @@ export function ThreadSheet({
                     {b.name}&rsquo;s computer
                   </button>
                 </div>
+                )}
               </div>
             )}
             <span className="text-[13px] leading-4 text-[#9A9A98]">
@@ -2980,7 +2993,7 @@ function NeedsYouCard({
   };
   // A shared workspace's asks wait on its owner, never the viewer.
   const title = s.blocker
-    ? `${name} needs ${blockerAsk(state, s.blocker)}`
+    ? `${name} needs ${blockerAsk(state, s.blocker, s.botId)}`
     : kind === "brain"
       ? `${name} needs ${brain?.name ?? "Claude Code"} signed in`
       : failed
@@ -3022,8 +3035,19 @@ function NeedsYouCard({
         )}
       </span>
       {question && <span className={`-mt-1 pl-4 text-[13.5px] leading-[19px] text-[#3A3A38] ${pinned ? "line-clamp-3 whitespace-pre-wrap" : ""}`}>{question}</span>}
-      {/* A sign in, a code or a check at the screen, or a brain's sign in: the owner's own logins and screens, never a viewer's to do. */}
-      <div className="flex flex-wrap gap-1.5" inert={!!state.shared && (!!s.blocker || kind === "brain")}>
+      {/* A sign in, a code or a check at the screen: the owner's, or an Admin's at the shared screen (screenAskMine). A brain's
+          sign in and a payment stay the owner's. Someone who can't do it gets a line saying so, never buttons that do nothing. */}
+      {state.shared && (kind === "brain" || (!!s.blocker && !screenAskMine(state, s.botId, s.blocker))) ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="pr-1 text-[12.5px] leading-[17px] text-[#6B6B6B]">{OWNER_ONLY_LINE}</span>
+          {writes && (
+            <button disabled={busy} onClick={dismiss} className={plain}>
+              Dismiss
+            </button>
+          )}
+        </div>
+      ) : (
+      <div className="flex flex-wrap gap-1.5">
         {s.blocker ? (
           <>
             <button disabled={busy} onClick={onShow} className={primary}>
@@ -3103,6 +3127,7 @@ function NeedsYouCard({
           </>
         )}
       </div>
+      )}
       {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open."}</span>}
       {shownError && (
         <span role="alert" className="pl-1 text-[12px] leading-4 text-[#B42318]">

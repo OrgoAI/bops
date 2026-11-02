@@ -773,7 +773,8 @@ await check("nothing else that would change a shared workspace is offered: a thr
   assert.ok(!/>Delete</.test(done) && !done.includes('aria-label="More"'));
   const where = renderToStaticMarkup(h(ThreadSheet, { state, session: state.sessions[1], onClose: noop, onShowComputer: noop }));
   assert.ok(!/>Stop</.test(where));
-  assert.match(where, /class="flex gap-1\.5 pt-0\.5" inert=""/, "Your Mac or its computer: shown, never picked");
+  assert.ok(!/class="flex gap-1\.5 pt-0\.5"/.test(where), "Your Mac or its computer: no buttons that do nothing, the owner picks");
+  assert.match(where, /It starts as soon as the owner picks\./);
   // The sidebar's thread row (a search lists it, flat): no ×. The same row in the user's own has one.
   const sideProps = { chatId: "bot:boppy", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {}, search: "find" };
   const side = renderToStaticMarkup(h(Sidebar, { ...sideProps, state }));
@@ -1529,12 +1530,25 @@ await check("a thread of the user's own that ended waiting for a sign in on its 
   // Still at work (its screen hit the sign in a moment ago): nothing to carry on.
   const working = { ...waits, status: "running", endedAt: undefined };
   assert.ok(!/I signed in/.test(text(sheet({ ...mine, sessions: [working] }, working))));
-  // The owner's, in a workspace shared with the user: shown, inert.
+  // The owner's, in a workspace shared with a Member: a line saying only the owner can, never buttons that do nothing.
   const c = cloudState();
   c.state.sessions = [{ ...waits }];
   const st = viewState(own(), { ...listed, role: "member", wsId: WS }, c, {});
   const html = sheet(st, st.sessions[0]);
-  assert.match(html, /inert=""[^]*I signed in/, "can't be answered there");
+  assert.ok(!/I signed in/.test(html) && !/Sign in for/.test(html), "a Member can't answer it there");
+  assert.match(text(html), /Only the owner can answer this\./);
+  assert.ok(!/inert=""[^]*Dismiss/.test(html), "nothing switched off that still looks like a button");
+  // An Admin with Write on the bot and its screen: they sign in at the shared screen themselves.
+  const sa = viewState(own(), { ...listed, role: "admin", wsId: WS }, c, {});
+  const admin = { ...sa, shared: { ...sa.shared, role: "admin", levels: { ...(sa.shared.levels ?? {}), [sa.sessions[0].botId]: "write" }, screens: [sa.sessions[0].botId] } };
+  const adminHtml = text(sheet(admin, admin.sessions[0]));
+  assert.match(adminHtml, /Sign in for /);
+  assert.match(adminHtml, /I signed in/);
+  assert.match(adminHtml, /needs you to sign in/);
+  assert.ok(!/Only the owner can answer this/.test(adminHtml));
+  // Without the screen (its bot works on the owner's Mac, or Bops Cloud doesn't share it): the owner's again.
+  const noScreen = { ...admin, shared: { ...admin.shared, screens: [] } };
+  assert.match(text(sheet(noScreen, noScreen.sessions[0])), /Only the owner can answer this\./);
 });
 
 await check("an @orgo.ai owner's app work never reaches the window of anyone they share the workspace with, whatever their email; an app line shows only where apps are shown", async () => {

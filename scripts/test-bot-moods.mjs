@@ -417,7 +417,10 @@ await test("coders: where apps show, a bot whose Works on names a site that's th
   const shared = { owner: "tess@orgo.ai", wsId: "ws_main", projectId: "p1", name: "Acme", role: "member", levels: {}, apps: { level: "read", at: 1, list: [{ name: "recipe-box", siteNames: ["site-a"] }] } };
   assert.deepEqual([...codersOf(apps({ account: { user: { id: "u2", email: "sam@example.com" }, signedInAt: 1 }, shared }))].sort(), ["max", "zed"]);
   assert.deepEqual([...codersOf(apps({ shared: { ...shared, apps: undefined } }))], [], "shared without Your Apps");
-  assert.deepEqual([...codersOf(apps({ shared: { ...shared, owner: "sam@example.com" } }))], [], "an owner apps aren't open to");
+  // An owner apps aren't open to: hidden from a viewer outside Orgo's team, shown to one of the team (owner, 11-02).
+  const outsider = { account: { user: { id: "u2", email: "sam@example.com" }, signedInAt: 1 } };
+  assert.deepEqual([...codersOf(apps({ ...outsider, shared: { ...shared, owner: "sam@example.com" } }))], [], "an owner apps aren't open to, a viewer outside the team");
+  assert.deepEqual([...codersOf(apps({ shared: { ...shared, owner: "sam@example.com" } }))].sort(), ["max", "zed"], "an owner apps aren't open to, a viewer of the team");
   // Read once, with the rest of the moods.
   assert.deepEqual([...moodSignals(apps()).coders].sort(), ["max", "zed"]);
   assert.equal(moodSignals(state()).coders.size, 0);
