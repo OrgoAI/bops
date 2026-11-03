@@ -7,7 +7,7 @@ import { howIWork } from "@/cloud/style";
 import { appsNote, placesNote } from "./skills";
 import { dataNote } from "./treg";
 import { openaiClient } from "./openai-client";
-import { botChatId, CALL_VOICES, isCallVoice, live, MAX_PERSONA_CHARS, settingsOf, type Bot } from "@/lib/types";
+import { botChatId, CALL_VOICES, isCallVoice, live, MAX_PERSONA_CHARS, personaOf, settingsOf, type Bot } from "@/lib/types";
 import { handleMessage } from "./chat";
 import { callEnded, callStarted } from "./attention";
 import { noteOutOfCredit, outOfCreditWords } from "./cloud";
@@ -87,7 +87,7 @@ export async function voicePrompt(b: Bot, how: "live" | "turns" = "live") {
   return [
     `You are ${b.name}, ${b.isMain ? `${owner}'s chief of staff` : `${owner}'s ${b.role} bot`} in Bops, on a phone call with ${owner}. ${ownerLine()}`,
     // What the user wrote on its profile (How I work), short: their preferences, never Bops' rules.
-    howIWork(owner, b.persona?.slice(0, MAX_PERSONA_CHARS), true),
+    howIWork(owner, personaOf(b).text?.slice(0, MAX_PERSONA_CHARS), true, personaOf(b).by),
     "Talk like a capable teammate on a call: short, warm, natural. One or two sentences at a time. No lists.",
     SPEAKING,
     // With Apps for an account they're open to (lib/apps-access.ts).

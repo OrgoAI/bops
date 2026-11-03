@@ -863,6 +863,10 @@ export type MemberAct =
   // An Admin's (ADMIN_ONLY), with the owner's Bops new enough (OWNER_BOPS_OLD): where a thread that waits on it runs.
   // "mac" (the owner's own Mac) stays the owner's: refused for anyone else.
   | { act: "where"; sessionId: string; to: "mac" | "cloud" }
+  // An Admin's (ADMIN_ONLY), with the owner's Bops at ADMIN_PUBLISH_MIN_VERSION (OWNER_BOPS_OLD): a bot's "How I work"
+  // (lib/types.ts Bot.persona), at most MEMBER_MAX_PERSONA characters; empty clears it. `was`: the words it started from,
+  // refused (NOT_WAITING, PERSONA_CHANGED) when the bot has others now.
+  | { act: "persona"; botId: string; text: string; was: string }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
 /**
@@ -946,7 +950,8 @@ export const ADMIN_POWERS_MIN_VERSION = "0.0.39";
 /**
  * The first Bops whose Mac publishes for an Admin (MemberAppAct env "prod", lib/server/member-acts.ts): an older one would
  * put it on the Preview, so Bops Cloud refuses it (OWNER_BOPS_OLD) for an owner whose last Mac is older. Set to the release
- * that carries it.
+ * that carries it. It also takes an Admin's change to a bot's "How I work" (the "persona" act), which an older one would
+ * drop: refused the same way.
  */
 export const ADMIN_PUBLISH_MIN_VERSION = "0.0.40";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
@@ -958,6 +963,10 @@ export const MEMBER_ACTS_A_MINUTE = 30;
 /** The most a member's message or reply may say, and a note with Deny. */
 export const MEMBER_MAX_TEXT = 8000;
 export const MEMBER_MAX_NOTE = 2000;
+/** The most a bot's "How I work" may say (the "persona" act): lib/types.ts MAX_PERSONA_CHARS, the owner's own limit. */
+export const MEMBER_MAX_PERSONA = 1500;
+/** What a change to a bot's How I work says when its words changed since the edit began (someone else saved first). */
+export const PERSONA_CHANGED = "Changed by someone else. Here's the latest.";
 /** The most threads one Stop may name ("Stop all"). */
 export const MEMBER_STOP_MAX = 20;
 /** How long an act waits for the owner's Bops to open: an older one is dropped, never done late. */

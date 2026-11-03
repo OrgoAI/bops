@@ -43,6 +43,8 @@ process.emitWarning = (warning, ...rest) => (rest[0]?.code === "MODULE_TYPELESS_
 const { parseHTML } = await import("linkedom");
 const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
 const doc = win.document;
+// React types into a box by its input event only where the document says it has one (How I work).
+doc.oninput = null;
 // Focus, as far as the tests ask: the element last focused, while it's in the page (linkedom keeps none).
 const focus = { el: null };
 win.HTMLElement.prototype.focus = function () {
@@ -60,7 +62,7 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: { us
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 /** Bops, faked: every PATCH and POST, the chart's save refused as not the owner's, and the state it keeps. */
-const bops = { sent: [], chartStatus: 200, botsStatus: 200, setState: null };
+const bops = { sent: [], chartStatus: 200, botsStatus: 200, setState: null, hold: null, botsReply: null };
 const json = (j, status = 200) => ({ ok: status < 400, status, json: async () => j });
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
@@ -75,11 +77,14 @@ globalThis.fetch = async (url, init = {}) => {
   }
   const body = JSON.parse(init.body);
   bops.sent.push({ url: u, method, body });
+  // A save held on its way (`hold`), to type while it goes.
+  if (bops.hold) await bops.hold;
   if (u === "/api/workspaces") {
     if (bops.chartStatus !== 200) return json({ error: "no" }, bops.chartStatus);
     bops.setState?.((st) => ({ ...st, workspaces: st.workspaces.map((w) => (w.id === body.id ? { ...w, chain: body.chain } : w)) }));
     return json({ ok: true });
   }
+  if (u === "/api/bots" && bops.botsReply) return json(...bops.botsReply);
   if (u === "/api/bots" && bops.botsStatus !== 200) return json({ error: "Pick one of the nine voices." }, bops.botsStatus);
   return json({ ok: true });
 };
@@ -646,6 +651,76 @@ await test("today's counts start at midnight, from the bot's own chat", async ()
 });
 
 /* ---------------- Words ---------------- */
+
+await test("How I work: typing while a Save goes keeps the new words, and the next Save starts from what was saved; an Admin's says Saved only once the owner's copy has it, and why when it didn't go", async () => {
+  /** The box with a bot and a shared workspace the test changes, as the window's state would. */
+  let set;
+  function Box({ start }) {
+    const [v, setV] = useState(start);
+    set = (patch) => act(async () => (setV((x) => ({ ...x, ...patch, bot: { ...x.bot, ...patch.bot } })), await settle()));
+    return h(Panel.HowIWork, { bot: v.bot, className: "", shared: v.shared });
+  }
+  const typeIn = (el, value) =>
+    act(async () => {
+      Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, "value").set.call(el, value);
+      el.dispatchEvent(new win.Event("input", { bubbles: true }));
+      await settle();
+    });
+  const saves = (url) => bops.sent.filter((x) => x.url === url).map((x) => x.body);
+  // The owner's own: their Save is on its way while they type more.
+  bops.sent.length = 0;
+  let release;
+  bops.hold = new Promise((r) => (release = r));
+  const own = await mount(h(Box, { start: { bot: { id: "juno", name: "Juno", persona: "Old" } } }));
+  const area = own.box.querySelector("textarea");
+  await typeIn(area, "First");
+  await click(buttonOf(own.box, "Save"));
+  await typeIn(area, "Second");
+  bops.hold = null;
+  await act(async () => (release(), await settle()));
+  await set({ bot: { persona: "First" } });
+  assert.equal(area.value, "Second", "the words typed meanwhile stay");
+  await click(buttonOf(own.box, "Save"));
+  assert.deepEqual(saves("/api/bots").map((b) => [b.persona, b.was]), [["First", "Old"], ["Second", "First"]], "the next Save starts from the saved words");
+  await set({ bot: { persona: "Second" } });
+  // Saved elsewhere while the box is unedited: it shows the new words.
+  await set({ bot: { persona: "An Admin's" } });
+  assert.equal(area.value, "An Admin's");
+  // Saved elsewhere while the owner types: their words stay until Save, which is refused and shows the latest.
+  await typeIn(area, "Mine");
+  await set({ bot: { persona: "Another Admin's" } });
+  assert.equal(area.value, "Mine");
+  bops.botsReply = [{ error: "Changed by someone else. Here's the latest.", persona: "Another Admin's" }, 409];
+  await click(buttonOf(own.box, "Save"));
+  bops.botsReply = null;
+  assert.equal(saves("/api/bots").at(-1).was, "An Admin's");
+  assert.equal(area.value, "Another Admin's");
+  assert.equal(own.box.querySelector("[role=alert]")?.textContent, "Changed by someone else. Here's the latest.");
+  await own.done();
+  // An Admin's: on its way, waiting, kept; typing meanwhile; then one that didn't go.
+  bops.sent.length = 0;
+  const adm = await mount(h(Box, { start: { bot: { id: "juno", name: "Juno", persona: "Old" }, shared: { role: "admin", personaActs: [] } } }));
+  const box = adm.box.querySelector("textarea");
+  await typeIn(box, "First");
+  await click(buttonOf(adm.box, "Save"));
+  const [first] = bops.sent.filter((x) => x.url === "/api/workspaces/shared");
+  assert.deepEqual(first.body.act, { act: "persona", botId: "juno", text: "First", was: "Old" });
+  assert.ok(buttonOf(adm.box, "Saving…"), "Saving… until the owner's copy has it");
+  await set({ shared: { role: "admin", personaActs: [{ key: first.body.key, botId: "juno", state: "waiting" }] } });
+  assert.match(adm.box.textContent, /Waiting for the owner's Bops to open\./);
+  assert.doesNotMatch(adm.box.textContent, /Saved/);
+  await typeIn(box, "Second");
+  await set({ shared: { role: "admin", personaActs: [] }, bot: { persona: "First" } });
+  assert.match(adm.box.textContent, /Saved/);
+  assert.equal(box.value, "Second");
+  await click(buttonOf(adm.box, "Save"));
+  const second = bops.sent.filter((x) => x.url === "/api/workspaces/shared")[1];
+  assert.equal(second.body.act.was, "First", "starts from the saved words");
+  await set({ shared: { role: "admin", personaActs: [{ key: second.body.key, botId: "juno", state: "failed", error: "The owner's Bops didn't open in time, so this didn't go." }] } });
+  assert.equal(adm.box.querySelector("[role=alert]")?.textContent, "The owner's Bops didn't open in time, so this didn't go.");
+  assert.ok(buttonOf(adm.box, "Save"), "Save again");
+  await adm.done();
+});
 
 await test("the words: no dashes, and Knowledge never its old name", async () => {
   const all = [...seen];

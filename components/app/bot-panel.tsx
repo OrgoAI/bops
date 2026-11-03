@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { agentLabel, defaultAgent, isCli, paysLabel } from "@/lib/agents";
-import { appsStayLine, botChatId, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, settingsOf, sharesComputer, workBot, workspaceOf, type AgentKind, type AppState, type Bot, type BotSettings, type Session } from "@/lib/types";
+import { appsStayLine, botChatId, brainRuns, keptPersona, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, settingsOf, sharesComputer, workBot, workspaceOf, type AgentKind, type AppState, type Bot, type BotSettings, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort, ownIsBops } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
-import type { BopsTier } from "@/cloud/protocol";
+import { PERSONA_CHANGED, type BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
 import { BotSkills } from "./bot-skills";
 import { chartLine, ChartIcon } from "./team-chart";
@@ -23,7 +23,8 @@ import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
-import { numberPausedUntil, readOnly, you, your, Your, yourMac } from "@/lib/shared";
+import { numberPausedUntil, readOnly, REPLY_WAITS_LINE, you, your, Your, yourMac, type SharedOpen } from "@/lib/shared";
+import { memberAct } from "./shared-act";
 import { BOOK_A_CALL } from "@/lib/links";
 import { aiKinds, aiLine, SETTINGS_WORDS, teamLine, type SettingsSection } from "@/lib/bot-settings";
 import { onCount } from "@/lib/sequences";
@@ -365,8 +366,8 @@ function Details({
         </div>
       )}
 
-      {/* Keyed by bot: another bot's profile in this tab starts from that bot's own words. */}
-      <HowIWork key={b.id} bot={b} className={glass} />
+      {/* Keyed by bot: another bot's profile in this tab starts from that bot's own words. A Member is never sent them. */}
+      {(!state.shared || state.shared.role === "admin") && <HowIWork key={b.id} bot={b} className={glass} shared={state.shared} />}
 
       {/* Never in a workspace shared with the user: it changes the owner's bot, and the viewer's own host and plan aren't the owner's. */}
       {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && !readOnly(state) && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
@@ -960,28 +961,71 @@ export function Field({ label, value, empty }: { label: string; value?: string; 
 /**
  * "How I work": what the user wants this bot to keep in mind as it works (Bot.persona), in their own
  * words. It gets it in its chat, tasks and calls as their preferences, under Bops' own rules. Saving it
- * empty clears it. Esc with unsaved words puts back what's saved.
+ * empty clears it. Esc with unsaved words puts back what's saved. Save names the words the edit began from (`base`):
+ * saved by someone else meanwhile, it's refused and the box shows theirs. Words saved elsewhere show while the box is
+ * unedited. In a workspace shared with the user as an Admin, Save goes to the owner's Bops (the "persona" act,
+ * shared-act.ts memberAct): Saved once the owner's copy has it (SharedOpen.personaActs), else why it didn't go.
  */
-export function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
-  const [text, setText] = useState(b.persona ?? "");
+export function HowIWork({ bot: b, className, shared }: { bot: Bot; className: string; shared?: SharedOpen }) {
+  const stored = b.persona ?? "";
+  const [base, setBase] = useState(stored);
+  const [text, setText] = useState(stored);
+  // The saved words as last seen, and `stale`: refused as changed by someone else, so the box takes the latest.
+  const [seen, setSeen] = useState(stored);
+  const [stale, setStale] = useState(false);
+  if (stale || stored !== seen) {
+    // Saved elsewhere, or this box's save landing: shown while the box holds what its edit began from.
+    if (stale || text === base || text.trim() === stored) {
+      setBase(stored);
+      setText(stored);
+    }
+    setStale(false);
+    setSeen(stored);
+  }
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const changed = text.trim() !== (b.persona ?? "");
+  const [sent, setSent] = useState<{ key: string; words: string } | null>(null);
+  const pending = sent ? shared?.personaActs?.find((p) => p.key === sent.key) : undefined;
+  // (A save that lands moves `base` to what it saved, words typed meanwhile kept.)
+  if (sent && !pending && stored === sent.words) {
+    setSent(null);
+    setBase(stored);
+    setSaved(true);
+  } else if (sent && pending?.state === "failed") {
+    setSent(null);
+    setError(pending.error ?? "That didn't save. Try again.");
+    // Someone else's words now: shown in place of these.
+    if (pending.error === PERSONA_CHANGED) setStale(true);
+  }
+  useEffect(() => {
+    if (!saved) return;
+    const t = setTimeout(() => setSaved(false), 1500);
+    return () => clearTimeout(t);
+  }, [saved]);
+  const changed = text.trim() !== stored;
   const left = MAX_PERSONA_CHARS - text.length;
   const save = async () => {
-    if (!changed || busy) return;
+    if (!changed || busy || sent) return;
     setBusy(true);
     setError(null);
     // What was sent: words typed while it saves stay (only the sent text is tidied).
-    const sent = text;
+    const words = text;
     try {
-      const res = await post("/api/bots", { botId: b.id, persona: sent }, "PATCH");
+      if (shared?.role === "admin") {
+        const key = crypto.randomUUID().replace(/-/g, "");
+        const r = await memberAct({ act: "persona", botId: b.id, text: words.trim(), was: base }, key);
+        if (r.ok) return setSent({ key, words: keptPersona(words) ?? "" });
+        if (r.error === PERSONA_CHANGED) setStale(true);
+        return setError(undash(r.error ?? "That didn't save. Try again."));
+      }
+      const res = await post("/api/bots", { botId: b.id, persona: words, was: base }, "PATCH");
       const r = (await res.json().catch(() => ({}))) as { error?: string };
+      if (r.error === PERSONA_CHANGED) setStale(true);
       if (!res.ok || r.error) return setError(r.error ? undash(r.error) : "That didn't save. Try again.");
-      setText((now) => (now === sent ? sent.trim() : now));
+      setBase(keptPersona(words) ?? "");
+      setText((now) => (now === words ? words.trim() : now));
       setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
     } catch {
       setError("Couldn't reach Bops. Try again.");
     } finally {
@@ -1007,7 +1051,7 @@ export function HowIWork({ bot: b, className }: { bot: Bot; className: string })
           } else if (e.key === "Escape" && changed) {
             // Puts back what's saved, and keeps the profile open (the app's Esc would leave it).
             e.preventDefault();
-            setText(b.persona ?? "");
+            setText(stored);
             setError(null);
           }
         }}
@@ -1018,10 +1062,10 @@ export function HowIWork({ bot: b, className }: { bot: Bot; className: string })
         className="w-full resize-none rounded-[12px] bg-white/70 px-3 py-2 text-[13px] leading-[18px] outline-none shadow-[0_0_0_1px_#E6E6E3] placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
       />
       <div className="flex items-center gap-2">
-        <button disabled={!changed || busy} onClick={() => void save()} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40">
-          {busy ? "Saving…" : "Save"}
+        <button disabled={!changed || busy || !!sent} onClick={() => void save()} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40">
+          {busy || sent ? "Saving…" : "Save"}
         </button>
-        {saved && <span className="motion-fade-in text-[12px] leading-4 text-[#6B6B6B]">Saved</span>}
+        {(saved || pending?.state === "waiting") && <span className="motion-fade-in text-[12px] leading-4 text-[#6B6B6B]">{saved ? "Saved" : REPLY_WAITS_LINE}</span>}
         {error && (
           <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
             {error}

@@ -1,8 +1,8 @@
-import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
+import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_PERSONA, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, PERSONA_CHANGED, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
 import { askOwnersOnly, threadOwnersOnly } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
 import { ADMIN_LINE, APP_WORK_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
-import { COMPACTED, pairChatId, workBot, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
+import { COMPACTED, keptPersona, pairChatId, workBot, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
 import type { RemoteMood } from "./live-core";
 
 /**
@@ -57,8 +57,15 @@ function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
     return c && Array.isArray(c.botIds) ? ids(c.botIds) : [];
   }
   if (act.act === "answer") return ids([d.state.approvals?.find((x) => x.id === act.askId)?.botId]);
+  if (act.act === "persona") return d.state.bots.some((b) => b.id === act.botId) ? [act.botId] : [];
   return ids((act.act === "stop" ? act.sessionIds : [act.sessionId]).map((id) => thread(id)?.botId));
 }
+
+/** Whether a bot of the copy has these How I work words (none: ""), or is gone. */
+const samePersona = (d: SharedWsState, botId: string, words: string) => {
+  const b = d.state.bots.find((x) => x.id === botId);
+  return !b || (typeof b.persona === "string" ? b.persona : "") === words;
+};
 
 /** Whether the copy has what an act did now (the owner's Bops wrote it): their words, by their key; the ask answered; the threads stopped. */
 function landed(d: SharedWsState, messages: Record<string, unknown>[], p: PendingAct): boolean {
@@ -79,6 +86,11 @@ function landed(d: SharedWsState, messages: Record<string, unknown>[], p: Pendin
     case "dismiss": {
       const t = thread(a.sessionId);
       return !t || t.dismissed === true || !LIVE.has(String(t.status));
+    }
+    // A bot's How I work: the copy has it as it's kept (or the bot went).
+    case "persona": {
+      const b = d.state.bots.find((x) => x.id === a.botId);
+      return !b || (b.persona ?? undefined) === keptPersona(a.text);
     }
     // Where it runs: picked (by them, or the owner meanwhile).
     case "where": {
@@ -229,6 +241,8 @@ export class SharedCopy {
     const levels = c.data.state.levels ?? {};
     for (const [key, p] of this.pending) {
       if (p.state !== "failed" && landed(c.data, messages, p)) this.pending.delete(key);
+      // A bot's How I work with other words now than its edit began from (someone else saved first): it won't go.
+      else if (p.state !== "failed" && p.act.act === "persona" && !samePersona(c.data, p.act.botId, p.act.was)) this.pending.set(key, { ...p, state: "failed", error: PERSONA_CHANGED });
       else if (p.state !== "failed" && (isAppAct(p.act) ? c.data.state.apps?.level !== "write" : botsOfAct(c.data, p.act).some((id) => levels[id] !== "write")))
         this.pending.set(key, { ...p, state: "failed", error: ACT_ACCESS_CHANGED });
     }
@@ -247,8 +261,8 @@ export class SharedCopy {
     if (!p) return;
     this.pending.set(key, { ...p, state });
     this.changed();
-    // Still waiting by then, it says it didn't go (acts): the window's state changes then too.
-    const t = setTimeout(() => this.pending.get(key)?.state === "waiting" && this.changed(), (p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS) + 1000);
+    // Not kept by then (waiting, or on its way and never written), it says it didn't go (acts): the window's state changes then too.
+    const t = setTimeout(() => ["waiting", "sending"].includes(this.pending.get(key)?.state ?? "") && this.changed(), (p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS) + 1000);
     (t as { unref?: () => void }).unref?.();
   }
 
@@ -292,6 +306,9 @@ export class SharedCopy {
     // An Admin whose acts the owner's Bops takes (SharedWsSlice.adminActs): the same rules as Bops Cloud and the owner's Mac (member-access.ts ADMIN_POWERS).
     const role = c.open.role;
     const admin = role === "admin" && c.data.state.adminActs === true;
+    // A bot's How I work: an Admin's (whether the owner's Bops takes it yet, Bops Cloud says: OWNER_BOPS_OLD).
+    if (act.act === "persona" && role !== "admin") return { status: 403, error: ADMIN_LINE, code: ADMIN_ONLY };
+    if (act.act === "persona" && act.text.trim().length > MEMBER_MAX_PERSONA) return { status: 400, error: ACT_TOO_LONG };
     if (act.act === "where") {
       if (role !== "admin") return { status: 403, error: ADMIN_LINE, code: ADMIN_ONLY };
       if (!admin) return c.data.state.ownerOld ? { status: 409, error: OWNER_UPDATE_LINE, code: OWNER_BOPS_OLD } : { status: 403, error: "Only the owner can pick this for now.", code: MEMBER_OWNER_ONLY };
@@ -456,7 +473,8 @@ export async function actWith(copy: SharedCopy, act: MemberAct, key: string, me:
   copy.failed(key, error);
   // No access at all (the workspace, not something in it): what a read would drop it for.
   if ((r.status === 404 && r.body?.error === "No such workspace") || r.status === 401) copy.gone();
-  else if (r.body?.code === MEMBER_READ_ONLY) void copy.refresh();
+  // Read again where the copy is behind: a bot taken down to Read, or something done or changed meanwhile.
+  else if (r.body?.code === MEMBER_READ_ONLY || r.body?.code === NOT_WAITING) void copy.refresh();
   return { ok: false, status: r.status, error, ...(r.body?.code ? { code: r.body.code } : {}) };
 }
 
@@ -654,6 +672,8 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...(s.groups ? { groups: s.groups } : {}),
       // An Admin's: the bots whose screen opens here, by id only (the computers' ids stay in this copy: sharedScreen).
       ...(open.role === "admin" && s.screens && Object.keys(s.screens).length ? { screens: Object.keys(s.screens).filter((id) => ids.has(id)) } : {}),
+      // Its bots' How I work changes on their way, for the box (bot-panel.tsx HowIWork): Saved only once the copy has them.
+      ...(acts.some((x) => x.act.act === "persona") ? { personaActs: acts.flatMap((x) => (x.act.act === "persona" ? [{ key: x.key, botId: x.act.botId, state: x.state, ...(x.error ? { error: x.error } : {}) }] : [])) } : {}),
       ...(s.apps && acts.some((x) => isAppAct(x.act)) ? { appActs: acts.filter((x) => isAppAct(x.act)).map((x) => ({ key: x.key, act: x.act as MemberAppAct, at: x.at, state: x.state, ...(x.error ? { error: x.error } : {}) })) } : {}),
     },
     // What of the user's own is worth a chime meanwhile: their own news still reaches them (lib/pings.ts).

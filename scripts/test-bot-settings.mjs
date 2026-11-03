@@ -198,6 +198,17 @@ const NEW_ON_BOT = ["callVoice", "answersCalls", "sequencesOff", "mailNever"];
   await patch({ autoApprove: false, othersMail: "ask" });
   for (const k of NEW_ON_BOT) assert.equal(k in sam(), false, `nothing of it on the bot itself (${k})`);
   console.log("PATCH /api/bots: voice, calls, sequences, replies to others, kept on the workspace");
+
+  // How I work: the owner's Save names the words it started from; changed meanwhile (an Admin's), it's refused and kept.
+  S.update(() => void Object.assign(sam(), { persona: "An Admin's words", personaBy: { name: "Ada", ownerText: "Mine" } }));
+  const stale = await patch({ persona: "Mine, again", was: "Mine" });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: "Changed by someone else. Here's the latest.", persona: "An Admin's words" });
+  assert.equal(sam().persona, "An Admin's words", "nothing overwritten");
+  assert.equal((await patch({ persona: "  Mine, again  ", was: "An Admin's words" })).status, 200);
+  assert.equal(sam().persona, "Mine, again");
+  assert.equal("personaBy" in sam(), false, "the owner's own words now: no Admin's mark");
+  console.log("PATCH /api/bots: How I work, refused over a change made meanwhile");
 }
 
 /* ---------------- The voice: its own field, Bot.voice untouched ---------------- */

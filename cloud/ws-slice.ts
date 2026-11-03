@@ -65,6 +65,8 @@ export function keep(v: unknown, spec: Spec): unknown {
 // Where its chat is answered (turns.ts mirrorOf), so an Admin's Settings shows the switch as it stands.
 const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true };
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
+/** An Admin's: its "How I work" too (Bot.persona), which they change (the "persona" act). Never a Member's. */
+const ADMIN_BOT: Spec = { ...BOT, persona: true };
 /** `readAt` is the owner's own (their unread dots), and `typing` is never synced: the moods say it. */
 const CHAT: Spec = { id: true, kind: true, botIds: true, title: true, createdAt: true, workspaceId: true };
 const SESSION: Spec = {
@@ -534,7 +536,7 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   const sites = apps ? sitesOf(s.workspace, s.bots) : undefined;
   return {
     workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
-    bots: all(s.bots, BOT),
+    bots: all(s.bots, viewer.role === "admin" ? ADMIN_BOT : BOT),
     chats: s.chats.map((c) => keepChat(c, bots)),
     sessions: s.sessions.map((x) => keepSession(x, bots, chats)),
     routines: all(s.routines, ROUTINE),

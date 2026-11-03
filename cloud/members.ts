@@ -36,6 +36,8 @@ import {
   ADMIN_PUBLISH_MIN_VERSION,
   OWNER_BOPS_OLD,
   MEMBER_ACT_MS,
+  MEMBER_MAX_PERSONA,
+  PERSONA_CHANGED,
   MEMBER_ACTS_A_MINUTE,
   STORED_ACT_MS,
   MEMBER_MAX_NOTE,
@@ -238,8 +240,8 @@ const realGate = (owner: string, min: string) => macNewEnough(owner, min);
 let gateOf: (owner: string, min: string) => Promise<boolean> = realGate;
 
 /**
- * Whether the owner's Bops takes an Admin's acts (protocol.ts ADMIN_POWERS_MIN_VERSION), or those from `min` on (Publish:
- * ADMIN_PUBLISH_MIN_VERSION): the last Mac of theirs that said its version (turns.ts macNewEnough), kept GATE_MS. An
+ * Whether the owner's Bops takes an Admin's acts (protocol.ts ADMIN_POWERS_MIN_VERSION), or those from `min` on (Publish, and a change to a bot's How
+ * I work: ADMIN_PUBLISH_MIN_VERSION): the last Mac of theirs that said its version (turns.ts macNewEnough), kept GATE_MS. An
  * older one would drop what it doesn't know, so they're refused here first (OWNER_BOPS_OLD). Never throws: no answer is a no.
  */
 export async function adminGate(owner: string, min = ADMIN_POWERS_MIN_VERSION): Promise<boolean> {
@@ -252,14 +254,17 @@ export async function adminGate(owner: string, min = ADMIN_POWERS_MIN_VERSION): 
   return yes;
 }
 
-/** Who acts, as the checks below take it: orgo-web's role (asked afresh) and whether the owner's Bops takes an Admin's acts. */
-type Actor = { role: WsRole; adminActs: boolean };
+/**
+ * Who acts, as the checks below take it: orgo-web's role (asked afresh) and whether the owner's Bops takes an Admin's acts
+ * (`adminEdits`: a change to a bot's "How I work", asked only for an Admin's "persona" act).
+ */
+type Actor = { role: WsRole; adminActs: boolean; adminEdits?: boolean };
 /** Whether an Admin with the owner's Bops new enough may do `power` (member-access.ts ADMIN_POWERS). */
 const mayAdmin = (who: Actor, power: AdminPower) => adminMay(power, who.role === "admin" && who.adminActs);
-/** For an act only an Admin does: 403 ADMIN_ONLY for anyone else, 409 OWNER_BOPS_OLD while the owner's Bops can't take it. */
-function adminOnly(who: Actor) {
+/** For an act only an Admin does: 403 ADMIN_ONLY for anyone else, 409 OWNER_BOPS_OLD while the owner's Bops can't take it (`taken`). */
+function adminOnly(who: Actor, taken = who.adminActs) {
   if (who.role !== "admin") throw new HttpError(403, ADMIN_LINE, { code: ADMIN_ONLY });
-  if (!who.adminActs) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
+  if (!taken) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
 }
 export const ADMIN_LINE = "Only the owner or an Admin can do this.";
 export const OWNER_OLD_LINE = "The owner's Bops needs an update first.";
@@ -468,6 +473,11 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
       return anId(x.sessionId) ? { key, act: { act: "dismiss", sessionId: x.sessionId } } : null;
     case "where":
       return anId(x.sessionId) && (x.to === "mac" || x.to === "cloud") ? { key, act: { act: "where", sessionId: x.sessionId, to: x.to } } : null;
+    // A bot's "How I work", trimmed: empty clears it, past MEMBER_MAX_PERSONA is refused (the box never sends more).
+    case "persona": {
+      const ok = (v: unknown): v is string => typeof v === "string" && v.trim().length <= MEMBER_MAX_PERSONA;
+      return anId(x.botId) && ok(x.text) && ok(x.was) ? { key, act: { act: "persona", botId: x.botId, text: x.text.trim(), was: x.was } } : null;
+    }
     // A chat's or a thread's: one of them, never both.
     case "compact":
       if (anId(x.chatId) === anId(x.sessionId)) return null;
@@ -627,6 +637,15 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       if (t.askWhere !== true || !liveStatus(t)) throw new HttpError(409, "That's been picked.", { code: NOT_WAITING });
       return botOf(t);
     }
+    case "persona": {
+      // An Admin's (ADMIN_POWERS.instructions), once the owner's Bops takes it (ADMIN_PUBLISH_MIN_VERSION).
+      adminOnly(who, adminMay("instructions", who.adminEdits === true));
+      const b = slice.bots.find((x) => x.id === act.botId);
+      if (!b) throw new HttpError(404, "No such bot");
+      // Changed since the edit began (the owner's Mac checks again as it saves).
+      if ((typeof b.persona === "string" ? b.persona : "") !== act.was) throw new HttpError(409, PERSONA_CHANGED, { code: NOT_WAITING });
+      return [act.botId];
+    }
     case "answer": {
       const a = slice.approvals?.find((x) => x.id === act.askId);
       if (a) {
@@ -757,7 +776,12 @@ const actIn: Route = {
     const { access: role, target } = await watchable(user!, bearer(req), projectId, { fresh: true });
     if (role.role === "owner") throw new HttpError(403, "This is your own workspace. Act in it from your Bops.", { code: OWN_WORKSPACE });
     const blob = await ownerState(target.account);
-    const actor: Actor = { role: role.role, adminActs: await adminGate(target.account) };
+    const actor: Actor = {
+      role: role.role,
+      adminActs: await adminGate(target.account),
+      // A change to a bot's How I work: an Admin's, with the owner's Bops as new as Publish needs (an older one drops it).
+      ...(role.role === "admin" && body.act.act === "persona" ? { adminEdits: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) } : {}),
+    };
     // Publish from Your Apps (env "prod"): an Admin's, with the owner's Bops new enough (an older one would put it on the Preview).
     if ((body.act.act === "deploy" || body.act.act === "rollback") && body.act.env === "prod") adminOnly({ role: role.role, adminActs: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) });
     const viewer = viewerOf(user!, role, actor.adminActs);

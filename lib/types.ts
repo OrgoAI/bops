@@ -110,6 +110,11 @@ export type Bot = {
    */
   persona?: string;
   /**
+   * Who wrote `persona` when the owner didn't (an Admin, from their own Bops: lib/server/member-acts.ts), and the owner's
+   * own last words then (`ownerText`), which work on the owner's Mac keeps to (personaOf). The owner's Save clears it.
+   */
+  personaBy?: { name: string; ownerText?: string };
+  /**
    * Keys (lib/server/keys.ts): the names of the user's API keys in their Orgo vault this bot may call
    * with call_api ("STRIPE_SECRET_KEY"). Only the names: the keys themselves never leave Orgo.
    */
@@ -204,6 +209,14 @@ export const isCallVoice = (v: unknown): v is CallVoice => typeof v === "string"
 export type LineVoice = { for: CallVoice; id: string; name: string; exact?: true };
 
 export const MAX_PERSONA_CHARS = 1500;
+/** "How I work" as it's kept (Bot.persona): trimmed, cut to MAX_PERSONA_CHARS; empty clears it. The owner's Save and an Admin's (lib/server/member-acts.ts) alike. */
+export const keptPersona = (text: string) => text.trim().slice(0, MAX_PERSONA_CHARS).trim() || undefined;
+/**
+ * The How I work a bot is given, and `by` when an Admin wrote it (Bot.personaBy). On the owner's Mac (`mac`: their own
+ * browsers, logins and files) only the owner's own words, or none: an Admin's never reach work there (ADMIN_POWERS.macThread).
+ */
+export const personaOf = (b: Pick<Bot, "persona" | "personaBy">, mac = false): { text?: string; by?: string } =>
+  !b.personaBy ? { text: b.persona } : mac ? { text: b.personaBy.ownerText } : { text: b.persona, by: b.personaBy.name };
 
 /** A workspace: one team with its own main bot, bots, chats and work. The user switches between them. */
 export type Workspace = {

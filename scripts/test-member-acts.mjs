@@ -21,7 +21,7 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const forward = (mod, names) => names.map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(mod)}].${n}(...a);`).join("\n");
 const FAKES = {
-  store: forward("store", ["bot", "chat", "getState", "ownerName", "session", "addMessage", "pullState"]),
+  store: forward("store", ["bot", "chat", "getState", "ownerName", "session", "addMessage", "pullState", "update"]),
   chat: forward("chat", ["handleMessage", "answerMessage"]),
   sessions: forward("sessions", ["replyToSession", "stopSession", "dismissWaiting", "compactThread", "setWhere"]),
   "chat-summary": forward("chat-summary", ["compactChat"]),
@@ -133,6 +133,10 @@ globalThis.__fake = {
     pullState: async () => {
       pulls++;
       onPull();
+    },
+    update: (fn) => {
+      fn(state);
+      did.push(["update"]);
     },
   },
   chat: {
@@ -654,6 +658,55 @@ await check("where a thread runs: an Admin picks the bot's computer, said in the
     assert.deepEqual(did, [], why);
     assert.ok(warned.some((w) => w.includes(`e_wn${i}`) && w.includes(why)), why);
   }
+});
+
+await check("a bot's How I work: an Admin changes it as the owner's Save does (trimmed, cut to 1500, empty clears); never a Member, never another workspace's bot", async () => {
+  fresh();
+  const persona = (id) => state.bots.find((b) => b.id === id).persona;
+  // Zed: no entry for anyone; an Admin's all the same.
+  await memberEvent(event({ act: "persona", botId: "zed", text: "  Keep replies short.  ", was: "" }, { member: ADA, role: "admin", key: "key_persona_1" }), "e_p1");
+  assert.equal(persona("zed"), "Keep replies short.");
+  await memberEvent(event({ act: "persona", botId: "zed", text: `${"x".repeat(1600)}`, was: "Keep replies short." }, { member: ADA, role: "admin", key: "key_persona_2" }), "e_p2");
+  assert.equal(persona("zed"), "x".repeat(1500), "cut to MAX_PERSONA_CHARS");
+  await memberEvent(event({ act: "persona", botId: "zed", text: "", was: "x".repeat(1500) }, { member: ADA, role: "admin", key: "key_persona_3" }), "e_p3");
+  assert.equal(persona("zed"), undefined, "empty clears it");
+  for (const [i, [o, act, why]] of [
+    // Sam has Write on Max: still not theirs.
+    [{}, { act: "persona", botId: "max", text: "Hi", was: "" }, "not an Admin"],
+    [{ member: ADA, role: "admin" }, { act: "persona", botId: "boppy", text: "Hi", was: "" }, "no such bot"],
+    [{ member: ADA, role: "admin" }, { act: "persona", botId: "max", text: 7, was: "" }, "not a member's act"],
+    [{ member: ADA, role: "admin" }, { act: "persona", botId: "max", text: "Hi" }, "not a member's act"],
+  ].entries()) {
+    fresh();
+    await memberEvent(event(act, { ...o, key: `key_persona_n${i}` }), `e_pn${i}`);
+    assert.deepEqual(did, [], why);
+    assert.equal(persona(act.botId), undefined, why);
+    assert.ok(warned.some((w) => w.includes(`e_pn${i}`) && w.includes(why)), why);
+  }
+});
+
+await check("an Admin's How I work: who wrote it is kept, the owner's own words stay for work on their Mac, the owner's chat says who changed it, a stale one is refused", async () => {
+  fresh();
+  const { personaOf } = await import(`${root}/lib/types.ts`);
+  const max = () => state.bots.find((b) => b.id === "max");
+  max().persona = "Owner's words";
+  await memberEvent(event({ act: "persona", botId: "max", text: "Ada's words", was: "Owner's words" }, { member: ADA, role: "admin", key: "key_pby_1" }), "e_pby1");
+  assert.deepEqual([max().persona, max().personaBy], ["Ada's words", { name: "Ada", ownerText: "Owner's words" }]);
+  assert.deepEqual(personaOf(max()), { text: "Ada's words", by: "Ada" }, "named as hers in its chat, tasks and calls");
+  assert.deepEqual(personaOf(max(), true), { text: "Owner's words" }, "never an Admin's words on the owner's Mac");
+  assert.ok(did.some((d) => d[0] === "add" && d[1] === "system" && d[2] === "Ada changed how Max works"), "the owner sees who changed it");
+  // Again: the owner's own words are still the ones kept for their Mac.
+  await memberEvent(event({ act: "persona", botId: "max", text: "Ada again", was: "Ada's words" }, { member: ADA, role: "admin", key: "key_pby_2" }), "e_pby2");
+  assert.deepEqual(max().personaBy, { name: "Ada", ownerText: "Owner's words" });
+  // Started from words that aren't there now (the owner, or another Admin, changed them meanwhile): nothing changes.
+  did.length = 0;
+  await memberEvent(event({ act: "persona", botId: "max", text: "Lost update", was: "Owner's words" }, { member: ADA, role: "admin", key: "key_pby_3" }), "e_pby3");
+  assert.equal(max().persona, "Ada again");
+  assert.deepEqual(did, []);
+  assert.ok(warned.some((w) => w.includes("e_pby3") && w.includes("changed since")));
+  // Written by an Admin before the owner wrote any: nothing on the owner's Mac.
+  assert.deepEqual(personaOf({ persona: "x", personaBy: { name: "Ada" } }, true), { text: undefined });
+  assert.deepEqual(personaOf({ persona: "Mine" }, true), { text: "Mine" }, "the owner's own: everywhere");
 });
 
 await check("an Admin's act on an app: Your Apps at Write with no entry, while apps are open to the owner", async () => {
