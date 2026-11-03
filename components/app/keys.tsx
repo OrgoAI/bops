@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
 import { KEYS_GIVEN_LINE, OWNERS_KEY_LINE, REPLY_WAITS_LINE } from "@/lib/shared";
-import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type LastUses, type Message, type Watch } from "@/lib/types";
+import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type FileChange, type LastUses, type Message, type Watch } from "@/lib/types";
 import { BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon, usedLine } from "./apps";
 import { Mascot } from "./mascot";
 import { anchorOf, AppRoutines, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
@@ -1105,10 +1105,14 @@ export function ApiNote({ call: c }: { call: ApiCall }) {
 }
 
 /** A request for a call_api write: the service, method and path, and the vault key Orgo sends it with (AppApproval.api). Null for another kind. */
-export function apiAskOf(a: AppApproval): { name: string; label: string; method: string; path: string } | null {
+export function apiAskOf(a: AppApproval): { name: string; label: string; method: string; path: string; change?: FileChange } | null {
   if (a.kind !== "api" || !a.api) return null;
-  return { name: a.api.key ?? a.api.label, label: a.api.label, method: a.api.method, path: a.api.path };
+  return { name: a.api.key ?? a.api.label, label: a.api.label, method: a.api.method, path: a.api.path, ...(a.api.change ? { change: a.api.change } : {}) };
 }
+
+/** What a change does to each file, in a word. */
+const FILE_OP = { add: "added", change: "changed", delete: "deleted" } as const;
+const sizeOf = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
 /**
  * The call an approval card asks about, under Details (closed until it's opened): the method, the whole path, then what
@@ -1130,10 +1134,25 @@ export function ApiAsk({ ask, detail, botName }: { ask: NonNullable<ReturnType<t
       <Fold open={open}>
         <div className="flex flex-col gap-1.5 pt-0.5">
           <div className="flex flex-col gap-1.5 rounded-xl bg-[#F7F7F6] px-3 py-2">
-            <div className="flex items-start gap-2 font-mono text-[12.5px] leading-[18px]">
-              <span className={`shrink-0 rounded-md bg-white px-1.5 text-[11.5px] font-semibold shadow-[0_0_0_1px_#E6E6E3] ${methodColor(ask.method)}`}>{ask.method}</span>
-              <span className="min-w-0 select-text text-ink [overflow-wrap:anywhere]">{ask.path}</span>
-            </div>
+            {/* A change to files in one go: each file and what happens to it, in place of a method and a path. */}
+            {ask.change ? (
+              <ul data-change-files className="flex flex-col gap-0.5 text-[12.5px] leading-[18px]">
+                {ask.change.files.map((f) => (
+                  <li key={f.path} data-change-file className="flex items-start gap-2">
+                    <span className="min-w-0 flex-1 select-text font-mono text-[12px] text-ink [overflow-wrap:anywhere]">{f.path}</span>
+                    <span className={`shrink-0 ${f.op === "delete" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
+                      {FILE_OP[f.op]}
+                      {f.bytes !== undefined ? ` · ${sizeOf(f.bytes)}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="flex items-start gap-2 font-mono text-[12.5px] leading-[18px]">
+                <span className={`shrink-0 rounded-md bg-white px-1.5 text-[11.5px] font-semibold shadow-[0_0_0_1px_#E6E6E3] ${methodColor(ask.method)}`}>{ask.method}</span>
+                <span className="min-w-0 select-text text-ink [overflow-wrap:anywhere]">{ask.path}</span>
+              </div>
+            )}
             {detail && <pre className="max-h-[180px] overflow-y-auto whitespace-pre-wrap font-mono text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">{detail}</pre>}
           </div>
           <span className="text-[12px] leading-4 text-[#6B6B6B]">

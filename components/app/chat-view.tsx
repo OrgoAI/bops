@@ -2,7 +2,7 @@
 
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
-import { alwaysScope, apiFacts, askHeadline } from "@/lib/permission";
+import { alwaysScope, apiDeletes, apiFacts, askHeadline } from "@/lib/permission";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { trackEvent } from "@/lib/analytics";
 import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, withRemoteTyping, workBot, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
@@ -3324,7 +3324,7 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
           <span className="text-[13.5px] font-semibold leading-[18px] [overflow-wrap:anywhere]">{askHeadline(name, { action: a.action, reason: a.reason && undash(a.reason) })}</span>
           {/* Bops' own words for the call, from its service and method: never the bot's reason, which can be wrong or planted. */}
           {api && (
-            <span data-ask-facts className={`text-[12px] leading-4 [overflow-wrap:anywhere] ${api.method === "DELETE" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
+            <span data-ask-facts className={`text-[12px] leading-4 [overflow-wrap:anywhere] ${apiDeletes(api) ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
               {apiFacts(api)}
             </span>
           )}

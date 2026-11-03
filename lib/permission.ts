@@ -44,11 +44,21 @@ export const askHeadline = (botName: string, a: Pick<AppApproval, "action" | "re
  * reason can be wrong, or planted by a page it read): "GitHub · adds or changes something", "Stripe · deletes something".
  * A query sent as a POST (GraphQL) and a GET that asks (Slack's) can do anything, and say so.
  */
-export function apiFacts(api: Pick<NonNullable<AppApproval["api"]>, "label" | "method" | "path">) {
+export function apiFacts(api: Pick<NonNullable<AppApproval["api"]>, "label" | "method" | "path" | "change">) {
+  // A change to files in one go: how many it changes and deletes, and on which branch ("GitHub · changes 2 files on site/orange").
+  if (api.change) {
+    const gone = api.change.files.filter((f) => f.op === "delete").length;
+    const kept = api.change.files.length - gone;
+    const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+    return `${api.label} · ${kept ? `changes ${files(kept)}${gone ? ` and deletes ${gone}` : ""}` : `deletes ${files(gone)}`} on ${api.change.branch}`;
+  }
   const method = api.method.toUpperCase();
   const what = method === "DELETE" ? "deletes something" : method === "GET" || /\/graphql(\/|$)/i.test(api.path) ? "may add, change or delete something" : "adds or changes something";
   return `${api.label} · ${what}`;
 }
+
+/** Whether a call with a key deletes something (its facts line says so, in the colour for it). */
+export const apiDeletes = (api: Pick<NonNullable<AppApproval["api"]>, "method" | "change">) => api.method.toUpperCase() === "DELETE" || !!api.change?.files.some((f) => f.op === "delete");
 
 /** What else Always allow covers of a request's kind, besides this call. */
 const ANY: Record<NonNullable<AppApproval["kind"]>, string> = {
