@@ -39,8 +39,9 @@ export const SETTINGS_WORDS = {
   roleHeader: (role: string, lead: string) => `${role} · reports to ${lead}`,
   ownMemory: "own memory",
   // Lines
-  // The org chart's own pair of words (team-chart.tsx CHART_WORDS): reports to, can ask.
-  chiefTeam: (n: number) => `Runs the team · can ask ${bots(n)}`,
+  // The org chart's own pair of words (team-chart.tsx CHART_WORDS): reports to, can ask. No one to ask yet (a team of
+  // one): that it runs the team, not "can ask 0 bots", as the chart's chiefLine says it (test-bot-settings-ui holds them alike).
+  chiefTeam: (n: number) => `Runs the team${n ? ` · can ask ${bots(n)}` : ""}`,
   reportsTo: (lead: string, asks: string) => `Reports to ${lead} · can ask ${asks}`,
   noBots: "no bots",
   byDefault: (agent: string) => `${agent} by default`,

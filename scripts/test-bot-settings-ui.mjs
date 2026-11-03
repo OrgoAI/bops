@@ -740,5 +740,12 @@ await test("the words: no dashes, and Knowledge never its old name", async () =>
   }
 });
 
+await test("the Team row says a main bot's place as the chart does: \"Runs the team\" with no one to ask, never \"can ask 0 bots\"", () => {
+  assert.equal(Words.teamLine(baseState({ bots: [SAM] }), SAM), "Runs the team", "alone in its workspace");
+  assert.match(Words.teamLine(baseState(), SAM), /^Runs the team · can ask [1-9]\d* bots?$/, "with bots to ask, how many");
+  // The row's words and the chart's line under its name (team-chart.tsx chartLine) are one wording in two places: alike for any count.
+  for (const n of [0, 1, 3]) assert.equal(Words.SETTINGS_WORDS.chiefTeam(n), CHART_WORDS.chiefLine(n), `${n}`);
+});
+
 console.log(`bot settings ui: ${passed} passed`);
 process.exit(0);
