@@ -35,7 +35,7 @@ type Older = { messages: Record<string, unknown>[]; more: boolean };
  */
 export type PendingAct = { key: string; act: MemberAct; at: number; state: MemberSend["state"]; error?: string; me: MemberSaid };
 /** What an act waiting past MEMBER_ACT_MS, or one the owner's access no longer lets go, says. */
-export const ACT_EXPIRED = "The owner's Bops didn't open in time, so this didn't go.";
+export const ACT_EXPIRED = "The workspace's Mac didn't open in time, so this didn't go.";
 export const ACT_ACCESS_CHANGED = "The owner changed your access, so this didn't go.";
 /** What one too long to send says (more than MEMBER_MAX_TEXT, or a body Bops Cloud won't take). */
 export const ACT_TOO_LONG = "That's too long to send. Make it shorter.";
