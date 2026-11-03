@@ -224,3 +224,63 @@ export const computerSummary = (access: { computer?: unknown }) => (usesComputer
 
 /** A short line for a person's Your Apps, as accessSummary words bots: "Your Apps, read"; nothing at None; "not set" before a level. */
 export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(access.apps) ? "Your Apps not set" : access.apps === "none" ? "" : `Your Apps, ${access.apps}`);
+
+/**
+ * What an Admin may do of what a Member with Write can't, each one check, wherever it's checked (Bops Cloud, the owner's
+ * Mac, the viewer's Mac and window). An Admin also needs the owner's Bops new enough (protocol.ts ADMIN_POWERS_MIN_VERSION,
+ * SharedWsSlice.adminActs): an older one would drop what it doesn't know. Off (false): still the owner's alone.
+ * - ownerAsk: answer an ask to use the owner's Connected apps or API keys (ownerOnlyAsk).
+ * - macAsk: answer an ask of a thread on the owner's Mac (a previewed action, yes or no).
+ * - macThread: tell a thread on the owner's Mac more (reply, Nothing to add): it has the owner's own browsers and logins. Off.
+ * - where: pick where an undecided thread runs ("{bot}'s computer" only: never the owner's Mac).
+ * - people: invite, remove and change people (orgo-web, and the bots a Member has: Bops Cloud).
+ * - workspace: rename the workspace, and say where its chat is answered.
+ * - wake: wake a bot's computer.
+ */
+export type AdminPower = "ownerAsk" | "macAsk" | "macThread" | "where" | "people" | "workspace" | "wake";
+export const ADMIN_POWERS: Readonly<Record<AdminPower, boolean>> = { ownerAsk: true, macAsk: true, macThread: false, where: true, people: true, workspace: true, wake: true };
+/** Never an Admin's, whatever: the side that does each refuses it (orgo-web, Bops Cloud, the owner's Mac). */
+export const OWNER_ALWAYS = ["deleteWorkspace", "transfer", "makeOwner", "billing", "allowHourly", "payment", "resize"] as const;
+/** Whether `admin` (an Admin whose acts the owner's Bops takes) may do `power`. */
+export const adminMay = (power: AdminPower, admin: boolean) => admin && ADMIN_POWERS[power];
+
+/**
+ * Why an ask is the owner's alone for this viewer (`admin`: an Admin whose acts the owner's Bops takes), or null when
+ * they may answer it (with Write on its bot): "logins" for the owner's Connected apps or keys (ownerOnlyAsk), "mac" for
+ * one of a thread on the owner's Mac. The same rule Bops Cloud, the owner's Mac and the viewer's window go by.
+ */
+export function askOwnersOnly(a: { kind?: unknown }, thread: { runsOn?: unknown } | undefined, admin: boolean): "logins" | "mac" | null {
+  if (ownerOnlyAsk(a.kind) && !adminMay("ownerAsk", admin)) return "logins";
+  if (thread?.runsOn === "mac" && !adminMay("macAsk", admin)) return "mac";
+  return null;
+}
+/** Whether telling a thread more (a reply, Nothing to add, Compact) is the owner's alone: one on the owner's Mac (macThread). */
+export const threadOwnersOnly = (thread: { runsOn?: unknown } | undefined, admin: boolean) => thread?.runsOn === "mac" && !adminMay("macThread", admin);
+
+/** Whether two entries give the same: the bots, `others`, Your Apps and Use its computer (never when they were set). */
+export const sameAccess = (a: MemberAccess, b: MemberAccess) =>
+  a.others === b.others && a.apps === b.apps && a.computer === b.computer && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
+/**
+ * Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). Your Apps
+ * comes with a bot: with none, the person's window has nothing of the workspace to open, and a Bops from before deletes
+ * such an entry whenever it saves one (its showsAny knows only bots), so the People sheet asks for a bot first.
+ */
+export const showsAny = (a: MemberAccess) => a.others !== "none" || Object.keys(a.bots).length > 0;
+
+/**
+ * A workspace's entries (Workspace.memberAccess) with one person's set to `access` (or forgotten, null), as both writers
+ * keep it: the owner's Mac (lib/server/workspaces.ts setMemberAccess) and Bops Cloud for an Admin (cloud/people.ts), so
+ * they agree. Your Apps and Use its computer: what was sent, else what was kept. Access that shows no bot is no entry.
+ * `at` when it's set (now, unless `how.at`), `invite` when set with an invite. The same map back when nothing changes.
+ */
+export function withEntry(map: MemberAccessMap | undefined, key: string, access: MemberAccess | null, how: { invite?: boolean; at?: number } = {}, now = Date.now()): MemberAccessMap | undefined {
+  const clean = access && cleanAccess(access);
+  const kept = map && Object.hasOwn(map, key) ? map[key] : undefined;
+  const apps = isAccessLevel(clean?.apps) ? clean.apps : isAccessLevel(kept?.apps) ? kept.apps : undefined;
+  const computer = isComputerUse(clean?.computer) ? clean.computer : isComputerUse(kept?.computer) ? kept.computer : undefined;
+  const withApps: MemberAccess | null = clean && { others: clean.others, bots: clean.bots, ...(apps ? { apps } : {}), ...(computer ? { computer } : {}) };
+  const keep: MemberAccess | null = withApps && showsAny(withApps) ? { ...withApps, at: how.at ?? now, ...(how.invite ? { invite: true as const } : {}) } : null;
+  if (keep ? kept && sameAccess(keep, kept) && !!kept.invite === !!keep.invite && (how.at === undefined || kept.at === how.at) : !kept) return map;
+  if (keep) return { ...map, [key]: keep };
+  return Object.fromEntries(Object.entries(map ?? {}).filter(([k]) => k !== key));
+}

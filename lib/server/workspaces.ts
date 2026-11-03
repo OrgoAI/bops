@@ -1,6 +1,6 @@
 import "server-only";
 import { appsOpen } from "@/lib/apps-access";
-import { cleanAccess, isAccessLevel, isComputerUse, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
+import { isAccessLevel, showsAny, withEntry, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
 import { chainWithout, cleanChain, leadOf, type Chain, type ChainBot } from "@/lib/chain";
 import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type AppState, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
 import { cleanFavorites } from "@/lib/favorites";
@@ -328,17 +328,8 @@ export function setFavorites(workspaceId: string, list: unknown) {
 /** The workspace the user is looking at. */
 export const currentWorkspaceId = () => getState().workspace ?? MAIN_WORKSPACE;
 
-const sameAccess = (a: MemberAccess, b: MemberAccess) =>
-  a.others === b.others && a.apps === b.apps && a.computer === b.computer && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
-
 /** `map` without `key`'s entry. */
 const without = (map: MemberAccessMap, key: string): MemberAccessMap => Object.fromEntries(Object.entries(map).filter(([k]) => k !== key));
-/**
- * Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). Your Apps
- * comes with a bot: with none, the person's window has nothing of the workspace to open, and a Bops from before deletes
- * such an entry whenever it saves one (its showsAny knows only bots), so the People sheet asks for a bot first.
- */
-const showsAny = (a: MemberAccess) => a.others !== "none" || Object.keys(a.bots).length > 0;
 
 /**
  * One person's access to a workspace's bots (Workspace.memberAccess, lib/member-access.ts), kept under
@@ -355,24 +346,21 @@ const showsAny = (a: MemberAccess) => a.others !== "none" || Object.keys(a.bots)
  * currentFor), so someone removed without this Mac seeing it never comes back to their old bots.
  */
 export function setMemberAccess(workspaceId: string, key: string, access: MemberAccess | null, how: { invite?: boolean; at?: number } = {}) {
-  const clean = access && cleanAccess(access);
-  const map = getState().workspaces?.find((w) => w.id === workspaceId)?.memberAccess;
-  const kept = map && Object.hasOwn(map, key) ? map[key] : undefined;
   // Your Apps: what was sent, else the level kept (a save that sends only bots keeps it). Never a level nobody picked:
-  // one not set yet is left so, for giveAppsRead (an entry from before the scope) and the sheet ("not set").
-  const apps = isAccessLevel(clean?.apps) ? clean.apps : isAccessLevel(kept?.apps) ? kept.apps : undefined;
-  // Use its computer: what was sent ("use" on, "none" off), else what was kept (missing reads as off). Kept as "none" once
-  // turned off, so a merge tells it from an entry an older Bops rewrote without it (state-merge.ts keepAppsLevels).
-  const computer = isComputerUse(clean?.computer) ? clean.computer : isComputerUse(kept?.computer) ? kept.computer : undefined;
-  const withApps: MemberAccess | null = clean && { others: clean.others, bots: clean.bots, ...(apps ? { apps } : {}), ...(computer ? { computer } : {}) };
-  const keep: MemberAccess | null = withApps && showsAny(withApps) ? { ...withApps, at: how.at ?? Date.now(), ...(how.invite ? { invite: true as const } : {}) } : null;
-  if (keep ? kept && sameAccess(keep, kept) && !!kept.invite === !!keep.invite && (how.at === undefined || kept.at === how.at) : !kept) return;
-  if (keep) ensureMain();
+  // one not set yet is left so, for giveAppsRead (an entry from before the scope) and the sheet ("not set"). Use its
+  // computer: what was sent ("use" on, "none" off), else what was kept (missing reads as off). Kept as "none" once turned
+  // off, so a merge tells it from an entry an older Bops rewrote without it (state-merge.ts keepAppsLevels). The same
+  // rule Bops Cloud keeps an Admin's change by (member-access.ts withEntry).
+  const map = getState().workspaces?.find((w) => w.id === workspaceId)?.memberAccess;
+  const next = withEntry(map, key, access, how);
+  if (next === map) return;
+  if (next && Object.hasOwn(next, key)) ensureMain();
   if (!getState().workspaces?.some((w) => w.id === workspaceId)) throw new Error("no such workspace");
   update((s) => {
     const x = s.workspaces?.find((y) => y.id === workspaceId);
     if (!x) return;
-    if (keep) x.memberAccess = { ...x.memberAccess, [key]: keep };
+    const now = withEntry(x.memberAccess, key, access, how);
+    if (now && Object.hasOwn(now, key)) x.memberAccess = { ...x.memberAccess, [key]: now[key] };
     else if (x.memberAccess) x.memberAccess = without(x.memberAccess, key);
   });
 }

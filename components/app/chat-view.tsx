@@ -13,7 +13,7 @@ import { appCoders } from "@/lib/hosted-apps";
 import { appsShown } from "@/lib/apps-access";
 import { appsOwnShown } from "@/lib/apps-access";
 import { crmOpen } from "@/lib/crm-access";
-import { answersAsk, canAct, computerLine, isViewerOwn, OWNER_ONLY_LINE, ownerWho, readOnly, saidBy, saidName, writesThread } from "@/lib/shared";
+import { ANSWER_WAITS_LINE, REPLY_WAITS_LINE, askAnswerer, canAct, computerLine, isViewerOwn, ownerWho, readOnly, saidBy, saidName, screenAskMine, tellsThread, threadAnswerer, whereAnswerer, writesThread } from "@/lib/shared";
 import { memberAct } from "./shared-act";
 import { MEMBER_STOP_MAX } from "@/cloud/protocol";
 import { CrmNote } from "./crm";
@@ -56,22 +56,6 @@ function repliedToWho(m: Message, state: AppState): string {
   return who === "you" || who === null ? "yourself" : who === "owner" ? "the owner" : who.name;
 }
 
-/**
- * A card in a shared workspace that only the owner can answer or act on (`only`): an ask of a bot the viewer has at
- * Read, of a thread on the owner's Mac, to use the owner's apps or keys, or to approve on the owner's phone. Dimmed,
- * nothing on it does anything, and a line says so, so it never looks like one of theirs that just doesn't work.
- */
-function OwnerOnly({ only, children }: { only: boolean; children: React.ReactNode }) {
-  if (!only) return <div className="contents">{children}</div>;
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="opacity-60" inert>
-        {children}
-      </div>
-      <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{OWNER_ONLY_LINE}</span>
-    </div>
-  );
-}
 /** Whose Mac a thread runs on or could move to, the same way: "Your Mac", or the owner's in a shared workspace. */
 const ownerMac = (state: AppState) => (state.shared ? "Owner's Mac" : "Your Mac");
 /** What a blocked thread needs (BLOCKER_ASK says it of the user), of the owner in a shared workspace. */
@@ -81,17 +65,6 @@ const OWNER_BLOCKER_ASK: Record<Blocker, string> = {
   captcha: "the owner to pass a captcha",
   payment: "the owner's OK to pay",
   error: "the owner: the page errored",
-};
-/**
- * Whether the viewer does a screen ask themselves: the owner always; an Admin of a shared workspace for a sign in, a code,
- * a captcha or a page error, when they have Write on the bot and its computer's screen is theirs to see and control
- * (computer.tsx SharedScreen). A payment stays the owner's: it spends the owner's money.
- */
-const screenAskMine = (state: AppState, botId: string, b: Blocker) => {
-  if (!state.shared) return true;
-  if (state.shared.role !== "admin" || b === "payment" || !canAct(state, [botId])) return false;
-  const bot = state.bots.find((x) => x.id === botId);
-  return !!bot && bot.runsOn !== "mac" && !!state.shared.screens?.includes(botId);
 };
 const blockerAsk = (state: AppState, b: Blocker, botId?: string) => (state.shared && !(botId && screenAskMine(state, botId, b)) ? OWNER_BLOCKER_ASK[b] : BLOCKER_ASK[b]);
 
@@ -853,7 +826,6 @@ export function ChatView({
               {/* A shared workspace's asks are the owner's to answer, but for a bot the viewer has at Write: shown, answered only then. */}
               <div className="contents">
               {shownAsks.map((x) => (
-                <OwnerOnly key={x.id} only={!writesThread(state, x) || (!!state.shared && askKind(x) === "elsewhere")}>
                 <NeedsYouCard
                   key={x.id}
                   session={x}
@@ -865,7 +837,6 @@ export function ChatView({
                   onSomethingElse={() => onOpenThread(x)}
                   onOpen={() => onOpenThread(x)}
                 />
-                </OwnerOnly>
               ))}
               {threadAsks.length > shownAsks.length && (
                 <button onClick={() => setAllAsks(true)} className="self-start pl-1 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
@@ -874,9 +845,7 @@ export function ChatView({
                 </button>
               )}
               {appAsks.map((a) => (
-                <OwnerOnly key={a.id} only={!answersAsk(state, a)}>
-                  <AppApprovalCard state={state} approval={a} className={seen.has(a.id) ? "" : "motion-rise-in"} />
-                </OwnerOnly>
+                <AppApprovalCard key={a.id} state={state} approval={a} className={seen.has(a.id) ? "" : "motion-rise-in"} />
               ))}
               </div>
             </div>
@@ -1727,6 +1696,13 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           Stop all {ro ? Math.min(runningHere.length, MEMBER_STOP_MAX) : runningHere.length}
         </button>
       )}
+      {ro && chips
+        .filter((s) => s.askWhere && live(s) && whereAnswerer(state, s) === "you")
+        .map((s) => (
+          <div key={`${s.id}-where`} className="pl-1">
+            <WhereButtons state={state} session={s} botName={state.bots.find((x) => x.id === s.botId)?.name ?? "The bot"} />
+          </div>
+        ))}
       {!ro && chips
         .filter((s) => s.askWhere && live(s))
         .map((s) => (
@@ -2558,18 +2534,8 @@ export function ThreadSheet({
             {s.askWhere && live(s) && (
               <div className="flex flex-col gap-2 rounded-[14px] bg-[#FBFFD9] px-3.5 py-3 shadow-[0_0_0_1px_#E8F28A]">
                 <span className="text-[13.5px] font-medium leading-[18px]">Where should {b.name} do this?</span>
-                <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">{state.shared ? "It starts as soon as the owner picks." : "It starts as soon as you pick. Your messages here go along with it."}</span>
-                {!state.shared && (
-                <div className="flex gap-1.5 pt-0.5">
-                  <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "mac" })} className="flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
-                    <MacIcon size={12} />
-                    {ownerMac(state)}
-                  </button>
-                  <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "cloud" })} className="rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
-                    {b.name}&rsquo;s computer
-                  </button>
-                </div>
-                )}
+                <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">{whereAnswerer(state, s) === "you" ? "It starts as soon as you pick. Your messages here go along with it." : whereAnswerer(state, s)}</span>
+                {whereAnswerer(state, s) === "you" && <WhereButtons state={state} session={s} botName={b.name} />}
               </div>
             )}
             <span className="text-[13px] leading-4 text-[#9A9A98]">
@@ -2679,15 +2645,12 @@ export function ThreadSheet({
         {waitingAsks(state, s.id).length > 0 && (
           <div className="flex flex-col gap-2 px-3 pb-2">
             {waitingAsks(state, s.id).map((a) => (
-              <OwnerOnly key={a.id} only={!answersAsk(state, a)}>
-                <AppApprovalCard state={state} approval={a} />
-              </OwnerOnly>
+              <AppApprovalCard key={a.id} state={state} approval={a} />
             ))}
           </div>
         )}
         {needsYou(s) && (
           <div className={`px-3 pb-2 ${askedAtOpen.asked ? "" : "motion-rise-in"}`}>
-            <OwnerOnly only={!writesThread(state, s) || (!!state.shared && askKind(s) === "elsewhere")}>
             <NeedsYouCard
               session={s}
               state={state}
@@ -2696,7 +2659,6 @@ export function ThreadSheet({
               onShowScreen={onShowScreen}
               onSomethingElse={() => document.getElementById("thread-reply")?.focus()}
             />
-            </OwnerOnly>
           </div>
         )}
         {readOnly(state, [s.botId]) ? (
@@ -2922,6 +2884,45 @@ function CloudIcon() {
 }
 
 /**
+ * Where an undecided thread runs (Session.askWhere), picked: the owner's Mac or the bot's computer in their own workspace;
+ * in a shared one an Admin picks the bot's computer only (the owner's Mac stays theirs), sent as their act (shared-act.ts),
+ * which the owner's Bops does as the owner's own pick. What didn't go says why.
+ */
+function WhereButtons({ state, session: s, botName }: { state: AppState; session: Session; botName: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pick = async (to: "mac" | "cloud") => {
+    setBusy(true);
+    setError(null);
+    if (state.shared) {
+      const r = await memberAct({ act: "where", sessionId: s.id, to });
+      if (!r.ok) setError(r.error ?? "That didn't go. Try again.");
+    } else await post(`/api/sessions/${s.id}/where`, { to });
+    setBusy(false);
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex gap-1.5 pt-0.5">
+        {!state.shared && (
+          <button disabled={busy} onClick={() => void pick("mac")} className="flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-50">
+            <MacIcon size={12} />
+            {ownerMac(state)}
+          </button>
+        )}
+        <button disabled={busy} onClick={() => void pick("cloud")} className={`rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50 ${state.shared ? "bg-ink text-white" : "bg-white shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"}`}>
+          {botName}&rsquo;s computer
+        </button>
+      </div>
+      {error && (
+        <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
  * A bot waiting on the user, as a card they can act on in one tap: sign it in, answer with one of the
  * replies it offered, say they approved it on their phone, let a flagged step go on, retry, or move it
  * to their Mac, instead of working out what to type back. `pinned`: over a chat's composer (lib/asks.ts
@@ -2952,8 +2953,8 @@ function NeedsYouCard({
   const [error, setError] = useState<string | null>(null);
   const b = state.bots.find((x) => x.id === s.botId);
   const name = b?.name ?? "The bot";
-  // In a shared workspace (only shown live for a viewer with Write on its bot: the caller makes it inert otherwise),
-  // answered through Bops Cloud on the owner's Bops (shared-act.ts), as the owner's own taps would be.
+  // In a shared workspace, answered through Bops Cloud on the owner's Bops (shared-act.ts), as the owner's own taps would
+  // be, by whoever may (lib/shared.ts threadAnswerer); anyone else gets the line saying who can, never buttons that do nothing.
   const writes = canAct(state, [s.botId]);
   // The viewer's own answer here since the bot last asked, as it stands until the owner's Bops has it (a shared
   // workspace: ThreadReply.memberSend): on its way the card waits, saying so; one that didn't go says why. Read from
@@ -2980,6 +2981,9 @@ function NeedsYouCard({
     else void post(`/api/sessions/${s.id}`, { dismiss: true }, "PATCH");
   };
   const kind = askKind(s);
+  const answerer = threadAnswerer(state, s, kind);
+  // Dismiss is theirs as telling the thread more is (Bops Cloud refuses it on the owner's Mac, or a computer they can't use).
+  const mayDismiss = tellsThread(state, s);
   const failed = kind === "failed";
   const display = s.display ?? s.lastDisplay;
   const busy = working || going;
@@ -3035,12 +3039,13 @@ function NeedsYouCard({
         )}
       </span>
       {question && <span className={`-mt-1 pl-4 text-[13.5px] leading-[19px] text-[#3A3A38] ${pinned ? "line-clamp-3 whitespace-pre-wrap" : ""}`}>{question}</span>}
-      {/* A sign in, a code or a check at the screen: the owner's, or an Admin's at the shared screen (screenAskMine). A brain's
-          sign in and a payment stay the owner's. Someone who can't do it gets a line saying so, never buttons that do nothing. */}
-      {state.shared && (kind === "brain" || (!!s.blocker && !screenAskMine(state, s.botId, s.blocker))) ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="pr-1 text-[12.5px] leading-[17px] text-[#6B6B6B]">{OWNER_ONLY_LINE}</span>
-          {writes && (
+      {/* Who answers it (lib/shared.ts threadAnswerer): a sign in at the screen is an Admin's at the shared screen; a payment,
+          an OK on the owner's phone and a brain's sign in stay the owner's; a thread on the owner's Mac takes nobody else's
+          words. Someone who can't gets a line saying who can, never buttons that do nothing. */}
+      {answerer !== "you" ? (
+        <div data-who-answers className="flex flex-wrap items-center gap-1.5">
+          <span className="pr-1 text-[12.5px] leading-[17px] text-[#6B6B6B]">{answerer}</span>
+          {mayDismiss && (
             <button disabled={busy} onClick={dismiss} className={plain}>
               Dismiss
             </button>
@@ -3128,7 +3133,8 @@ function NeedsYouCard({
         )}
       </div>
       )}
-      {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open."}</span>}
+      {/* A reply or Dismiss waits only a while for the owner's Bops (then says it didn't go): never the answer line's promise. */}
+      {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : REPLY_WAITS_LINE}</span>}
       {shownError && (
         <span role="alert" className="pl-1 text-[12px] leading-4 text-[#B42318]">
           {shownError}
@@ -3177,7 +3183,9 @@ const CHANNEL_NAME: Record<string, string> = { slack: "Slack", telegram: "Telegr
  * rule for the bot and this action, whoever it's for and whatever it says, which the card says under the buttons:
  * lib/permission.ts alwaysScope) and Allow once. Shown on every Bops of yours, wherever its run
  * runs (a bot's computer too): the run waits for your reply and goes on from there (lib/server/permission.ts). In a
- * shared workspace it's the owner's to answer: shown, never answered (the caller makes it inert).
+ * shared workspace it's answered by whoever may (lib/shared.ts askAnswerer: Write on its bot; the owner's apps, keys or
+ * Mac only for an Admin), sent to where the run waits through the owner's Bops; anyone else reads it all, with a line
+ * saying who can in place of the buttons.
  */
 function AppApprovalCard({ state, approval: a, className = "" }: { state: AppState; approval: AppApproval; className?: string }) {
   const [working, setBusy] = useState(false);
@@ -3210,6 +3218,7 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
   };
   const shownError = going ? null : (error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null));
   const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
+  const answerer = askAnswerer(state, a);
   return (
     <div className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${className}`}>
       <div className="flex items-start gap-2.5">
@@ -3242,6 +3251,11 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
           className="resize-none rounded-xl bg-[#F7F7F6] px-3 py-2 text-[12.5px] leading-[18px] text-ink outline-none placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
         />
       )}
+      {answerer !== "you" ? (
+        <span data-who-answers className="text-[12.5px] leading-[17px] text-[#6B6B6B]">
+          {answerer}
+        </span>
+      ) : (
       <div className="flex flex-wrap items-center gap-1.5">
         {telling ? (
           <>
@@ -3269,9 +3283,10 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
           </>
         )}
       </div>
+      )}
       {/* What Always allow covers: this bot and this action from now on, whoever it's for (lib/permission.ts). */}
-      {!telling && <span className="text-[12px] leading-4 text-[#6B6B6B]">{alwaysScope(name, a)}</span>}
-      {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open."}</span>}
+      {!telling && answerer === "you" && <span className="text-[12px] leading-4 text-[#6B6B6B]">{alwaysScope(name, a)}</span>}
+      {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
       {shownError && (
         <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
           {shownError}

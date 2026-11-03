@@ -558,10 +558,13 @@ await check("while a shared workspace is open, what its bots wait on the owner's
   assert.deepEqual(v.appApprovals, [ask], "the shared bot's unanswered request alone");
   // From a Bops Cloud before requests were shared: none.
   assert.deepEqual(viewState(mine, { ...listed, wsId: WS }, cloudState(), {}).appApprovals, []);
-  // The chat and the thread show their cards inert there (chat-view.tsx) but for a bot the viewer has at Write.
+  // The chat and the thread show their cards whole (chat-view.tsx): who answers one is the card's to say (lib/shared.ts
+  // askAnswerer), with a line in place of its buttons for anyone else. Nothing is ever switched off and left looking live.
   const src = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
-  assert.match(src, /<OwnerOnly key=\{a\.id\} only=\{!answersAsk\(state, a\)\}>/);
-  assert.equal(src.split("<OwnerOnly key={a.id} only={!answersAsk(state, a)}>").length - 1, 2, "in the chat and in the thread");
+  assert.ok(!src.includes("OwnerOnly") && !/\binert\b/.test(src), "no card made inert");
+  assert.equal(src.split("<AppApprovalCard key={a.id} state={state} approval={a}").length - 1, 2, "in the chat and in the thread");
+  assert.match(src, /const answerer = askAnswerer\(state, a\);/);
+  assert.match(src, /const answerer = threadAnswerer\(state, s, kind\);/);
   // A reply from the window never goes while a shared workspace is open (their own Bops has none of the owner's requests to answer either: test-members.mjs).
   assert.equal(callAllowed("POST", "/api/apps/approvals"), false, "a member's reply never leaves the window");
 });
@@ -713,8 +716,8 @@ await check("with Read, the composer, the thread's reply and the Routines page s
   assert.match(html, /data-read-only[^>]*>You can watch this bot\. Ask the owner for Write to chat with it\.</);
   assert.ok(!html.includes('id="composer"'), "no message box");
   assert.match(html, /Dana asked for leads/);
-  assert.match(html, /<div class="opacity-60" inert="">/, "the asks are shown, never answered");
-  assert.match(html, /Only the owner can answer this\./, "and say so");
+  assert.ok(!html.includes('<div class="opacity-60" inert="">'), "nothing switched off that still looks like a button");
+  assert.match(html, /data-who-answers[^>]*>(?:<span[^>]*>)?You can watch this bot\. Ask the owner for Write to chat with it\.</, "the asks are shown, and say who can answer them");
   // Orgo's role only says who gets in: an admin with Read watches as a member does.
   const admin = renderToStaticMarkup(h(ChatView, { ...props, state: shownState("admin") }));
   assert.match(admin, /You can watch this bot/);
@@ -725,7 +728,8 @@ await check("with Read, the composer, the thread's reply and the Routines page s
   const sheet = renderToStaticMarkup(h(ThreadSheet, { state, session: state.sessions[0], onClose: noop, onShowComputer: noop }));
   assert.match(sheet, /data-read-only[^>]*>You can watch this bot\. Ask the owner for Write to chat with it\.</);
   assert.ok(!sheet.includes('id="thread-reply"'));
-  assert.match(sheet, /inert=""/);
+  assert.match(sheet, /data-who-answers/);
+  assert.ok(!sheet.includes('<div class="opacity-60" inert="">'));
   const page = renderToStaticMarkup(h(AutopilotPage, { state, onBot: noop, onOpenWatch: noop, onOpenSkills: noop, onAsk: noop, onClose: noop }));
   assert.match(page, /data-read-only[^>]*>Only the owner changes this\.</);
   assert.match(text(page), /Morning brief/);
@@ -1536,7 +1540,12 @@ await check("a thread of the user's own that ended waiting for a sign in on its 
   const st = viewState(own(), { ...listed, role: "member", wsId: WS }, c, {});
   const html = sheet(st, st.sessions[0]);
   assert.ok(!/I signed in/.test(html) && !/Sign in for/.test(html), "a Member can't answer it there");
-  assert.match(text(html), /Only the owner can answer this\./);
+  assert.match(text(html), /You can watch this bot\. Ask the owner for Write to chat with it\./, "at Read, said so");
+  // At Write: the owner's, or an Admin's at the shared screen once the owner's Bops takes an Admin's acts.
+  const sw = viewState(own(), { ...listed, role: "member", wsId: WS }, { ...c, state: { ...c.state, levels: { boppy: "write" }, computer: "use" } }, {});
+  assert.match(text(sheet(sw, sw.sessions[0])), /Only the owner can answer this\./);
+  const swa = viewState(own(), { ...listed, role: "member", wsId: WS }, { ...c, state: { ...c.state, levels: { boppy: "write" }, computer: "use", adminActs: true } }, {});
+  assert.match(text(sheet(swa, swa.sessions[0])), /Only the owner or an Admin can answer this\./);
   assert.ok(!/inert=""[^]*Dismiss/.test(html), "nothing switched off that still looks like a button");
   // An Admin with Write on the bot and its screen: they sign in at the shared screen themselves.
   const sa = viewState(own(), { ...listed, role: "admin", wsId: WS }, c, {});
@@ -1665,14 +1674,15 @@ await check("Write: a bot at Write has the composer, its thread's reply, and its
   assert.ok(!boppy.includes('aria-label="Attach images"'), "no pictures");
   // Boppy's chat shows the team's asks (the main bot's): Boppy's live, Ava's the owner's.
   assert.ok(boppy.includes("leads@acme.test") && boppy.includes("x@acme.test"));
-  const inert = '<div class="opacity-60" inert="">';
-  assert.equal(boppy.split(inert).length - 1, 1, "only Ava's ask is inert");
-  assert.ok(boppy.indexOf(inert) < boppy.indexOf("x@acme.test") && boppy.indexOf(inert) > boppy.indexOf("leads@acme.test"), "and it's Ava's");
-  assert.equal(boppy.split("Only the owner can answer this.").length - 1, 1, "and it says so, so it doesn't look like Boppy's");
+  const line = "data-who-answers";
+  assert.equal(boppy.split(line).length - 1, 1, "only Ava's ask has a line in place of its buttons");
+  assert.ok(boppy.indexOf(line) > boppy.indexOf("x@acme.test") && boppy.indexOf("x@acme.test") > boppy.indexOf("leads@acme.test"), "and it's Ava's");
+  assert.equal(boppy.split("You can watch this bot. Ask the owner for Write to chat with it.").length - 1, 1, "and it says so, so it doesn't look like Boppy's");
+  assert.ok(!boppy.includes('<div class="opacity-60" inert="">'));
   const ava = renderToStaticMarkup(h(ChatView, chatProps(v, "bot:ava")));
   assert.ok(!ava.includes('id="composer"'));
   assert.match(ava, /data-read-only[^>]*>You can watch this bot\. Ask the owner for Write to chat with it\.</);
-  assert.match(ava, /<div class="opacity-60" inert="">/, "Ava's ask is the owner's");
+  assert.match(ava, /data-who-answers/, "Ava's ask says who can answer it");
   const group = renderToStaticMarkup(h(ChatView, chatProps(v, "g1")));
   assert.match(group, /data-read-only[^>]*>You can chat here once the owner gives you Write on every bot in it\.</);
   const sheet = renderToStaticMarkup(h(ThreadSheet, { state: v, session: v.sessions.find((x) => x.id === "s1"), onClose: noop, onShowComputer: noop }));
@@ -1681,7 +1691,7 @@ await check("Write: a bot at Write has the composer, its thread's reply, and its
   assert.ok(!text(sheet).includes("Delete"), "deleting stays the owner's");
   const avaSheet = renderToStaticMarkup(h(ThreadSheet, { state: v, session: v.sessions.find((x) => x.id === "s-ava"), onClose: noop, onShowComputer: noop }));
   assert.ok(!avaSheet.includes('id="thread-reply"'));
-  assert.match(avaSheet, /inert=""/);
+  assert.match(avaSheet, /data-who-answers/);
   // The one way out while it's open: /api/workspaces/shared. The owner's own routes stay shut.
   assert.equal(callAllowed("POST", "/api/workspaces/shared"), true);
   assert.equal(callAllowed("POST", "/api/apps/approvals"), false);
@@ -1773,8 +1783,9 @@ await check("Write: only the owner's, whatever the level: a thread on the owner'
   const v = writeView(d);
   const html = renderToStaticMarkup(h(ChatView, chatProps(v, "bot:boppy")));
   // Boppy's own email ask is live; its apps' and keys' asks (and Ava's) are the owner's, saying so.
-  assert.equal(html.split('<div class="opacity-60" inert="">').length - 1, 3);
-  assert.equal(html.split("Only the owner can answer this.").length - 1, 3);
+  assert.equal(html.split("data-who-answers").length - 1, 3);
+  assert.equal(html.split("Only the owner can answer this.").length - 1, 2, "its apps' and keys'");
+  assert.ok(!html.includes('<div class="opacity-60" inert="">'));
   const sheet = renderToStaticMarkup(h(ThreadSheet, { state: v, session: v.sessions.find((x) => x.id === "s-mac"), onClose: noop, onShowComputer: noop }));
   assert.ok(!sheet.includes('id="thread-reply"'), "no reply to a thread on the owner's Mac");
   assert.match(text(sheet), /This runs on the owner's Mac\. Only the owner can tell it more\./);
@@ -1937,6 +1948,208 @@ await check("an Admin sees a bot's computer live, with Take control and orgo.ai;
   // Its screen's plan is read from the shared workspace's own route (never /api/vnc, the user's own bot of that id).
   assert.equal(callAllowed("GET", "/api/workspaces/shared/screen?bot=boppy"), true);
   assert.equal(callAllowed("GET", "/api/vnc?bot=boppy&display=99"), false);
+});
+
+/* ---------------- Every card: live for whoever may answer it, else one line saying who can ---------------- */
+
+await check("every card kind, for every role: live buttons for whoever may answer it, else exactly one line saying who can; never a card switched off", async () => {
+  const L = await import(`${root}/lib/shared.ts`);
+  const base = { id: "s1", botId: "boppy", chatId: "bot:boppy", title: "Find leads", goal: "g", replies: [], steps: [], createdAt: 2, host: "orgo", sentVia: "you" };
+  const kinds = {
+    question: { ...base, status: "done", answer: "Which list should I use?", options: ["The new one", "The old one"] },
+    failed: { ...base, status: "failed", error: "It broke." },
+    safety: { ...base, status: "done", answer: "Shall I go on?", owed: [{ id: "o1", type: "computer", checks: [{ id: "c1", message: "A risky step" }] }] },
+    elsewhere: { ...base, status: "done", answer: "Approve it on your phone?", approveElsewhere: true },
+    sign_in: { ...base, status: "done", blocker: "sign_in", answer: "I need you to sign in.", lastDisplay: 101 },
+    payment: { ...base, status: "done", blocker: "payment", answer: "Pay?", lastDisplay: 101 },
+    mac: { ...base, status: "done", runsOn: "mac", answer: "Which list should I use?" },
+  };
+  const asks = {
+    email: { kind: "email", action: "Send an email", threadId: "s1" },
+    app: { kind: "app", action: "GMAIL_SEND_EMAIL in Gmail", threadId: "s1" },
+    api: { kind: "api", action: "Call Stripe", threadId: "s1", api: { label: "Stripe", method: "POST", path: "/v1/refunds" } },
+    old: { action: "SLACK_SEND_MESSAGE in Slack", threadId: "s1" },
+  };
+  const roles = {
+    memberRead: { role: "member", slice: { levels: { boppy: "read" } } },
+    memberWrite: { role: "member", slice: { levels: { boppy: "write" }, computer: "use" } },
+    memberAdminsAct: { role: "member", slice: { levels: { boppy: "write" }, computer: "use", adminActs: true } },
+    memberNoComputer: { role: "member", slice: { levels: { boppy: "write" } } },
+    admin: { role: "admin", slice: { levels: { boppy: "write" }, computer: "use", adminActs: true, screens: { boppy: "comp_1" } } },
+    adminOld: { role: "admin", slice: { levels: { boppy: "write" }, computer: "use", ownerOld: true, screens: { boppy: "comp_1" } } },
+    adminOldCloud: { role: "admin", slice: { levels: { boppy: "write" }, computer: "use", screens: { boppy: "comp_1" } } },
+  };
+  const view = (role, sessions, approvals = []) => {
+    if (role === "owner") return { ...own(), sessions, appApprovals: approvals };
+    const c = cloudState();
+    c.role = roles[role].role;
+    c.state = { ...c.state, ...roles[role].slice, sessions, approvals };
+    return viewState(own(), { ...listed, role: roles[role].role, wsId: WS }, c, {});
+  };
+  const sheet = (st) => renderToStaticMarkup(h(ThreadSheet, { state: st, session: st.sessions[0], onClose: noop, onShowComputer: noop, onShowScreen: noop }));
+  const LINES = [L.OWNER_ONLY_LINE, L.OWNER_OR_ADMIN_LINE, L.OWNER_UPDATE_LINE, L.OWNER_PHONE_LINE, L.OWNER_PAY_LINE, L.ON_MAC_LINE, L.NO_COMPUTER_LINE, "You can watch this bot. Ask the owner for Write to chat with it."];
+  const live = { question: /The new one/, failed: /Try again/, safety: /Go on/, elsewhere: /Done, I approved it/, sign_in: /Sign in for /, payment: /Review the payment/, mac: /Answer/ };
+  // Who answers each, by role: "you" (live) or the line.
+  const want = {
+    question: { owner: "you", memberRead: 7, memberWrite: "you", memberAdminsAct: "you", memberNoComputer: 6, admin: "you", adminOld: "you", adminOldCloud: "you" },
+    failed: { owner: "you", memberRead: 7, memberWrite: "you", memberAdminsAct: "you", memberNoComputer: 6, admin: "you", adminOld: "you", adminOldCloud: "you" },
+    safety: { owner: "you", memberRead: 7, memberWrite: "you", memberAdminsAct: "you", memberNoComputer: 6, admin: "you", adminOld: "you", adminOldCloud: "you" },
+    elsewhere: { owner: "you", memberRead: 3, memberWrite: 3, memberAdminsAct: 3, memberNoComputer: 3, admin: 3, adminOld: 3, adminOldCloud: 3 },
+    sign_in: { owner: "you", memberRead: 7, memberWrite: 0, memberAdminsAct: 1, memberNoComputer: 0, admin: "you", adminOld: "you", adminOldCloud: "you" },
+    payment: { owner: "you", memberRead: 4, memberWrite: 4, memberAdminsAct: 4, memberNoComputer: 4, admin: 4, adminOld: 4, adminOldCloud: 4 },
+    mac: { owner: "you", memberRead: 7, memberWrite: 5, memberAdminsAct: 5, memberNoComputer: 5, admin: 5, adminOld: 5, adminOldCloud: 5 },
+  };
+  const card = (html) => {
+    const c = html.slice(html.indexOf("rounded-2xl bg-[#FBFFE0]"));
+    const end = [c.indexOf("data-read-only"), c.indexOf('id="thread-reply"')].filter((i) => i > 0);
+    return end.length ? c.slice(0, Math.min(...end)) : c;
+  };
+  for (const [k, s] of Object.entries(kinds))
+    for (const role of ["owner", ...Object.keys(roles)]) {
+      const html = sheet(view(role, [s]));
+      const c = card(html);
+      assert.ok(!html.includes('<div class="opacity-60" inert="">'), `${k} ${role}: never switched off`);
+      const w = want[k][role];
+      const said = LINES.filter((l) => text(c).includes(l));
+      if (w === "you") {
+        assert.match(text(c), live[k], `${k} ${role}: live`);
+        assert.ok(!c.includes("data-who-answers"), `${k} ${role}: no line`);
+      } else {
+        assert.equal(c.split("data-who-answers").length - 1, 1, `${k} ${role}: one line`);
+        assert.deepEqual(said, [LINES[w]], `${k} ${role}: ${LINES[w]}`);
+        assert.ok(!live[k].test(text(c)), `${k} ${role}: no live buttons`);
+      }
+    }
+  // The asks (Deny, Always allow, Allow once), on a thread on the bot's computer.
+  const askWant = {
+    email: { owner: "you", memberRead: 7, memberWrite: "you", memberAdminsAct: "you", memberNoComputer: 6, admin: "you", adminOld: "you", adminOldCloud: "you" },
+    app: { owner: "you", memberRead: 7, memberWrite: 0, memberAdminsAct: 1, memberNoComputer: 0, admin: "you", adminOld: 2, adminOldCloud: 0 },
+  };
+  askWant.api = askWant.app;
+  askWant.old = askWant.app;
+  const thread = { ...base, status: "running" };
+  for (const [k, a] of Object.entries(asks))
+    for (const role of ["owner", ...Object.keys(roles)]) {
+      const ask = { id: `apr-${k}`, botId: "boppy", chatId: "bot:boppy", resources: ["leads@acme.test"], preview: "to: leads@acme.test", at: 4, ...a };
+      const st = view(role, [thread], [ask]);
+      const html = renderToStaticMarkup(h(ThreadSheet, { state: st, session: st.sessions[0], onClose: noop, onShowComputer: noop }));
+      const c0 = html.slice(html.indexOf("shadow-[0_0_0_1px_#0000000F"));
+      const c = c0.slice(0, c0.indexOf("data-read-only") > 0 ? c0.indexOf("data-read-only") : undefined);
+      const w = askWant[k][role];
+      assert.ok(!html.includes('<div class="opacity-60" inert="">'), `${k} ${role}: never switched off`);
+      if (w === "you") assert.ok(/Allow once/.test(text(c)) && !c.includes("data-who-answers"), `ask ${k} ${role}: live`);
+      else {
+        assert.ok(!/Allow once|Always allow|Deny/.test(text(c)), `ask ${k} ${role}: no buttons`);
+        assert.deepEqual(LINES.filter((l) => text(c).includes(l)), [LINES[w]], `ask ${k} ${role}`);
+      }
+      // And the viewer's Mac refuses exactly what the card doesn't offer (lib/server/shared-core.ts refusal).
+      if (role === "owner") continue;
+      const d = cloudState();
+      d.role = roles[role].role;
+      d.state = { ...d.state, ...roles[role].slice, sessions: [thread], approvals: [ask] };
+      const copy = new SharedCopy(fakeRead({ status: 200, body: d }).read);
+      await copy.open({ ...listed, role: roles[role].role });
+      assert.equal(copy.refusal({ act: "answer", askId: ask.id, reply: "once" }) === null, w === "you", `refusal ${k} ${role}`);
+    }
+  // An Admin answers an ask of a thread on the owner's Mac (a previewed action); a Member never.
+  const macAsk = { id: "apr-mac", botId: "boppy", chatId: "bot:boppy", threadId: "s1", kind: "email", action: "Send an email", resources: [], at: 4 };
+  assert.equal(L.answersAsk(view("admin", [kinds.mac], [macAsk]), macAsk), true);
+  assert.equal(L.answersAsk(view("memberWrite", [kinds.mac], [macAsk]), macAsk), false);
+  // Dismiss on a line: only where telling the thread more is theirs (never on the owner's Mac, nor at Read).
+  const dismissed = (role, s) => /Dismiss/.test(text(card(sheet(view(role, [s])))));
+  assert.equal(dismissed("memberWrite", kinds.sign_in), true, "a Member at Write may still say they're done with it");
+  assert.equal(dismissed("memberRead", kinds.sign_in), false);
+  assert.equal(dismissed("memberWrite", { ...kinds.sign_in, runsOn: "mac" }), false, "not on the owner's Mac");
+  assert.equal(dismissed("memberNoComputer", kinds.sign_in), false, "nor on a computer they can't use");
+});
+
+await check("where a thread runs: an Admin picks the bot's computer (never the owner's Mac), a Member reads who can; refused here first otherwise, and it lands once picked", async () => {
+  const L = await import(`${root}/lib/shared.ts`);
+  const where = { id: "s-where", botId: "boppy", chatId: "bot:boppy", title: "Plan a trip", goal: "g", status: "queued", askWhere: true, replies: [], steps: [], createdAt: 2, host: "orgo", sentVia: "you" };
+  const view = (role, slice) => {
+    const c = cloudState();
+    c.role = role;
+    c.state = { ...c.state, levels: { boppy: "write" }, computer: "use", ...slice, sessions: [where, { ...c.state.sessions[0], status: "running" }] };
+    return { c, v: viewState(own(), { ...listed, role, wsId: WS }, c, {}) };
+  };
+  const sheetOf = (v) => text(renderToStaticMarkup(h(ThreadSheet, { state: v, session: v.sessions[0], onClose: noop, onShowComputer: noop })));
+  const admin = view("admin", { adminActs: true });
+  assert.match(sheetOf(admin.v), /Where should Dana's Boppy do this\? It starts as soon as you pick\./);
+  assert.match(sheetOf(admin.v), /Dana's Boppy.s computer/);
+  assert.ok(!/Owner's Mac/.test(sheetOf(admin.v)), "the owner's Mac stays theirs to pick");
+  assert.match(sheetOf(view("admin", { ownerOld: true }).v), new RegExp(L.OWNER_UPDATE_LINE.replace(/[.']/g, ".")));
+  assert.match(sheetOf(view("member", { adminActs: true }).v), /It starts as soon as the owner or an Admin picks\./);
+  assert.match(sheetOf(view("member", {}).v), /It starts as soon as the owner picks\./);
+  assert.ok(!/computer$/.test(sheetOf(view("member", {}).v).trim()));
+  const copyOf = async (role, slice) => {
+    const { c } = view(role, slice);
+    const fake = fakeRead({ status: 200, body: c });
+    const copy = new SharedCopy(fake.read);
+    await copy.open({ ...listed, role });
+    return { copy, fake, c };
+  };
+  const a = await copyOf("admin", { adminActs: true });
+  assert.equal(a.copy.refusal({ act: "where", sessionId: "s-where", to: "cloud" }), null);
+  assert.equal(a.copy.refusal({ act: "where", sessionId: "s-where", to: "mac" }).code, "member_owner_only");
+  assert.equal(a.copy.refusal({ act: "where", sessionId: "s1", to: "cloud" }).code, "not_waiting");
+  assert.equal((await copyOf("admin", { ownerOld: true })).copy.refusal({ act: "where", sessionId: "s-where", to: "cloud" }).code, "owner_bops_old");
+  assert.equal((await copyOf("member", { adminActs: true })).copy.refusal({ act: "where", sessionId: "s-where", to: "cloud" }).code, "admin_only");
+  // Sent, then picked on the owner's Bops: it lands.
+  const sent = [];
+  const r = await actWith(a.copy, { act: "where", sessionId: "s-where", to: "cloud" }, "key_where_0001", sam, async (b) => (sent.push(JSON.parse(b)), { status: 202, body: { ok: true, macOn: true } }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(sent[0].act, { act: "where", sessionId: "s-where", to: "cloud" });
+  assert.equal(a.copy.acts().length, 1);
+  a.copy["read"] = fakeRead({ status: 200, body: { ...a.c, hash: "h-picked", state: { ...a.c.state, sessions: [{ ...where, askWhere: false, runsOn: "cloud", status: "running" }, a.c.state.sessions[1]] } } }).read;
+  await a.copy.refresh();
+  assert.equal(a.copy.acts().length, 0, "landed");
+});
+
+await check("an answer waits as long as its ask: a Member's or an Admin's is still on its way after ten minutes, and says the owner's Bops is closed", async () => {
+  const c = cloudState("running");
+  c.state = { ...c.state, levels: { boppy: "write" }, computer: "use", approvals: [{ id: "apr-x", botId: "boppy", chatId: "bot:boppy", threadId: "s1", kind: "email", action: "Send an email", resources: [], at: 4 }] };
+  const copy = new SharedCopy(fakeRead({ status: 200, body: c }).read);
+  await copy.open(listed);
+  let t = 1_000_000;
+  copy.now = () => t;
+  await actWith(copy, { act: "answer", askId: "apr-x", reply: "once" }, "key_answer_0001", sam, async () => ({ status: 202, body: { ok: true, macOn: false } }));
+  await actWith(copy, { act: "reply", sessionId: "s1", text: "more" }, "key_reply_00001", sam, async () => ({ status: 202, body: { ok: true, macOn: false } }));
+  t += 11 * 60_000;
+  const acts = Object.fromEntries(copy.acts().map((p) => [p.act.act, p]));
+  assert.equal(acts.answer.state, "waiting", "the answer still goes when the owner's Bops opens");
+  assert.equal(acts.reply.state, "failed");
+  t += 24 * 3_600_000;
+  assert.equal(copy.acts().find((p) => p.act.act === "answer").state, "failed", "not past a day");
+  const v = viewState(own(), copy.openNow(), copy.data(), {}, copy.acts().map((p) => ({ ...p, state: "waiting" })));
+  const html = text(renderToStaticMarkup(h(ThreadSheet, { state: v, session: v.sessions[0], onClose: noop, onShowComputer: noop })));
+  assert.match(html, /The owner's Bops is closed\. Your answer goes when it opens\./);
+});
+
+await check("the owner's app work: an app thread's ask or question is answered only with Your Apps at Write (an Admin has it), else one line; refused here first; a reply waiting says only that it waits", async () => {
+  const L = await import(`${root}/lib/shared.ts`);
+  const t = { id: "t-app", botId: "boppy", app: { name: "site" } };
+  const st = (shared) => ({ shared: { projectId: "p", name: "W", owner: "", wsId: WS, levels: { boppy: "write" }, computer: true, ...shared }, sessions: [t], bots: [{ id: "boppy" }] });
+  const ask = { botId: "boppy", kind: "email", threadId: "t-app" };
+  assert.equal(L.askAnswerer(st({ role: "member" }), ask), L.APP_WORK_LINE, "no Your Apps");
+  assert.equal(L.askAnswerer(st({ role: "member", apps: { level: "read", list: [] } }), ask), L.APP_WORK_LINE, "Your Apps at Read");
+  assert.equal(L.askAnswerer(st({ role: "member", apps: { level: "write", list: [] } }), ask), "you");
+  assert.equal(L.askAnswerer(st({ role: "admin", adminActs: true, apps: { level: "write", list: [] } }), ask), "you", "an Admin");
+  assert.equal(L.threadAnswerer(st({ role: "member" }), t, "question"), L.APP_WORK_LINE);
+  assert.equal(L.writesThread(st({ role: "member" }), t), false);
+  assert.equal(L.askAnswerer(st({ role: "member" }), { ...ask, threadId: "t-other" }), "you", "only an app thread");
+  // The viewer's Mac says no first, as Bops Cloud and the owner's Mac do.
+  const c = cloudState("running");
+  c.state = { ...c.state, levels: { boppy: "write" }, computer: "use", sessions: [{ ...c.state.sessions[0], id: "t-app", app: { name: "site" } }], approvals: [{ id: "apr-app", botId: "boppy", chatId: "bot:boppy", threadId: "t-app", kind: "email", action: "Send an email", resources: [], at: 4 }] };
+  const copy = new SharedCopy(fakeRead({ status: 200, body: c }).read);
+  await copy.open(listed);
+  assert.deepEqual(copy.refusal({ act: "answer", askId: "apr-app", reply: "once" }), { status: 403, error: L.APP_WORK_LINE, code: "member_apps_read_only" });
+  assert.equal(copy.refusal({ act: "reply", sessionId: "t-app", text: "x" }).code, "member_apps_read_only");
+  // A reply or Dismiss on its way waits only a while: its card never makes the answer's promise.
+  const src = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
+  const from = src.indexOf("function NeedsYouCard(");
+  const card = src.slice(from, src.indexOf("\nfunction ", from + 1));
+  assert.ok(card.includes("REPLY_WAITS_LINE") && !card.includes("ANSWER_WAITS_LINE"));
+  assert.equal(L.REPLY_WAITS_LINE, "Waiting for the owner's Bops to open.");
 });
 
 console.log(`${passed} passed, ${failures} failed`);

@@ -1,7 +1,7 @@
-import { isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
-import { ownerOnlyAsk } from "@/lib/member-access";
+import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
+import { askOwnersOnly, threadOwnersOnly } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
-import { ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
+import { ADMIN_LINE, APP_WORK_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
 import { COMPACTED, pairChatId, workBot, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
 import type { RemoteMood } from "./live-core";
 
@@ -79,6 +79,11 @@ function landed(d: SharedWsState, messages: Record<string, unknown>[], p: Pendin
     case "dismiss": {
       const t = thread(a.sessionId);
       return !t || t.dismissed === true || !LIVE.has(String(t.status));
+    }
+    // Where it runs: picked (by them, or the owner meanwhile).
+    case "where": {
+      const t = thread(a.sessionId);
+      return !t || t.askWhere !== true || !LIVE.has(String(t.status));
     }
     // A chat's: its line, by their key. A thread's: once it ran again and ended (its line, or why it couldn't, is in its steps).
     case "compact": {
@@ -243,7 +248,7 @@ export class SharedCopy {
     this.pending.set(key, { ...p, state });
     this.changed();
     // Still waiting by then, it says it didn't go (acts): the window's state changes then too.
-    const t = setTimeout(() => this.pending.get(key)?.state === "waiting" && this.changed(), MEMBER_ACT_MS + 1000);
+    const t = setTimeout(() => this.pending.get(key)?.state === "waiting" && this.changed(), (p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS) + 1000);
     (t as { unref?: () => void }).unref?.();
   }
 
@@ -260,10 +265,14 @@ export class SharedCopy {
     if (this.pending.delete(key)) this.changed();
   }
 
-  /** What's still on its way, as it stands now: one waiting longer than MEMBER_ACT_MS for the owner's Bops didn't go. */
+  /**
+   * What's still on its way, as it stands now: one waiting longer than MEMBER_ACT_MS for the owner's Bops didn't go. An
+   * answer waits as long as its ask can (STORED_ACT_MS, as Bops Cloud keeps it): the run waits for it too.
+   */
   acts(): PendingAct[] {
     const now = this.now();
-    return [...this.pending.values()].map((p) => (p.state !== "failed" && now - p.at > MEMBER_ACT_MS ? { ...p, state: "failed" as const, error: ACT_EXPIRED } : p));
+    const ms = (p: PendingAct) => (p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS);
+    return [...this.pending.values()].map((p) => (p.state !== "failed" && now - p.at > ms(p) ? { ...p, state: "failed" as const, error: ACT_EXPIRED } : p));
   }
 
   /** Why the user can't do this here, from the copy (Bops Cloud decides, this only saves a round trip), or null. */
@@ -280,15 +289,33 @@ export class SharedCopy {
     }
     const bots = botsOfAct(c.data, act);
     if (!bots.length) return { status: 404, error: "That's gone from the workspace." };
+    // An Admin whose acts the owner's Bops takes (SharedWsSlice.adminActs): the same rules as Bops Cloud and the owner's Mac (member-access.ts ADMIN_POWERS).
+    const role = c.open.role;
+    const admin = role === "admin" && c.data.state.adminActs === true;
+    if (act.act === "where") {
+      if (role !== "admin") return { status: 403, error: ADMIN_LINE, code: ADMIN_ONLY };
+      if (!admin) return c.data.state.ownerOld ? { status: 409, error: OWNER_UPDATE_LINE, code: OWNER_BOPS_OLD } : { status: 403, error: "Only the owner can pick this for now.", code: MEMBER_OWNER_ONLY };
+    }
     const levels = c.data.state.levels ?? {};
     if (!bots.every((id) => levels[id] === "write")) return { status: 403, error: "You can watch this bot, not act for it. Ask the owner for Write.", code: MEMBER_READ_ONLY };
     // What only the owner does, whatever the level (cloud/members.ts botsTouched says the same).
-    const onMac = (id: unknown) => typeof id === "string" && c.data.state.sessions.some((x) => x.id === id && x.runsOn === "mac");
-    if ((act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act)) && onMac(act.sessionId)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    const thread = (id: unknown) => (typeof id === "string" ? c.data.state.sessions.find((x) => x.id === id) : undefined);
+    if ((act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act)) && threadOwnersOnly(thread(act.sessionId), admin)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    // The owner's app work: Your Apps at Write too (cloud/members.ts appWorkRefused).
+    const appThread = act.act === "answer" ? thread(c.data.state.approvals?.find((x) => x.id === act.askId)?.threadId) : act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act) ? thread(act.sessionId) : undefined;
+    if (appThread && "app" in appThread && !!appThread.app && c.data.state.apps?.level !== "write") return { status: 403, error: APP_WORK_LINE, code: MEMBER_APPS_READ_ONLY };
+    if (act.act === "where") {
+      if (act.to === "mac") return { status: 403, error: "Only the owner can run this on their Mac.", code: MEMBER_OWNER_ONLY };
+      const t = thread(act.sessionId);
+      if (!t || t.askWhere !== true || !LIVE.has(String(t.status))) return { status: 409, error: "That's been picked.", code: NOT_WAITING };
+    }
     if (act.act === "answer") {
       const a = c.data.state.approvals?.find((x) => x.id === act.askId);
-      if (a && ownerOnlyAsk(a.kind)) return { status: 403, error: THEIR_LOGINS, code: MEMBER_OWNER_ONLY };
-      if (a && onMac(a.threadId)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+      const why = a ? askOwnersOnly(a, thread(a.threadId), admin) : null;
+      // An Admin's to answer once the owner's Bops is new enough (ownerOld): said so, not "only the owner".
+      if (why && role === "admin" && c.data.state.ownerOld && !askOwnersOnly(a!, thread(a!.threadId), true)) return { status: 409, error: OWNER_UPDATE_LINE, code: OWNER_BOPS_OLD };
+      if (why === "logins") return { status: 403, error: THEIR_LOGINS, code: MEMBER_OWNER_ONLY };
+      if (why === "mac") return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
     }
     // Work on a bot's computer: only with Use its computer (cloud/members.ts computerAct says the same). Stop still ends it.
     if (!c.data.state.computer) {
@@ -299,7 +326,7 @@ export class SharedCopy {
       };
       const a = act.act === "answer" ? c.data.state.approvals?.find((x) => x.id === act.askId) : undefined;
       const touches =
-        act.act === "reply" || act.act === "dismiss" ? onComputer(act.sessionId) : act.act === "compact" ? "sessionId" in act && onComputer(act.sessionId) : !!a && (typeof a.threadId === "string" ? onComputer(a.threadId) : hasComputer(a.botId));
+        act.act === "reply" || act.act === "dismiss" || act.act === "where" ? onComputer(act.sessionId) : act.act === "compact" ? "sessionId" in act && onComputer(act.sessionId) : !!a && (typeof a.threadId === "string" ? onComputer(a.threadId) : hasComputer(a.botId));
       if (touches) return { status: 403, error: NO_COMPUTER, code: MEMBER_NO_COMPUTER };
     }
     return null;
@@ -461,7 +488,9 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   const ws = open.wsId;
   const s = data.state;
   // The site each bot works on, when the owner gave the user Your Apps (cloud/ws-slice.ts sitesOf): read as the owner's are (siteOf).
-  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}) };
+  // Where its chat is answered (an Admin's Settings shows the switch: chat-switch.tsx), as Bops Cloud mirrors it.
+  const chatOn = s.workspace?.chatOn === "cloud" || s.workspace?.chatOn === "mac" ? { chatOn: s.workspace.chatOn as "cloud" | "mac" } : {};
+  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}), ...chatOn, ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}) };
   const bots = s.bots.map((b) => ({ computerStatus: "none", role: "", color: "#0A0A0A", isMain: false, ...b, workspaceId: ws }) as unknown as Bot);
   const ids = new Set(bots.map((b) => b.id));
   // Who's typing, from the stream's moods: the owner's Bops says a bot typing in a chat as "thinking" there
@@ -614,6 +643,9 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       levels: s.levels ?? {},
       // Use its computer, when the owner turned it on for them (cloud/ws-slice.ts computerUseOf).
       ...(s.computer === "use" ? { computer: true } : {}),
+      // The owner's Bops takes an Admin's acts (cloud/ws-slice.ts sharedSlice), or, for an Admin, not yet.
+      ...(s.adminActs ? { adminActs: true as const } : {}),
+      ...(s.ownerOld && open.role === "admin" ? { ownerOld: true as const } : {}),
       ...(data.you ? { you: data.you } : {}),
       // Your Apps, when the owner gave it (cloud/ws-slice.ts appsFor), and what the user did to them that hasn't landed.
       ...(s.apps ? { apps: s.apps } : {}),

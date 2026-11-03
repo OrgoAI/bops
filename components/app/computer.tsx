@@ -1247,6 +1247,8 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 py-2 text-[14px] leading-5 text-[#6B6B6B]">
         <span>{`${b.name} works on ${b.runsOn === "mac" ? yourMac(state) : "the owner's computer"}. Its work shows in the chat.`}</span>
         {orgoUrl && <OrgoLink href={orgoUrl} label={state.shared.role === "admin" ? SHARED_SCREEN_WORDS.open : SHARED_SCREEN_WORDS.watch} />}
+        {/* Someone who may use it wakes it here too, as a message to the bot would (Bops Cloud, with the owner's say on an hourly bill). */}
+        {b.runsOn !== "mac" && state.shared.computer && !readOnly(state, [b.id]) && cloudWakes(state) && <WakeButton botId={b.id} />}
       </p>
     );
   }
@@ -1298,6 +1300,38 @@ function OrgoLink({ href, label }: { href: string; label: string }) {
  * watched, and theirs to click and type on once they take control. Streamed with their own Orgo key
  * (/api/workspaces/shared/screen). When it can't open (asleep, or Orgo said no), it says so and points at orgo.ai.
  */
+/** Whether the shared workspace's Bops Cloud wakes a computer when asked (one with Admin powers says adminActs or ownerOld). */
+const cloudWakes = (state: AppState) => !!state.shared?.adminActs || !!state.shared?.ownerOld;
+
+/**
+ * Wake a shared workspace's bot's computer (POST /api/workspaces/shared/wake: Bops Cloud wakes it as a message to the bot
+ * would, so a computer billed by the hour wakes only where the owner lets messages wake it). Says why when it won't.
+ */
+function WakeButton({ botId, onAwake }: { botId: string; onAwake?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  const wake = async () => {
+    setBusy(true);
+    setSaid(null);
+    const res = await fetch("/api/workspaces/shared/wake", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ botId }) }).catch(() => null);
+    const j = ((await res?.json().catch(() => null)) ?? {}) as { ok?: boolean; why?: string; error?: string };
+    setBusy(false);
+    if (res?.ok && j.ok) {
+      setSaid(SHARED_SCREEN_WORDS.waking);
+      // Its screen comes once it's up: about a minute.
+      if (onAwake) setTimeout(onAwake, 20_000);
+    } else setSaid(j.why ?? j.error ?? "Couldn't wake it. Try again.");
+  };
+  return (
+    <>
+      <button type="button" disabled={busy} onClick={() => void wake()} className="rounded-full px-2.5 py-1 text-[13px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-black/[0.04] disabled:opacity-50">
+        {SHARED_SCREEN_WORDS.wake}
+      </button>
+      {said && <span role="status" className="basis-full text-[12.5px] leading-4 text-[#6B6B6B]">{said}</span>}
+    </>
+  );
+}
+
 function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
   const [failed, setFailed] = useState(false);
   const [control, setControl] = useState(false);
@@ -1309,6 +1343,7 @@ function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
         <button type="button" onClick={() => setFailed(false)} className="rounded-full px-2.5 py-1 text-[13px] font-medium leading-4 text-ink hover:bg-black/[0.04]">
           Try again
         </button>
+        {cloudWakes(state) && <WakeButton botId={b.id} onAwake={() => setFailed(false)} />}
         {orgoUrl && <OrgoLink href={orgoUrl} label={SHARED_SCREEN_WORDS.open} />}
       </p>
     );

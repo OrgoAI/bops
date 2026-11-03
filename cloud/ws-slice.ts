@@ -62,7 +62,8 @@ export function keep(v: unknown, spec: Spec): unknown {
   return out;
 }
 
-const WORKSPACE: Spec = { id: true, name: true, createdAt: true };
+// Where its chat is answered (turns.ts mirrorOf), so an Admin's Settings shows the switch as it stands.
+const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true };
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
 /** `readAt` is the owner's own (their unread dots), and `typing` is never synced: the moods say it. */
 const CHAT: Spec = { id: true, kind: true, botIds: true, title: true, createdAt: true, workspaceId: true };
@@ -148,7 +149,7 @@ const WATCH: Spec = {
  * someone given that bot sees what its thread waits on. Never the reply, which device asked, or what resumes its
  * run: answering is the owner's alone, from a Bops of their own.
  */
-const APPROVAL: Spec = { id: true, botId: true, chatId: true, threadId: true, routineId: true, action: true, resources: true, preview: true, kind: true, api: { label: true, method: true, path: true }, at: true };
+const APPROVAL: Spec = { id: true, botId: true, chatId: true, threadId: true, routineId: true, action: true, resources: true, preview: true, kind: true, api: { label: true, method: true, path: true }, askedFor: true, at: true };
 /** A message as a member reads it: what the chat shows, never where it came from on the owner's side (inbox, channel, phone ids) or a CRM file's copy. */
 const MESSAGE: Spec = {
   id: true,
@@ -220,6 +221,8 @@ export type SliceViewer = {
   computerUse?: boolean;
   /** The owner's sign in email, as orgo-web says it (WsAccess.ownerEmail): whether the workspace has apps (appsOpenFor). */
   ownerEmail?: string;
+  /** Whether the owner's Bops is new enough for an Admin's acts (protocol.ts ADMIN_POWERS_MIN_VERSION): SharedWsSlice.adminActs. */
+  adminActs?: boolean;
 };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
@@ -545,6 +548,9 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     ...(groups ? { groups } : {}),
     ...(sites ? { sites } : {}),
     ...(screens ? { screens } : {}),
+    // The owner's Bops takes an Admin's acts (members.ts adminGate), said to anyone but the owner: an Admin answers the
+    // owner's own asks then, and a Member's window says an Admin can. An Admin's says when it can't yet (ownerOld).
+    ...(access && viewer.adminActs ? { adminActs: true as const } : access && viewer.role === "admin" ? { ownerOld: true as const } : {}),
   };
 }
 

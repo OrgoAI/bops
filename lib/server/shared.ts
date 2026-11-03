@@ -160,6 +160,45 @@ export function sharedScreen(botId: string): string | null {
 }
 
 /**
+ * The shared workspace open now, for what an Admin changes there from this Mac (lib/server/shared-people.ts): its Orgo
+ * project (never an id from a request), the user's own key and id there, its bots, and a call to its Bops Cloud routes
+ * with that key. Null unless an Admin's workspace is open for the signed-in user.
+ */
+export function sharedAdminOpen({ anyRole = false } = {}): {
+  projectId: string;
+  key: string;
+  you: string;
+  botIds: string[];
+  orgoUrl?: string;
+  cloud: (method: "GET" | "POST" | "PATCH", path: "people" | "routing" | "wake", body?: unknown) => Promise<{ status: number; json: Record<string, unknown> } | null>;
+  refresh: () => Promise<void>;
+} | null {
+  const open = openNow();
+  // (`anyRole`: a Member too, for what Bops Cloud checks of them itself: waking a computer they may use.)
+  if (!open || (!anyRole && open.at.role !== "admin") || !open.data.you) return null;
+  const device = deviceIdFor(open.user);
+  return {
+    projectId: open.at.projectId,
+    key: open.key,
+    you: open.data.you,
+    botIds: open.data.state.bots.flatMap((b) => (typeof b.id === "string" ? [b.id] : [])),
+    ...(open.at.orgoUrl ? { orgoUrl: open.at.orgoUrl } : {}),
+    cloud: async (method, path, body) => {
+      const res = await fetch(`${cloudUrl()}/v1/ws/${encodeURIComponent(open.at.projectId)}/${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${open.key}`, [BOPS_DEVICE_HEADER]: device, ...appHeaders(), ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        cache: "no-store",
+        signal: AbortSignal.timeout(20_000),
+      }).catch(() => null);
+      if (!res) return null;
+      return { status: res.status, json: ((await res.json().catch(() => null)) as Record<string, unknown> | null) ?? {} };
+    },
+    refresh: () => open.copy.refresh(),
+  };
+}
+
+/**
  * What the window is shown: with a shared workspace open, its state in place of the user's own
  * workspace (shared-core.ts viewState), with a version of its own (the user's own changes and the
  * copy's both change it); else null.

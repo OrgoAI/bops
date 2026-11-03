@@ -81,6 +81,8 @@ jobs:
         env:
           BOPS_TEST_DATABASE_URL: postgres://bops_app:bops-local@127.0.0.1:5432/orgo_core
       - name: Bops Cloud edge and router tests
-        run: node --test "cloud/test/edge-*.test.ts" cloud/test/server.test.ts
+        # One file at a time: they share one database, and two files migrating it at once can deadlock
+        # (edge-state-sync's migration test, 40P01).
+        run: node --test --test-concurrency=1 "cloud/test/edge-*.test.ts" cloud/test/server.test.ts
         env:
           BOPS_TEST_DATABASE_URL: postgres://bops_app:bops-local@127.0.0.1:5432/orgo_edge

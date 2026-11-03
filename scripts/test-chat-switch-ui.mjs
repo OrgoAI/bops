@@ -120,6 +120,20 @@ await test("rendered: the switch, its state and its line; nothing where it isn't
   assert.equal(renderToStaticMarkup(h(S.ChatSwitch, { state: stateWith({}) })), "");
 });
 
+await test("an Admin of a shared workspace has the switch, in words of the owner's bots and Mac, and it goes through the shared workspace's route; a Member never", async () => {
+  const shared = (role, more = {}) => stateWith({ chatOn: "mac" }, { shared: { name: "Acme", owner: "Tara", role, screens: ["max"], ...more } });
+  assert.deepEqual(S.chatSwitchOf(shared("admin", { adminActs: true })), { wsId: "ws_acme", on: false, line: S.CHAT_LINES_SHARED.mac });
+  assert.deepEqual(S.chatSwitchOf(shared("admin", { ownerOld: true }))?.on, false, "it doesn't wait on the owner's Mac");
+  assert.equal(S.chatSwitchOf(shared("admin")), null, "a Bops Cloud before Admin powers");
+  assert.equal(S.chatSwitchOf(shared("member", { adminActs: true })), null);
+  assert.equal(S.chatSwitchOf(shared("admin", { adminActs: true, screens: [] })), null, "no bot with a computer");
+  const sent = [];
+  globalThis.fetch = async (url, init) => (sent.push([String(url), JSON.parse(init.body)]), { ok: true, json: async () => ({}) });
+  assert.equal(await S.setChat("ws_acme", true, true), null);
+  assert.deepEqual(sent, [["/api/workspaces/shared/settings", { chat: "auto" }]]);
+  for (const w of Object.values(S.CHAT_LINES_SHARED)) assert.ok(!/[–—]/.test(w), w);
+});
+
 await test("the words: no dashes, never Orbit", () => {
   const words = [...Object.values(S.CHAT_LINES), "Answer with your Mac closed", "Chat"].join("\n");
   assert.ok(!/[-–—]/.test(words), words);

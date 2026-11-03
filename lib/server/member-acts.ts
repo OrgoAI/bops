@@ -1,14 +1,14 @@
 import "server-only";
 import { isAppAct, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
-import { accessKey, accessOf, adminAccess, appsLevelOf, cleanName, currentFor, levelOf, noUseNote, ownerOnlyAsk, permits, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
+import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
 import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
 import { workBot, workspaceOf, type MemberSaid, type MemberTurn, type Message, type Workspace } from "@/lib/types";
 import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
-import { compactThread, dismissWaiting, replyToSession, stopSession } from "./sessions";
+import { compactThread, dismissWaiting, replyToSession, setWhere, stopSession } from "./sessions";
 import { compactChat } from "./chat-summary";
 import { addMessage, bot, chat, getState, ownerName, pullState, session } from "./store";
 import type { OrgoMember } from "./orgo";
@@ -31,7 +31,10 @@ import type { OrgoMember } from "./orgo";
  * An Admin (Orgo's role, MemberActPayload.role) has every bot, Your Apps at Write and Use its computer, whatever this
  * state keeps for them (adminOf): Bops Cloud asked orgo-web afresh as it took the act. One older than MEMBER_ACT_MS (a
  * stored message, up to a day) is an Admin only while orgo-web's list says so now, so a demotion whose notice was lost
- * isn't honored a day late; else their entry counts, as for anyone. Only the owner deletes the workspace: no act does.
+ * isn't honored a day late; else their entry counts, as for anyone. An Admin also answers the owner's own asks (their
+ * Connected apps and keys, a thread on this Mac) and picks where an undecided thread runs (the bot's computer, never this
+ * Mac): member-access.ts ADMIN_POWERS. Only the owner deletes the workspace, tells a thread on this Mac more, or spends
+ * their money: no act does. An answer waits as long as its ask (STORED_ACT_MS), as the run does.
  *
  * It's safe to act on as this Mac: only the tunnel can call that route, and this state agrees they have Write. One
  * refused, too late or of a shape this doesn't know is still taken (the event is acked), and dropped with a line in
@@ -50,6 +53,7 @@ function actOf(a: unknown): MemberAct | null {
   if (x.act === "answer") return short(x.askId, 120) && ["once", "always", "reject"].includes(x.reply as string) && (x.message === undefined || (typeof x.message === "string" && x.message.length <= MEMBER_MAX_NOTE)) ? (x as MemberAct) : null;
   if (x.act === "stop") return Array.isArray(x.sessionIds) && x.sessionIds.length > 0 && x.sessionIds.length <= MEMBER_STOP_MAX && x.sessionIds.every((id) => short(id, 120)) ? (x as MemberAct) : null;
   if (x.act === "dismiss") return short(x.sessionId, 120) ? (x as MemberAct) : null;
+  if (x.act === "where") return short(x.sessionId, 120) && (x.to === "mac" || x.to === "cloud") ? { act: "where", sessionId: x.sessionId as string, to: x.to } : null;
   if (x.act === "compact") return short(x.chatId, 120) !== short(x.sessionId, 120) ? (x as MemberAct) : null;
   if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
   return null;
@@ -154,8 +158,9 @@ function accessFor(p: MemberActPayload, who: MemberWho, admin: boolean): MemberA
 
 /** Why it's not done, or null when it may be: worked out from this state, as Bops Cloud did from its copy. */
 function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = false): string | null {
-  // A message Bops Cloud wrote already waits longer for this Mac: the chat says the bot answers once it opens.
-  if (!Number.isFinite(p.at) || Date.now() - p.at > (p.stored ? STORED_ACT_MS : MEMBER_ACT_MS)) return "too late";
+  // A message Bops Cloud wrote already waits longer for this Mac: the chat says the bot answers once it opens. So does an
+  // answer: its run waits for it as long as the ask does (an Admin's that old goes by orgo-web's list now: adminOf).
+  if (!Number.isFinite(p.at) || Date.now() - p.at > (p.stored || act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS)) return "too late";
   const ws = getState().workspaces?.find((w) => w.id === p.wsId);
   if (!ws) return "no such workspace";
   const access = accessFor(p, who, admin);
@@ -166,8 +171,8 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     return !!s && writes(ws, access, s.botId) && (apps || !ofApp(s.id));
   };
   // A thread on the owner's Mac: a member's words never reach work there (it has the owner's own apps, browsers and
-  // logins), so no reply, Nothing to add or answer to its asks. Stop still ends it.
-  const onMac = (id: string | undefined) => !!id && session(id)?.runsOn === "mac";
+  // logins), so no reply or Nothing to add (threadOwnersOnly), and its asks are the owner's and an Admin's
+  // (askOwnersOnly). Stop still ends it.
   // Work on a bot's computer, where the bot is root: only with Use its computer (stop still ends it).
   const computer = mayUse(p, who, admin);
   const onComputer = (id: string | undefined) => !!id && !!session(id) && session(id)!.runsOn !== "mac";
@@ -191,17 +196,25 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     case "reply":
     case "dismiss":
       if (!threadOk(as.sessionId)) return "not at Write";
-      if (onMac(as.sessionId)) return "on the owner's Mac";
+      if (threadOwnersOnly(session(as.sessionId), admin)) return "on the owner's Mac";
       return !computer && onComputer(as.sessionId) ? "no computer" : null;
+    case "where": {
+      // An Admin's (member-access.ts ADMIN_POWERS), and only to the bot's computer: the owner's Mac is theirs to pick.
+      if (!adminMay("where", admin)) return "not an Admin";
+      if (as.to !== "cloud") return "on the owner's Mac";
+      if (!threadOk(as.sessionId)) return "not at Write";
+      return session(as.sessionId)?.askWhere ? null : "not waiting";
+    }
     case "stop":
       return as.sessionIds.every(threadOk) ? null : "not at Write";
     case "answer": {
       const a = getState().appApprovals?.find((x) => x.id === as.askId);
       if (!a) return "no such ask";
       if (!writes(ws, access, a.botId)) return "not at Write";
-      // The owner's Connected apps or keys: theirs alone to allow (member-access.ts ownerOnlyAsk).
-      if (ownerOnlyAsk(a.kind)) return "the owner's apps or keys";
-      if (onMac(a.threadId)) return "on the owner's Mac";
+      // The owner's Connected apps or keys, or a thread on the owner's Mac: theirs, and an Admin's (member-access.ts askOwnersOnly).
+      const why = askOwnersOnly(a, a.threadId ? session(a.threadId) : undefined, admin);
+      if (why === "logins") return "the owner's apps or keys";
+      if (why === "mac") return "on the owner's Mac";
       if (!computer && (a.threadId ? onComputer(a.threadId) : hasComputer(a.botId))) return "no computer";
       return apps || !ofApp(a.threadId) ? null : "an app's ask";
     }
@@ -282,6 +295,13 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
     }
     case "dismiss": {
       dismissWaiting(act.sessionId, `Dismissed by ${who.name}`);
+      return;
+    }
+    case "where": {
+      // As the owner's own pick (POST /api/sessions/<id>/where), and said in the chat as theirs.
+      const s = session(act.sessionId);
+      setWhere(act.sessionId, "cloud");
+      if (s) addMessage({ chatId: s.chatId, role: "system", text: `${who.name} picked ${bot(s.botId)?.name ?? "the bot"}'s computer for “${s.title}”`, sessionIds: [s.id] });
       return;
     }
     case "compact": {

@@ -6,6 +6,7 @@ import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, computerSumma
 import { appsOwnShown } from "@/lib/apps-access";
 import {
   ACCESS_TIPS,
+  ADMIN_SHEET_WORDS,
   ADMIN_WORDS,
   APPS_TIPS,
   APPS_WORDS,
@@ -13,6 +14,7 @@ import {
   COMPUTER_WORDS,
   emailOf,
   ROLE_LINES,
+  ROLE_LINES_SHARED,
   ROLE_NAMES,
   WORDS,
   type Invite,
@@ -130,7 +132,20 @@ const quiet = `${pill} shrink-0 bg-[#F2F2F0] hover:bg-[#EAEAE7]`;
  * showing what it has meanwhile. `onUpgrade` goes to the plans (Settings, Plan and credit); `onClose`, signing out
  * from here leaves Settings too.
  */
-export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: AppState; onClose?: () => void; onUpgrade: () => void; /** The team chart (team-chart.tsx), for the open workspace. */ onTeamChart?: () => void }) {
+export function Members({
+  state,
+  onClose,
+  onUpgrade,
+  onTeamChart,
+  source = "/api/members",
+}: {
+  state: AppState;
+  onClose?: () => void;
+  onUpgrade: () => void;
+  /** The team chart (team-chart.tsx), for the open workspace. */ onTeamChart?: () => void;
+  /** Where it reads and changes who's in: the user's own (app/api/members), or, for an Admin, the shared workspace open (app/api/workspaces/shared/people). */
+  source?: string;
+}) {
   const [read, setRead] = useState<Read | null>(null);
   const [loading, setLoading] = useState(true);
   // The route itself failed (a 500, or not JSON): Team says so and offers a retry.
@@ -142,7 +157,7 @@ export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: App
    */
   const load = useCallback(
     ({ quiet = false } = {}): Promise<Read | undefined> =>
-      fetch("/api/members", { cache: "no-store" })
+      fetch(source, { cache: "no-store" })
         .then((res) => res.json() as Promise<Read>)
         .then((j) => (j && typeof j === "object" && (typeof j.state === "string" || typeof (j as MembersRefusal).code === "string") ? j : null))
         .catch(() => null)
@@ -155,7 +170,7 @@ export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: App
           setFailed(false);
           return next;
         }),
-    [],
+    [source],
   );
   useEffect(() => void load(), [load]);
   useEffect(() => {
@@ -176,7 +191,7 @@ export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: App
       let status = 0;
       let json: Record<string, unknown> = {};
       try {
-        const res = await fetch("/api/members", { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const res = await fetch(source, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         status = res.status;
         json = ((await res.json().catch(() => null)) as Record<string, unknown> | null) ?? {};
       } catch {
@@ -186,7 +201,7 @@ export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: App
       refreshMembersCount();
       return { status, json, ...(read ? { read } : {}) };
     },
-    [load],
+    [load, source],
   );
 
   // Counted once Team has shown who has access.
@@ -206,7 +221,7 @@ export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: App
             <span id="members-title" className="text-[22px] font-bold leading-7 tracking-[-0.02em]">
               Team
             </span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">Who sees which of your bots, and their computers.</span>
+            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">{state.shared ? "Who sees which of the owner's bots, and their computers." : "Who sees which of your bots, and their computers."}</span>
             {/* Who answers to whom, and who may ask whom: the team chart (your own workspace only). */}
             {onTeamChart && !state.shared && (
               <button type="button" data-chart-link onClick={onTeamChart} className="mt-1 flex items-center gap-1.5 self-start text-[12.5px] font-medium leading-4 text-ink hover:underline">
@@ -272,7 +287,13 @@ export function Members({ state, onClose, onUpgrade, onTeamChart }: { state: App
           </Section>
         )}
 
-        {read?.state === "ready" ? (
+        {read?.state === "ready" && read.shared ? (
+          <div className="px-[22px] pb-5 pt-5 text-[12px] leading-4 text-[#9A9A98]">
+            <a href={read.orgoUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-ink">
+              Open on orgo.ai
+            </a>
+          </div>
+        ) : read?.state === "ready" ? (
           <div className="px-[22px] pb-5 pt-5 text-[12px] leading-4 text-[#9A9A98]">
             People you add sign in with the email you invite. In Bops they see everything of the bots you pick, your chats with them too. On orgo.ai they see every bot&apos;s
             computer, like an open inbox, and can ask Orgo&apos;s agent to work on it. {read.keysOnComputers ? "Never your saved logins." : "Never your saved logins or keys."}{" "}
@@ -293,13 +314,21 @@ function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; stat
   // they may use on any of the computers, runs as root there), and when they're why the app has no Full access.
   const someoneElse = info.people.length > 0 || info.invites.length > 0;
   const keys = info.fullAccess === "off" || (info.keysOnComputers && someoneElse);
-  const bots = sheetBots(state, info.wsId);
+  const bots = sheetBots(state, info.wsId, !!info.shared);
   // Your Apps, beside each person's bots: only where apps are open to the owner (lib/apps-access.ts).
   const apps = appsOwnShown(state);
   const older = useOlderBops(apps);
+  // An Admin's sheet of a workspace shared with them: changes only once orgo-web and Bops Cloud let them (else it reads only, saying why).
+  const readsOnly = !!info.shared && !info.shared.can;
   return (
     <AppsScope.Provider value={{ shown: apps, older, roles: info.fullAccess === "on" }}>
-      {(keys || info.host === "mac" || !bots) && (
+      <SheetScope.Provider value={info.shared ?? null}>
+      {info.shared?.line && (
+        <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
+          <Notice>{info.shared.line}</Notice>
+        </div>
+      )}
+      {!info.shared && (keys || info.host === "mac" || !bots) && (
         <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
           {!bots && <Notice>{WORDS.sharedOpen}</Notice>}
           {keys && <Notice>{info.fullAccess === "off" ? `${WORDS.keysOff}${someoneElse ? ` ${WORDS.keysOffAnyone}` : ""}` : WORDS.keysHeld}</Notice>}
@@ -308,12 +337,24 @@ function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; stat
           )}
         </div>
       )}
-      <AddSomeone info={info} state={state} bots={bots} act={act} onRetry={onRetry} onUpgrade={onUpgrade} />
+      {!readsOnly && <AddSomeone info={info} state={state} bots={bots} act={act} onRetry={onRetry} onUpgrade={onUpgrade} />}
       <WhoHasAccess info={info} bots={bots} act={act} />
-      {info.invites.length > 0 && <Invited info={info} bots={bots} act={act} />}
+      {info.invites.length > 0 && (
+        <fieldset disabled={readsOnly} className="contents">
+          <Invited info={info} bots={bots} act={act} />
+        </fieldset>
+      )}
+      </SheetScope.Provider>
     </AppsScope.Provider>
   );
 }
+
+/**
+ * The sheet of a workspace shared with the user, for an Admin there (MembersInfo.shared): their own row is "You" (with
+ * Leave), the owner's has no controls and says what stays theirs, and a plan with no room says to ask the owner. Null in
+ * the user's own sheet.
+ */
+const SheetScope = createContext<{ me: string; can: boolean; line?: string } | null>(null);
 
 /* ---------------- Which bots they see ---------------- */
 
@@ -322,8 +363,9 @@ function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; stat
  * open one when it isn't said), its main bot first. Null while a workspace shared with the user is open:
  * the window's bots are that one's then, and Team is about the user's own.
  */
-export function sheetBots(state: AppState, wsId?: string): Bot[] | null {
-  if (state.shared) return null;
+export function sheetBots(state: AppState, wsId?: string, sharedSheet = false): Bot[] | null {
+  // An Admin's sheet of the shared workspace open: its bots are the window's (every one of them is theirs to give).
+  if (state.shared) return sharedSheet && state.shared.role === "admin" ? [...state.bots].sort((a, b) => Number(b.isMain) - Number(a.isMain)) : null;
   const team = wsId ? state.bots.filter((b) => workspaceOf(b) === wsId) : teamOf(state);
   return [...team].sort((a, b) => Number(b.isMain) - Number(a.isMain));
 }
@@ -667,6 +709,16 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
       </Section>
     );
   const upgrade = short ? short.upgrade : s.upgrade;
+  // An Admin's sheet: the plan is the owner's to change.
+  if (info.shared)
+    return (
+      <Section title="Add someone" aside={s.plan === "free_bops" ? null : counter}>
+        <Notice>
+          {short?.text ?? WORDS.upgradeRequired} {ADMIN_SHEET_WORDS.seats}
+        </Notice>
+        {line}
+      </Section>
+    );
   return (
     <Section title="Add someone" aside={s.plan === "free_bops" ? null : counter}>
       <Notice
@@ -819,21 +871,26 @@ function InviteForm({
   );
 }
 
+/** The role words for this sheet: the owner's, or an Admin's of a workspace shared with them (SheetScope), where the apps and the workspace are the owner's. */
+const useRoleLines = () => (useContext(SheetScope) ? ROLE_LINES_SHARED : ROLE_LINES);
+
 /** What the picked role means. An Admin's is the one warning before it's sent, marked like what needs the user. */
 function RoleLine({ role }: { role: MemberRole }) {
+  const lines = useRoleLines();
   return role === "admin" ? (
     <span className="flex items-start gap-1.5 pt-0.5 text-[12.5px] leading-[18px] text-[#3A3A38]">
       <NeedsYouDot className="mt-px" />
-      {ROLE_LINES.admin}
+      {lines.admin}
     </span>
   ) : (
-    <span className="pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">{ROLE_LINES.viewer}</span>
+    <span className="pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">{lines.viewer}</span>
   );
 }
 
 /** Member or Admin, as a segmented control named Role: one choice makes someone an Admin (only once Bops Cloud gives people their role: AppsScope.roles). */
 function AccessPicker({ value, onChange, disabled }: { value: MemberRole; onChange: (role: MemberRole) => void; disabled?: boolean }) {
   const { roles } = useContext(AppsScope);
+  const lines = useRoleLines();
   return (
     <div className="flex shrink-0 items-center gap-1.5">
       <span className="text-[12px] text-[#9A9A98]">Role</span>
@@ -849,7 +906,7 @@ function AccessPicker({ value, onChange, disabled }: { value: MemberRole; onChan
               role="radio"
               aria-checked={on}
               disabled={disabled || held}
-              data-tip={held ? WORDS.fullAccessNotYet : r === "admin" ? ROLE_LINES.admin : ROLE_LINES.viewer}
+              data-tip={held ? WORDS.fullAccessNotYet : r === "admin" ? lines.admin : lines.viewer}
               onClick={() => !on && onChange(r)}
               className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : held ? "text-[#B5B5B3]" : "text-[#6B6B6B] hover:text-ink"}`}
             >
@@ -894,21 +951,24 @@ function SubLine({ who, children }: { who?: string | null; children?: React.Reac
 
 /** The user first (they own it all, every bot), then everyone else by name, each with what they can do. */
 function WhoHasAccess({ info, bots, act }: { info: Ready; bots: Bot[] | null; act: Act }) {
+  // (In an Admin's sheet, `you` is the owner: no controls, and what stays theirs.)
   const you = info.you;
+  const shared = !!info.shared;
   return (
     <Section title="Who has access">
       <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
         <div className={row}>
           <div className="flex items-center gap-3">
-            <Face label={you.name} you />
+            <Face label={you.name} you={!shared} />
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="flex min-w-0 items-center gap-1.5">
                 <span className="truncate text-[14px] font-medium leading-[18px]">{you.name}</span>
-                <Badge>You</Badge>
+                {!shared && <Badge>You</Badge>}
               </span>
               <SubLine who={you.email && you.email !== you.name ? you.email : null}>
                 <span className="shrink-0">Every bot</span>
               </SubLine>
+              {shared && <span data-owner-line className="text-[12px] leading-4 text-[#6B6B6B]">{ADMIN_SHEET_WORDS.owner}</span>}
             </div>
             <span className="shrink-0 text-[12.5px] text-[#9A9A98]">Owner</span>
           </div>
@@ -980,6 +1040,10 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
   };
   const hadFull = p.role === "admin" || demoted;
   const admin = p.role === "admin";
+  // An Admin's sheet of a shared workspace: their own row is "You" (Leave), and nothing changes while they may not change people.
+  const sheet = useContext(SheetScope);
+  const me = !!sheet && sheet.me === p.id;
+  const locked = !!sheet && !sheet.can;
   // A computer password they copied as an Admin outlasts it, until the computer's password changes.
   const copied = hadFull;
   const change = async (role: MemberRole) => {
@@ -1010,6 +1074,7 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-[14px] font-medium leading-[18px]">{p.name}</span>
+            {me && <Badge>You</Badge>}
             {p.guest && <Badge>Guest</Badge>}
           </span>
           <SubLine who={p.guest ? "Joined with a link on orgo.ai" : p.email && p.email !== p.name ? p.email : null}>
@@ -1023,17 +1088,18 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
                 <span data-access-summary className="min-w-0 truncate" title={summary(access, ids)}>
                   {summary(access, ids)}
                 </span>
-                <BotsToggle open={choosing} label={scopeShown ? "Access" : "Bots"} onClick={() => setChoosing((x) => !x)} />
+                {!locked && <BotsToggle open={choosing} label={scopeShown ? "Access" : "Bots"} onClick={() => setChoosing((x) => !x)} />}
                 {saving && <Spinner size={11} color="#9A9A98" />}
               </>
             )}
           </SubLine>
         </div>
-        <AccessPicker value={p.role} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />
+        {/* Their own row on an Admin's sheet: Leave only (shared-people.ts refuses a change to their own role). */}
+        {locked || me ? <span className="shrink-0 text-[12.5px] text-[#9A9A98]">{ROLE_NAMES[p.role]}</span> : <AccessPicker value={p.role} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />}
         {/* Asked in place: while it asks, its question under the row stands for it. */}
-        {asking !== "remove" && (
+        {asking !== "remove" && (!locked || me) && (
           <button onClick={() => setAsking("remove")} className={`${rowAction} shrink-0 text-[#B42318] hover:bg-[#FEF3F2]`}>
-            Remove
+            {me ? "Leave" : "Remove"}
           </button>
         )}
       </div>
@@ -1049,14 +1115,18 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
       )}
       {copied && p.role === "viewer" && (
         <span role="status" className="pl-12 pt-1.5 text-[12px] leading-4 text-[#6B6B6B]">
-          {`${ADMIN_WORDS.toMemberTip} ${WORDS.copiedPassword}`}
+          {`${sheet ? ADMIN_WORDS.toMemberTipShared : ADMIN_WORDS.toMemberTip} ${WORDS.copiedPassword}`}
         </span>
       )}
       {asking === "remove" && (
         <Confirm
-          title={`Remove ${p.name}?`}
-          line={`They lose access to your bots and their computers right away.${hadFull ? " Anything they changed on the computers stays." : ""}${copied ? ` ${WORDS.copiedPassword}` : ""}`}
-          action="Remove"
+          title={me ? "Leave this workspace?" : `Remove ${p.name}?`}
+          line={
+            me
+              ? "You lose access to its bots and their computers right away. The owner or an Admin can add you again."
+              : `They lose access to ${sheet ? "the bots" : "your bots"} and their computers right away.${hadFull ? " Anything they changed on the computers stays." : ""}${copied ? ` ${WORDS.copiedPassword}` : ""}`
+          }
+          action={me ? "Leave" : "Remove"}
           danger
           busy={busy}
           error={confirmError}
@@ -1070,7 +1140,7 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
       {asking === "full" && (
         <Confirm
           title={ADMIN_WORDS.confirmTitle(p.name)}
-          line={ADMIN_WORDS.confirmBody}
+          line={sheet ? ADMIN_WORDS.confirmBodyShared : ADMIN_WORDS.confirmBody}
           action={ADMIN_WORDS.confirm}
           busy={busy}
           error={confirmError}

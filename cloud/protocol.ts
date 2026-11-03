@@ -351,7 +351,13 @@ export const CLOUD_TUNNEL_HEADER = "x-bops-cloud";
  * and says Your Apps reach people, only once its Bops Cloud says so (lib/server/cloud-caps.ts): before that, an Admin
  * with no entry would see no bot at all there.
  */
-export const CLOUD_CAPS = ["roles"] as const;
+/**
+ * "admin_powers": an Admin may also answer the owner's own asks (their Connected apps and keys, a thread on their Mac),
+ * pick where a thread runs, add, remove and change people (GET and POST /v1/ws/<id>/people), say where chat is answered
+ * (PATCH /v1/ws/<id>/routing) and wake a bot's computer (POST /v1/ws/<id>/wake); SharedWsSlice.adminActs says when the
+ * owner's Bops is new enough to take what waits for it (ADMIN_POWERS_MIN_VERSION).
+ */
+export const CLOUD_CAPS = ["roles", "admin_powers"] as const;
 export type CloudCap = (typeof CLOUD_CAPS)[number];
 /** GET /health: the database answers (`ok`), how many Macs hold a tunnel, and CLOUD_CAPS (none from a Bops Cloud before them). */
 export type CloudHealth = { ok: boolean; macs: number; caps?: string[] };
@@ -761,6 +767,14 @@ export type SharedWsSlice = {
    * for anyone else, for a bot on the owner's Mac, and from a Bops Cloud before roles.
    */
   screens?: Record<string, string>;
+  /**
+   * For anyone but the owner, from a Bops Cloud with "admin_powers": the owner's Bops is new enough to take an Admin's
+   * acts (ADMIN_POWERS_MIN_VERSION), so an Admin answers the owner's own asks and picks where a thread runs. Part of the
+   * fingerprint: the owner updating gives a new one. `ownerOld`: for an Admin, it isn't yet (their window says the
+   * owner's Bops needs an update, never "only the owner").
+   */
+  adminActs?: true;
+  ownerOld?: true;
 };
 /** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
 export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
@@ -840,6 +854,9 @@ export type MemberAct =
   | { act: "answer"; askId: string; reply: "once" | "always" | "reject"; message?: string }
   | { act: "stop"; sessionIds: string[] }
   | { act: "dismiss"; sessionId: string }
+  // An Admin's (ADMIN_ONLY), with the owner's Bops new enough (OWNER_BOPS_OLD): where a thread that waits on it runs.
+  // "mac" (the owner's own Mac) stays the owner's: refused for anyone else.
+  | { act: "where"; sessionId: string; to: "mac" | "cloud" }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
 /** What a member with Your Apps at Write does to an app: deploy (the newest changeset, or `at`), go back to an earlier deploy, change a site's settings, or use one of the workspace's own domains (`zone`, its id). */
@@ -861,7 +878,8 @@ export type MemberActBody = { key: string; act: MemberAct };
 /**
  * `computer`: Bops Cloud found the owner let them use the bots' computers (Use its computer, cloud/ws-slice.ts computerUseOf)
  * when it took the act. `stored`: a chat act Bops Cloud wrote already (`messageId`), in a workspace whose chat goes through
- * it, for a bot with no computer: the owner's Mac answers that message, and adds none.
+ * it, for a bot with no computer: the owner's Mac answers that message, and adds none. An answer is marked `stored` too
+ * (no `messageId`), so every owner's Mac with members (0.0.37 on) takes it up to STORED_ACT_MS late, as long as its ask waits.
  */
 /**
  * `role`: "admin" when orgo-web said they're an Admin as Bops Cloud took it (asked afresh): the owner's Mac from 0.0.38
@@ -900,6 +918,20 @@ export const MEMBER_OWNER_ONLY = "member_owner_only";
  * folding it up, or answering one of its asks), and the owner hasn't turned on Use its computer for them.
  */
 export const MEMBER_NO_COMPUTER = "member_no_computer";
+/** 404 from an Admin's change to someone's bots (POST /v1/ws/<id>/people): orgo-web doesn't list them now. */
+export const PEOPLE_GONE = "gone";
+/** 409 from the same: the owner and Admins have every bot, so nothing is kept for them. */
+export const ADMIN_HAS_ALL = "admin_has_all";
+/** 403: only the owner or an Admin does this (an Admin's act, AdminPower in member-access.ts). */
+export const ADMIN_ONLY = "admin_only";
+/** 409: an Admin's act, while the owner's Bops is older than ADMIN_POWERS_MIN_VERSION: it would drop it. */
+export const OWNER_BOPS_OLD = "owner_bops_old";
+/**
+ * The first Bops whose Mac takes an Admin's acts (an answer to the owner's own asks, where a thread runs: lib/server/
+ * member-acts.ts). Bops Cloud refuses them (OWNER_BOPS_OLD) for an owner whose last Mac is older (turns.ts macNewEnough).
+ * Set to the release that carries them.
+ */
+export const ADMIN_POWERS_MIN_VERSION = "0.0.39";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
 export const NOT_WAITING = "not_waiting";
 /** 403: the caller is the workspace's owner, who acts in their own Bops. */
@@ -913,7 +945,7 @@ export const MEMBER_MAX_NOTE = 2000;
 export const MEMBER_STOP_MAX = 20;
 /** How long an act waits for the owner's Bops to open: an older one is dropped, never done late. */
 export const MEMBER_ACT_MS = 10 * 60_000;
-/** How long a message Bops Cloud wrote already (MemberActPayload.stored) waits for the owner's Mac to answer it. */
+/** How long a message Bops Cloud wrote already, or an answer (MemberActPayload.stored), waits for the owner's Mac to take it. */
 export const STORED_ACT_MS = 24 * 3600_000;
 
 /**

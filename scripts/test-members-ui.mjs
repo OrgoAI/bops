@@ -473,7 +473,7 @@ await test("inviting an Admin hides the bots and sends none; an invite's role ch
 
 await test("no dashes, and the sheet says the bots you pick, never the saved logins or keys", async () => {
   const noDashes = (text) => assert.ok(!/[–—]/.test(text), `no dashes: ${text}`);
-  for (const v of [...Object.values(M.ACCESS_TIPS), ...Object.values(M.ROLE_LINES), M.WORDS.sharedOpen, ...Object.values(A.ACCESS_LABELS)]) noDashes(v);
+  for (const v of [...Object.values(M.ACCESS_TIPS), ...Object.values(M.ROLE_LINES), ...Object.values(M.ROLE_LINES_SHARED), M.ADMIN_WORDS.toMemberTipShared, M.ADMIN_SHEET_WORDS.ownRole, M.WORDS.sharedOpen, ...Object.values(A.ACCESS_LABELS)]) noDashes(v);
   // What Write lets a member do, and the line a member reads in place of what they can't (lib/shared.ts readOnlyLine): plain words, Knowledge never Orbit.
   const { readOnlyLine } = await import(`${root}/lib/shared.ts`);
   const lines = [readOnlyLine(), readOnlyLine(["boppy"], { boppy: "read" }), readOnlyLine(["boppy", "sam"], { boppy: "write", sam: "read" })];
@@ -498,7 +498,7 @@ await test("no dashes, and the sheet says the bots you pick, never the saved log
 
 await test("Member and None say what people get, and keys on the computers are said whenever anyone else is in", async () => {
   // An Admin's line says what only the owner does; a Member's never promises orgo.ai (a staff owned workspace keeps a Member without Use its computer off there).
-  assert.equal(M.ROLE_LINES.admin, "Every bot, its computer and your apps. Only you can add people or delete this workspace.");
+  assert.equal(M.ROLE_LINES.admin, "Every bot, its computer and your apps, and adding people. Only you can delete this workspace.");
   assert.ok(!/orgo\.ai/.test(M.ROLE_LINES.viewer));
   assert.match(M.ACCESS_TIPS.none, /^Can't see this bot in Bops\. On orgo\.ai they still see its computer\.$/);
   const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -750,6 +750,60 @@ await test("Use its computer goes to Orgo first: turned down it stays as it was,
   assert.equal(form.querySelector("[data-computer-note]").textContent, M.COMPUTER_WORDS.afterJoin);
   await f.done();
   for (const v of [M.COMPUTER_WORDS.afterJoin, M.WORDS.computerUnchanged, M.WORDS.computerUnreachable, M.WORDS.computerNotReady]) assert.ok(!/[–—]/.test(v) && !v.includes(" - ") && !/orbit/i.test(v), v);
+});
+
+/* ---------------- An Admin's sheet of a workspace shared with them ---------------- */
+
+await test("an Admin's sheet: the owner's row has no controls and says what stays theirs; their own row says You, with Leave; Member or Admin, never Owner; no plan to upgrade", async () => {
+  const fake = bops();
+  const urls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (url, init) => (urls.push(String(url)), real(url, init));
+  fake.info.people.push({ id: "m2", name: "Ada Admin", email: "ada@example.com", role: "admin", guest: false, access: { others: "none", bots: {} } });
+  fake.info.shared = { me: "m2", can: true };
+  fake.info.seats = { ...fake.info.seats, canAdd: false, used: 5, limit: 5, upgrade: "max" };
+  const admin = { ...base, shared: { projectId: "p9", name: "Acme", owner: "tess@example.com", role: "admin", wsId: "shared_p9", adminActs: true } };
+  const { box, done } = await mount(h(S.Members, { state: admin, onClose: noop, onUpgrade: noop, source: "/api/workspaces/shared/people" }));
+  assert.ok(urls.length && urls.every((u) => u === "/api/workspaces/shared/people"), "the shared workspace's people, never the user's own");
+  const owner = rowOf(box, "Tess Ito");
+  assert.ok(owner.textContent.includes(M.ADMIN_SHEET_WORDS.owner));
+  assert.ok(!owner.querySelector("button"), "nothing to change on the owner");
+  assert.ok(!/You/.test(owner.querySelector("span").textContent));
+  const me = rowOf(box, "Ada Admin");
+  assert.match(me.textContent, /You/);
+  assert.ok(buttonOf(me, "Leave") && !buttonOf(me, "Remove"));
+  assert.ok(!buttonOf(me, "Member") && !buttonOf(me, "Admin"), "their own role isn't theirs to change: Leave only");
+  const jamie = rowOf(box, "Jamie Lee");
+  assert.ok(buttonOf(jamie, "Member") && buttonOf(jamie, "Admin") && !buttonOf(jamie, "Owner"));
+  // The role words in an Admin's: the owner's apps and workspace, never "your" or "only you".
+  assert.equal(buttonOf(jamie, "Admin").getAttribute("data-tip"), M.ROLE_LINES_SHARED.admin);
+  assert.equal(buttonOf(jamie, "Member").getAttribute("data-tip"), M.ROLE_LINES_SHARED.viewer);
+  assert.ok(!box.textContent.includes(M.ROLE_LINES.admin) && !/\byou pick|Only you\b|your apps/.test(Object.values(M.ROLE_LINES_SHARED).join(" ") + M.ADMIN_WORDS.toMemberTipShared));
+  assert.ok(buttonOf(jamie, "Bots"), "a Member's bots to pick");
+  assert.ok(buttonOf(jamie, "Remove"));
+  assert.ok(box.textContent.includes(M.ADMIN_SHEET_WORDS.seats), "the plan is the owner's");
+  assert.equal(buttonOf(box, "Upgrade to Max"), undefined);
+  assert.ok(!box.textContent.includes("Transfer"), "no transfer");
+  await click(buttonOf(jamie, "Admin"));
+  assert.ok(box.textContent.includes(M.ADMIN_WORDS.confirmBodyShared), "the Make Admin question in an Admin's words");
+  globalThis.fetch = real;
+  await done();
+});
+
+await test("an Admin's sheet while orgo-web or Bops Cloud don't let them change people: it reads only, says why, and Leave still goes", async () => {
+  const fake = bops();
+  fake.info.people.push({ id: "m2", name: "Ada Admin", email: "ada@example.com", role: "admin", guest: false, access: { others: "none", bots: {} } });
+  fake.info.shared = { me: "m2", can: false, line: M.ADMIN_SHEET_WORDS.notYet };
+  const admin = { ...base, shared: { projectId: "p9", name: "Acme", owner: "tess@example.com", role: "admin", wsId: "shared_p9" } };
+  const { box, done } = await mount(h(S.Members, { state: admin, onClose: noop, onUpgrade: noop, source: "/api/workspaces/shared/people" }));
+  assert.ok(box.textContent.includes(M.ADMIN_SHEET_WORDS.notYet));
+  assert.equal(box.querySelector("form"), null, "no invite form");
+  const jamie = rowOf(box, "Jamie Lee");
+  assert.equal(buttonOf(jamie, "Remove"), undefined);
+  assert.equal(buttonOf(jamie, "Bots"), undefined);
+  assert.match(jamie.textContent, /Member/);
+  assert.ok(buttonOf(rowOf(box, "Ada Admin"), "Leave"));
+  await done();
 });
 
 console.log(`${passed} passed`);
