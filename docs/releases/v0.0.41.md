@@ -1,0 +1,5 @@
+- Admins, and anyone you give Keys, can manage a workspace's keys.
+- Paste a key and Bops picks its service for you.
+- Done threads fold into one line under each bot.
+- Mascots blink and breathe, and an idle bot watches you type.
+- The sidebar shows a bot's last reply in plain words.
