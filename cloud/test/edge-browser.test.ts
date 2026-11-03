@@ -6,7 +6,7 @@ import { clearAuthCache } from "../auth.ts";
 import { resetBrowser, runnerConnected, viewersOf } from "../browser.ts";
 import { closeDb } from "../db.ts";
 import { resetMembers } from "../members.ts";
-import { BROWSER_NEEDS_COMPUTER, BROWSER_NEEDS_WRITE, type BrowserToRunner, type RunnerToBrowser } from "../protocol.ts";
+import { BROWSER_NEEDS_COMPUTER, BROWSER_NEEDS_WRITE, BROWSER_SHARED_COMPUTER, type BrowserToRunner, type RunnerToBrowser } from "../protocol.ts";
 import { listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
@@ -72,7 +72,8 @@ const state = {
       id: "ws_acme",
       name: "Acme",
       memberAccess: {
-        [`${writer}@example.com`]: { others: "none", bots: { max: "write" }, computer: "use", at },
+        // Dana works on Max's computer (none of its own), so watching Max takes Dana at Write too (they share its screens).
+        [`${writer}@example.com`]: { others: "none", bots: { max: "write", dana: "write" }, computer: "use", at },
         [`${noComputer}@example.com`]: { others: "none", bots: { max: "write" }, at },
         [`${reader}@example.com`]: { others: "none", bots: { max: "read" }, computer: "use", at },
         [`${hidden}@example.com`]: { others: "none", bots: { dana: "write" }, computer: "use", at },
@@ -178,6 +179,12 @@ test("a member without Use its computer, a member at Read, one who doesn't see t
   assert.match(read.body!.error, /takes Write on Max, and the owner gave you Read/);
   const notTheirs = await watch(hidden);
   assert.equal(notTheirs.status, 404, "a bot they don't see is no bot at all");
+  // Nor through a bot they have that works on its computer: its screens are the hidden bot's too.
+  const shared = await watch(hidden, PROJECT, "dana");
+  assert.equal(shared.status, 403);
+  assert.equal(shared.body?.code, BROWSER_SHARED_COMPUTER);
+  assert.match(shared.body!.error, /^Dana shares its computer with bots you don't have, so only the owner can watch its browser\.$/);
+  assert.equal((await act(hidden, { bot: "dana", act: "take" })).body.code, BROWSER_SHARED_COMPUTER, "nor take it over");
   const out = await watch(outsider);
   assert.equal(out.status, 404, "not in the workspace: no such workspace");
   // Nor their own account's bot of that id: someone else's computer isn't theirs to watch.
