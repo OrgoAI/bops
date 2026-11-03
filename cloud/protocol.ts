@@ -988,7 +988,8 @@ export const STORED_ACT_MS = 24 * 3600_000;
  * or newer (set_by "auto"), and back to the Mac whenever one can't answer (set_by "auto", or "auto-held" for a wake
  * refused, which waits a day). A choice the owner (POST /v1/chat-routing {mode: "mac" | "cloud"}) or Orgo's staff made
  * is never moved, either way; {mode: "auto"} gives it back. The owner's state carries it on each workspace
- * (Workspace.chatOn "cloud", or "mac" for a choice of the Mac; chatAuto while Bops Cloud may move it).
+ * (Workspace.chatOn "cloud", or "mac" for a choice of the Mac; chatAuto while Bops Cloud may move it; chatAutoOff where
+ * it refuses {mode: "auto"} for the owner, so the switch can't be turned back on from it).
  */
 /** What the owner's Bops sends: its own key for the message (its id is "msg_o_<key>"), the words, and the message it replies to. */
 export type ChatSendBody = { key: string; text: string; replyTo?: string };

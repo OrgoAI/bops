@@ -570,10 +570,10 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
     } else {
       // The switch of each workspace's chat as Bops Cloud keeps it (turns.ts keepChatOn): a Bops from before drops it,
       // and one that never heard of a change of it (Bops Cloud may move a workspace by itself) doesn't have it yet.
-      // An account with no row, that Bops Cloud doesn't move workspaces for, and with no mark of that left: nothing to put back.
+      // An account with no row, that Bops Cloud doesn't move workspaces for, and with no mark of either left: nothing to put back.
       const rows = await routedWorkspaces(c, user.id);
       const on = chatAutoFor(user.id);
-      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && w.chatAuto !== undefined) ? keepChatOn(written, rows, on) : written;
+      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && (w.chatAuto !== undefined || w.chatAutoOff !== undefined)) ? keepChatOn(written, rows, on) : written;
       if (kept !== written) {
         written = kept;
         json = toJson(blobOf(kept));

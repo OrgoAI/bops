@@ -587,6 +587,14 @@ await check("while a shared workspace is open, the user's own news still chimes:
   assert.ok(!/if \(!state \|\| state\.shared\) return;\n\s*const due/.test(src), "it no longer stops for a shared workspace");
 });
 
+await check("an Admin's window has the workspace's switch as Bops Cloud mirrors it: chatOn, chatAuto, and chatAutoOff where it won't come back on", () => {
+  const withSwitch = (workspace) => ({ ...cloudState(), state: { ...cloudState().state, workspace: { id: "ws_main", name: "Acme", createdAt: 1, ...workspace } } });
+  const ws = (workspace) => viewState(own(), { ...listed, wsId: WS }, withSwitch(workspace), {}).workspaces.find((w) => w.id === WS);
+  assert.deepEqual([ws({ chatOn: "mac", chatAutoOff: true }).chatOn, ws({ chatOn: "mac", chatAutoOff: true }).chatAutoOff], ["mac", true]);
+  assert.equal(ws({ chatOn: "mac" }).chatAutoOff, undefined, "a Bops Cloud from before says nothing: the switch as it was");
+  assert.equal(ws({ chatOn: "mac", chatAutoOff: "yes" }).chatAutoOff, undefined, "only true counts");
+});
+
 await check("nothing of a shared workspace is ever written into the user's state, saved or synced", () => {
   for (const f of ["lib/server/shared.ts", "lib/server/shared-core.ts"]) {
     const src = readFileSync(`${root}/${f}`, "utf8");
