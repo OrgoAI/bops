@@ -179,8 +179,9 @@ export function StatusIcon({ session: s, size = 13, dark, owner, member, okWait 
       <path d="M4 4l6 6M10 4l-6 6" fill="none" stroke="#9A9A98" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   );
+  // The same words for a screen reader, so the state is never a glyph only.
   return (
-    <span data-tip={tip} className="flex shrink-0 items-center justify-center">
+    <span data-tip={tip} role="img" aria-label={tip} className="flex shrink-0 items-center justify-center">
       {icon}
     </span>
   );

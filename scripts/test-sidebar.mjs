@@ -8,8 +8,10 @@
 // chips pin and unpin (All never); the main bot's is a chat row like the others, pinned first, with a
 // star on its avatar; a routine's post on a row names its routine; under each bot's row, folded by
 // default, its cards (three, the rest behind "Show N more") over its threads, with a chip that counts
-// both and says whether something needs you or one is working, open as this Mac remembers it; and a
-// search still lists the matching threads flat under Threads.
+// both and says whether something needs you or one is working, open as this Mac remembers it; its threads
+// inline only while one waits on someone (first of all) or works, each with its time and its state in
+// words, the rest folded under one "N done" line that opens them, held in place while the pointer or focus
+// is in the sidebar; and a search still lists the matching threads flat under Threads.
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-sidebar.mjs   (not with --conditions=react-server: these are client components)
@@ -175,7 +177,7 @@ await test("Needs your attention: an issue waiting on us under the bot that open
 await test("Under a bot: what waits on the user from it as cards, then its threads; the chip counts both and, folded, marks it", () => {
   stored.clear();
   const needs = { asks: [], issues: [1, 2, 3, 4].map((n) => issue(`i${n}`, { title: `Customer ${n} needs a reply`, customer: { name: `c${n}@example.com` }, tags: ["Customer", "Bug"] })), alerts: [alertOf("w1", "nova")], setup: [] };
-  const props = { user: "u1", ws: "ws_main", botId: "nova", name: "Nova", threads: [session("t1", "nova")], needs, row: (space) => h("div", null, "ROW", space), onOpenThread: noop, onOpenIssue: noop, onOpenWatch: noop, onSetup: noop };
+  const props = { user: "u1", ws: "ws_main", botId: "nova", name: "Nova", threads: [session("t1", "nova", { status: "running", endedAt: undefined })], needs, row: (space) => h("div", null, "ROW", space), onOpenThread: noop, onOpenIssue: noop, onOpenWatch: noop, onSetup: noop };
   let html = renderToStaticMarkup(h(S.WithThreads, props));
   assert.match(html, /aria-label="Nova: 5 waiting on you, 1 thread"/, "what waits and the threads");
   assert.match(html, /data-chip-mark="you"[^>]*><\/span>6</, "folded: the count of both, and the mark that something needs you");
@@ -537,17 +539,30 @@ await test("Threads: a bot's row sits in the same place with threads or without,
   assert.match(botBlock(one, "pip"), /Pip&#x27;s threads, 1/);
 });
 
-await test("Threads: open as this Mac remembers it per bot, live or needs you first, then newest, three and Show N more", () => {
+await test("Threads: open as this Mac remembers it per bot; inline only what waits on someone (first of all) or works, each with its time and its state in words; the rest folded under one line with the count and the latest", () => {
   stored.clear();
   stored.set("bops.threads.open.u1.ws_main.nova", "1");
   const html = render(busy());
   const nova = botBlock(html, "nova");
   assert.match(nova, /aria-expanded="true" aria-label="Nova&#x27;s threads, 5"/);
   assert.ok(!/data-chip-mark/.test(nova.slice(0, nova.indexOf("data-thread"))), "open: the chip just counts");
-  assert.deepEqual(threadIds(nova), ["n2", "n4", "n5"], "working and waiting first, then the newest");
-  assert.match(nova, />Show 2 more</);
+  assert.deepEqual(threadIds(nova), ["n4", "n2"], "waiting first of all, then working; the done ones folded away");
+  assert.match(nova, /data-thread="n4"(?:(?!<\/button>)[\s\S])*>40m<(?:(?!<\/button>)[\s\S])*<\/button>/, "the waiting one: when it stopped");
+  assert.match(nova, /data-thread="n2"(?:(?!<\/button>)[\s\S])*>2m<(?:(?!<\/button>)[\s\S])*<\/button>/, "the working one: when it began");
+  assert.match(nova, /data-thread="n4"(?:(?!<\/button>)[\s\S])*role="img" aria-label="Needs you"/, "its state in words, not a glyph only");
+  assert.match(nova, /data-thread="n2"(?:(?!<\/button>)[\s\S])*role="img" aria-label="Working on it"/);
+  assert.match(nova, /<button(?=[^>]*data-done-line="true")(?=[^>]*aria-expanded="false")[^>]*>(?:(?!<\/button>)[\s\S])*>3 done · last 5m ago</, "one quiet line: how many, and when the newest stopped");
+  assert.ok(at(nova, 'data-thread="n2"') < at(nova, "data-done-line"), "under the inline ones");
+  assert.doesNotMatch(nova, /Show \d+ more/, "two inline: nothing more to show");
   assert.match(nova, /border-l/, "on a thin rule");
   assert.deepEqual(threadIds(botBlock(html, "pip")), [], "Pip's stays folded");
+  // Nothing done: no line. Only done: just the line.
+  stored.set("bops.threads.open.u1.ws_main.pip", "1");
+  const pipOnly = (sessions) => botBlock(render(world({ sessions })), "pip");
+  assert.ok(!pipOnly([session("p1", "pip", { status: "running", endedAt: undefined })]).includes("data-done-line"));
+  const onlyDone = pipOnly([session("p2", "pip", { endedAt: min(3) }), session("p3", "pip", { status: "failed", error: "Stopped by you", endedAt: min(7) })]);
+  assert.deepEqual(threadIds(onlyDone), [], "stopped by the user counts as done: nothing waits on it");
+  assert.match(onlyDone, />2 done · last 3m ago</);
   // No storage at all: it still renders, folded.
   storageThrows = true;
   const bare = render(busy());
@@ -556,12 +571,37 @@ await test("Threads: open as this Mac remembers it per bot, live or needs you fi
   stored.clear();
 });
 
+await test("Threads: waiting on the user's OK sorts first too, and four inline show three and Show 1 more", () => {
+  stored.clear();
+  stored.set("bops.threads.open.u1.ws_main.nova", "1");
+  const sessions = [
+    session("w1", "nova", { status: "running", createdAt: min(1), endedAt: undefined }),
+    session("w2", "nova", { status: "running", createdAt: min(2), endedAt: undefined }),
+    session("ok", "nova", { status: "queued", createdAt: min(30), endedAt: undefined }),
+    asking("q1", "nova", min(50)),
+  ];
+  const ask = { id: "a1", botId: "nova", chatId: "chat_nova", askedBy: "dev_runner_c1", action: "Send Email in Gmail (sam@acme.com)", resources: [], preview: "", at: min(4), threadId: "ok" };
+  const nova = botBlock(render(world({ sessions, appApprovals: [ask] })), "nova");
+  assert.deepEqual(threadIds(nova), ["ok", "q1", "w1"], "both waiting ones first (the newer first), then the working");
+  assert.match(nova, />Show 1 more</);
+  stored.clear();
+});
+
+await test("Threads: a search lists one waiting for your OK first too, before newer working ones, never cut off by them", () => {
+  stored.clear();
+  const run = (id, n) => session(id, "nova", { status: "running", createdAt: min(n), endedAt: undefined });
+  const ask = { id: "a1", botId: "nova", chatId: "chat_nova", askedBy: "dev_runner_c1", action: "Send Email in Gmail (sam@acme.com)", resources: [], preview: "", at: min(4), threadId: "ok" };
+  const html = render(world({ sessions: [run("ok", 30), ...[1, 2, 3, 4, 5, 6].map((n) => run(`w${n}`, n))], appApprovals: [ask] }), { search: "Thread" });
+  assert.deepEqual(threadIds(html.slice(at(html, ">Threads<"))), ["ok", "w1", "w2", "w3", "w4", "w5"]);
+});
+
 await test("Threads: a search still lists the matching ones flat under Threads", () => {
   stored.clear();
   const html = render(busy(), { search: "Thread n" });
   assert.ok(html.includes(">Threads<"), "the Threads heading");
   assert.equal(at(html, "data-bot-threads="), -1, "no chips while searching");
-  assert.deepEqual(threadIds(html.slice(at(html, ">Threads<"))), ["n2", "n4", "n5", "n3", "n1"], "flat, in the same order");
+  assert.deepEqual(threadIds(html.slice(at(html, ">Threads<"))), ["n4", "n2", "n5", "n3", "n1"], "flat, in the same order: waiting, working, then the newest");
+  assert.match(html.slice(at(html, ">Threads<")), /data-thread="n5"(?:(?!<\/button>)[\s\S])*>5m</, "each with its time");
 });
 
 /* ---------------- The workspace menu's Team chart row ---------------- */
@@ -577,6 +617,119 @@ await test("the workspace menu has a Team chart row for the open workspace, the 
   assert.ok(!menu(shared).includes("data-team-chart-row"));
   // Nowhere to open it: no row.
   assert.ok(!renderToStaticMarkup(h(WorkspaceSwitcher, { state: world(), opened: true, sharedList: [] })).includes("data-team-chart-row"));
+});
+
+/* ---------------- Threads, clicked and held (a DOM) ---------------- */
+
+const { parseHTML } = await import("linkedom");
+const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
+const doc = win.document;
+win.HTMLElement.prototype.focus = function () {};
+// Whether focus came from the keyboard is the browser's to say (:focus-visible, which linkedom doesn't know): a test sets it.
+let keyboard = true;
+const matches = win.Element.prototype.matches;
+win.Element.prototype.matches = function (selector) {
+  return selector === ":focus-visible" ? keyboard : matches.call(this, selector);
+};
+globalThis.document = doc;
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const { createRoot } = await import("react-dom/client");
+const { act } = await import("react");
+const settle = () => new Promise((r) => setTimeout(r, 5));
+async function mount(el) {
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const r = createRoot(box);
+  await act(async () => (r.render(el), await settle()));
+  return { box, render: (x) => act(async () => (r.render(x), await settle())), done: async () => (await act(async () => r.unmount()), box.remove()) };
+}
+const fire = (el, type, init = {}) => act(async () => (el.dispatchEvent(Object.assign(new win.Event(type, { bubbles: true }), init)), await settle()));
+/** The threads listed inline (not in the done list), and the done list's, in order. */
+const inlineOf = (box) => [...box.querySelectorAll("[data-thread]")].filter((e) => !e.closest("[data-done-list]")).map((e) => e.getAttribute("data-thread"));
+const doneOf = (box) => [...box.querySelectorAll("[data-done-list] [data-thread]")].map((e) => e.getAttribute("data-thread"));
+const doneLine = (box) => box.querySelector("[data-done-line]");
+const threadProps = (threads, extra = {}) => ({ user: "u1", ws: "ws_main", botId: "nova", name: "Nova", threads, row: (space) => h("div", null, "ROW", space), onOpenThread: noop, onOpenIssue: noop, onOpenWatch: noop, onSetup: noop, ...extra });
+
+await test("Threads: the done line opens the done ones, newest first, and shuts them again", async () => {
+  stored.clear();
+  stored.set("bops.threads.open.u1.ws_main.nova", "1");
+  const v = await mount(h(S.WithThreads, threadProps(busy().sessions.filter((s) => s.botId === "nova"))));
+  assert.deepEqual(inlineOf(v.box), ["n4", "n2"]);
+  assert.deepEqual(doneOf(v.box), [], "folded: not even rendered");
+  assert.equal(doneLine(v.box).getAttribute("aria-expanded"), "false");
+  await fire(doneLine(v.box), "click");
+  assert.equal(doneLine(v.box).getAttribute("aria-expanded"), "true");
+  assert.deepEqual(doneOf(v.box), ["n5", "n3", "n1"], "open: newest first");
+  assert.equal(v.box.querySelector("[data-done-list]").closest("[inert]"), null, "within reach");
+  await fire(doneLine(v.box), "click");
+  assert.equal(doneLine(v.box).getAttribute("aria-expanded"), "false");
+  assert.ok(v.box.querySelector("[data-done-list]").closest("[inert]"), "shut: out of reach");
+  await v.done();
+  stored.clear();
+});
+
+await test("Threads: held, a thread that finishes keeps its place and changes its mark, a new one joins at the end; let go, it folds into done", async () => {
+  stored.clear();
+  stored.set("bops.threads.open.u1.ws_main.nova", "1");
+  const base = [session("w1", "nova", { status: "running", createdAt: min(3), endedAt: undefined }), asking("q1", "nova", min(20)), session("d1", "nova", { endedAt: min(30) })];
+  const v = await mount(h(S.WithThreads, threadProps(base, { still: false })));
+  assert.deepEqual(inlineOf(v.box), ["q1", "w1"]);
+  await v.render(h(S.WithThreads, threadProps(base, { still: true })));
+  const later = [...base.map((s) => (s.id === "w1" ? { ...s, status: "done", endedAt: Date.now() } : s)), session("n9", "nova", { status: "running", createdAt: Date.now(), endedAt: undefined })];
+  await v.render(h(S.WithThreads, threadProps(later, { still: true })));
+  assert.deepEqual(inlineOf(v.box), ["q1", "w1", "n9"], "w1 where it was, the new one at the end");
+  const w1 = v.box.querySelector('[data-thread="w1"]');
+  assert.equal(w1.querySelector('[aria-label="Working on it"]'), null, "its spinner gone: it changed form in place");
+  assert.match(doneLine(v.box).textContent, /^1 done/, "not counted as done yet");
+  // A second arrival, newer, goes after the first; the first starting to wait on the user doesn't move it either.
+  const more = [...later, session("n10", "nova", { status: "running", createdAt: Date.now() + 1, endedAt: undefined })];
+  await v.render(h(S.WithThreads, threadProps(more, { still: true })));
+  await fire([...v.box.querySelectorAll("button")].find((b) => b.textContent === "Show 1 more"), "click");
+  assert.deepEqual(inlineOf(v.box), ["q1", "w1", "n9", "n10"], "each arrival at the end, once");
+  const asks = more.map((s) => (s.id === "n9" ? { ...s, status: "done", endedAt: Date.now(), waitingOnYou: true } : s));
+  await v.render(h(S.WithThreads, threadProps(asks, { still: true })));
+  assert.deepEqual(inlineOf(v.box), ["q1", "w1", "n9", "n10"], "a change of state stays in place");
+  await v.render(h(S.WithThreads, threadProps(asks, { still: false })));
+  assert.deepEqual(inlineOf(v.box), ["n9", "q1", "n10"], "let go: it settles, the waiting ones first, the finished one folded");
+  assert.match(doneLine(v.box).textContent, /^2 done · last just now$/);
+  await v.done();
+  stored.clear();
+});
+
+await test("Threads: the sidebar holds them while the keyboard's focus or the pointer is in its list (not a click's focus), and lets go when they leave", async () => {
+  stored.clear();
+  stored.set("bops.threads.open.u1.ws_main.nova", "1");
+  const base = world({ sessions: [session("w1", "nova", { status: "running", createdAt: min(3), endedAt: undefined }), session("d1", "nova", { endedAt: min(30) })] });
+  const finished = { ...base, sessions: base.sessions.map((s) => (s.id === "w1" ? { ...s, status: "done", endedAt: Date.now() } : s)) };
+  const bar = (state) =>
+    h(Sidebar, { state, chatId: "chat_nova", onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onMembers: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop });
+  const v = await mount(bar(base));
+  const nova = () => v.box.querySelector('[data-bot-threads="nova"]');
+  assert.deepEqual(inlineOf(nova()), ["w1"]);
+  // Focus comes into the list (a row, from the keyboard): held.
+  keyboard = true;
+  await fire(nova().querySelector('[data-thread="w1"]'), "focusin");
+  await v.render(bar(finished));
+  assert.deepEqual(inlineOf(nova()), ["w1"], "focus in: it stays");
+  await fire(nova().querySelector('[data-thread="w1"]'), "focusout", { relatedTarget: null });
+  assert.deepEqual(inlineOf(nova()), [], "focus gone: it folds");
+  // A click's focus (the chip that opened the list) holds nothing once the pointer has gone.
+  await v.render(bar(base));
+  keyboard = false;
+  await fire(nova().querySelector("button[aria-expanded]"), "focusin");
+  await v.render(bar(finished));
+  assert.deepEqual(inlineOf(nova()), [], "a click's focus: it folds");
+  keyboard = true;
+  // The pointer comes in: held, until it leaves.
+  await v.render(bar(base));
+  const list = nova().closest(".overflow-y-auto");
+  await fire(list, "pointerover", { relatedTarget: null, pointerId: 1 });
+  await v.render(bar(finished));
+  assert.deepEqual(inlineOf(nova()), ["w1"], "pointer in: it stays");
+  await fire(list, "pointerout", { relatedTarget: doc.body, pointerId: 1 });
+  assert.deepEqual(inlineOf(nova()), [], "pointer gone: it folds");
+  await v.done();
+  stored.clear();
 });
 
 console.log(`\nsidebar: ${passed} passed`);
