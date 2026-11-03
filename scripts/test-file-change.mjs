@@ -292,8 +292,8 @@ await check("two files, one call: exactly ONE ask; before it only reads went out
   assert.equal(asked.length, a0 + 1, "the turn paused at it");
   assert.deepEqual(writes(), [], "nothing written before the yes");
   assert.deepEqual([apr.action, apr.kind, apr.reason], ["Call GitHub", "api", "Make the buttons the logo's orange, as a draft"]);
-  assert.deepEqual(apr.api.change, { repo: "acme/site", branch: "site/orange-buttons", base: "main", files: [{ path: "src/look.ts", op: "change", bytes: Buffer.byteLength(NEW_LOOK) }, { path: "src/notes.md", op: "add", bytes: 17 }] });
-  assert.equal(apiFacts(apr.api), "GitHub · changes 2 files on site/orange-buttons");
+  assert.deepEqual(apr.api.change, { repo: "acme/site", branch: "site/orange-buttons", base: "main", at: gh.refs.get("main"), files: [{ path: "src/look.ts", op: "change", bytes: Buffer.byteLength(NEW_LOOK) }, { path: "src/notes.md", op: "add", bytes: 17 }] });
+  assert.equal(apiFacts(apr.api), "GitHub · changes 2 files in acme/site, on site/orange-buttons");
   assert.match(apr.preview, /^New branch site\/orange-buttons, from main\./);
   assert.match(apr.preview, /src\/look\.ts: changed, \d+ B\nat line 2\n- {3}accent: "#FFD400",\n\+ {3}accent: "#F15B3B",/);
   assert.match(apr.preview, /src\/notes\.md: added, 17 B\n\+ Buttons: orange\./);
@@ -324,7 +324,7 @@ await check("an existing branch moves by a fast forward, last; a delete says so 
   gh.calls = [];
   const { apr, opened } = await asking(change({ files: [{ path: "src/look.ts", text: NEW_LOOK.replace("F15B3B", "E04A2A"), delete: null }, { path: "old.css", text: null, delete: true }] }));
   assert.equal(opened, 1);
-  assert.equal(apiFacts(apr.api), "GitHub · changes 1 file and deletes 1 on site/orange-buttons");
+  assert.equal(apiFacts(apr.api), "GitHub · changes 1 file and deletes 1 in acme/site, on site/orange-buttons");
   assert.match(apr.preview, /old\.css: deleted/);
   assert.ok(!/New branch/.test(apr.preview));
   const a0 = asked.length;
@@ -335,7 +335,7 @@ await check("an existing branch moves by a fast forward, last; a delete says so 
   assert.equal(gh.commits.get(gh.refs.get("site/orange-buttons")).parents[0], before);
   assert.equal(fileAt("site/orange-buttons", "old.css"), undefined, "deleted");
   const only = await asking(change({ files: [{ path: "README.md", text: null, delete: true }] }));
-  assert.equal(apiFacts(only.apr.api), "GitHub · deletes 1 file on site/orange-buttons");
+  assert.equal(apiFacts(only.apr.api), "GitHub · deletes 1 file in acme/site, on site/orange-buttons");
   P.replyToAsk(only.apr.id, "reject");
   await until(() => !S.getState().appApprovals.some((x) => x.id === only.apr.id), "the no to be read");
 });
@@ -364,6 +364,54 @@ await check("a failure part way leaves no half change on the branch: it never mo
   assert.ok(!writes().some((c) => /\/git\/refs/.test(c.path)), "the branch never moved");
   assert.equal(outputOf(asked[a0]), "Not saved: making the commit, GitHub answered 422 (Validation Failed). Nothing changed on main.");
   assert.match(messages().findLast((m) => m.appResult).text, /^Boppy couldn't call it: making the commit, GitHub answered 422/);
+});
+
+/** Someone else's commit on `ref` (a teammate saving meanwhile): `path` says `text` there. */
+function theirCommit(ref, path, text) {
+  const was = gh.refs.get(ref);
+  const tree = { ...gh.trees.get(gh.commits.get(was).tree), [path]: gh.blob(Buffer.from(text)) };
+  const treeSha = sha1(JSON.stringify(tree));
+  gh.trees.set(treeSha, tree);
+  const sha = sha1(`theirs${treeSha}${was}`);
+  gh.commits.set(sha, { tree: treeSha, parents: [was], message: "A teammate's change" });
+  gh.refs.set(ref, sha);
+  return sha;
+}
+
+await check("the yes is to the card: a branch that moved after it was made stops the change, writing nothing, so a teammate's work is never undone", async () => {
+  freshRepo();
+  const { apr } = await asking(change({ branch: "main" }));
+  assert.equal(apr.api.change.at, gh.refs.get("main"), "the card says the commit it was made from");
+  const theirs = theirCommit("main", "src/look.ts", "export const look = { accent: \"#00AA00\" };\n");
+  gh.calls = [];
+  const a0 = asked.length;
+  P.replyToAsk(apr.id, "once");
+  await until(() => asked.length === a0 + 1, "the turn to go on");
+  assert.deepEqual(writes(), [], "nothing written");
+  assert.equal(gh.refs.get("main"), theirs, "the teammate's commit stays");
+  assert.equal(outputOf(asked[a0]), "Not saved: main changed after the card was made, and this could undo that. Ask again to see what changes now. Nothing changed on main.");
+  // A new branch someone made meanwhile: the same.
+  const fresh = await asking(change({ branch: "site/new" }));
+  gh.refs.set("site/new", gh.refs.get("main"));
+  gh.calls = [];
+  const a1 = asked.length;
+  P.replyToAsk(fresh.apr.id, "once");
+  await until(() => asked.length === a1 + 1, "the turn to go on");
+  assert.deepEqual(writes(), []);
+  assert.match(outputOf(asked[a1]), /^Not saved: site\/new changed after the card was made/);
+});
+
+await check("only the files the card listed go in: one the same as there now is left out of the card and of the commit", async () => {
+  freshRepo();
+  const { apr } = await asking(change({ branch: "main", files: [{ path: "src/look.ts", text: NEW_LOOK, delete: null }, { path: "README.md", text: "# Site\n", delete: null }] }));
+  assert.deepEqual(apr.api.change.files.map((f) => f.path), ["src/look.ts"]);
+  gh.calls = [];
+  const a0 = asked.length;
+  P.replyToAsk(apr.id, "once");
+  await until(() => asked.length === a0 + 1 && writes().some((c) => c.method === "PATCH"), "the change to go in");
+  assert.deepEqual(writes().filter((c) => c.path.endsWith("/git/blobs")).map((c) => c.body.content), [NEW_LOOK], "one blob: the card's file");
+  assert.deepEqual(writes().find((c) => c.path.endsWith("/git/trees")).body.tree.map((e) => e.path), ["src/look.ts"]);
+  assert.match(outputOf(asked[a0]), /^Saved: 1 file on main in acme\/site \(commit/);
 });
 
 await check("the same text as there now asks nothing; bad input is said plainly and sends nothing", async () => {

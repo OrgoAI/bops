@@ -2692,7 +2692,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // Files changed in a repository in one go (repo-change.ts): asked for once; on the yes (or an Always allow), each file
       // is said in the chat as it went, as theirs, folded into one line there ("Boppy changed 2 files on GitHub").
       if (name === "change_files")
-        return changeFiles(botId, a, used, { chat: true, approved })
+        return changeFiles(botId, a, used, { chat: true, approved, ...(approved && opts.resume?.api?.change ? { asked: opts.resume.api.change } : {}) })
           .then((r) => {
             for (const did of r.did ?? []) addMessage({ chatId, role: "system", text: `${b.name}: ${did}`, appResult: { action: did.replace(/^Called /, ""), ok: true, output: r.text } });
             if (r.failed && approved) addMessage({ chatId, role: "system", text: `${b.name} couldn't call it: ${r.failed.why.slice(0, 160)}`, appResult: { action: r.failed.did.replace(/^Called /, ""), ok: false, output: r.text } });

@@ -2269,9 +2269,10 @@ export type AppApproval = {
 
 /**
  * A change to files in a repository asked for in one go (lib/server/repo-change.ts change_files): the repository, the
- * branch it goes on (`base`: made from it, when it's new), and each file, added, changed or deleted, with its new size.
+ * branch it goes on (`base`: made from it, when it's new), the commit the card was made from (`at`: the branch's, or
+ * its base's), which the yes builds on, and each file, added, changed or deleted, with its new size: only these go in.
  */
-export type FileChange = { repo: string; branch: string; base?: string; files: { path: string; op: "add" | "change" | "delete"; bytes?: number }[] };
+export type FileChange = { repo: string; branch: string; base?: string; at: string; files: { path: string; op: "add" | "change" | "delete"; bytes?: number }[] };
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
 export type AskReply = "once" | "always" | "reject";

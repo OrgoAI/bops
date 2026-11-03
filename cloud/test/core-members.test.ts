@@ -1620,7 +1620,7 @@ test("the slice says when the owner's Bops takes an Admin's acts (adminActs), an
   assert.equal(said.approvals?.[0]?.reason, "Save the new button colour as a draft");
   assert.deepEqual(said.approvals?.[0]?.api, { label: "GitHub", method: "POST", path: "/x" }, "never the key's vault name");
   // A change to files in one go (AppApproval.api.change): which files and how, for the card's facts line and Details.
-  const change = { repo: "acme/site", branch: "site/orange", base: "main", files: [{ path: "src/look.ts", op: "change", bytes: 59 }, { path: "old.css", op: "delete" }] };
+  const change = { repo: "acme/site", branch: "site/orange", base: "main", at: "4de5457", files: [{ path: "src/look.ts", op: "change", bytes: 59 }, { path: "old.css", op: "delete" }] };
   const changed = sharedSlice({ ...blob, appApprovals: [{ id: "a3", botId: "max", chatId: "bot:max", action: "Call GitHub", kind: "api", api: { key: "GITHUB_TOKEN", label: "GitHub", method: "POST", path: "/repos/acme/site/git/commits", change }, reason: "Make the buttons orange" }] }, "ws_act", { role: "admin", id: "u", adminActs: true });
   assert.deepEqual(changed.approvals?.[0]?.api, { label: "GitHub", method: "POST", path: "/repos/acme/site/git/commits", change });
 });

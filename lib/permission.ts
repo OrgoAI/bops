@@ -45,12 +45,13 @@ export const askHeadline = (botName: string, a: Pick<AppApproval, "action" | "re
  * A query sent as a POST (GraphQL) and a GET that asks (Slack's) can do anything, and say so.
  */
 export function apiFacts(api: Pick<NonNullable<AppApproval["api"]>, "label" | "method" | "path" | "change">) {
-  // A change to files in one go: how many it changes and deletes, and on which branch ("GitHub · changes 2 files on site/orange").
+  // A change to files in one go: how many it changes and deletes, in which repository and on which branch
+  // ("GitHub · changes 2 files in acme/site, on site/orange"): the repository is Bops' to say, never the bot's reason.
   if (api.change) {
     const gone = api.change.files.filter((f) => f.op === "delete").length;
     const kept = api.change.files.length - gone;
     const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
-    return `${api.label} · ${kept ? `changes ${files(kept)}${gone ? ` and deletes ${gone}` : ""}` : `deletes ${files(gone)}`} on ${api.change.branch}`;
+    return `${api.label} · ${kept ? `changes ${files(kept)}${gone ? ` and deletes ${gone}` : ""}` : `deletes ${files(gone)}`} in ${api.change.repo}, on ${api.change.branch}`;
   }
   const method = api.method.toUpperCase();
   const what = method === "DELETE" ? "deletes something" : method === "GET" || /\/graphql(\/|$)/i.test(api.path) ? "may add, change or delete something" : "adds or changes something";

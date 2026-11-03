@@ -155,9 +155,11 @@ function shortDiff(was: string | null, next: string): string[] {
  * turn's only (`chat`). Before the ask, Bops only reads (GETs run at once, as call_api's): the branch, or its base, and
  * each file there now, for the card's diff. Then it asks the user, every time, as any write with a key does (NeedsOk:
  * the turn pauses for the reply), unless an Always allow they saved for the key's service covers it; never on a
- * member's turn without asking. `approved`: they said yes to this very change: the writes run, the branch moving last.
+ * member's turn without asking. `approved`: they said yes to this very change, `asked` (the card they saw): the writes
+ * run on the commit the card was made from and only for the files it listed, the branch moving last; one that moved
+ * meanwhile stops it, as what was shown could undo what came since.
  */
-export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere, opts: { chat?: boolean; approved?: boolean } = {}): Promise<ChangeDone> {
+export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere, opts: { chat?: boolean; approved?: boolean; asked?: FileChange } = {}): Promise<ChangeDone> {
   const b = bot(botId);
   if (!b) return { text: "Unknown bot." };
   const owner = ownerName();
@@ -201,9 +203,12 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
     return { head: null, from, base };
   };
   const fail = (why: string): ChangeDone => ({ text: `Not saved: ${why}. Nothing changed on ${branch}.`, failed: { did: `Called ${p.label} POST /repos/${repo}/git/commits`, why } });
-  const run = async (approvedBy?: AccessUse["approvedBy"]): Promise<ChangeDone> => {
+  /** What a yes writes: on commit `from` (the branch at `head`, or a new branch from `base`), these files. */
+  type Plan = { head: string | null; from: string; base: string | null; files: FileIn[] };
+  const run = async (approvedBy: AccessUse["approvedBy"], s: Plan): Promise<ChangeDone> => {
+    const files = s.files;
+    const n = files.length;
     try {
-      const s = await start();
       const tree = (await need("reading the branch", gh("GET", `/repos/${repo}/git/commits/${s.from}`))).tree as { sha?: unknown } | undefined;
       if (typeof tree?.sha !== "string") throw new StepFailed("reading the branch", `${p.label} didn't say its files`);
       const entries: { path: string; mode: "100644"; type: "blob"; sha: string | null }[] = [];
@@ -228,7 +233,23 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
       return fail(e instanceof StepFailed ? `${e.step}, ${e.message}` : (e as Error).message);
     }
   };
-  if (opts.approved) return run("user");
+  if (opts.approved) {
+    // The yes is to the card: the commit it was made from and the files it listed, nothing found since.
+    const asked = opts.asked;
+    if (!asked || asked.repo !== repo || asked.branch !== branch) return fail("the card for this change is gone, so ask again");
+    let now: string | null;
+    try {
+      now = await at(branch);
+    } catch (e) {
+      used("failed", "user");
+      return fail(e instanceof StepFailed ? `${e.step}, ${e.message}` : (e as Error).message);
+    }
+    if (asked.base ? now !== null : now !== asked.at) {
+      used("failed", "user");
+      return fail(`${branch} changed after the card was made, and this could undo that. Ask again to see what changes now`);
+    }
+    return run("user", { head: asked.base ? null : asked.at, from: asked.at, base: asked.base ?? null, files: files.filter((f) => asked.files.some((x) => x.path === f.path)) });
+  }
   // Before asking: what's there now (reads only), for the card: each file added, changed or deleted, and a short diff.
   let s: Awaited<ReturnType<typeof start>>;
   const shown: FileChange["files"] = [];
@@ -264,12 +285,12 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
     resources: shown.map((f) => f.path),
     preview: preview.length > DIFF_CAP ? `${preview.slice(0, DIFF_CAP)}…` : preview,
     kind: "api",
-    api: { key: name, label: p.label, method: "POST", path: `/repos/${repo}/git/commits`, change: { repo, branch, ...(s.head ? {} : { base: s.base! }), files: shown } },
+    api: { key: name, label: p.label, method: "POST", path: `/repos/${repo}/git/commits`, change: { repo, branch, ...(s.head ? {} : { base: s.base! }), at: s.from, files: shown } },
     ...(asker ? { askedFor: asker } : {}),
     ...(reason ? { reason } : {}),
   };
   // As call_api's writes: an Always allow for the service goes without asking (the owner's own turn only).
-  if (!asker && allows(b, ask, { justDoIt: false })) return run("auto");
+  if (!asker && allows(b, ask, { justDoIt: false })) return run("auto", { ...s, files: files.filter((f) => shown.some((x) => x.path === f.path)) });
   used("waiting");
   throw new NeedsOk(ask);
 }
