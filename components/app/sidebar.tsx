@@ -449,7 +449,8 @@ export const FOOTER_ROOM = "pr-10";
  * `news` is for the tests.
  */
 export function KnowledgeButton({ state, expanded, pressed, news: given, onOpen }: { state: AppState; expanded: boolean; pressed: boolean; news?: boolean; onOpen: () => void }) {
-  const fresh = useKnowledgeNews(currentWorkspace(state), state.account?.user.id ?? "");
+  // A workspace shared with the user: its Knowledge is the owner's, so nothing is read for the dot (none shows).
+  const fresh = useKnowledgeNews(currentWorkspace(state), state.account?.user.id ?? "", !state.shared);
   const news = (given ?? fresh) && !pressed;
   return (
     <FooterButton

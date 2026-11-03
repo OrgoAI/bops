@@ -350,6 +350,49 @@ await test("Skills and Apps, kinds in Knowledge: Skills chip after Issues with i
   assert.ok(!/Issues/.test(t), "no chips without an account");
 });
 
+await test("a read that fails says why with Try again, never an endless spinner; Try again reads again", async () => {
+  const before = answer;
+  let down = true;
+  answer = (url, method, body) => (url.startsWith("/api/memory/categories?ws=w9") ? (down ? { status: 500, body: { error: "Memory didn't answer." } } : { status: 200, body: snap() }) : before(url, method, body));
+  const stopIt = orbitStore.watch("u1", "w9", () => {});
+  await settle();
+  assert.equal(orbitStore.failed?.("u1", "w9") ?? null, "Memory didn't answer.");
+  const html = renderToStaticMarkup(h(MemoryPage, { snap: null, failed: "Memory didn't answer.", onRetry: noop, act: async () => null, forgetting, category: "all", onCategory: noop, onClose: noop }));
+  assert.match(text(html), /Memory didn(&#x27;|')t answer\. Try again/);
+  assert.ok(!html.includes("animate-spin"), "no spinner");
+  down = false;
+  orbitStore.retry("u1", "w9");
+  await settle();
+  assert.equal(orbitStore.failed("u1", "w9"), null, "gone once a read works");
+  assert.ok(orbitStore.view("u1", "w9")?.on, "and the categories show");
+  stopIt();
+  // Bops itself out of reach: said too.
+  answer = (url, method, body) => (url.startsWith("/api/memory/categories?ws=w8") ? Promise.reject(new Error("offline")) : before(url, method, body));
+  const stopOther = orbitStore.watch("u1", "w8", () => {});
+  await settle();
+  assert.equal(orbitStore.failed("u1", "w8"), "Couldn't reach Bops.");
+  stopOther();
+  answer = before;
+});
+
+await test("in a workspace shared with the user, Knowledge says it's kept on the owner's Bops: no spinner, no kinds to pick", async () => {
+  const { MemoryView } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
+  const state = {
+    account: { user: { id: "u1" } },
+    workspace: "shared_p1",
+    workspaces: [{ id: "shared_p1", name: "acme", createdAt: 1 }],
+    bots: [{ id: "boppy", name: "Boppy", isMain: true, workspaceId: "shared_p1" }],
+    shared: { projectId: "p1", name: "acme", owner: "dana@acme.example", role: "admin", wsId: "shared_p1", levels: { boppy: "write" } },
+  };
+  for (const category of ["all", "people", "issues"]) {
+    const html = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "shared_p1", category, onCategory: noop, onClose: noop }));
+    const t = text(html).replace(/&#x27;/g, "'");
+    assert.match(t, /Knowledge in acme is kept on the owner's Bops/, category);
+    assert.ok(!html.includes("animate-spin"), `${category}: no spinner`);
+    assert.ok(!/aria-pressed/.test(html), `${category}: no kinds to pick`);
+  }
+});
+
 await test("Routines in the footer: a round button, with how many monitors have news", async () => {
   const { AutopilotButton } = await import(pathToFileURL(`${root}/components/app/autopilot.tsx`).href);
   const base = { bots: [{ id: "boppy", name: "Boppy", isMain: true }], routines: [], watches: [], sessions: [], messages: [] };
@@ -517,6 +560,82 @@ answer = (url, method, body) => {
 };
 const opened = (id, user = "u9") => h(IssuesPage, { user, ws: "w9", focus: id, tags: WS_TAGS, nav: null, onClose: noop });
 const patches = () => calls.filter((c) => c.method === "PATCH").map((c) => c.body);
+
+await test("in a workspace shared with the user, Knowledge and the footer's Knowledge button read nothing, mounted", async () => {
+  const { MemoryView } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
+  const { KnowledgeButton } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
+  const state = {
+    account: { user: { id: "u7" } },
+    workspace: "shared_p7",
+    workspaces: [{ id: "shared_p7", name: "acme", createdAt: 1 }],
+    bots: [{ id: "boppy", name: "Boppy", isMain: true, workspaceId: "shared_p7" }],
+    chats: [],
+    sessions: [],
+    shared: { projectId: "p7", name: "acme", owner: "dana@acme.example", role: "admin", wsId: "shared_p7", levels: { boppy: "write" } },
+  };
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    disconnect() {}
+  };
+  const page = await mount(h(MemoryView, { state, user: "u7", ws: "shared_p7", category: "all", onCategory: noop, onClose: noop }));
+  const button = await mount(h(KnowledgeButton, { state, expanded: false, pressed: false, onOpen: noop }));
+  await act(async () => {
+    win.dispatchEvent?.(new win.Event("focus"));
+    await settle();
+  });
+  assert.match(page.box.textContent, /kept on the owner's Bops/);
+  assert.deepEqual(calls.filter((c) => /^\/api\/(memory|orbit)/.test(c.url)).map((c) => c.url), [], "no memory or issues read");
+  await page.done();
+  await button.done();
+});
+
+await test("Issues: Bops out of reach says so with Try again, never an endless spinner; Try again reads again, mounted", async () => {
+  const before = answer;
+  let down = true;
+  answer = (url, method, body) =>
+    url.startsWith("/api/orbit/issues?ws=w6") ? (down ? Promise.reject(new Error("offline")) : { status: 200, body: { issues: [issue("issue-9", { ws: "w6", title: "Printer jam" })], tags: [] } }) : before(url, method, body);
+  const page = await mount(h(IssuesPage, { user: "u1", ws: "w6", onClose: noop }));
+  assert.match(page.box.textContent, /Couldn't reach Bops\./);
+  assert.ok(!page.box.innerHTML.includes("animate-spin"), "no spinner");
+  const again = [...page.box.querySelectorAll("button")].find((b) => b.textContent === "Try again");
+  assert.ok(again, "Try again");
+  down = false;
+  await click(again);
+  assert.match(page.box.textContent, /Printer jam/);
+  assert.equal(issueStore.failed("u1", "w6"), null);
+  await page.done();
+  answer = before;
+});
+
+await test("Issues: an error answer says why with Try again, never an empty list that hides it; memory off is still an empty list", async () => {
+  const before = answer;
+  let down = true;
+  answer = (url, method, body) =>
+    url.startsWith("/api/orbit/issues?ws=w5")
+      ? down
+        ? { status: 500, body: { error: "The issues file couldn't be read." } }
+        : { status: 200, body: { issues: [issue("issue-8", { ws: "w5", title: "Fax line down" })], tags: [] } }
+      : url.startsWith("/api/orbit/issues?ws=w4")
+        ? { status: 200, body: { issues: [], tags: [], on: false } }
+        : before(url, method, body);
+  const page = await mount(h(IssuesPage, { user: "u1", ws: "w5", onClose: noop }));
+  assert.match(page.box.textContent, /The issues file couldn't be read\./);
+  assert.equal(issueStore.list("u1", "w5"), null, "no empty list in its place");
+  const again = [...page.box.querySelectorAll("button")].find((b) => b.textContent === "Try again");
+  assert.ok(again, "Try again");
+  down = false;
+  await click(again);
+  assert.match(page.box.textContent, /Fax line down/);
+  assert.equal(issueStore.failed("u1", "w5"), null);
+  await page.done();
+  // Memory off (the route answers 200 with no issues): the empty list, no failure.
+  const stop = issueStore.watch("u1", "w4", () => {});
+  await settle();
+  assert.deepEqual(issueStore.list("u1", "w4")?.issues, []);
+  assert.equal(issueStore.failed("u1", "w4"), null);
+  stop();
+  answer = before;
+});
 
 await test("an issue's + Tag opens a Bops picker over the page, not a datalist: every workspace tag, the ones on it checked in place", async () => {
   tagged = [issue("issue-9", { ws: "w9", tags: ["Customer", "Outage"] })];

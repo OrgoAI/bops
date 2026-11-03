@@ -811,8 +811,8 @@ await check("the sidebar of a shared workspace makes nothing new", () => {
   assert.ok(!shared.includes("Sam&#x27;s Boppy") && !shared.includes("Sam's Boppy"), "none of the user's own bots");
   const mine = renderToStaticMarkup(h(Sidebar, { ...props, state: own() }));
   assert.match(mine, /aria-label="New chat or bot"/);
-  // Favorites: shown, never moved or taken off (no drag, Option and an arrow, or menu): its owner's, and nothing's saved.
-  assert.match(shared, /data-favorite="issues" draggable="false"/);
+  // Favorites: none of Knowledge's kinds (its Knowledge is on the owner's Bops), so nothing to move, take off or save.
+  assert.ok(!/data-favorite="(issues|todos|people)"/.test(shared));
   assert.ok(!shared.includes('aria-keyshortcuts="Alt+ArrowUp'));
   assert.match(mine, /data-favorite="issues" draggable="true" aria-keyshortcuts="Alt\+ArrowUp Alt\+ArrowDown"/, "the user's own: as always");
   // Neither the user's own issues nor this Mac's setup go under its bots as cards: they're the user's, not the owner's.
