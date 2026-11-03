@@ -56,7 +56,7 @@ import { RestartButton, RestartIcon, useCanRestart } from "./restart";
 import { RunsOnSettings } from "./runs-on";
 import { chatInWorkspace, currentWorkspace, option, post, radio, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
 import { viewOnly } from "./view-only";
-import { readOnlyLine, seesBrowser } from "@/lib/shared";
+import { panelAfterSwitch, panelEmpty, readOnlyLine, seesBrowser, type PanelHeld } from "@/lib/shared";
 import { duePings } from "@/lib/pings";
 import { UsageData, useAnalytics } from "./usage-data";
 import { YourData } from "./your-data";
@@ -139,6 +139,15 @@ function Bops({ state }: { state: AppState | null }) {
   }, [threadId]);
   const [composing, setComposing] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
+  // A workspace shared with the user whose side panel would show nothing of the owner's (panelEmpty: a Member with no
+  // bot's browser) opens with it closed, so the chat gets the window, and leaving it puts the panel back as it was
+  // (panelAfterSwitch). Any other switch leaves it as it is, as does anything that changes inside a workspace.
+  const [panelHeld, setPanelHeld] = useState<PanelHeld | null>(null);
+  const panelSwitch = state ? panelAfterSwitch(panelHeld, state, panelOpen) : null;
+  if (panelSwitch) {
+    setPanelHeld(panelSwitch.held);
+    setPanelOpen(panelSwitch.open);
+  }
   // The sidebar on the left, or its rail of icons once you collapse it (sidebar-rail.tsx; this Mac
   // remembers; ⌘\ or the toggle).
   const [sidebarOpen, setSidebarOpen] = useState(() => typeof window === "undefined" || localStorage.getItem(SIDEBAR_KEY) !== "0");
@@ -481,8 +490,9 @@ function Bops({ state }: { state: AppState | null }) {
         (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
       // Its screen comes up with it, even with the side panel hidden, and the panel follows the action
-      // again (several at once show side by side), even if you'd picked a screen before.
-      setPanelOpen(true);
+      // again (several at once show side by side), even if you'd picked a screen before. Not where it would show nothing
+      // of the owner's (panelEmpty): it stays as the viewer left it.
+      if (!panelEmpty(state, state.bots)) setPanelOpen(true);
       if (lead.runsOn !== "mac") setPinned((p) => ({ ...p, [lead.botId]: false }));
       // In a workspace shared with the user, a lead on the owner's Mac is never the viewer's own Mac tab (opensMacTab).
       if (opensMacTab(state, lead)) {
