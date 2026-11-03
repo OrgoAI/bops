@@ -2721,7 +2721,7 @@ await test("Your Apps in a workspace shared with the user: the apps as the owner
   // Read: look only. Through the Your Apps page (made-apps.tsx), as the footer opens it: no tiles, no Add app.
   const read = renderToStaticMarkup(h(MadeAppsHome, { state: sharedState("read"), ws: "shared_p" }));
   assert.match(read, /data-shared-apps/);
-  assert.match(read, />Apps</);
+  assert.match(read, />Your Apps</);
   assert.match(read, /Apps on the web in Acme\. You can look\./);
   assert.match(read, /As of /);
   assert.match(read, /data-shared-app="shop"/);

@@ -32,11 +32,11 @@ export const appsShown = (state: Pick<AppState, "account" | "shared"> | null | u
   state?.shared ? !!state.shared.apps && (appsOpenTo(state.shared.owner) || appsOpen(state)) : appsOpen(state);
 
 /**
- * What the apps page is called where it shows (appsShown): Your Apps in the user's own workspace; in one shared with
- * them, its owner's apps on the web, which neither they nor their bots made, so Apps, in that workspace. The footer's
+ * What the apps page is called where it shows (appsShown): Your Apps, in the user's own workspace and in one shared
+ * with them alike (owner, 11-02: one name everywhere). Its line under it says whose apps they are. The footer's
  * button, its tab, its New Tab tile and the page say the same.
  */
-export const appsName = (state: Pick<AppState, "shared"> | null | undefined) => (state?.shared ? "Apps" : "Your Apps");
+export const APPS_NAME = "Your Apps";
 export const appsLine = (state: Pick<AppState, "shared"> | null | undefined) => (state?.shared ? `Apps on the web in ${state.shared.name}` : "Apps your bots made for you");
 
 /**

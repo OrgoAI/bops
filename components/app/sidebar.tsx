@@ -25,7 +25,7 @@ import { forgetWorkspaceHere } from "@/lib/workspace-local";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouDot, post, RoundButton, SideToggleIcon, useNow } from "./ui";
 import { ChartIcon } from "./team-chart";
 import { ownerWho, roleHere, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
-import { appsLine, appsName, appsShown } from "@/lib/apps-access";
+import { APPS_NAME, appsLine, appsShown } from "@/lib/apps-access";
 import { botGroups, groupedList, siteLabel } from "@/lib/bot-groups";
 import { codersOf } from "@/lib/bot-mood";
 import { BotGroupBlock, CodeMark, renameComputer, useGroupFolds, useSiteDomains } from "./bot-groups";
@@ -421,7 +421,7 @@ export function SidebarFooter({
       />
       <AutopilotButton state={state} expanded={pill === "routines"} pressed={page === "routines"} onOpen={onOpenAutopilot} />
       {knowledge && <KnowledgeButton state={state} expanded={pill === "knowledge"} pressed={page === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
-      {apps && <FooterButton name="apps" expanded={pill === "apps"} pressed={page === "apps"} label={appsName(state)} tip={appsLine(state)} onClick={onApps} icon={<AppsIcon size={16} />} />}
+      {apps && <FooterButton name="apps" expanded={pill === "apps"} pressed={page === "apps"} label={APPS_NAME} tip={appsLine(state)} onClick={onApps} icon={<AppsIcon size={16} />} />}
     </>
   );
   if (vertical)
