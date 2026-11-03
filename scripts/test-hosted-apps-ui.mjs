@@ -2756,7 +2756,7 @@ await test("Your Apps in a workspace shared with the user: the apps as the owner
   await r.done();
   // Pending and failed acts say how they stand.
   const pending = html(h(SharedAppsPage, { state: sharedState("write", { appActs: [{ key: "k9", act: { act: "deploy", app: "shop" }, at: 1, state: "waiting" }] }) }));
-  assert.match(pending, /Waiting for the owner&#x27;s Bops to open\./);
+  assert.match(pending, /Waiting for the workspace&#x27;s Mac to open\./);
   // The owner's own list: who did what under the app's row.
   assert.equal(actLine({ key: "k", userId: "u", name: "Juno", act: "domain", domain: "shop.acme.example", ok: true, at: new Date().setHours(15, 4, 0, 0) }), "Juno pointed shop.acme.example at it · 3:04 PM");
   assert.match(actLine({ key: "k", userId: "u", name: "Juno", act: "deploy", ok: false, said: "That domain isn't this workspace's.", at: 1 }), /^Juno tried to deploy it: That domain isn't this workspace's\. · /);

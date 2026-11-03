@@ -5,7 +5,7 @@ import { favoriteCount, favoriteLabel, movedFavorite, nudgedFavorite, toggledFav
 import { categoriesOpen } from "@/lib/memory-categories";
 import { alwaysScope, apiFacts, askHeadline } from "@/lib/permission";
 import { plainTitle } from "@/lib/plain-words";
-import { answersAsk, canAct, writesThread } from "@/lib/shared";
+import { answersAsk, canAct, REPLY_WAITS_LINE, writesThread } from "@/lib/shared";
 import { askKind } from "@/lib/asks";
 import { memberAct } from "./shared-act";
 import { live, waitingAsks, workspaceOf, type AppApproval, type AppState, type Session, type Watch } from "@/lib/types";
@@ -299,7 +299,7 @@ function AskCard({ ask: a, botName, where, shared, onOpen }: { ask: AppApproval;
   const facts = a.kind === "api" && a.api ? apiFacts(a.api) : null;
   const scope = alwaysScope(botName, { ...a, action: undash(a.action) });
   const meta = [where ? `For ${undash(where)}` : shared ? "Waiting for an OK" : "Waiting for your OK", ago(a.at)].join(" · ");
-  const said = sent && sent.state !== "failed" ? (sent.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open.") : null;
+  const said = sent && sent.state !== "failed" ? (sent.state === "sending" ? "Sending…" : REPLY_WAITS_LINE) : null;
   const shownError = said ? null : (error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null));
   const btn = "rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
   return (

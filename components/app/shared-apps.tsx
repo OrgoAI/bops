@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
+import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
 import { PasswordShown } from "./preview-password";
 import { memberAct } from "./shared-act";
@@ -31,7 +32,7 @@ export const SHARED_APPS_WORDS = {
   noBuying: "Only the owner buys domains.",
   useDomain: "Use one of this workspace's domains",
   sending: "Sending to the owner's Bops…",
-  waiting: "Waiting for the owner's Bops to open.",
+  waiting: REPLY_WAITS_LINE,
   failed: "That didn't go. Try again.",
   deploy: "Deploy",
   publish: "Publish",
