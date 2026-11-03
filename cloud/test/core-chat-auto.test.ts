@@ -115,9 +115,29 @@ test("the mirror on the owner's state: chatOn cloud or a chosen mac, chatAuto wh
   assert.deepEqual(mirrorOf(row("mac", "auto"), false), {});
   const st = { workspaces: [{ id: "ws_main", chatAuto: true }, { id: "ws_acme" }, { id: "ws_beta", chatOn: "cloud" }] };
   const kept = keepChatOn(st, rows({ ws_acme: row("mac", "owner"), ws_beta: row("cloud", "staff") }), false);
-  assert.deepEqual(kept.workspaces, [{ id: "ws_main" }, { id: "ws_acme", chatOn: "mac" }, { id: "ws_beta", chatOn: "cloud" }]);
+  assert.deepEqual(kept.workspaces, [{ id: "ws_main" }, { id: "ws_acme", chatOn: "mac", chatAutoOff: true }, { id: "ws_beta", chatOn: "cloud", chatAutoOff: true }]);
   // Already as the table has it: the same blob back.
   assert.equal(keepChatOn(kept, rows({ ws_acme: row("mac", "owner"), ws_beta: row("cloud", "staff") }), false), kept);
+});
+
+test("the mirror says where Bops Cloud won't take the switch back on (chatAutoOff): a workspace with the switch, outside BOPS_CHAT_AUTO", () => {
+  // Outside it, "auto" is refused (setRouting, 409 chat_auto_off): turned off, the switch can't come back on there.
+  assert.deepEqual(mirrorOf(row("mac", "owner"), false), { chatOn: "mac", chatAutoOff: true });
+  assert.deepEqual(mirrorOf(row("mac", "admin"), false), { chatOn: "mac", chatAutoOff: true });
+  assert.deepEqual(mirrorOf(row("cloud", "staff"), false), { chatOn: "cloud", chatAutoOff: true });
+  assert.deepEqual(mirrorOf(row("cloud", "auto"), false), { chatOn: "cloud", chatAutoOff: true });
+  // No switch there (nobody chose, and nothing moves for the account): nothing to say.
+  assert.deepEqual(mirrorOf(undefined, false), {});
+  assert.deepEqual(mirrorOf(row("mac", "auto"), false), {});
+  // Inside it, "auto" is taken: never the flag.
+  assert.deepEqual(mirrorOf(row("mac", "owner"), true), { chatOn: "mac" });
+  assert.deepEqual(mirrorOf(row("cloud", "staff"), true), { chatOn: "cloud" });
+  // An older Bops's save, without the flag: put back. Moves turned on for the account since: taken off.
+  const r = rows({ ws_acme: row("mac", "owner") });
+  assert.deepEqual(keepChatOn({ workspaces: [{ id: "ws_acme", name: "Acme", chatOn: "mac" }] }, r, false).workspaces, [{ id: "ws_acme", name: "Acme", chatOn: "mac", chatAutoOff: true }]);
+  assert.deepEqual(keepChatOn({ workspaces: [{ id: "ws_acme", chatOn: "mac", chatAutoOff: true }] }, r, true).workspaces, [{ id: "ws_acme", chatOn: "mac" }]);
+  const same = { workspaces: [{ id: "ws_acme", chatOn: "mac", chatAutoOff: true }] };
+  assert.equal(keepChatOn(same, r, false), same, "as the table has it: the same blob back");
 });
 
 test("BOPS_CHAT_AUTO: unset and off move nothing, on moves everyone's, a list only theirs, revert nothing", () => {

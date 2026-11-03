@@ -328,6 +328,13 @@ export type Workspace = {
    */
   chatAuto?: boolean;
   /**
+   * Bops Cloud refuses to give this workspace's switch back to it ({mode: "auto"}: 409 chat_auto_off, outside
+   * BOPS_CHAT_AUTO), so once it's off it can't be turned back on here. Bops Cloud writes it where the switch shows
+   * (chatOn); Settings, General shows the switch off and disabled with why, and asks before turning it off. Unset: as
+   * before (a Bops Cloud from before says nothing).
+   */
+  chatAutoOff?: boolean;
+  /**
    * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
    * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
    * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain); like

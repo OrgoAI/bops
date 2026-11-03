@@ -199,19 +199,23 @@ export function chatAutoFor(userId: string): boolean {
 /**
  * The switch as each workspace of the owner's state carries it (Workspace.chatOn, chatAuto): chatOn "cloud" while its
  * chat goes through Bops Cloud, "mac" when the owner or Orgo's staff chose the Mac, unset otherwise; chatAuto while
- * Bops Cloud may move it by itself (`on`, and nobody chose). The owner's Bops reads both: its switch in Settings, and
+ * Bops Cloud may move it by itself (`on`, and nobody chose); chatAutoOff where the switch shows (chatOn) but Bops Cloud
+ * refuses "auto" for the owner (not `on`: setRouting, 409 CHAT_AUTO_OFF), so turned off it can't be turned back on
+ * there. The owner's Bops reads them: its switch in Settings (components/app/chat-switch.tsx, which says so first), and
  * whether a computer someone else can use may get a runner (lib/server/runner-install.ts sharedRunnerOk).
  */
-export function mirrorOf(row: RoutingRow | undefined, on: boolean): { chatOn?: "cloud" | "mac"; chatAuto?: true } {
+export function mirrorOf(row: RoutingRow | undefined, on: boolean): { chatOn?: "cloud" | "mac"; chatAuto?: true; chatAutoOff?: true } {
+  const chatOn = row?.mode === "cloud" ? ("cloud" as const) : chosen(row) ? ("mac" as const) : undefined;
   return {
-    ...(row?.mode === "cloud" ? { chatOn: "cloud" as const } : chosen(row) ? { chatOn: "mac" as const } : {}),
+    ...(chatOn ? { chatOn } : {}),
     ...(on && !chosen(row) ? { chatAuto: true as const } : {}),
+    ...(chatOn && !on ? { chatAutoOff: true as const } : {}),
   };
 }
 
 /**
- * The switch as the table has it, put on every workspace of the blob (mirrorOf): Workspace.chatOn and chatAuto are a
- * mirror, and a Bops from before (or a restore) that drops them would turn the owner stamp rule and the runners off
+ * The switch as the table has it, put on every workspace of the blob (mirrorOf): Workspace.chatOn, chatAuto and
+ * chatAutoOff are a mirror, and a Bops from before (or a restore) that drops them would turn the owner stamp rule and the runners off
  * while members' messages still go through Bops Cloud. Returns the blob, changed or not.
  */
 export function keepChatOn(blob: Record<string, unknown>, rows: Map<string, RoutingRow>, on: boolean): Record<string, unknown> {
@@ -219,11 +223,12 @@ export function keepChatOn(blob: Record<string, unknown>, rows: Map<string, Rout
   let changed = false;
   const workspaces = was.map((w) => {
     const want = typeof w.id === "string" ? mirrorOf(rows.get(w.id), on) : {};
-    if (w.chatOn === want.chatOn && w.chatAuto === want.chatAuto) return w;
+    if (w.chatOn === want.chatOn && w.chatAuto === want.chatAuto && w.chatAutoOff === want.chatAutoOff) return w;
     changed = true;
     const rest = { ...w };
     delete rest.chatOn;
     delete rest.chatAuto;
+    delete rest.chatAutoOff;
     return { ...rest, ...want };
   });
   return changed ? { ...blob, workspaces } : blob;

@@ -85,9 +85,10 @@ export async function sendThroughCloud(chatId: string, text: string, replyTo?: s
 /**
  * The owner's switch for a workspace's chat (Settings, General: components/app/chat-switch.tsx), to Bops Cloud (POST
  * /v1/chat-routing, cloud/turns.ts setRouting): "mac" chooses this Mac, and Bops Cloud never moves that workspace by
- * itself after; "auto" gives the choice back, so Bops Cloud moves it once its bots' computers answer there (or turns it
- * on, where Bops Cloud doesn't move workspaces for this account). The state is read again now: it carries the switch as
- * Bops Cloud wrote it (Workspace.chatOn, chatAuto). Refused: Bops Cloud's words (an older Bops on another Mac: 409).
+ * itself after; "auto" gives the choice back, so Bops Cloud moves it once its bots' computers answer there. Where Bops
+ * Cloud doesn't move workspaces for this account, it refuses "auto" (409 chat_auto_off) and says so on the workspace
+ * first (Workspace.chatAutoOff). The state is read again now: it carries the switch as Bops Cloud wrote it
+ * (Workspace.chatOn, chatAuto, chatAutoOff). Refused: Bops Cloud's words (an older Bops on another Mac: 409).
  */
 export async function setChatRouting(wsId: string, mode: "auto" | "mac"): Promise<{ ok: true } | { error: string; status: number }> {
   const user = stateUser();

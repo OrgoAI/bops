@@ -122,6 +122,11 @@ test("an Admin has every bot (a bot made later too), Your Apps at Write and Use 
   assert.equal(levelsOfMember(), "member held to the entry", "a member is still held to what the owner gave");
 });
 
+test("an Admin's copy of the workspace has its switch as the owner's state has it: chatOn, chatAuto and chatAutoOff", () => {
+  assert.deepEqual(sharedSlice(uploaded({ chatOn: "mac", chatAutoOff: true }), "ws_studio", admin).workspace, { id: "ws_studio", name: "Studio", createdAt: 1, chatOn: "mac", chatAutoOff: true });
+  assert.equal(sharedSlice(uploaded({ chatAuto: true }), "ws_studio", admin).workspace?.chatAutoOff, undefined);
+});
+
 /** A member with Write on Max only still sees only Max: Admin changes nothing for anyone else. */
 function levelsOfMember() {
   const s = sharedSlice(uploaded({ memberAccess: { [MEMBER_EMAIL]: { others: "none", bots: { max: "write" }, at: 2_000 } } }), "ws_studio", member);

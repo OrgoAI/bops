@@ -508,7 +508,7 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   // The site each bot works on, when the owner gave the user Your Apps (cloud/ws-slice.ts sitesOf): read as the owner's are (siteOf).
   // Where its chat is answered (an Admin's Settings shows the switch: chat-switch.tsx), as Bops Cloud mirrors it.
   const chatOn = s.workspace?.chatOn === "cloud" || s.workspace?.chatOn === "mac" ? { chatOn: s.workspace.chatOn as "cloud" | "mac" } : {};
-  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}), ...chatOn, ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}) };
+  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}), ...chatOn, ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}), ...(s.workspace?.chatAutoOff === true ? { chatAutoOff: true } : {}) };
   const bots = s.bots.map((b) => ({ computerStatus: "none", role: "", color: "#0A0A0A", isMain: false, ...b, workspaceId: ws }) as unknown as Bot);
   const ids = new Set(bots.map((b) => b.id));
   // Who's typing, from the stream's moods: the owner's Bops says a bot typing in a chat as "thinking" there

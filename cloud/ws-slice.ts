@@ -63,7 +63,7 @@ export function keep(v: unknown, spec: Spec): unknown {
 }
 
 // Where its chat is answered (turns.ts mirrorOf), so an Admin's Settings shows the switch as it stands.
-const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true };
+const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true, chatAutoOff: true };
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
 /** An Admin's: its "How I work" too (Bot.persona), which they change (the "persona" act). Never a Member's. */
 const ADMIN_BOT: Spec = { ...BOT, persona: true };

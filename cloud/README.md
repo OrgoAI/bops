@@ -894,7 +894,8 @@ protocol.ts "Chat through Bops Cloud"). It's set by the owner's Bops (`POST /v1/
 { wsId, mode?: "mac" | "cloud" | "auto", allowHourly? }`, read with `GET /v1/chat-routing?ws=`; Settings,
 General has the switch) or by Orgo's staff (`POST /v1/internal/chat-routing { userId, wsId, mode?, allowHourly?,
 force? }`, signed as the plan notices are), and mirrored on the workspace in the owner's state
-(`Workspace.chatOn`: "cloud", or "mac" when someone chose the Mac; `chatAuto` while Bops Cloud may move it),
+(`Workspace.chatOn`: "cloud", or "mac" when someone chose the Mac; `chatAuto` while Bops Cloud may move it;
+`chatAutoOff` where the switch shows but `mode: "auto"` is refused for the owner, so Settings says it can't come back on),
 which the owner's Mac and the runner set up go by; Bops Cloud puts the mirror back on every owner write, and
 one whose save lacked it gets one more version, Bops Cloud's, so it reads it. Turning it on waits for a Bops at
 `CLOUD_CHAT_MIN_VERSION` or newer (the asking Bops's version, or for staff the last Mac the account said: a

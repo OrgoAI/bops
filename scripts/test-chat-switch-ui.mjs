@@ -78,10 +78,22 @@ const stateWith = (acme, more = {}) => ({
 });
 
 await test("on while the chat goes through Bops Cloud or will, off once the owner chose the Mac, each with its line", () => {
-  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "cloud" })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES.cloud });
-  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "cloud", chatAuto: true })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES.cloud });
-  assert.deepEqual(S.chatSwitchOf(stateWith({ chatAuto: true })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES.soon });
-  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "mac" })), { wsId: "ws_acme", on: false, line: S.CHAT_LINES.mac });
+  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "cloud" })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES.cloud, closed: false });
+  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "cloud", chatAuto: true })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES.cloud, closed: false });
+  assert.deepEqual(S.chatSwitchOf(stateWith({ chatAuto: true })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES.soon, closed: false });
+  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "mac" })), { wsId: "ws_acme", on: false, line: S.CHAT_LINES.mac, closed: false });
+});
+
+await test("where Bops Cloud won't take it back on (Workspace.chatAutoOff): off says so and stays off; on is still on, and says it's closed", () => {
+  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "mac", chatAutoOff: true })), { wsId: "ws_acme", on: false, line: S.CHAT_LINES.closed, closed: true });
+  assert.deepEqual(S.chatSwitchOf(stateWith({ chatOn: "cloud", chatAutoOff: true })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES.cloud, closed: true });
+  // Without the flag (a Bops Cloud from before, or one that takes it back on): as before.
+  assert.equal(S.chatSwitchOf(stateWith({ chatOn: "mac" })).closed, false);
+  assert.equal(S.chatSwitchOf(stateWith({ chatOn: "cloud" })).closed, false);
+  // An Admin's, in the shared words.
+  const admin = (acme) => stateWith(acme, { shared: { name: "Acme", owner: "Tara", role: "admin", adminActs: true, screens: ["max"] } });
+  assert.deepEqual(S.chatSwitchOf(admin({ chatOn: "mac", chatAutoOff: true })), { wsId: "ws_acme", on: false, line: S.CHAT_LINES_SHARED.closed, closed: true });
+  assert.deepEqual(S.chatSwitchOf(admin({ chatOn: "cloud", chatAutoOff: true })), { wsId: "ws_acme", on: true, line: S.CHAT_LINES_SHARED.cloud, closed: true });
 });
 
 await test("not shown: Bops Cloud says nothing of it, a shared workspace open, bots in browsers on the Mac, or no bot with a computer", () => {
@@ -120,9 +132,19 @@ await test("rendered: the switch, its state and its line; nothing where it isn't
   assert.equal(renderToStaticMarkup(h(S.ChatSwitch, { state: stateWith({}) })), "");
 });
 
+await test("rendered where it won't come back on: off is a switch you can't press, with its line and no red one", () => {
+  const off = renderToStaticMarkup(h(S.ChatSwitch, { state: stateWith({ chatOn: "mac", chatAutoOff: true }) }));
+  assert.match(off, /role="switch" aria-checked="false"[^>]*disabled=""/);
+  assert.ok(off.includes(S.CHAT_LINES.closed));
+  assert.ok(!off.includes('role="alert"'));
+  const on = renderToStaticMarkup(h(S.ChatSwitch, { state: stateWith({ chatOn: "cloud", chatAutoOff: true }) }));
+  assert.match(on, /role="switch" aria-checked="true"/);
+  assert.ok(!/role="switch" aria-checked="true"[^>]*disabled=""/.test(on), "on: it can still be turned off");
+});
+
 await test("an Admin of a shared workspace has the switch, in words of the owner's bots and Mac, and it goes through the shared workspace's route; a Member never", async () => {
   const shared = (role, more = {}) => stateWith({ chatOn: "mac" }, { shared: { name: "Acme", owner: "Tara", role, screens: ["max"], ...more } });
-  assert.deepEqual(S.chatSwitchOf(shared("admin", { adminActs: true })), { wsId: "ws_acme", on: false, line: S.CHAT_LINES_SHARED.mac });
+  assert.deepEqual(S.chatSwitchOf(shared("admin", { adminActs: true })), { wsId: "ws_acme", on: false, line: S.CHAT_LINES_SHARED.mac, closed: false });
   assert.deepEqual(S.chatSwitchOf(shared("admin", { ownerOld: true }))?.on, false, "it doesn't wait on the owner's Mac");
   assert.equal(S.chatSwitchOf(shared("admin")), null, "a Bops Cloud before Admin powers");
   assert.equal(S.chatSwitchOf(shared("member", { adminActs: true })), null);
@@ -135,9 +157,88 @@ await test("an Admin of a shared workspace has the switch, in words of the owner
 });
 
 await test("the words: no dashes, never Orbit", () => {
-  const words = [...Object.values(S.CHAT_LINES), "Answer with your Mac closed", "Chat"].join("\n");
+  const words = [...Object.values(S.CHAT_LINES), ...Object.values(S.CHAT_LINES_SHARED), ...Object.values(S.OFF_ASK), ...Object.values(S.OFF_ASK_SHARED), "Answer with your Mac closed", "Chat"].join("\n");
   assert.ok(!/[-–—]/.test(words), words);
   assert.ok(!/orbit/i.test(readFileSync(`${root}/components/app/chat-switch.tsx`, "utf8")));
+});
+
+/* ---------------- Clicked ---------------- */
+
+const { parseHTML } = await import("linkedom");
+const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
+const doc = win.document;
+win.HTMLElement.prototype.focus = function () {};
+globalThis.document = doc;
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const { createRoot } = await import("react-dom/client");
+const { act } = await import("react");
+const settle = () => new Promise((r) => setTimeout(r, 5));
+async function mount(el) {
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const r = createRoot(box);
+  await act(async () => (r.render(el), await settle()));
+  return { box, render: (x) => act(async () => (r.render(x), await settle())), done: async () => (await act(async () => r.unmount()), box.remove()) };
+}
+const click = (el) => act(async () => (el.dispatchEvent(new win.Event("click", { bubbles: true })), await settle()));
+const button = (box, label) => [...box.querySelectorAll("button")].find((b) => b.textContent.trim() === label);
+const switchOf = (box) => box.querySelector('[role="switch"]');
+
+await test("on where it won't come back on: turning it off asks first, in place; Cancel leaves it on, Turn off sends the Mac", async () => {
+  globalThis.fetch = async (url, init = {}) => (asked.push({ url: String(url), body: init.body ? JSON.parse(init.body) : undefined }), { ok: true, status: 200, json: async () => ({ ok: true }) });
+  asked.length = 0;
+  const v = await mount(h(S.ChatSwitch, { state: stateWith({ chatOn: "cloud", chatAutoOff: true }) }));
+  await click(switchOf(v.box));
+  assert.deepEqual(asked, [], "nothing sent yet");
+  assert.ok(v.box.textContent.includes(S.OFF_ASK.title) && v.box.textContent.includes(S.OFF_ASK.line));
+  await click(button(v.box, "Cancel"));
+  assert.ok(!v.box.textContent.includes(S.OFF_ASK.title));
+  assert.equal(switchOf(v.box).getAttribute("aria-checked"), "true");
+  assert.deepEqual(asked, [], "Cancel sends nothing");
+  await click(switchOf(v.box));
+  await click(button(v.box, "Turn off"));
+  assert.deepEqual(asked.map((a) => [a.url, a.body]), [["/api/workspaces", { id: "ws_acme", chat: "mac" }]]);
+  assert.ok(!v.box.textContent.includes(S.OFF_ASK.title));
+  await v.done();
+});
+
+await test("an ask left open goes when the switch changes under it (another Mac turned it off, another workspace): Turn off never sends on", async () => {
+  asked.length = 0;
+  const v = await mount(h(S.ChatSwitch, { state: stateWith({ chatOn: "cloud", chatAutoOff: true }) }));
+  await click(switchOf(v.box));
+  assert.ok(button(v.box, "Turn off"));
+  await v.render(h(S.ChatSwitch, { state: stateWith({ chatOn: "mac", chatAutoOff: true }) }));
+  assert.ok(!button(v.box, "Turn off"), "off already: nothing to ask");
+  await v.render(h(S.ChatSwitch, { state: { ...stateWith({ chatOn: "cloud", chatAutoOff: true }), workspace: "ws_beta", workspaces: [{ id: "ws_beta", name: "Beta", chatOn: "cloud", chatAutoOff: true }], bots: [{ id: "bee", name: "Bee", isMain: true, workspaceId: "ws_beta", computerId: D1 }] } }));
+  assert.ok(!button(v.box, "Turn off"), "another workspace's switch: not asked about");
+  assert.deepEqual(asked, []);
+  await v.done();
+});
+
+await test("as before where it can come back on: off asks nothing, on sends auto; off and closed, a press sends nothing", async () => {
+  asked.length = 0;
+  const open = await mount(h(S.ChatSwitch, { state: stateWith({ chatOn: "cloud" }) }));
+  await click(switchOf(open.box));
+  assert.deepEqual(asked.map((a) => a.body), [{ id: "ws_acme", chat: "mac" }]);
+  assert.ok(!open.box.textContent.includes(S.OFF_ASK.title));
+  await open.done();
+  asked.length = 0;
+  const closed = await mount(h(S.ChatSwitch, { state: stateWith({ chatOn: "mac", chatAutoOff: true }) }));
+  assert.equal(switchOf(closed.box).hasAttribute("disabled"), true);
+  await click(switchOf(closed.box));
+  assert.deepEqual(asked, [], "no request, so no red line");
+  assert.ok(!closed.box.querySelector('[role="alert"]'));
+  await closed.done();
+});
+
+await test("an Admin's ask is in the shared words, and goes through the shared workspace's route", async () => {
+  asked.length = 0;
+  const v = await mount(h(S.ChatSwitch, { state: stateWith({ chatOn: "cloud", chatAutoOff: true }, { shared: { name: "Acme", owner: "Tara", role: "admin", adminActs: true, screens: ["max"] } }) }));
+  await click(switchOf(v.box));
+  assert.ok(v.box.textContent.includes(S.OFF_ASK_SHARED.line));
+  await click(button(v.box, "Turn off"));
+  assert.deepEqual(asked.map((a) => [a.url, a.body]), [["/api/workspaces/shared/settings", { chat: "mac" }]]);
+  await v.done();
 });
 
 console.log(`chat switch ui: ${passed} passed`);
