@@ -4,6 +4,7 @@ import { forMember, logUse, viaOf, type UseWhere } from "./access-sync";
 import { callKey, keyName, keyProjectFor, keyProvider, listKeys, plainReason, usableKeys, type KeyAnswer, type KeyMethod, type KeyProvider, type VaultKey } from "./keys";
 import { chatPictures, linkedByPerson, linkedPicture, uploadBytes, type Picture } from "./chat-pictures";
 import { allows, NeedsOk, type AskSpec } from "./permission";
+import { onRunner } from "./persist";
 import { PICTURE_MAX } from "./safe-fetch";
 import { bot, ownerName } from "./store";
 import { saveUpload } from "./uploads";
@@ -165,20 +166,26 @@ function check(a: ChangeArgs): { ok: true; repo: string; branch: string; base: s
 type Got = Picture & { from: string; id?: string; url?: string };
 
 /**
- * The bytes of each picture in a change: the approved ones when the card showed them (`asked`: its upload, the copy the
- * thumbnail is of), else found now: a picture a person attached in chat `chatId` (by its number), or the one at a link a
- * person wrote there (never one found anywhere else). Or why not, in plain words.
+ * The bytes of each picture in a change. On the yes (`asked`: the card they saw), only the copies the card showed (its
+ * uploads, which the thumbnails are of): one that's gone stops the change, never found again, so nothing but what was
+ * shown goes in. Before the card: a picture a person attached in chat `chatId` (by its number), or the one at a link a
+ * person wrote there (never one found anywhere else), a copy of which is kept here for the card and the yes (on the
+ * Mac: changeFiles refuses a picture on a bot's computer). Or why not, in plain words.
  */
-async function picturesOf(files: FileIn[], chatId: string | undefined, asked?: FileChange): Promise<{ ok: true; got: Map<string, Got> } | { ok: false; why: string }> {
+async function picturesOf(files: FileIn[], chatId: string | undefined, owner: string, asked?: FileChange): Promise<{ ok: true; got: Map<string, Got> } | { ok: false; why: string }> {
   const got = new Map<string, Got>();
   let all = 0;
   for (const f of files) {
     if (!("picture" in f)) continue;
-    const was = asked?.files.find((x) => x.path === f.path)?.image;
-    const kept = was?.id ? uploadBytes(was.id) : null;
     let p: Got;
-    if (kept) p = { ...kept, from: "the picture the card showed", id: was!.id, ...(was!.url ? { url: was!.url } : {}) };
-    else if ("n" in f.picture) {
+    if (asked) {
+      // A file the card left out (the same as there already) doesn't go in: nothing of it is needed.
+      if (!asked.files.some((x) => x.path === f.path)) continue;
+      const was = asked.files.find((x) => x.path === f.path)?.image;
+      const kept = was?.id ? uploadBytes(was.id) : null;
+      if (!kept) return { ok: false, why: `the picture the card showed for ${f.path} isn't here any more. Ask again` };
+      p = { ...kept, from: "the picture the card showed", id: was!.id, ...(was!.url ? { url: was!.url } : {}) };
+    } else if ("n" in f.picture) {
       const n = f.picture.n;
       const all = chatId ? chatPictures(chatId) : [];
       const pic = all[n - 1];
@@ -194,10 +201,12 @@ async function picturesOf(files: FileIn[], chatId: string | undefined, asked?: F
       } catch (e) {
         return { ok: false, why: `Couldn't get the picture at that link: ${(e as Error).message}` };
       }
-      // A copy here, for the card's thumbnail and for the yes: the bytes it shows are the ones that go in.
+      // A copy here, for the card's thumbnail and for the yes: the bytes it shows are the ones that go in. None, no card.
       try {
         p.id = saveUpload(`data:${p.type};base64,${p.bytes.toString("base64")}`).id;
-      } catch {}
+      } catch (e) {
+        return { ok: false, why: `Couldn't keep a copy of the picture at that link to show ${owner} (${(e as Error).message}), so it can't go in.` };
+      }
     }
     all += p.bytes.length;
     if (p.bytes.length > PICTURE_MAX || all > PICTURE_MAX) return { ok: false, why: "The pictures are too big for one change (12 MB at most in all)." };
@@ -239,13 +248,19 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
   const p = keyProvider(name);
   if (!p || !CHANGE_KEYS.has(name) || !b.keys?.includes(name)) return { text: `You may not change files with ${name || "that key"}. ${owner} can let you use the GitHub key in Keys.` };
   if (!opts.chat) return { text: "Only in the chat: a task's keys only read." };
-  const usable = await usableKeys(b);
-  if (!usable.some((k) => k.name === name)) return { text: `The ${p.label} key isn't set in ${owner}'s vault. ${owner} can add it in Keys.` };
   const c = check(a);
   if (!c.ok) return { text: c.why };
+  // A picture's bytes and the card's copy of it are kept on the Mac (lib/server/uploads.ts), whose window shows the card:
+  // a chat answered from a bot's computer can't show them, so it doesn't take one.
+  if (onRunner() && c.files.some((f) => "picture" in f))
+    return { text: `A picture goes into a change only from Bops on ${owner}'s Mac, which keeps the pictures, and this chat is answered from the bot's computer now. Ask again once the Mac is on.` };
+  const usable = await usableKeys(b);
+  if (!usable.some((k) => k.name === name)) return { text: `The ${p.label} key isn't set in ${owner}'s vault. ${owner} can add it in Keys.` };
   const { repo, branch, message, files } = c;
-  const pics = await picturesOf(files, where.chatId, opts.approved ? opts.asked : undefined);
-  if (!pics.ok) return { text: pics.why };
+  // On the yes, the card's copies (none there stops it, as a moved branch does); before the card, found now.
+  if (opts.approved && files.some((f) => "picture" in f) && !opts.asked) return { text: `Not saved: the card for this change is gone, so ask again. Nothing changed on ${branch}.` };
+  const pics = await picturesOf(files, where.chatId, owner, opts.approved ? opts.asked : undefined);
+  if (!pics.ok) return opts.approved ? { text: `Not saved: ${pics.why}. Nothing changed on ${branch}.`, failed: { did: `Called ${p.label} POST /repos/${repo}/git/commits`, why: pics.why } } : { text: pics.why };
   const all = await listKeys().catch(() => [] as VaultKey[]);
   const workspaceId = keyProjectFor(all, workspaceOf(b), name);
   const gh = (method: KeyMethod, path: string, body?: unknown, query?: Record<string, unknown>) => callKey({ name, method, path, query: query ?? null, body: body ?? null, workspaceId });
