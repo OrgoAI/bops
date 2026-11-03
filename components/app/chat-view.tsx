@@ -223,7 +223,9 @@ function Inline({ text }: { text: string }) {
     if (browser || !openLink) window.open(url, "_blank");
     else openLink(url, label);
   };
-  const parts = text.split(/(\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|`[^`\n]+`|https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?![\w:-]|\.[\w-])(?:[/?#](?:[^\s)]*[^\s).,;:!?])?)?)/g);
+  // A bare web address is a link too (bots write them plain, as their prompt asks), its own words its label; a full stop or
+  // bracket after it stays the sentence's (WEB_ADDRESS). A localhost one keeps its own, stricter end.
+  const parts = text.split(/(\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|`[^`\n]+`|https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?![\w:-]|\.[\w-])(?:[/?#](?:[^\s)]*[^\s).,;:!?])?)?|https?:\/\/\S*[^\s.,;:!?)\]])/g);
   return (
     <>
       {parts.map((p, i) => {
@@ -233,7 +235,8 @@ function Inline({ text }: { text: string }) {
         const bold = /^\*\*([^*]+)\*\*$/.exec(p);
         if (bold) return <strong key={i} className="font-semibold">{bold[1]}</strong>;
         if (onlyThere(p)) return <Fragment key={i}>{said(p)}</Fragment>;
-        const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(p);
+        const named = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(p);
+        const link: readonly [string, string, string] | null = named ? [named[0], named[1], named[2]] : /^https?:\/\/\S+$/.test(p) ? [p, p, p] : null;
         if (link && onlyThere(link[2])) return <Fragment key={i}>{said(link[1])}</Fragment>;
         if (link) {
           const page = link[2].startsWith("/api/pages/");
