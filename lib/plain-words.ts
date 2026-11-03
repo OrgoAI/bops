@@ -9,6 +9,19 @@
  */
 export const dropCitations = (text: string) => text.replace(/\s?[^]*/g, "");
 
+/**
+ * A bot's message as plain text, the words the chat shows without their look (components/app/chat-view.tsx Rich, by
+ * its own patterns): a link's words, not its address; a code block's lines without the ``` around them; no ** or
+ * backticks, no # before a heading or bullet before a list item, no citation markers. For a one-line preview.
+ */
+export const plainText = (text: string) =>
+  dropCitations(text)
+    .replace(/```[a-z0-9-]*\n?([\s\S]*?)```/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)\s]+\)/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/^[ \t]*(?:#{1,4}|[-*+•])[ \t]+/gm, "");
+
 /** A link to a page on the computer it runs on (localhost, 127.0.0.1): it opens there and nowhere else. */
 export const isLocalLink = (href: string) => /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#]|$)/i.test(href);
 
