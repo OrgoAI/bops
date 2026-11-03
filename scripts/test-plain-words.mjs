@@ -1,7 +1,7 @@
 // Tests for lib/plain-words.ts: what a bot's words and steps say to someone who isn't a developer.
 // Usage: node --experimental-strip-types scripts/test-plain-words.mjs
 import assert from "node:assert/strict";
-import { dropCitations, isLocalLink, localOnlyLine, plainStep, plainTitle } from "../lib/plain-words.ts";
+import { dropCitations, isLocalLink, localOnlyLine, plainStep, plainText, plainTitle } from "../lib/plain-words.ts";
 
 let passed = 0;
 const check = (name, fn) => {
@@ -16,6 +16,22 @@ check("citation markers go, with the space before them, and nothing else changes
   assert.equal(dropCitations(`seven walking days ${cite("turn1view0")}${cite("turn1view5")}.`), "seven walking days.");
   assert.equal(dropCitations(`From the guide fileciteturn2file0, page 3.`), "From the guide, page 3.");
   assert.equal(dropCitations("Plain words, kept: a, b; c. Run `cd .` first."), "Plain words, kept: a, b; c. Run `cd .` first.");
+});
+
+check("a bot's message as plain text: a link's words, no address, brackets, **, backticks, # or bullets", () => {
+  assert.equal(plainText("See [the preview](https://trailguides.example.com/preview)."), "See the preview.");
+  assert.equal(plainText("**Done**: `look.ts` is back."), "Done: look.ts is back.");
+  assert.equal(plainText("# Plan\n- [Book](https://trailguides.example.com/b)\n* **Pay**\n+ Go\n• Rest"), "Plan\nBook\nPay\nGo\nRest");
+  assert.equal(plainText("Run:\n```bash\nnpm run dev\n```\nthen look."), "Run:\nnpm run dev\n\nthen look.");
+  assert.equal(plainText(`Found it. ${cite("turn0search3")}`), "Found it.", "citation markers go too");
+  // What isn't a mark stays: a bare address, a minus, a lone star, a hyphenated word, a number list.
+  for (const t of ["Live: https://trailguides.example.com/live", "-5 degrees", "a * b", "re-run it", "1. Book\n2. Pay", "C# and #tags"]) assert.equal(plainText(t), t, t);
+});
+
+check("code stays as the chat shows it: a code block's lines and `code` verbatim, only the ``` and backticks go", () => {
+  assert.equal(plainText("```\ncode **x** [l](u)\n- y\n```"), "code **x** [l](u)\n- y\n");
+  assert.equal(plainText("Match `src/**` or `lib/**` here."), "Match src/** or lib/** here.");
+  assert.equal(plainText("Type `[a](b)` then **go**."), "Type [a](b) then go.");
 });
 
 check("steps are said as a person would", () => {

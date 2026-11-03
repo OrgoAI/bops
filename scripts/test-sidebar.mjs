@@ -303,6 +303,33 @@ await test("A routine's post on a row says which routine, as the chat does above
   assert.match(render(world({ routines, messages: [post()] })), />someone@example\.com requests cancellation</, "a bot's own reply as before");
 });
 
+await test("A bot's reply on its row is the plain text the chat shows: a link's words, not its address or brackets; no **, backticks, # or bullets", async () => {
+  const reply = (text, extra = {}) => ({ id: "m1", chatId: "chat_boppy", role: "bot", botId: "boppy", text, at: min(5), ...extra });
+  /** The row's last-message line: the text after the chat's name and time, up to the end of its span. */
+  const line = (html) => html.match(/data-row-line[\s\S]*?<span class="min-w-0 flex-1 truncate[^"]*">([^<]*)<\/span>/)?.[1];
+  const said = "Back to how it was: [Open the live site](https://trailguides.example.com/live). **Yellow** buttons, `look.ts` restored.";
+  assert.equal(line(render(world({ messages: [reply(said)] }))), "Back to how it was: Open the live site. Yellow buttons, look.ts restored.");
+  assert.equal(line(render(world({ messages: [reply("## Done\n- [The preview](https://trailguides.example.com/preview)\n* **Live** next")] }))), "Done\nThe preview\nLive next");
+  assert.equal(line(render(world({ messages: [reply("Run this:\n```bash\nnpm run dev\n```")] }))), "Run this:\nnpm run dev\n");
+  // A routine's post and a group chat's say whose first, then the same plain words.
+  assert.equal(line(render(world({ routines: [{ id: "r1", title: "Morning check" }], messages: [reply(said, { routine: { id: "r1" } })] }))), "Morning check: Back to how it was: Open the live site. Yellow buttons, look.ts restored.");
+  const group = world({ messages: [{ ...reply(said), chatId: "chat_group", botId: "nova" }] });
+  assert.match(render(group, { chatId: "chat_boppy" }), />Nova: Back to how it was: Open the live site\. Yellow buttons, look\.ts restored\.</);
+  // The same words as the chat's own bubble (chat-view.tsx Rich), tags and spacing aside.
+  const { Rich } = await import(pathToFileURL(`${root}/components/app/chat-view.tsx`).href);
+  const words = (s) => s.replace(/<[^>]+>/g, "").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
+  assert.equal(words(line(render(world({ messages: [reply(said)] })))), words(renderToStaticMarkup(h(Rich, { text: said, botId: "boppy" }))));
+  // A person's message is shown as they wrote it, as the chat shows it.
+  assert.equal(line(render(world({ messages: [{ id: "m2", chatId: "chat_boppy", role: "user", text: "Use **bold** [here](https://trailguides.example.com)", at: min(4) }] }))), "You: Use **bold** [here](https://trailguides.example.com)");
+  // So is a text or an email someone sent, and a note: the chat shows them raw (TextCard, EmailCard, SystemNote), not as a bot's words.
+  const inbound = (id, text, extra) => ({ id, chatId: "chat_boppy", role: "system", text, at: min(3), ...extra });
+  const sms = { sms: { dir: "in", from: "+15551234567", to: "+15557654321" } };
+  assert.equal(line(render(world({ messages: [inbound("t1", "# 4521 is your code", sms)] }))), "# 4521 is your code");
+  assert.equal(line(render(world({ messages: [inbound("t2", "+ 1 for yes\n- or no", sms)] }))), "+ 1 for yes\n- or no");
+  assert.equal(line(render(world({ messages: [inbound("e1", "**Invoice** [view](https://trailguides.example.com/i)", { email: { from: "alex@example.com", to: "boppy@example.com", subject: "Invoice" } })] }))), "**Invoice** [view](https://trailguides.example.com/i)");
+  assert.equal(line(render(world({ messages: [inbound("n1", "* Boppy saved `look.ts`")] }))), "* Boppy saved `look.ts`");
+});
+
 await test("A thread's row says its title in plain words (an app's copy on its computer, not Local), the stored title as it was", () => {
   const t = session("t9", "nova", { title: "Run Trail Guides Local" });
   const html = render(world({ sessions: [t] }), { search: "trail" });
