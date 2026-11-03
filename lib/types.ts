@@ -2244,8 +2244,17 @@ export type AppApproval = {
   resources: string[];
   preview: string;
   kind?: "app" | "email" | "api" | "data" | "brain";
-  /** A call to an API with one of the user's keys: the key, its service, the method and the whole path. */
-  api?: { key: string; label: string; method: string; path: string };
+  /**
+   * A call to an API with one of the user's keys: the key, its service, the method and the whole path. `change`: a change
+   * to files in one go (lib/server/repo-change.ts), which is several calls: where, and each file.
+   */
+  api?: { key: string; label: string; method: string; path: string; change?: FileChange };
+  /**
+   * What the person gets, in the bot's own plain words ("Save the new button colour as a draft"): the card's headline,
+   * one line, at most 80 characters (lib/server/keys.ts plainReason). The bot's claim, never the truth of the call: the
+   * card's facts line (lib/permission.ts apiFacts) and Details say what is really sent. None: the action heads the card.
+   */
+  reason?: string;
   at: number;
   resume?: AskResume;
   reply?: AskAnswer;
@@ -2256,6 +2265,20 @@ export type AppApproval = {
    * their logins (lib/member-access.ts ownerOnlyAsk), so the card says whose ask it was.
    */
   askedFor?: string;
+};
+
+/**
+ * A change to files in a repository asked for in one go (lib/server/repo-change.ts change_files): the repository, the
+ * branch it goes on (`base`: made from it, when it's new), the commit the card was made from (`at`: the branch's, or
+ * its base's), which the yes builds on, and each file, added, changed or deleted, with its new size: only these go in.
+ */
+export type FileChange = {
+  repo: string;
+  branch: string;
+  base?: string;
+  at: string;
+  /** `image`: a picture from the chat goes there, byte for byte: the copy the card shows (an upload on this Mac, `id`), and the link a person wrote it at (`url`) when it came from one. */
+  files: { path: string; op: "add" | "change" | "delete"; bytes?: number; image?: { id?: string; url?: string } }[];
 };
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
