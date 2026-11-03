@@ -1877,10 +1877,14 @@ function WorkspaceGeneral({ state }: { state: AppState }) {
   const [naming, setNaming] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const name = state.shared ? state.shared.name : (w?.name ?? "This workspace");
+  // An Admin renames a shared workspace on Orgo, whose name every Bops follows (lib/server/shared-people.ts).
+  const adminRenames = state.shared?.role === "admin" && (!!state.shared.adminActs || !!state.shared.ownerOld);
   const save = async () => {
     const next = naming?.trim();
-    if (!next || !w) return;
-    const res = await post("/api/workspaces", { id: w.id, name: next }, "PATCH").catch(() => null);
+    if (!next || (!w && !adminRenames)) return;
+    const res = adminRenames
+      ? await post("/api/workspaces/shared/settings", { name: next }, "PATCH").catch(() => null)
+      : await post("/api/workspaces", { id: w!.id, name: next }, "PATCH").catch(() => null);
     const j = ((await res?.json().catch(() => ({}))) ?? {}) as { error?: string };
     if (res?.ok) {
       setNaming(null);
@@ -1898,8 +1902,8 @@ function WorkspaceGeneral({ state }: { state: AppState }) {
         ) : (
           <>
             <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{name}</span>
-            {!state.shared && w && (
-              <button onClick={() => setNaming(w.name)} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+            {((!state.shared && w) || adminRenames) && (
+              <button onClick={() => setNaming(adminRenames ? name : w!.name)} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
                 Rename
               </button>
             )}
@@ -2018,7 +2022,9 @@ export function Settings({
   // The workspace's domains (bought through Orgo): only where apps are shown (an @orgo.ai account, its own workspace).
   const domains = appsOwnShown(state);
   const apps = appsShown(state);
-  const fits = (p?: SettingsPane) => !!p && (p !== "domains" || domains) && (p !== "apps" || apps) && (!state.shared || (p !== "team" && p !== "chart" && p !== "email"));
+  // An Admin of a shared workspace has its Team too (who's in: lib/server/shared-people.ts); never its chart or email.
+  const adminHere = state.shared?.role === "admin";
+  const fits = (p?: SettingsPane) => !!p && (p !== "domains" || domains) && (p !== "apps" || apps) && (!state.shared || ((p !== "team" || adminHere) && p !== "chart" && p !== "email"));
   const [pane, setPane] = useState<SettingsPane>(fits(at) ? at! : "profile");
   const [was, setWas] = useState(`${at}:${atAt}`);
   if (was !== `${at}:${atAt}`) {
@@ -2059,7 +2065,7 @@ export function Settings({
   ];
   const workspace: NavItem[] = [
     item("general", "General"),
-    ...(!shared ? [item("team", "Team", { value: people || undefined })] : []),
+    ...(!shared || adminHere ? [item("team", "Team", { value: people || undefined })] : []),
     ...(!shared ? [item("chart", "Org chart")] : []),
     item("bots", "Bots", { value: team.length || undefined }),
     item("logins", "Logins", { value: logins || undefined }),
@@ -2183,6 +2189,9 @@ export function Settings({
     );
   else if (pane === "team" && !shared)
     body = <Members state={state} onUpgrade={() => go("plan")} onTeamChart={() => go("chart")} />;
+  else if (pane === "team" && adminHere)
+    // An Admin's: the shared workspace's people, on the owner's seats (its plan stays the owner's: no upgrade from here).
+    body = <Members key={state.shared?.projectId} state={state} source="/api/workspaces/shared/people" onUpgrade={() => {}} />;
   else if (pane === "chart" && !shared)
     body = <TeamChart key={`${chartBot ?? ""}:${atAt ?? ""}`} state={state} focus={chartBot} onMakeBot={onMakeBot} onOpenPeople={() => go("team")} />;
   else if (pane === "apps" && apps) body = <MadeAppsHome state={state} ws={ws} />;

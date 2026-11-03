@@ -62,7 +62,8 @@ export function keep(v: unknown, spec: Spec): unknown {
   return out;
 }
 
-const WORKSPACE: Spec = { id: true, name: true, createdAt: true };
+// Where its chat is answered (turns.ts mirrorOf), so an Admin's Settings shows the switch as it stands.
+const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true };
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
 /** `readAt` is the owner's own (their unread dots), and `typing` is never synced: the moods say it. */
 const CHAT: Spec = { id: true, kind: true, botIds: true, title: true, createdAt: true, workspaceId: true };

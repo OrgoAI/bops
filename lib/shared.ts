@@ -256,6 +256,8 @@ export const SHARED_SCREEN_WORDS = {
   control: "Take control",
   release: "Stop controlling",
   asleep: (bot: string) => `If it's asleep, it wakes when you ask ${bot} something.`,
+  wake: "Wake it",
+  waking: "Waking it. Its screen shows in about a minute.",
 };
 
 /**

@@ -94,6 +94,12 @@ export type MembersInfo =
       invites: Invite[];
       seats: MemberSeats | null;
       seatsError?: SeatsError;
+      /**
+       * A workspace shared with the user, for an Admin there (lib/server/shared-people.ts): `you` is then its owner, `me`
+       * the user's own id among `people`, `can` whether orgo-web and Bops Cloud let them change who's here (else the
+       * sheet reads only, saying `line`).
+       */
+      shared?: { me: string; can: boolean; line?: string };
     };
 
 /** Why a members call didn't do what was asked: a code the app acts on, and words to show. */
@@ -122,7 +128,7 @@ export const ROLE_NAMES: Record<MemberRole, string> = { viewer: "Member", admin:
 /** What each role means, under the invite form: an Admin's is the one warning. */
 export const ROLE_LINES: Record<MemberRole, string> = {
   viewer: "Sees and does only what you pick for them.",
-  admin: "Every bot, its computer and your apps. Only you can add people or delete this workspace.",
+  admin: "Every bot, its computer and your apps, and adding people. Only you can delete this workspace.",
 };
 
 /** The People sheet's words for an Admin (lib/server/members.ts, components/app/members.tsx). */
@@ -130,12 +136,28 @@ export const ADMIN_WORDS = {
   row: "Every bot, its computer and your apps",
   confirmTitle: (name: string) => `Make ${name} an Admin?`,
   confirmBody:
-    "They can use every bot and its computer as you can, bots made later too, and change your apps. Bots that answer on your Mac answer them too. Only you can add people or delete this workspace.",
+    "They can use every bot and its computer as you can, bots made later too, change your apps, and add or remove people. Bots that answer on your Mac answer them too. Only you can delete this workspace or change its plan.",
+  /** The same, in an Admin's sheet of a workspace shared with them (ADMIN_SHEET_WORDS). */
+  confirmBodyShared: "They can use every bot and its computer, bots made later too, change the apps, and add or remove people. Bots on the owner's Mac answer them too. Only the owner can delete this workspace or change its plan.",
   confirm: "Make Admin",
   toMember: "Make Member",
   toMemberTip: "They keep only the bots you picked for them before.",
   older: "One of your Macs runs an older Bops. Until it updates, it goes by the bots you picked for them.",
   inviteRoleNotReady: "Orgo can't change a waiting invite yet. Resend it to change the role.",
+};
+
+/**
+ * The People sheet of a workspace shared with the user, for an Admin there (lib/server/shared-people.ts): the same sheet,
+ * on the owner's workspace and seats. What stays the owner's is said on the Owner row; a plan with no room says to ask them.
+ */
+export const ADMIN_SHEET_WORDS = {
+  owner: "Only the owner can delete this workspace or change its plan.",
+  seats: "Ask the owner for more seats.",
+  notYet: "Bops Cloud needs an update before you can change who's here.",
+  notOwnerOnly: "Only the owner can add or change people for now.",
+  ownersEmail: "That's the owner.",
+  ownerRow: "The owner has every bot.",
+  bots: "Invited, but their bots didn't save. Pick them again.",
 };
 
 /**
