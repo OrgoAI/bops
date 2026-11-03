@@ -2272,7 +2272,14 @@ export type AppApproval = {
  * branch it goes on (`base`: made from it, when it's new), the commit the card was made from (`at`: the branch's, or
  * its base's), which the yes builds on, and each file, added, changed or deleted, with its new size: only these go in.
  */
-export type FileChange = { repo: string; branch: string; base?: string; at: string; files: { path: string; op: "add" | "change" | "delete"; bytes?: number }[] };
+export type FileChange = {
+  repo: string;
+  branch: string;
+  base?: string;
+  at: string;
+  /** `image`: a picture from the chat goes there, byte for byte: the copy the card shows (an upload on this Mac, `id`), and the link a person wrote it at (`url`) when it came from one. */
+  files: { path: string; op: "add" | "change" | "delete"; bytes?: number; image?: { id?: string; url?: string } }[];
+};
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
 export type AskReply = "once" | "always" | "reject";

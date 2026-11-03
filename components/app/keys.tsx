@@ -11,6 +11,7 @@ import { Fold } from "./fold";
 import { KeyIcon } from "./screen-cards";
 import { Chevron, undash } from "./side-group";
 import { post, teamOf } from "./ui";
+import { readAllowed } from "./view-only";
 
 /*
  * Keys (lib/server/keys.ts): the user's API keys their bots may call services with. They're kept in the
@@ -1139,6 +1140,11 @@ export function ApiAsk({ ask, detail, botName }: { ask: NonNullable<ReturnType<t
               <ul data-change-files className="flex flex-col gap-0.5 text-[12.5px] leading-[18px]">
                 {ask.change.files.map((f) => (
                   <li key={f.path} data-change-file className="flex items-start gap-2">
+                    {/* A picture from the chat: the copy that goes in, small, next to where it goes (a shared workspace's aren't shown here yet). */}
+                    {f.image?.id && readAllowed(`/api/uploads/${f.image.id}`) && (
+                      // eslint-disable-next-line @next/next/no-img-element -- the picture that goes in, served by this app
+                      <img data-change-image src={`/api/uploads/${f.image.id}`} alt="" className="mt-px size-[18px] shrink-0 rounded-[4px] object-cover shadow-[0_0_0_1px_#0000000F]" />
+                    )}
                     <span className="min-w-0 flex-1 select-text font-mono text-[12px] text-ink [overflow-wrap:anywhere]">{f.path}</span>
                     <span className={`shrink-0 ${f.op === "delete" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
                       {FILE_OP[f.op]}
