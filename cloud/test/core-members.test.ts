@@ -1440,7 +1440,7 @@ test("an ask the owner alone answers, and a member's name made plain", () => {
   assert.equal(cleanName(undefined), "");
 });
 
-test("over HTTP: in a workspace of Orgo's team, an app thread's ask is a Write member's to answer, whatever their email; in one whose owner isn't, nobody is told it's there", async () => {
+test("over HTTP: in a workspace of Orgo's team, an app thread's ask is a Write member's with Your Apps at Write to answer, whatever their email; in one whose owner isn't, nobody is told it's there", async () => {
   const ask = (key: string) => ({ key, act: { act: "answer", askId: "ask-app", reply: "once" } });
   const stop = (key: string) => ({ key, act: { act: "stop", sessionIds: ["t-app"] } });
   // orgo-web says no owner's email, or one that isn't @orgo.ai (or the owner's upload names an @orgo.ai account, which
@@ -1453,11 +1453,25 @@ test("over HTTP: in a workspace of Orgo's team, an app thread's ask is a Write m
     }
     assert.equal(queued.length, 0);
   }
+  // Shown to a Write member, but without Your Apps at Write the owner's Mac would drop it ("an app's ask"): said here.
   actFakes({ ownerEmail: "owner@orgo.ai" });
-  assert.equal((await act("act-sam", ask("k_app_00003"))).status, 202);
+  for (const body of [ask("k_app_00003"), stop("k_app_00005"), { key: "k_app_00006", act: { act: "reply", sessionId: "t-app", text: "x" } }]) {
+    const r = await act("act-sam", body);
+    assert.deepEqual([r.status, r.json.code], [403, "member_apps_read_only"], JSON.stringify(body));
+  }
+  assert.equal(queued.length, 0, "nothing refused was queued");
+  // With Your Apps at Write: theirs. An Admin always has it.
+  const ws = (actOwner.workspaces as Record<string, unknown>[])[0];
+  const access = ws.memberAccess as Record<string, Record<string, unknown>>;
+  const withApps = { ...actOwner, workspaces: [{ ...ws, memberAccess: { ...access, "sam@example.com": { ...access["sam@example.com"], apps: "write" } } }] };
+  actFakes({ owner: withApps, ownerEmail: "owner@orgo.ai" });
+  assert.equal((await act("act-sam", ask("k_app_00007"))).status, 202);
   assert.equal((await act("act-tom", ask("k_app_00004"))).status, 202);
-  assert.equal((await act("act-sam", stop("k_app_00005"))).status, 202);
+  assert.equal((await act("act-sam", stop("k_app_00008"))).status, 202);
   assert.deepEqual(queued.map((q) => q.payload.member.email), ["sam@example.com", "tom@orgo.ai", "sam@example.com"]);
+  // An answer waits as long as its ask (a day), marked so every owner's Mac with members takes it that late.
+  assert.deepEqual([queued[0].payload.stored, queued[2].payload.stored], [true, undefined]);
+  assert.ok(Math.abs(queued[0].expires.getTime() - (Date.now() + STORED_ACT_MS)) < 10_000);
 });
 
 test("over HTTP: Write is checked with Orgo afresh: a member removed acts no more, and what they sent that waits is dropped", async () => {

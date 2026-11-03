@@ -588,7 +588,7 @@ const nameOf = (blob: Record<string, unknown>, botId: string) => {
   const n = list(blob.bots).find((b) => b.id === botId)?.name;
   return typeof n === "string" && n.trim() ? n.trim() : "The bot";
 };
-const ownerOf = (blob: Record<string, unknown>) => {
+export const ownerOf = (blob: Record<string, unknown>) => {
   const o = isObject(blob.owner) ? blob.owner.name : undefined;
   return typeof o === "string" && o.trim() ? o.trim() : "The owner";
 };

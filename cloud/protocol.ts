@@ -878,7 +878,8 @@ export type MemberActBody = { key: string; act: MemberAct };
 /**
  * `computer`: Bops Cloud found the owner let them use the bots' computers (Use its computer, cloud/ws-slice.ts computerUseOf)
  * when it took the act. `stored`: a chat act Bops Cloud wrote already (`messageId`), in a workspace whose chat goes through
- * it, for a bot with no computer: the owner's Mac answers that message, and adds none.
+ * it, for a bot with no computer: the owner's Mac answers that message, and adds none. An answer is marked `stored` too
+ * (no `messageId`), so every owner's Mac with members (0.0.37 on) takes it up to STORED_ACT_MS late, as long as its ask waits.
  */
 /**
  * `role`: "admin" when orgo-web said they're an Admin as Bops Cloud took it (asked afresh): the owner's Mac from 0.0.38
@@ -944,7 +945,7 @@ export const MEMBER_MAX_NOTE = 2000;
 export const MEMBER_STOP_MAX = 20;
 /** How long an act waits for the owner's Bops to open: an older one is dropped, never done late. */
 export const MEMBER_ACT_MS = 10 * 60_000;
-/** How long a message Bops Cloud wrote already (MemberActPayload.stored) waits for the owner's Mac to answer it. */
+/** How long a message Bops Cloud wrote already, or an answer (MemberActPayload.stored), waits for the owner's Mac to take it. */
 export const STORED_ACT_MS = 24 * 3600_000;
 
 /**

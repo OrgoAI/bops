@@ -140,7 +140,12 @@ export async function fakeOrgo(roles?: Record<string, unknown>, people?: Record<
       const userId = /^Bearer key-(.+)$/.exec(req.headers.authorization ?? "")?.[1];
       // A project's people (GET /api/workspaces/<id>/members), to anyone bops-role names there, when the test gives them.
       const listed = /^\/api\/workspaces\/([^/]+)\/members$/.exec(req.url ?? "")?.[1];
-      if (people && listed && userId) return void (roles?.[`${userId} ${listed}`] && people[listed] ? json(res, 200, people[listed]) : json(res, 403, { error: "Forbidden" }));
+      // With orgo-web's `can.managePeople`: an owner's or Admin's yes, unless the test's list says its own `can`.
+      if (people && listed && userId) {
+        const r = roles?.[`${userId} ${listed}`] as { role?: string } | undefined;
+        const list = people[listed] as { can?: unknown } | undefined;
+        return void (r && list ? json(res, 200, { ...list, can: list.can ?? { managePeople: r.role === "owner" || r.role === "admin" } }) : json(res, 403, { error: "Forbidden" }));
+      }
       const project = /^\/api\/projects\/([^/]+)\/bops-role$/.exec(req.url ?? "")?.[1];
       if (roles && project && userId) return void (roles[`${userId} ${project}`] ? json(res, 200, roles[`${userId} ${project}`]) : json(res, 404, { error: "Not found" }));
       if (req.url !== "/api/user/profile" || !userId) return void json(res, 401, { error: "no" });
