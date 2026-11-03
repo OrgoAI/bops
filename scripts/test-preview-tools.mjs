@@ -1100,5 +1100,18 @@ await test("FixPanel by itself: what a page's 5xx offers, and a bot with no chat
   assert.ok(!NO_DASHES.test(text(html)) && !/orbit/i.test(text(html)));
 });
 
+await test("a bot's localhost link in the owner's chat opens its Local, with a query or a fragment right after the port too; another site opens as a tab", async () => {
+  const { OpenBotLocal, OpenLink } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  const local = [];
+  const tabs = [];
+  const st = chatState();
+  st.messages = [{ id: "m-links", chatId: "bot:boppy", role: "bot", botId: "boppy", text: "Up: [the start page](http://localhost:3001/start), [the home view](http://localhost:3001?view=home), [the cover](http://127.0.0.1:3001#cover) and [the docs](https://docs.example.com/x).", at: 10 }];
+  const m = await mount(h(OpenBotLocal.Provider, { value: (botId, url) => local.push([botId, url]) }, h(OpenLink.Provider, { value: (url) => tabs.push(url) }, h(ChatView, chatProps(st)))));
+  for (const name of ["the start page", "the home view", "the cover", "the docs"]) await click([...m.box.querySelectorAll("a")].find((a) => a.textContent === name));
+  assert.deepEqual(local, [["boppy", "http://localhost:3001/start"], ["boppy", "http://localhost:3001?view=home"], ["boppy", "http://127.0.0.1:3001#cover"]], "each localhost address is its Local, never a tab of this Mac's own localhost");
+  assert.deepEqual(tabs, ["https://docs.example.com/x"]);
+  await m.done();
+});
+
 console.log(`preview tools: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

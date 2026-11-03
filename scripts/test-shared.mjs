@@ -887,6 +887,36 @@ const READ_ONLY_LINES = [
 ];
 const yous = (html, ...allowed) => (html.match(/[^<>"]*\b(you|your|yours|yourself)\b[^<>"]*/gi) ?? []).filter((x) => ![...allowed, ...READ_ONLY_LINES].some((a) => x.includes(a)));
 
+await check("a bot's localhost link in a shared workspace is text saying it opens only on the bot's computer, and a thread's title is in plain words; in the user's own the link opens", async () => {
+  const { LocalOnly, OpenInBrowser } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  const state = everythingState();
+  state.sessions = [...state.sessions, { ...state.sessions[0], id: "local", title: "Run Trail Guides Local", status: "running", createdAt: 8 }];
+  state.messages = [...state.messages, { id: "m-local", chatId: "bot:boppy", role: "bot", botId: "boppy", text: "It runs. [Open the preview](http://localhost:3101/) or go to http://127.0.0.1:3101/start, or http://localhost:3000?view=home#cover now. Not http://localhost.example.com/ but http://localhost:3000. And http://localhost.", at: 10, sessionIds: ["local"] }];
+  const shared = renderToStaticMarkup(h(LocalOnly.Provider, { value: state.bots }, h(ChatView, chatProps(state, "bot:boppy"))));
+  assert.ok(!/href="http:\/\/(localhost|127\.0\.0\.1)/.test(shared), "no link that would open the viewer's own localhost");
+  assert.match(text(shared), /Open the preview \(opens only on Dana's Boppy's computer\) or go to http:\/\/127\.0\.0\.1:3101\/start \(opens only on Dana's Boppy's computer\) ?, or/, "a comma after it stays the sentence's");
+  assert.match(text(shared), /http:\/\/localhost:3000\?view=home#cover \(opens only on Dana's Boppy's computer\) now\./, "a query and a fragment stay with the address");
+  assert.match(text(shared), /Not http:\/\/localhost\.example\.com\//);
+  assert.match(text(shared), /but http:\/\/localhost:3000 \(opens only on Dana's Boppy's computer\) ?\. And http:\/\/localhost \(opens only on Dana's Boppy's computer\) ?\./, "a full stop after the port or the host ends the address");
+  assert.ok(!/localhost\.example\.com\/? ?\(opens only/.test(text(shared)) && !/localhost \(opens only[^)]*\)\.example/.test(text(shared)), "another host is left alone");
+  assert.match(text(shared), /Run Trail Guides on its computer/, "the thread's chip");
+  assert.ok(!/Run Trail Guides Local/.test(text(shared)));
+  // Someone who may use the bot's browser there (an Admin, or a Member with Write and Use its computer) opens it in that
+  // browser, as before: the link stays a link, with nothing said after it.
+  const browsing = renderToStaticMarkup(h(LocalOnly.Provider, { value: state.bots }, h(OpenInBrowser.Provider, { value: { may: (botId) => botId === "boppy", open: () => {} } }, h(ChatView, chatProps(state, "bot:boppy")))));
+  assert.match(browsing, /href="http:\/\/localhost:3101\/"/, "a link they open in the bot's browser");
+  assert.ok(!/opens only on/.test(browsing), browsing.match(/[^>]*opens only on[^<]*/)?.[0]);
+  // The user's own (no LocalOnly): the link is a link, as always (it opens the bot's preview beside the chat).
+  const mine = renderToStaticMarkup(h(ChatView, chatProps(state, "bot:boppy")));
+  assert.match(mine, /href="http:\/\/localhost:3101\/"/);
+  assert.ok(!/opens only on/.test(mine));
+  // The window gives it in a shared workspace only.
+  const app = readFileSync(`${root}/components/app/bops-app.tsx`, "utf8");
+  assert.match(app, /<LocalOnly\.Provider value=\{state\.shared \? state\.bots : null\}>/);
+  // The owner's localhost link keeps Local by the same test as everywhere (a query or fragment after the port too).
+  assert.match(app, /!\(url && !state\.shared && isLocalLink\(url\)\)/);
+});
+
 await check("nothing in a shared workspace's open chat says the owner's as the viewer's or asks them to chat: its header, an empty chat, a text's or email's note, a thread's chip, sheet and asks", () => {
   const state = everythingState();
   const chat = renderToStaticMarkup(h(ChatView, chatProps(state, "bot:boppy")));

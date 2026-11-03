@@ -6,6 +6,7 @@ import { entryOf, teamIn } from "@/lib/chain";
 import { MemorySheet } from "./memory-sheet";
 import { ago, memberAnswers, post, quietNothing, StatusIcon } from "./ui";
 import { you } from "@/lib/shared";
+import { plainTitle } from "@/lib/plain-words";
 
 type Fact = { id: string; text: string; private: boolean; at?: number; source?: string };
 type Data = { workspace: string; ws: string; own?: boolean; card: Fact[]; facts: Fact[]; error?: string };
@@ -206,7 +207,7 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-2">
-                          <span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-5">{s.title}</span>
+                          <span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-5">{plainTitle(s.title)}</span>
                           <span className="shrink-0 text-[12px] text-[#9A9A98]">{ago(s.endedAt ?? s.createdAt)}</span>
                         </span>
                         {s.answer && <span className="line-clamp-1 text-[13px] leading-[18px] text-[#6B6B6B]">{s.answer.replace(/\*\*|\[|\]\([^)]*\)/g, "")}</span>}

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Bot } from "@/lib/types";
 import { Mascot } from "./mascot";
+import { plainTitle } from "@/lib/plain-words";
 
 type Phase = "connecting" | "live" | "ending" | "ended" | "failed";
 
@@ -181,7 +182,7 @@ export function CallBar({
         send({
           type: "session.commentary.append",
           delegation_id: delegationId,
-          content: t.status === "done" ? `"${t.title}" is done: ${t.answer ?? "finished"}` : `"${t.title}" didn't finish: ${t.error ?? "it stopped"}`,
+          content: t.status === "done" ? `"${plainTitle(t.title)}" is done: ${t.answer ?? "finished"}` : `"${plainTitle(t.title)}" didn't finish: ${t.error ?? "it stopped"}`,
         });
         return;
       }

@@ -5,6 +5,7 @@ import { live, type AppState } from "@/lib/types";
 import { MacStream, useAppWindowSource } from "./mac-screens";
 import { Mascot } from "./mascot";
 import { post } from "./ui";
+import { plainTitle } from "@/lib/plain-words";
 
 /*
  * The user's Mac, as a place bots work: whether it's ready, what's running there, and the words that
@@ -136,7 +137,7 @@ export function MacTiles({ tiles, onOpen, max = 480, tall = false }: { tiles: Re
             </span>
             {live(s) ? <span className="size-1.5 animate-pulse rounded-full bg-[#2BB673]" title="Working" /> : <span className="text-[11px] text-[#9A9A98]">done</span>}
           </div>
-          <button onClick={onOpen} title={`${s.title}: open Your Mac`} className={`block w-full ${tall ? "min-h-0 flex-1" : ""}`}>
+          <button onClick={onOpen} title={`${plainTitle(s.title)}: open Your Mac`} className={`block w-full ${tall ? "min-h-0 flex-1" : ""}`}>
             <MacWindow app={app} max={max} className={tall ? "h-full w-full" : "h-[150px] w-full"} />
           </button>
         </div>

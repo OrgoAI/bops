@@ -1,7 +1,7 @@
 // Tests for lib/plain-words.ts: what a bot's words and steps say to someone who isn't a developer.
 // Usage: node --experimental-strip-types scripts/test-plain-words.mjs
 import assert from "node:assert/strict";
-import { dropCitations, plainStep } from "../lib/plain-words.ts";
+import { dropCitations, isLocalLink, localOnlyLine, plainStep, plainTitle } from "../lib/plain-words.ts";
 
 let passed = 0;
 const check = (name, fn) => {
@@ -27,8 +27,34 @@ check("steps are said as a person would", () => {
   assert.equal(plainStep("ran git log --oneline -5"), "Looked at the code history");
   assert.equal(plainStep("ran npm test"), "Ran a command", "a test run isn't setting the app up");
   assert.equal(plainStep("ran git commit -m fix"), "Ran a command", "nor is a commit looking at history");
-  assert.equal(plainStep("Read https://fourcorners.brandlord.agency/start?redirect=%2F"), "Read fourcorners.brandlord.agency");
+  assert.equal(plainStep("Read https://trailguides.example.com/start?redirect=%2F"), "Read trailguides.example.com");
   assert.equal(plainStep("Check the corrected draft itinerary"), "Check the corrected draft itinerary", "a step already in words stays");
+});
+
+check("a thread's title says where an app's copy runs, its computer, not Local or localhost; the rest stays", () => {
+  assert.equal(plainTitle("Run Trail Guides Local"), "Run Trail Guides on its computer");
+  assert.equal(plainTitle("Show Trail Guides locally"), "Show Trail Guides on its computer");
+  assert.equal(plainTitle("Open the brochure on localhost:3101"), "Open the brochure on its computer");
+  assert.equal(plainTitle("Check http://localhost:3000/start for the cover"), "Check its computer for the cover");
+  assert.equal(plainTitle("Trail Guides draft brochure"), "Trail Guides draft brochure", "already plain");
+  assert.equal(plainTitle("Local news digest"), "Local news digest", "Local only where it ends the title");
+  assert.equal(plainTitle("Call the local printer"), "Call the local printer");
+  assert.equal(plainTitle("Check localhost:3000?view=home"), "Check its computer");
+  assert.equal(plainTitle("Open localhost:3000. Then check the cover"), "Open its computer. Then check the cover", "a full stop after the port ends it");
+  assert.equal(plainTitle("Read http://localhost.example.com/docs"), "Read http://localhost.example.com/docs", "another host stays");
+  // Only the run target an app's copy has on the bot's computer (its Local): a title that runs, starts or opens an app
+  // there. Any other title ending in "local" is the word, and stays.
+  assert.equal(plainTitle("Start trail-guides Local"), "Start trail-guides on its computer");
+  assert.equal(plainTitle("Restart the brochure site locally"), "Restart the brochure site on its computer");
+  for (const title of ["Shop local", "Shop locally", "Buy local", "Support local", "Think global, act local", "Keep it local", "Run local", "Find the best coffee local", "Call the printer locally"])
+    assert.equal(plainTitle(title), title, title);
+});
+
+check("a localhost link is one to the computer it runs on, and says so", () => {
+  for (const href of ["http://localhost:3101/", "http://localhost", "https://127.0.0.1:8080/x?y", "http://LOCALHOST:3000#a"]) assert.ok(isLocalLink(href), href);
+  for (const href of ["https://trailguides.example.com", "http://localhost.example.com/", "/api/pages/x", "http://127.0.0.12/"]) assert.ok(!isLocalLink(href), href);
+  assert.equal(localOnlyLine("Nova"), "opens only on Nova's computer");
+  assert.equal(localOnlyLine(undefined), "opens only on the bot's computer");
 });
 
 console.log(`\nplain words: ${passed} passed`);

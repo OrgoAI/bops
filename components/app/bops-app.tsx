@@ -24,7 +24,7 @@ import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BotMoodsFrom, CallTalking, Mascot, talkingStore } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
-import { BROWSER_TAB, BrowserGoTo, browserTabOf, browsesHere, CHAT_TAB, electron, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenBotLocal, OpenInBrowser, OpenLink, OpenPreview, TabBar, WebTab, type BrowserGo, type PanelTab, type PreviewOpened } from "./panel-tabs";
+import { BROWSER_TAB, BrowserGoTo, browserTabOf, browsesHere, CHAT_TAB, electron, forgetTab, hostOf, isReading, LocalOnly, memoryAgain, NewTab, OpenBotLocal, OpenInBrowser, OpenLink, OpenPreview, TabBar, WebTab, type BrowserGo, type PanelTab, type PreviewOpened } from "./panel-tabs";
 import { PreviewTab } from "./preview-tab";
 import { MadeAppsHome, MadeAppTab, OpenMadeApp } from "./made-apps";
 import { appsStamp, HostedAppTab, OpenAppTask, OpenHostedApp, OpenSettings } from "./hosted-apps";
@@ -43,6 +43,7 @@ import { SidebarRail } from "./sidebar-rail";
 import type { BotMenuActions } from "./bot-menu";
 import { NewThread } from "./new-thread";
 import { readyAgents } from "@/lib/agents";
+import { isLocalLink } from "@/lib/plain-words";
 import { footerPageOf, openFooterPage } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
 import { PickComputer, useSizePick } from "./computer-size";
@@ -812,7 +813,7 @@ function Bops({ state }: { state: AppState | null }) {
   };
   const openInBrowser = {
     // The owner's localhost link keeps Local (its preview, with Select and Draw); a teammate's opens in the bot's browser.
-    may: (botId: string, url?: string) => browsesHere(state, state.bots.find((b) => b.id === botId)) && !(url && !state.shared && /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(url)),
+    may: (botId: string, url?: string) => browsesHere(state, state.bots.find((b) => b.id === botId)) && !(url && !state.shared && isLocalLink(url)),
     open: (botId: string, url: string) => showBrowser(botId, url),
   };
   // The Watch chip: the chat's bot is browsing and its browser isn't in sight ("Boppy is browsing · Watch").
@@ -1037,6 +1038,7 @@ function Bops({ state }: { state: AppState | null }) {
     <OpenBotComputer.Provider value={openBotComputer}>
     <OpenPreview.Provider value={openPreview}>
     <OpenBotLocal.Provider value={openBotLocal}>
+    <LocalOnly.Provider value={state.shared ? state.bots : null}>
     <ComposerBridgeProvider value={composerBridge}>
       <TooltipLayer />
       {/* A shared workspace's chats aren't the user's own: nothing of them is said as what they're looking at. */}
@@ -1465,6 +1467,7 @@ function Bops({ state }: { state: AppState | null }) {
         {!(tab?.kind === "mac" && panelOpen) && !state.shared && <MacPreviews state={state} onOpen={openMac} />}
       </div>
     </ComposerBridgeProvider>
+    </LocalOnly.Provider>
     </OpenBotLocal.Provider>
     </OpenPreview.Provider>
     </OpenBotComputer.Provider>

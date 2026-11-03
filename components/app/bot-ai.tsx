@@ -28,6 +28,7 @@ import { Fold } from "./fold";
 import { DefaultPill, NewThread, useBotKeys, useDismiss } from "./new-thread";
 import { undash } from "./side-group";
 import { post } from "./ui";
+import { plainTitle } from "@/lib/plain-words";
 
 /**
  * A bot's AI, in its profile (lib/agents.ts): the agents it can run as tiles, the Default marked; tap one to change
@@ -431,7 +432,7 @@ export function ThreadsNow({ state, bot: b, onOpenThread, onMore }: { state: App
           >
             <AgentMark kind={threadKind(s)} size={15} state={ms} />
             <span className="sr-only">{who.label}: </span>
-            <span className="truncate">{s.title}</span>
+            <span className="truncate">{plainTitle(s.title)}</span>
             {words && <span className="shrink-0 text-[#6B6B6B]">· {words}</span>}
           </button>
         );

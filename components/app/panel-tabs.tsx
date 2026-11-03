@@ -144,6 +144,11 @@ export const OpenPreview = createContext<((ws: string, name: string, site?: stri
 
 /** A localhost link a bot gave in its chat, opened as its app's preview (else on its screen); null where there's no panel. */
 export const OpenBotLocal = createContext<((botId: string, url: string) => void) | null>(null);
+/**
+ * In a workspace shared with the user: its bots, for what a localhost link of theirs says instead of opening (it
+ * opens only on that bot's computer, never on this Mac: lib/plain-words.ts localOnlyLine). Null in their own.
+ */
+export const LocalOnly = createContext<readonly { id: string; name: string }[] | null>(null);
 
 /**
  * The session an app's preview loads in: its own, per Bops user, workspace, app, site and copy (`bot`: a bot's copy
