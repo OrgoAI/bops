@@ -309,6 +309,50 @@ await check("the workspace's name (orgo-web, which every Bops follows) and where
   assert.equal((await call(W, "POST", { botId: "max" })).status, 200);
 });
 
+await check("an Admin gives a Member Keys, or takes it away, in orgo-web with their own key, then reads the copy again; never an Admin's, the owner's or their own; refusals in the sheet's words", async () => {
+  caps(["roles", "admin_powers", "keys"]);
+  fresh();
+  // The sheet reads Keys as orgo-web says it: an Admin's always on.
+  replies[`GET ${membersPath}`] = () => json(200, { members: MEMBERS.map((m) => (m.id === "u-cy" ? { ...m, bopsKeys: true } : m)), invites: INVITES, seats: SEATS, can: { managePeople: true } });
+  const read = await people("GET");
+  assert.deepEqual(read.body.people.map((p) => [p.id, p.keys]), [["u-ada", true], ["u-bo", true], ["u-cy", true]]);
+  assert.equal(read.body.keysScope, "on");
+  fresh();
+  replies[`PATCH ${membersPath}`] = (c) => json(200, { success: true, bopsKeys: c.body.bopsKeys });
+  const before = globalThis.__shared.refreshed;
+  const r = await people("PATCH", { memberId: "u-cy", keys: true });
+  assert.deepEqual([r.status, r.body], [200, { ok: true }]);
+  assert.deepEqual(shape(), [`orgo GET ${membersPath}`, "cloud GET people", `orgo PATCH ${membersPath}`], "orgo-web alone: nothing for Bops Cloud to keep");
+  assert.deepEqual([calls[2].body, calls[2].auth], [{ memberId: "u-cy", bopsKeys: true }, `Bearer ${ADMIN_KEY}`]);
+  assert.ok(globalThis.__shared.refreshed > before, "the copy is read again");
+  for (const [body, status, code] of [
+    [{ memberId: "u-bo", keys: false }, 409, "ADMIN_HAS_ALL"],
+    [{ memberId: "u-owner", keys: true }, 400, "SELF"],
+    [{ memberId: "u-nobody", keys: true }, 404, "GONE"],
+    [{ memberId: "u-cy", keys: true, role: "admin" }, 400, "BAD_REQUEST"],
+  ]) {
+    fresh();
+    const no = await people("PATCH", body);
+    assert.deepEqual([no.status, no.body.code], [status, code], JSON.stringify(body));
+    assert.ok(!calls.some((c) => c.method === "PATCH"), "never sent");
+  }
+  // orgo-web without it yet, or saying no.
+  for (const [reply, code, error] of [
+    [() => json(503, { error: "x", code: "KEYS_UNAVAILABLE" }), "KEYS_NOT_READY", M.KEYS_WORDS.notReady],
+    [() => json(409, { error: "x", code: "KEYS_GUEST" }), "KEYS_GUEST", M.KEYS_WORDS.guest],
+    [() => json(409, { error: "x", code: "KEYS_BOPS_ONLY" }), "KEYS_BOPS_ONLY", M.KEYS_WORDS.bopsOnly],
+  ]) {
+    fresh();
+    replies[`PATCH ${membersPath}`] = reply;
+    const no = await people("PATCH", { memberId: "u-cy", keys: true });
+    assert.deepEqual([no.body.code, no.body.error], [code, error]);
+  }
+  // While they may not change people: refused before orgo-web is asked.
+  fresh({ can: false });
+  assert.equal((await people("PATCH", { memberId: "u-cy", keys: true })).status, 403);
+  assert.ok(!calls.some((c) => c.method === "PATCH"));
+});
+
 await check("changes come only from the Bops window", async () => {
   process.env.BOPS_UI_TOKEN = "window-token-0123456789";
   for (const [mod, method] of [[R, "POST"], [R, "PATCH"], [R, "DELETE"], [S, "PATCH"], [W, "POST"]]) {

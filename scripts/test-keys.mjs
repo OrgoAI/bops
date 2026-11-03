@@ -57,6 +57,16 @@ registerHooks({
     }
   },
   load(url, context, next) {
+    // A workspace shared with the user (lib/server/shared.ts): the real one, but what Keys reads of it is the test's while
+    // globalThis.__sk says one is open (lib/server/shared-keys.ts).
+    if (url.endsWith("/lib/server/shared.ts")) {
+      const real = JSON.stringify(`${url}?real`);
+      return {
+        format: "module",
+        shortCircuit: true,
+        source: `export * from ${real};\nimport * as real from ${real};\nexport const sharedOpen = () => (globalThis.__sk ? globalThis.__sk.open : real.sharedOpen());\nexport const sharedKeysOpen = () => (globalThis.__sk ? (globalThis.__sk.open ? globalThis.__sk.view() : null) : real.sharedKeysOpen());\nexport const actShared = (...a) => (globalThis.__sk ? globalThis.__sk.act(...a) : real.actShared(...a));`,
+      };
+    }
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !STAND_INS.has(name)) return next(url, context);
     const names = [...readFileSync(new URL(url), "utf8").matchAll(/^export (?:async )?(?:function\*? |const |let |class )([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
@@ -86,6 +96,9 @@ const vault = new Map([
 /** Values in `vault` for the workspace-scoped key by that name only (the GITHUB_TOKEN listed below), never an account one. */
 const scopedOnly = new Set();
 const orgoCalls = [];
+/** A shared workspace's own keys as orgo-web's bops-keys routes keep them, and what they answer next instead ("page": a route it doesn't have). */
+const projectVault = new Map([["LINEAR_API_KEY", "lin_api_fake_shared"]]);
+const projectSays = [];
 /** Orgo's reveal answers 429 while this is set: its rate limit. */
 let revealLimited = false;
 /** What the broker answers next for a path, else a small JSON answer. */
@@ -132,6 +145,16 @@ const server = createServer(async (req, res) => {
     if (!vault.has(body.name)) return send(404, { error: "Secret not set", code: "not_set" });
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     return res.end(JSON.stringify({ name: body.name, value: vault.get(body.name) }));
+  }
+  // A shared workspace's own keys (orgo-web's bops-keys routes), as its Keys holder reaches them with their own key.
+  const pk = url.pathname.match(/^\/api\/projects\/([^/]+)\/bops-keys(?:\/(reveal|[A-Z0-9_]+))?$/);
+  if (pk) {
+    const say = projectSays.shift();
+    if (say) return say === "page" ? (res.writeHead(404, { "content-type": "text/html" }), res.end("<!doctype html><p>Not found</p>")) : send(say.status, say.body);
+    if (!pk[2] && req.method === "GET") return send(200, { keys: [...projectVault.keys()].map((name) => ({ name, updated_at: "2026-10-15T00:00:00Z" })).concat([{ name: "SOME_TEMPLATE_SECRET", updated_at: null }]) });
+    if (!pk[2] && req.method === "POST") return projectVault.set(body.name, body.value), send(200, { ok: true, name: body.name });
+    if (pk[2] === "reveal" && req.method === "POST") return projectVault.has(body.name) ? send(200, { name: body.name, value: projectVault.get(body.name) }) : send(404, { error: "Not found", code: "KEY_NOT_FOUND" });
+    if (pk[2] && req.method === "DELETE") return projectVault.delete(pk[2]) ? send(200, { ok: true }) : send(404, { error: "Not found", code: "KEY_NOT_FOUND" });
   }
   if (url.pathname === "/api/secrets/call" && req.method === "POST") {
     if (!vault.has(body.name)) return send(404, { error: "Secret not set" });
@@ -788,6 +811,185 @@ await check("a service's 4xx is a failure: an approved write and a GET both leav
   assert.ok(!messages().findLast((m) => m.role === "bot").called, "not kept as called");
 });
 
+/* ---------------- Keys for people with Keys ---------------- */
+
+await check("what people with Keys see: the keys each workspace someone else is in sees, by name and whose, never a value; gone once nobody else is in; written only when it changed", async () => {
+  const { notePeopleIn } = await import(`${root}/lib/server/apps-for-members.ts`);
+  S.update((s) => void (s.workspaces = [...(s.workspaces ?? []).filter((w) => w.id !== "ws_keys"), { id: "ws_keys", name: "Keys", createdAt: 1, orgoProjectId: "proj-keys-1" }]));
+  const ws = () => S.getState().workspaces.find((w) => w.id === "ws_keys");
+  const vaultNow = [
+    { name: "STRIPE_SECRET_KEY", updatedAt: null, workspaceId: null },
+    { name: "LINEAR_API_KEY", updatedAt: null, workspaceId: "proj-keys-1" },
+    { name: "GITHUB_TOKEN", updatedAt: null, workspaceId: "proj-elsewhere" },
+  ];
+  notePeopleIn("ws_keys", { any: false, admin: false });
+  Keys.seeKeysFor(vaultNow, 100);
+  assert.equal(ws().keysForMembers, undefined, "nobody else in: nothing said");
+  notePeopleIn("ws_keys", { any: true, admin: false });
+  Keys.seeKeysFor(vaultNow, 200);
+  assert.deepEqual(ws().keysForMembers, { at: 200, keys: [{ name: "STRIPE_SECRET_KEY", scope: "all" }, { name: "LINEAR_API_KEY", scope: "workspace" }] }, "another workspace's, not switched on here, isn't seen");
+  Keys.seeKeysFor(vaultNow, 300);
+  assert.equal(ws().keysForMembers.at, 200, "unchanged: not written again");
+  // Another workspace's switched on here (Used in): the owner's, said so.
+  S.update((s) => void (s.workspaces.find((w) => w.id === "ws_keys").loginsOn = { "key:proj-elsewhere:GITHUB_TOKEN": { at: 1 } }));
+  Keys.seeKeysFor(vaultNow, 400);
+  assert.deepEqual(ws().keysForMembers.keys.at(-1), { name: "GITHUB_TOKEN", scope: "workspace", from: true });
+  assert.ok(!JSON.stringify(ws().keysForMembers).includes("sk_test_fake_stripe"));
+  notePeopleIn("ws_keys", { any: false, admin: false });
+  Keys.seeKeysFor(vaultNow, 500);
+  assert.equal(ws().keysForMembers, undefined, "gone once nobody else is in");
+  // Said from a read of the vault, too.
+  notePeopleIn("ws_keys", { any: true, admin: true });
+  await Keys.listKeys({ fresh: true });
+  const names = ws().keysForMembers.keys.map((k) => `${k.name}:${k.scope}`);
+  assert.ok(names.includes("STRIPE_SECRET_KEY:all") && names.includes("MERCURY_API_KEY:all") && !names.some((x) => x.startsWith("GITHUB_TOKEN")), names.join(", "));
+  notePeopleIn("ws_keys", { any: false, admin: false });
+  Keys.seeKeysFor([]);
+});
+
+/** A shared workspace open, as Keys reads it (lib/server/shared.ts sharedKeysOpen), and the acts its page sent. */
+const SHARED_PROJECT = "9a9a9a9a-1111-4000-8000-000000000009";
+const acts = [];
+let actSays = null;
+const openShared = (o = {}) => {
+  acts.length = 0;
+  actSays = null;
+  globalThis.__sk = {
+    open: true,
+    view: () => ({
+      projectId: SHARED_PROJECT,
+      keys: o.keys ?? true,
+      keyActs: o.keyActs ?? true,
+      keyNames: o.keyNames ?? [{ name: "GITHUB_TOKEN", scope: "all" }, { name: "LINEAR_API_KEY", scope: "workspace" }, { name: "PLAIN_API_KEY", scope: "workspace", from: true }],
+      bots: [{ id: "max", keys: ["GITHUB_TOKEN", "LINEAR_API_KEY"] }, { id: "ivy", keys: [] }],
+      refresh: async () => {},
+    }),
+    act: async (act, key) => (acts.push({ act, key }), actSays ?? { ok: true, key, macOn: true }),
+  };
+};
+const closeShared = () => void (globalThis.__sk = undefined);
+const projectCalls = () => orgoCalls.filter((c) => c.path.startsWith(`/api/projects/${SHARED_PROJECT}/bops-keys`));
+
+await check("in a shared workspace with Keys: This workspace's keys from orgo-web, live, then the owner's read only, each with its bots; the user's own vault isn't read", async () => {
+  openShared();
+  try {
+    const n = orgoCalls.length;
+    const r = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+    assert.deepEqual(r.shared, { keys: true, acts: true });
+    assert.equal(r.workspaceKeys, true);
+    assert.deepEqual(
+      r.keys.map((k) => [k.name, k.scope, k.owner ?? false, k.from ?? null, k.bots]),
+      [
+        ["LINEAR_API_KEY", "workspace", false, null, ["max"]],
+        ["GITHUB_TOKEN", "all", true, null, ["max"]],
+        ["PLAIN_API_KEY", "workspace", true, "owner", []],
+      ],
+      "a secret Bops can't call isn't one of them",
+    );
+    assert.equal(r.keys[0].updatedAt, "2026-10-15T00:00:00Z");
+    assert.deepEqual(orgoCalls.slice(n).map((c) => [c.method, c.path, c.auth]), [["GET", `/api/projects/${SHARED_PROJECT}/bops-keys`, `Bearer ${ORGO_KEY}`]], "orgo-web's route, with the user's own key; never their vault");
+    // An orgo-web before the routes: the owner's still show, and a line says why This workspace's don't.
+    projectSays.push("page");
+    const old = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+    assert.deepEqual(old.keys.map((k) => k.name), ["GITHUB_TOKEN", "PLAIN_API_KEY"]);
+    assert.equal(old.notice, "Orgo can't keep this workspace's keys yet.");
+    // Without Keys: none, and orgo-web isn't asked.
+    openShared({ keys: false });
+    const m = orgoCalls.length;
+    const none = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+    assert.deepEqual([none.keys, none.shared], [[], { keys: false, acts: false }]);
+    assert.equal(orgoCalls.length, m);
+  } finally {
+    closeShared();
+  }
+});
+
+await check("in a shared workspace with Keys: a new key is This workspace's (orgo-web, never the user's vault), then the bots picked get it by the owner's Bops; a bot's switch is an act; Remove and Show are This workspace's alone", async () => {
+  openShared();
+  try {
+    // For all workspaces: the owner's, never from here.
+    let res = await KeysRoute.POST(req("POST", "/api/keys", { name: "STRIPE_SECRET_KEY", value: "sk_live_shared_fake", botIds: [], scope: "all" }));
+    assert.equal(res.status, 400);
+    const n = orgoCalls.length;
+    res = await KeysRoute.POST(req("POST", "/api/keys", { name: "stripe-secret-key", value: "  sk_live_shared_fake  ", botIds: ["max", "ivy", "nobody"], scope: "workspace" }));
+    assert.deepEqual(await res.json(), { ok: true, name: "STRIPE_SECRET_KEY" });
+    assert.deepEqual(orgoCalls.slice(n).map((c) => [c.method, c.path, c.body]), [["POST", `/api/projects/${SHARED_PROJECT}/bops-keys`, { name: "STRIPE_SECRET_KEY", value: "sk_live_shared_fake" }]]);
+    assert.equal(projectVault.get("STRIPE_SECRET_KEY"), "sk_live_shared_fake");
+    assert.ok(!vault.has("STRIPE_SECRET_KEY") || vault.get("STRIPE_SECRET_KEY") !== "sk_live_shared_fake", "never the user's own vault");
+    assert.deepEqual(acts.map((a) => a.act), [{ act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: true }, { act: "key", botId: "ivy", name: "STRIPE_SECRET_KEY", on: true }], "only bots of the workspace");
+    assert.ok(acts.every((a) => /^[A-Za-z0-9_-]{8,64}$/.test(a.key)) && acts[0].key !== acts[1].key, "a key each, as Bops Cloud takes them");
+    // Saved, but the owner's Bops can't give the bots it yet: said with the save.
+    acts.length = 0;
+    actSays = { ok: false, status: 409, error: "The owner's Bops needs an update first.", code: "owner_bops_old" };
+    res = await KeysRoute.POST(req("POST", "/api/keys", { name: "RESEND_API_KEY", value: "re_fake_shared", botIds: ["ivy"], scope: "workspace" }));
+    assert.deepEqual(await res.json(), { ok: true, name: "RESEND_API_KEY", note: "Saved. The bots you picked didn't get it: The owner's Bops needs an update first." });
+    actSays = null;
+    // A bot's switch: an act (the owner's Bops does it).
+    acts.length = 0;
+    res = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "GITHUB_TOKEN", botId: "ivy", allowed: true }));
+    assert.deepEqual([res.status, acts.map((a) => a.act)], [200, [{ act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }]]);
+    actSays = { ok: false, status: 403, error: "The owner or an Admin can give you Keys.", code: "member_no_keys" };
+    res = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "GITHUB_TOKEN", botId: "ivy", allowed: false }));
+    assert.deepEqual([res.status, (await res.json()).error], [403, "The owner or an Admin can give you Keys."]);
+    actSays = null;
+    assert.equal((await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "GITHUB_TOKEN", botId: "nobody", allowed: true }))).status, 404);
+    // Show: This workspace's, from orgo-web; never the owner's for all their workspaces.
+    res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "LINEAR_API_KEY", scope: "workspace" }));
+    assert.deepEqual(await res.json(), { name: "LINEAR_API_KEY", value: "lin_api_fake_shared" });
+    res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "GITHUB_TOKEN", scope: "all" }));
+    assert.equal(res.status, 403);
+    // Remove: the owner's for all their workspaces stays theirs; This workspace's goes, and its bots stop using it.
+    assert.equal((await KeyRoute.DELETE(req("DELETE", "/api/keys/GITHUB_TOKEN"), ctx("GITHUB_TOKEN"))).status, 403);
+    acts.length = 0;
+    res = await KeyRoute.DELETE(req("DELETE", "/api/keys/LINEAR_API_KEY?scope=workspace"), ctx("LINEAR_API_KEY"));
+    assert.equal(res.status, 200);
+    assert.equal(projectVault.has("LINEAR_API_KEY"), false);
+    assert.deepEqual(acts.map((a) => a.act), [{ act: "key", botId: "max", name: "LINEAR_API_KEY", on: false }]);
+  } finally {
+    closeShared();
+  }
+});
+
+await check("in a shared workspace: what orgo-web's bops-keys routes refuse, in plain words", async () => {
+  openShared();
+  try {
+    const said = async (answer, call) => {
+      projectSays.push(answer);
+      const res = await call();
+      return [res.status, (await res.json()).error];
+    };
+    const reveal = () => RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "STRIPE_SECRET_KEY", scope: "workspace" }));
+    const save = () => KeysRoute.POST(req("POST", "/api/keys", { name: "NOTION_API_KEY", value: "ntn_fake", botIds: [], scope: "workspace" }));
+    const remove = () => KeyRoute.DELETE(req("DELETE", "/api/keys/NOTION_API_KEY?scope=workspace"), ctx("NOTION_API_KEY"));
+    const cases = [
+      [{ status: 404, body: { error: "Not found", code: "KEY_NOT_FOUND" } }, remove, [404, "That key isn't in this workspace anymore."]],
+      [{ status: 404, body: { error: "Not found", code: "KEY_NOT_FOUND" } }, reveal, [404, "That key isn't in this workspace anymore."]],
+      [{ status: 400, body: { error: "x", code: "invalid_name" } }, save, [400, "Bops can't call that service yet. Pick one from the list."]],
+      [{ status: 400, body: { error: "x", code: "value_required" } }, save, [400, "Paste the key first."]],
+      [{ status: 400, body: { error: "x", code: "value_too_long" } }, save, [400, "That key is too long."]],
+      [{ status: 429, body: { error: "Too many" } }, reveal, [429, "You've looked at a lot of keys this hour. Try again later."]],
+      [{ status: 403, body: { error: "x", code: "app_key_required" } }, reveal, [403, "Orgo shows a key only to a Bops signed in with Orgo. Sign out, then sign in again."]],
+      [{ status: 503, body: { error: "x", code: "audit_unavailable" } }, reveal, [503, "Orgo couldn't note who looked just now, so it didn't send the key. Try again in a minute."]],
+      [{ status: 403, body: { error: "x", code: "KEYS_NOT_ALLOWED" } }, save, [403, "The owner or an Admin can give you Keys."]],
+      [{ status: 404, body: { error: "Not a member" } }, save, [404, "This workspace isn't shared with you anymore."]],
+      ["page", reveal, [503, "Orgo can't keep this workspace's keys yet."]],
+    ];
+    for (const [answer, call, want] of cases) {
+      const got = await said(answer, call);
+      assert.deepEqual(got, want, JSON.stringify(answer));
+      noDashes(got[1], "a refusal");
+    }
+    // Without Keys: refused here, orgo-web never asked.
+    openShared({ keys: false });
+    const n = projectCalls().length;
+    assert.equal((await save()).status, 403);
+    assert.equal((await reveal()).status, 403);
+    assert.equal(projectCalls().length, n);
+  } finally {
+    closeShared();
+  }
+});
+
 /* ---------------- Out of steps (last: their long turns add many rows to the chat) ---------------- */
 
 /** A turn whose model reads one customer a round (call_api GET), `n` rounds, then does what `then` queues. */
@@ -842,7 +1044,7 @@ await check("no dashes in anything Bops said or told the model", () => {
 });
 
 await check("no key value in any log, or anything the model was sent", () => {
-  for (const v of [...vault.values(), "sk_test_fake123"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
+  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
   for (const body of asked) for (const v of vault.values()) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
 });
 

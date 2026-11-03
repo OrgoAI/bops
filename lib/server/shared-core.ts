@@ -1,7 +1,7 @@
-import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_PERSONA, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, PERSONA_CHANGED, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
+import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_PERSONA, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_NO_KEYS, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, PERSONA_CHANGED, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
 import { askOwnersOnly, threadOwnersOnly } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
-import { ADMIN_LINE, APP_WORK_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
+import { ADMIN_LINE, APP_WORK_LINE, KEYS_GIVEN_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
 import { COMPACTED, keptPersona, pairChatId, workBot, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
 import type { RemoteMood } from "./live-core";
 
@@ -57,7 +57,7 @@ function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
     return c && Array.isArray(c.botIds) ? ids(c.botIds) : [];
   }
   if (act.act === "answer") return ids([d.state.approvals?.find((x) => x.id === act.askId)?.botId]);
-  if (act.act === "persona") return d.state.bots.some((b) => b.id === act.botId) ? [act.botId] : [];
+  if (act.act === "persona" || act.act === "key") return d.state.bots.some((b) => b.id === act.botId) ? [act.botId] : [];
   return ids((act.act === "stop" ? act.sessionIds : [act.sessionId]).map((id) => thread(id)?.botId));
 }
 
@@ -91,6 +91,11 @@ function landed(d: SharedWsState, messages: Record<string, unknown>[], p: Pendin
     case "persona": {
       const b = d.state.bots.find((x) => x.id === a.botId);
       return !b || (b.persona ?? undefined) === keptPersona(a.text);
+    }
+    // A bot's key: the copy has it on or off as they switched it (or the bot went).
+    case "key": {
+      const b = d.state.bots.find((x) => x.id === a.botId);
+      return !b || (Array.isArray(b.keys) && b.keys.includes(a.name)) === a.on;
     }
     // Where it runs: picked (by them, or the owner meanwhile).
     case "where": {
@@ -243,7 +248,8 @@ export class SharedCopy {
       if (p.state !== "failed" && landed(c.data, messages, p)) this.pending.delete(key);
       // A bot's How I work with other words now than its edit began from (someone else saved first): it won't go.
       else if (p.state !== "failed" && p.act.act === "persona" && !samePersona(c.data, p.act.botId, p.act.was)) this.pending.set(key, { ...p, state: "failed", error: PERSONA_CHANGED });
-      else if (p.state !== "failed" && (isAppAct(p.act) ? c.data.state.apps?.level !== "write" : botsOfAct(c.data, p.act).some((id) => levels[id] !== "write")))
+      // A bot's key: Keys, not Write (a bot at Read takes one too).
+      else if (p.state !== "failed" && (isAppAct(p.act) ? c.data.state.apps?.level !== "write" : p.act.act === "key" ? !c.data.state.keys : botsOfAct(c.data, p.act).some((id) => levels[id] !== "write")))
         this.pending.set(key, { ...p, state: "failed", error: ACT_ACCESS_CHANGED });
     }
   }
@@ -302,6 +308,13 @@ export class SharedCopy {
       return null;
     }
     const bots = botsOfAct(c.data, act);
+    // A bot's key: Keys, and the owner's Bops new enough to take it (Bops Cloud says the same: cloud/members.ts botsTouched).
+    if (act.act === "key") {
+      if (!c.data.state.keys) return { status: 403, error: KEYS_GIVEN_LINE, code: MEMBER_NO_KEYS };
+      if (!bots.length) return { status: 404, error: "That's gone from the workspace." };
+      if (!c.data.state.keyActs) return { status: 409, error: OWNER_UPDATE_LINE, code: OWNER_BOPS_OLD };
+      return null;
+    }
     if (!bots.length) return { status: 404, error: "That's gone from the workspace." };
     // An Admin whose acts the owner's Bops takes (SharedWsSlice.adminActs): the same rules as Bops Cloud and the owner's Mac (member-access.ts ADMIN_POWERS).
     const role = c.open.role;
@@ -496,6 +509,20 @@ const bopsLine = (m: Message) => m.role === "system" && typeof m.text === "strin
 const onTheirMac = (text: string) => text.replace(/ · on your Mac\b/g, " · on the owner's Mac");
 
 /**
+ * The keys a bot of the copy may use (Bot.keys, shown to someone with Keys), with what the user switched for it that the
+ * owner's Bops hasn't kept yet (a "key" act on its way or waiting) as switched, oldest first.
+ */
+export function switchedKeys(b: Record<string, unknown>, acts: PendingAct[]): string[] {
+  let keys = Array.isArray(b.keys) ? b.keys.filter((k): k is string => typeof k === "string") : [];
+  for (const p of [...acts].sort((x, y) => x.at - y.at)) {
+    if (p.state === "failed" || p.act.act !== "key" || p.act.botId !== b.id) continue;
+    const { name, on } = p.act;
+    keys = [...keys.filter((k) => k !== name), ...(on ? [name] : [])];
+  }
+  return keys;
+}
+
+/**
  * The state the window is shown while a shared workspace is open: the user's own (their account,
  * Settings, the vault sheet: all theirs), with every workspace's bots, chats, threads, routines, watches
  * and messages replaced by the shared one's, under its own id (sharedWsId) so nothing of it is ever
@@ -509,7 +536,13 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   // Where its chat is answered (an Admin's Settings shows the switch: chat-switch.tsx), as Bops Cloud mirrors it.
   const chatOn = s.workspace?.chatOn === "cloud" || s.workspace?.chatOn === "mac" ? { chatOn: s.workspace.chatOn as "cloud" | "mac" } : {};
   const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}), ...chatOn, ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}), ...(s.workspace?.chatAutoOff === true ? { chatAutoOff: true } : {}) };
-  const bots = s.bots.map((b) => ({ computerStatus: "none", role: "", color: "#0A0A0A", isMain: false, ...b, workspaceId: ws }) as unknown as Bot);
+  // A bot's keys, for someone with Keys: as switched here until the owner's Bops has it (switchedKeys).
+  const bots = s.bots.map((b) => {
+    const { keys: _keys, ...rest } = b;
+    void _keys;
+    const keys = s.keys ? switchedKeys(b, acts) : [];
+    return { computerStatus: "none", role: "", color: "#0A0A0A", isMain: false, ...rest, ...(keys.length ? { keys } : {}), workspaceId: ws } as unknown as Bot;
+  });
   const ids = new Set(bots.map((b) => b.id));
   // Who's typing, from the stream's moods: the owner's Bops says a bot typing in a chat as "thinking" there
   // (live-core.ts localMoods), so a teammate sees the dots the owner sees, not a reply that lands whole.
@@ -665,6 +698,12 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...(s.adminActs ? { adminActs: true as const } : {}),
       ...(s.ownerOld && open.role === "admin" ? { ownerOld: true as const } : {}),
       ...(s.adminPublish && open.role === "admin" ? { adminPublish: true as const } : {}),
+      // Keys (cloud/ws-slice.ts keysOf): whether they manage this workspace's keys, whether the owner's Bops takes their
+      // bots' key switches, and the switches on their way or not gone (keys.tsx).
+      ...(s.keys ? { keys: true as const, ...(s.keyActs ? { keyActs: true as const } : {}) } : {}),
+      ...(s.keys && acts.some((x) => x.act.act === "key")
+        ? { keySends: acts.flatMap((x) => (x.act.act === "key" ? [{ key: x.key, botId: x.act.botId, name: x.act.name, on: x.act.on, state: x.state, ...(x.error ? { error: x.error } : {}) }] : [])) }
+        : {}),
       ...(data.you ? { you: data.you } : {}),
       // Your Apps, when the owner gave it (cloud/ws-slice.ts appsFor), and what the user did to them that hasn't landed.
       ...(s.apps ? { apps: s.apps } : {}),

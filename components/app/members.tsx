@@ -13,6 +13,7 @@ import {
   CLOUD_SHARES_APPS,
   COMPUTER_WORDS,
   emailOf,
+  KEYS_WORDS,
   ROLE_LINES,
   ROLE_LINES_SHARED,
   ROLE_NAMES,
@@ -321,7 +322,7 @@ function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; stat
   // An Admin's sheet of a workspace shared with them: changes only once orgo-web and Bops Cloud let them (else it reads only, saying why).
   const readsOnly = !!info.shared && !info.shared.can;
   return (
-    <AppsScope.Provider value={{ shown: apps, older, roles: info.fullAccess === "on" }}>
+    <AppsScope.Provider value={{ shown: apps, older, roles: info.fullAccess === "on", keys: info.keysScope !== "not_yet" }}>
       <SheetScope.Provider value={info.shared ?? null}>
       {info.shared?.line && (
         <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
@@ -375,7 +376,7 @@ export function sheetBots(state: AppState, wsId?: string, sharedSheet = false): 
  * and whether Bops Cloud gives people their role yet (MembersInfo.fullAccess "on": Admin is offered, and Your Apps
  * reach people; else "not_yet" until it updates).
  */
-const AppsScope = createContext<{ shown: boolean; older: boolean; roles: boolean }>({ shown: false, older: false, roles: true });
+const AppsScope = createContext<{ shown: boolean; older: boolean; roles: boolean; keys?: boolean }>({ shown: false, older: false, roles: true });
 
 /** A Mac or runner on the account on a Bops from before (the org chart's check, GET /api/workspaces?olderBops=1), asked only when `ask`. */
 function useOlderBops(ask: boolean) {
@@ -536,6 +537,47 @@ function ComputerMark() {
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
       <rect x="2" y="3" width="12" height="8" rx="1.5" fill="none" stroke="#9A9A98" strokeWidth="1.3" />
       <path d="M6 13.5h4M8 11v2.5" stroke="#9A9A98" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * Keys' row (lib/members.ts KEYS_WORDS): Off or On, as Use its computer's is, beside it. orgo-web keeps it per member
+ * (PATCH {memberId, keys}: lib/server/members.ts changeKeys). `locked`: an Admin's, always on.
+ */
+export function KeysRow({ on, onChange, disabled, locked }: { on: boolean; onChange?: (on: boolean) => void; disabled?: boolean; locked?: boolean }) {
+  return (
+    <div data-keys-access className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex h-[30px] shrink-0 items-center gap-2">
+        <KeysMark />
+        <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-ink">{KEYS_WORDS.row}</span>
+        <div role="radiogroup" aria-label={KEYS_WORDS.row} data-tip={locked ? KEYS_WORDS.admin : undefined} className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[2px] ${disabled || locked ? "opacity-50" : ""}`}>
+          {[false, true].map((value) => (
+            <button
+              key={String(value)}
+              type="button"
+              role="radio"
+              aria-checked={on === value}
+              disabled={disabled || locked}
+              data-tip={locked ? KEYS_WORDS.admin : value ? KEYS_WORDS.onTip : KEYS_WORDS.offTip}
+              onClick={() => on !== value && onChange?.(value)}
+              className={`rounded-full px-2 py-0.5 text-[11.5px] leading-4 ${on === value ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+            >
+              {value ? COMPUTER_WORDS.on : COMPUTER_WORDS.off}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Keys' mark, as big as a bot's: a key. */
+function KeysMark() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+      <circle cx="5.5" cy="8" r="2.8" fill="none" stroke="#9A9A98" strokeWidth="1.3" />
+      <path d="M8.3 8h5.2M11.5 8v2.2M13.5 8v1.6" stroke="#9A9A98" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }
@@ -1038,6 +1080,23 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
     setSaving(false);
     setDraft(null);
   };
+  const keysCloud = useContext(AppsScope).keys !== false;
+  // Keys, as picked while it saves, then as orgo-web's list says (an Admin's always on).
+  const [keysDraft, setKeysDraft] = useState<boolean | null>(null);
+  const keysNow = p.role === "admin" || (keysDraft ?? p.keys === true);
+  const pickKeys = async (on: boolean) => {
+    setKeysDraft(on);
+    setError(null);
+    const r = await act("PATCH", { memberId: p.id, keys: on });
+    if (r.status !== 200) {
+      setKeysDraft(null);
+      setError(errorOf(r, KEYS_WORDS.unchanged));
+      return;
+    }
+    const read = r.read?.state === "ready" ? r.read.people.find((x) => x.id === p.id) : undefined;
+    // orgo-web's list says it now: shown as it says; one that doesn't say yet keeps what was picked.
+    if (read?.keys !== undefined) setKeysDraft(null);
+  };
   const hadFull = p.role === "admin" || demoted;
   const admin = p.role === "admin";
   // An Admin's sheet of a shared workspace: their own row is "You" (Leave), and nothing changes while they may not change people.
@@ -1085,8 +1144,8 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
             )}
             {bots && !admin && (
               <>
-                <span data-access-summary className="min-w-0 truncate" title={summary(access, ids)}>
-                  {summary(access, ids)}
+                <span data-access-summary className="min-w-0 truncate" title={[summary(access, ids), keysNow && KEYS_WORDS.summary].filter(Boolean).join(" · ")}>
+                  {[summary(access, ids), keysNow && KEYS_WORDS.summary].filter(Boolean).join(" · ")}
                 </span>
                 {!locked && <BotsToggle open={choosing} label={scopeShown ? "Access" : "Bots"} onClick={() => setChoosing((x) => !x)} />}
                 {saving && <Spinner size={11} color="#9A9A98" />}
@@ -1104,8 +1163,20 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
         )}
       </div>
       {bots && choosing && !admin && (
-        <div className="pl-12 pt-2">
+        <div className="flex flex-col gap-2 pl-12 pt-2">
           <BotAccess bots={bots} value={access} onChange={(next) => void pick(next)} />
+          {/* Keys: a scope of its own, kept by orgo-web (lib/server/members.ts changeKeys), beside Use its computer. */}
+          {/* A share link's guest never gets Keys (orgo-web refuses it): shown off, with why; one on still turns off. */}
+          <KeysRow on={keysNow} onChange={(on) => void pickKeys(on)} disabled={locked || (p.guest && !keysNow)} />
+          <span data-keys-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
+            {p.guest ? KEYS_WORDS.guest : keysCloud ? (sheet ? KEYS_WORDS.legendShared : KEYS_WORDS.legend) : KEYS_WORDS.notYet}
+          </span>
+        </div>
+      )}
+      {/* An Admin always has Keys: shown on and locked. */}
+      {admin && (
+        <div className="pl-12 pt-2">
+          <KeysRow on locked />
         </div>
       )}
       {error && (

@@ -1,5 +1,5 @@
 import "server-only";
-import { isAppAct, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
+import { isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
@@ -34,7 +34,9 @@ import type { OrgoMember } from "./orgo";
  * isn't honored a day late; else their entry counts, as for anyone. An Admin also answers the owner's own asks (their
  * Connected apps and keys, a thread on this Mac), picks where an undecided thread runs (the bot's computer, never this
  * Mac), publishes an app or rolls back what's Published (MemberAppAct env "prod"), and changes a bot's "How I work" as the
- * owner's own Save does: member-access.ts ADMIN_POWERS. Only the owner deletes the workspace, tells a thread on this Mac
+ * owner's own Save does: member-access.ts ADMIN_POWERS. Someone with Keys (as Bops Cloud found orgo-web says it:
+ * MemberActPayload.keys) lets a bot they see use a key this workspace sees, or stops it (the "key" act), as the owner's own
+ * switch does (keys.ts grantKey), checked against the vault as it is then. Only the owner deletes the workspace, tells a thread on this Mac
  * more, or spends their money: no act does. An answer waits as long as its ask (STORED_ACT_MS), as the run does.
  *
  * It's safe to act on as this Mac: only the tunnel can call that route, and this state agrees they have Write. One
@@ -59,6 +61,7 @@ function actOf(a: unknown): MemberAct | null {
   // (Empty clears it. One longer than Bops Cloud lets through is cut as the owner's own Save cuts it: keptPersona.)
   if (x.act === "persona")
     return short(x.botId, 120) && [x.text, x.was].every((v) => typeof v === "string" && v.length <= MEMBER_MAX_TEXT) ? { act: "persona", botId: x.botId as string, text: x.text as string, was: x.was as string } : null;
+  if (x.act === "key") return short(x.botId, 120) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" ? { act: "key", botId: x.botId as string, name: x.name, on: x.on } : null;
   if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
   return null;
 }
@@ -224,6 +227,14 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     }
     case "stop":
       return as.sessionIds.every(threadOk) ? null : "not at Write";
+    // A bot's keys: Keys, as Bops Cloud vouched for them as it took it (MemberActPayload.keys, from orgo-web), for a bot of
+    // this workspace they see. Which keys the workspace sees is checked against the vault as the act is done (keyEvent).
+    case "key": {
+      if (p.keys !== true) return "no Keys";
+      const b = bot(as.botId);
+      if (!b || workspaceOf(b) !== ws.id) return "no such bot";
+      return levelOf(access, b.id) === "none" ? "not a bot they see" : null;
+    }
     // A bot's "How I work": an Admin's (member-access.ts ADMIN_POWERS.instructions), for a bot of this workspace.
     case "persona": {
       if (!adminMay("instructions", admin)) return "not an Admin";
@@ -328,6 +339,8 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       if (s) addMessage({ chatId: s.chatId, role: "system", text: `${who.name} picked ${bot(s.botId)?.name ?? "the bot"}'s computer for “${s.title}”`, sessionIds: [s.id] });
       return;
     }
+    case "key":
+      return void keyEvent(p.wsId, act, who, eventId).catch(warn);
     case "persona": {
       // As the owner's own Save (app/api/bots/route.ts PATCH): trimmed and cut to MAX_PERSONA_CHARS, empty clears it.
       // Named as theirs (Bot.personaBy), the owner's own last words kept for work on the owner's Mac (types.ts personaOf).
@@ -348,6 +361,27 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       return;
     }
   }
+}
+
+/**
+ * A bot's key switched on or off by someone with Keys, as the owner's own switch does (keys.ts grantKey): a key Bops can
+ * call that this workspace sees now (the vault read afresh: one just added on orgo-web is there), never a value. Said in
+ * the bot's chat as theirs. Off needs no read: it only ever takes away. The same act again changes nothing.
+ */
+async function keyEvent(wsId: string, act: Extract<MemberAct, { act: "key" }>, who: MemberWho, eventId: string) {
+  const k = await import("./keys");
+  const name = k.keyName(act.name);
+  if (!k.keyProvider(name)) return void console.warn(`[members] event ${eventId}: not done (no such key)`);
+  const b = bot(act.botId);
+  if (!b) return;
+  if (act.on) {
+    const all = await k.listKeys({ fresh: true }).catch(() => null);
+    if (!all) return void console.warn(`[members] event ${eventId}: not done (the vault didn't answer)`);
+    if (!k.keysOf(all, wsId).some((x) => x.name === name)) return void console.warn(`[members] event ${eventId}: not done (not a key this workspace sees)`);
+  }
+  if (!!b.keys?.includes(name) === act.on) return;
+  k.grantKey(name, b.id, act.on);
+  addMessage({ chatId: botChatId(b.id), role: "system", botId: b.id, text: act.on ? `${who.name} let ${b.name} use ${name}` : `${who.name} stopped ${b.name} using ${name}` });
 }
 
 /** Whether a bot works on a computer of its own (not on this Mac): what Use its computer gates. */

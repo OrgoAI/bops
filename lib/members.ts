@@ -30,7 +30,10 @@ export type MemberRole = "viewer" | "admin";
  * Someone with access besides the user. `guest`: joined with a link made on orgo.ai, so no email.
  * `access`: what they may do with this workspace's bots in Bops (lib/member-access.ts; none when not set).
  */
-export type Person = { id: string; name: string; email?: string; role: MemberRole; guest: boolean; access: MemberAccess };
+/**
+ * `keys`: their Keys as orgo-web keeps it (OrgoMember.bopsKeys: an Admin's always on), none from an orgo-web that doesn't say.
+ */
+export type Person = { id: string; name: string; email?: string; role: MemberRole; guest: boolean; access: MemberAccess; keys?: boolean };
 
 /**
  * An invite still waiting. `expiresAt`: Unix ms, null from an orgo-web that doesn't say. `link`: the
@@ -100,6 +103,8 @@ export type MembersInfo =
        * sheet reads only, saying `line`).
        */
       shared?: { me: string; can: boolean; line?: string };
+      /** Whether Bops Cloud carries Keys yet (cloud/protocol.ts CLOUD_CAPS "keys"): "not_yet" until it does, and the sheet says so. Unset: as "on". */
+      keysScope?: "on" | "not_yet";
     };
 
 /** Why a members call didn't do what was asked: a code the app acts on, and words to show. */
@@ -211,6 +216,28 @@ export const COMPUTER_WORDS = {
   needsWrite: "Give them Write on a bot first. Using its computer comes with Write.",
   onWithoutWrite: "They can't write to any bot now, so turn this off. Using its computer comes with Write.",
   afterJoin: "You can turn on Use its computer once they've joined.",
+};
+
+/**
+ * The People sheet's words for Keys (cloud/protocol.ts SharedWsSlice.keys): managing the workspace's own keys and which
+ * bots use a key. orgo-web keeps it per member; an Admin always has it, and the owner's own keys stay the owner's.
+ */
+export const KEYS_WORDS = {
+  row: "Keys",
+  offTip: "They can't see or change this workspace's keys.",
+  onTip: "They can add, replace, remove and copy this workspace's keys, and pick which bots use a key.",
+  legend: "Keys lets them add, replace, remove and copy this workspace's own keys, and pick which bots use any key here. Your keys for all your workspaces stay yours: they see only their names.",
+  legendShared: "Keys lets them add, replace, remove and copy this workspace's own keys, and pick which bots use any key here. The owner's keys for all their workspaces stay the owner's.",
+  admin: "An Admin always has Keys.",
+  summary: "Keys",
+  notReady: "Keys can't be given yet. Orgo needs an update first.",
+  unreachable: "Couldn't reach Orgo, so Keys stayed as it was. Try again.",
+  unchanged: "Orgo couldn't change Keys just now, so it stayed as it was. Try again in a minute.",
+  afterJoin: "You can give Keys once they've joined.",
+  guest: "Someone who joined with a link can't get Keys.",
+  bopsOnly: "Keys is only for Bops workspaces.",
+  owner: "The owner always has Keys.",
+  notYet: "They get Keys once Bops Cloud updates. Until then, nothing changes for them.",
 };
 
 export const ACCESS_TIPS: Record<AccessLevel, string> = {

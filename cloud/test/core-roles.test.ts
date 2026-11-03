@@ -154,3 +154,21 @@ test("an Admin's slice says which computer each bot works on (to stream it with 
   assert.equal(sharedSlice(blob, "ws_studio", member).screens, undefined, "a member with Use its computer: none");
   assert.ok(!JSON.stringify(sharedSlice(blob, "ws_studio", member)).includes("comp-max"));
 });
+
+test("Keys, from the state a real Mac uploads: an Admin has it unless orgo-web says no (a share link's guest), a Member only on orgo-web's yes; the names said and each bot's keys come with it, never anyone else's", () => {
+  const blob = toShared(
+    {
+      ...ownerState({ keysForMembers: { at: 3, keys: [{ name: "STRIPE_SECRET_KEY", scope: "all" }] } }),
+      bots: ownerState().bots.map((b) => ({ ...b, keys: ["STRIPE_SECRET_KEY"] })),
+    },
+    "mac-owner",
+  ) as Record<string, unknown>;
+  const of = (v: SliceViewer) => {
+    const s = sharedSlice(blob, "ws_studio", v);
+    return [s.keys, s.keyNames?.map((k) => k.name), s.bots.map((b) => b.keys)];
+  };
+  assert.deepEqual(of(admin), [true, ["STRIPE_SECRET_KEY"], [["STRIPE_SECRET_KEY"], ["STRIPE_SECRET_KEY"]]], "an orgo-web that doesn't say: an Admin has it");
+  assert.deepEqual(of({ ...admin, keys: false }), [undefined, undefined, [undefined, undefined]], "orgo-web's no stands for an Admin");
+  assert.deepEqual(of({ ...member, keys: true }), [true, ["STRIPE_SECRET_KEY"], [["STRIPE_SECRET_KEY"], ["STRIPE_SECRET_KEY"]]]);
+  assert.deepEqual(of(member), [undefined, undefined, [undefined, undefined]]);
+});

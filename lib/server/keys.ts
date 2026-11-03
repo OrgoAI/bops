@@ -1,4 +1,5 @@
 import "server-only";
+import type { SharedKey } from "@/cloud/protocol";
 import { sameApp } from "@/lib/routine-catalog";
 import { keyLoginKey, MAIN_WORKSPACE, switchedOn, workspaceOf, type AccessUse, type Bot } from "@/lib/types";
 import { accessChanged, forMember, logUse, viaOf, type UseWhere } from "./access-sync";
@@ -6,8 +7,10 @@ import { allows, NeedsOk, type AskSpec } from "./permission";
 import { orgoHeaders } from "./app-version";
 import { apiKey } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
+import { anyoneIn } from "./apps-for-members";
 import { forgetLogin } from "./logins";
-import { bot, getState, ownerName, update } from "./store";
+import { onRunner } from "./persist";
+import { bot, getState, ownerName, stateReady, stateTooNew, update } from "./store";
 
 /**
  * Keys: the user's own API keys (Stripe, GitHub, Linear…) that their bots may call. The keys live in the
@@ -182,7 +185,73 @@ export async function listKeys({ fresh = false } = {}): Promise<VaultKey[]> {
     .filter((s) => typeof s.name === "string" && keyProvider(s.name) && (!s.workspace_id || (typeof s.workspace_id === "string" && ours.has(s.workspace_id))))
     .map((s) => ({ name: s.name as string, updatedAt: typeof s.updated_at === "string" ? s.updated_at : null, workspaceId: typeof s.workspace_id === "string" ? s.workspace_id : null }));
   g.bopsKeys = { at: Date.now(), keys, who };
+  // What people with Keys see of them: said from each read of the vault.
+  try {
+    seeKeysFor(keys);
+  } catch (e) {
+    console.warn(`[keys] members' keys: ${(e as Error).message}`);
+  }
   return keys;
+}
+
+/* ---------------- What people with Keys see ---------------- */
+
+/** The keys workspace `wsId`'s bots see (keysOf) as people with Keys are shown them (cloud/protocol.ts SharedKey): names and whose, never a value. */
+export function sharedKeysOf(all: VaultKey[], wsId: string): SharedKey[] {
+  const project = keysProject(wsId);
+  const out: SharedKey[] = [];
+  for (const k of keysOf(all, wsId)) {
+    const key: SharedKey = { name: k.name, scope: k.workspaceId ? "workspace" : "all", ...(k.workspaceId && k.workspaceId !== project ? { from: true as const } : {}) };
+    if (!out.some((x) => x.name === key.name && x.scope === key.scope && !!x.from === !!key.from)) out.push(key);
+  }
+  return out;
+}
+
+const sameKeys = (a: SharedKey[] | undefined, b: SharedKey[]) => !!a && a.length === b.length && a.every((k, i) => k.name === b[i].name && k.scope === b[i].scope && !!k.from === !!b[i].from);
+
+/**
+ * Say which keys each workspace's bots see (Workspace.keysForMembers), from the vault as just read: what people with Keys
+ * are shown (cloud/ws-slice.ts keyNamesOf), so they switch bots on and off for any of them. Only for a workspace someone
+ * else is in (apps-for-members.ts anyoneIn); one nobody else is in has what was said taken away. Written only when it
+ * changed. On the owner's Mac alone: a runner never says it.
+ */
+export function seeKeysFor(all: VaultKey[], now = Date.now()) {
+  if (onRunner() || !stateReady() || stateTooNew()) return;
+  const next = new Map<string, SharedKey[] | null>();
+  for (const w of getState().workspaces ?? []) {
+    if (!anyoneIn(w.id)) {
+      if (w.keysForMembers) next.set(w.id, null);
+      continue;
+    }
+    const keys = sharedKeysOf(all, w.id);
+    if (!sameKeys(w.keysForMembers?.keys, keys)) next.set(w.id, keys);
+  }
+  if (!next.size) return;
+  update((s) => {
+    for (const w of s.workspaces ?? []) {
+      if (!next.has(w.id)) continue;
+      const keys = next.get(w.id);
+      if (keys) w.keysForMembers = { at: now, keys };
+      else delete w.keysForMembers;
+    }
+  });
+}
+
+/** How often the Mac's look reads the vault again for people with Keys (seeKeysNow). */
+const SEE_KEYS_MS = 10 * 60_000;
+const seen = globalThis as unknown as { bopsKeysSeenAt?: number };
+
+/**
+ * The Mac's look (lib/server/runner-install.ts): what people with Keys see read again from the vault, at most every
+ * SEE_KEYS_MS, while anyone else is in a workspace or something was said for one. Never throws.
+ */
+export async function seeKeysNow(now = Date.now()) {
+  if (onRunner() || !stateReady()) return;
+  const ws = getState().workspaces ?? [];
+  if (!ws.some((w) => anyoneIn(w.id) || w.keysForMembers)) return;
+  if (seen.bopsKeysSeenAt !== undefined && now - seen.bopsKeysSeenAt < SEE_KEYS_MS) return;
+  seen.bopsKeysSeenAt = now;
+  await listKeys({ fresh: true }).catch(() => {});
 }
 
 /**

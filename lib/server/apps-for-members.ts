@@ -63,6 +63,16 @@ export function notePeopleIn(wsId: string, seen: { any: boolean; admin: boolean 
 }
 
 /**
+ * Whether anyone besides the owner is in the workspace: as orgo-web's list last said (notePeopleIn), else (before it's
+ * read since this Mac started) as its entries say. What people with Keys are shown is said only then (keys.ts seeKeysFor).
+ */
+export const anyoneIn = (wsId: string) => {
+  const p = people.get(wsId);
+  if (p) return p.any || p.admin;
+  return Object.keys(getState().workspaces?.find((w) => w.id === wsId)?.memberAccess ?? {}).length > 0;
+};
+
+/**
  * Whether anyone the workspace is shared with may be shown its apps (`level`: at that level or more): someone with Your
  * Apps there, or (as orgo-web's list said) an Admin, who has Write with no entry, and for Read anyone in it at all:
  * Bops Cloud shows each viewer only what's theirs (cloud/ws-slice.ts appsFor).

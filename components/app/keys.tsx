@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
+import { KEYS_GIVEN_LINE, REPLY_WAITS_LINE } from "@/lib/shared";
 import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type LastUses, type Message, type Watch } from "@/lib/types";
 import { BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon, usedLine } from "./apps";
 import { Mascot } from "./mascot";
@@ -16,6 +17,11 @@ import { post, teamOf } from "./ui";
  * for this workspace only, or for all workspaces, as there. A workspace's bots use both; its own wins. A value goes to Orgo on Save, and comes back only when the
  * user asks to see or copy it (KeyValue): it lives in that row while it's shown and nowhere else. Only which
  * bots may use which key (Bot.keys) is kept, in the state.
+ *
+ * In a workspace shared with the user (lib/server/shared-keys.ts), the page is that workspace's: someone with Keys (an
+ * Admin, or a Member given it in People) adds, replaces, removes, sees and copies This workspace's own keys, which orgo-web
+ * keeps in the owner's vault, and switches bots on and off for any key it sees; the owner's keys for all their workspaces
+ * show by name alone, marked as the owner's. Without Keys, a line says who gives it. The user's own keys aren't there.
  */
 
 type Provider = { name: string; label: string; where: string; tip: string; readOnly: boolean };
@@ -25,10 +31,14 @@ export type Scope = "workspace" | "all";
  * lib/server/logins.ts); `from`: the workspace it's from, when it's another's switched on here (its value, a new one
  * and removing it are that workspace's).
  */
-export type KeyRow = Provider & { updatedAt: string | null; scope: Scope; bots: string[]; usedIn?: string[]; from?: string };
+export type KeyRow = Provider & { updatedAt: string | null; scope: Scope; bots: string[]; usedIn?: string[]; from?: string; owner?: true };
 /** A key's id on the Logins page: its scope and name (one name may be in both). */
 export const keyId = (k: Pick<KeyRow, "scope" | "name">) => `${k.scope}:${k.name}`;
-type KeysInfo = { signedIn: boolean; keys: KeyRow[]; providers: Provider[]; workspaceKeys?: boolean; error?: string };
+/**
+ * `shared`: in a workspace shared with the user, whether they have Keys there and whether the owner's Bops takes their
+ * bots' switches (`acts`). `notice`: orgo-web couldn't list This workspace's keys just now (the owner's still show).
+ */
+type KeysInfo = { signedIn: boolean; keys: KeyRow[]; providers: Provider[]; workspaceKeys?: boolean; error?: string; shared?: { keys: boolean; acts: boolean }; notice?: string };
 
 /** The two scopes, as Orgo's Secrets names them. */
 const SCOPES: { id: Scope; label: string; tip: string }[] = [
@@ -36,6 +46,37 @@ const SCOPES: { id: Scope; label: string; tip: string }[] = [
   { id: "all", label: "All workspaces", tip: "In your Orgo account, for all your workspaces. It shows in Orgo's Settings, Secrets too." },
 ];
 const scopeLabel = (scope: Scope) => SCOPES.find((x) => x.id === scope)!;
+
+/** A shared workspace's keys for all the owner's workspaces, and another of theirs switched on here: theirs alone. */
+const OWNERS_TIP = "The owner's own key. You can switch bots on or off for it, but only the owner can see, replace or remove it.";
+/** In a shared workspace, without Keys. */
+const NO_KEYS_LINE = `People with Keys manage this workspace's keys. ${KEYS_GIVEN_LINE}`;
+/** In a shared workspace whose owner's Bops can't take the bots' switches yet (SharedWsSlice.keyActs). */
+const SWITCH_UPDATE_LINE = "The owner's Bops needs an update before you can switch bots for it.";
+
+const STRIPE_NAMES = ["STRIPE_SECRET_KEY", "STRIPE_API_KEY"];
+
+/**
+ * The service a pasted key is for, by how it starts, of the ones Bops can call (`names`), or null when it doesn't say. A
+ * Stripe key keeps a Stripe name already `picked` (Stripe has two). Only what each service's own keys start with: an
+ * OpenAI "sk-" never takes Stripe's "sk_".
+ */
+export function serviceOfKey(value: string, names: readonly string[], picked?: string): string | null {
+  const v = value.trim();
+  const has = (n: string) => (names.includes(n) ? n : null);
+  if (/^(github_pat_|ghp_|gho_|ghu_|ghs_)/.test(v)) return has("GITHUB_TOKEN");
+  if (v.startsWith("sk-ant-admin")) return has("ANTHROPIC_ADMIN_KEY");
+  if (v.startsWith("sk-ant-")) return has("ANTHROPIC_API_KEY");
+  if (v.startsWith("sk-admin-")) return has("OPENAI_ADMIN_KEY");
+  if (/^(sk|rk)_(live|test)_/.test(v)) return picked && STRIPE_NAMES.includes(picked) && names.includes(picked) ? picked : has("STRIPE_SECRET_KEY");
+  if (v.startsWith("sk-")) return has("OPENAI_API_KEY");
+  if (v.startsWith("xoxb-")) return has("SLACK_BOT_TOKEN");
+  if (v.startsWith("lin_api_")) return has("LINEAR_API_KEY");
+  if (v.startsWith("ntn_")) return has("NOTION_API_KEY");
+  if (v.startsWith("re_")) return has("RESEND_API_KEY");
+  if (v.startsWith("phx_")) return has("POSTHOG_PERSONAL_API_KEY");
+  return null;
+}
 
 /** Every Keys list on the page, so a save or a remove in the Vault shows on a bot's profile too. */
 const readers = new Set<() => void>();
@@ -270,6 +311,9 @@ export function KeysSettings({
   useEffect(() => {
     if (info) onKeys?.(info.keys);
   }, [info, onKeys]);
+  // A workspace shared with the user: its own keys, only with Keys there (lib/server/shared-keys.ts).
+  const shared = !!state.shared;
+  const holds = !shared || !!info?.shared?.keys;
   const team = teamOf(state);
   const main = team.find((b) => b.isMain) ?? team[0];
   const picked = keysFor && team.some((b) => b.id === keysFor) ? keysFor : main?.id;
@@ -279,9 +323,11 @@ export function KeysSettings({
   // workspace has no Orgo workspace of its own (an Orgo without them).
   // Opens on This workspace only when it has keys of its own (every key from before is for all workspaces);
   // a new key is for all workspaces unless This workspace was picked.
+  // In a shared workspace it opens on This workspace, where keys are added there.
   const [tab, setTab] = useState<Scope | null>(null);
-  const scope: Scope = info?.workspaceKeys ? (tab ?? (info.keys.some((k) => k.scope === "workspace") ? "workspace" : "all")) : "all";
-  const addScope: Scope = info?.workspaceKeys && tab === "workspace" ? "workspace" : "all";
+  const scope: Scope = info?.workspaceKeys ? (tab ?? (shared || info.keys.some((k) => k.scope === "workspace") ? "workspace" : "all")) : "all";
+  // A new key goes where the user is looking: the tab shown, whether it was picked or opened on. A shared workspace's, This workspace's alone.
+  const addScope: Scope = shared ? "workspace" : scope;
   const shown = info?.keys.filter((k) => k.scope === scope) ?? [];
   const [saved, setSaved] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -295,16 +341,19 @@ export function KeysSettings({
     setAskedFor(keysFor);
     if (keysFor && picked) setForm({ bots: [picked] });
   }
-  const done = (name: string) => {
+  const done = (name: string, note?: string) => {
     setForm(null);
-    setSaved(`${name} saved to your Orgo vault.`);
-    setTimeout(() => setSaved(null), 2500);
+    setSaved(note ?? (shared ? `${name} saved for this workspace.` : `${name} saved to your Orgo vault.`));
+    setTimeout(() => setSaved(null), note ? 6000 : 2500);
   };
-  const add = () => setForm({ bots: main ? [main.id] : [] });
+  const add = () => {
+    if (shared) setTab("workspace");
+    setForm({ bots: main ? [main.id] : [] });
+  };
   // A key with starter routines (Stripe, Plain) offers them on its row, and by itself right after it's saved.
   const anchors = useRef(new Map<string, HTMLElement>());
   const [asked, setAsked] = useState<string | null>(null);
-  const suggest = usePendingSuggest(state, (s) => shown.some((k) => sameApp(k.name, s.app)));
+  const suggest = usePendingSuggest(state, (s) => !shared && shown.some((k) => sameApp(k.name, s.app)));
   const routinesFor = asked ? { app: asked, botId: undefined } : suggest.pending ? { app: suggest.pending.app, botId: suggest.pending.botId } : null;
 
   // A service's routines show once, on its first key (STRIPE_API_KEY and STRIPE_SECRET_KEY are both Stripe).
@@ -323,8 +372,14 @@ export function KeysSettings({
       <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">Checking</span>
     );
   else if (!info.signedIn) body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
+  else if (!holds) body = <span data-no-keys className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{NO_KEYS_LINE}</span>;
   else if (!shown.length && !form)
-    body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{saved ?? (scope === "workspace" ? "No keys for this workspace yet." : "No keys yet. Add one for Stripe, OpenAI, GitHub and more.")}</span>;
+    body = (
+      <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">
+        {saved ?? (scope === "workspace" ? "No keys for this workspace yet." : shared ? "The owner has no keys for all their workspaces." : "No keys yet. Add one for Stripe, OpenAI, GitHub and more.")}
+        {info.notice && <span className="block pt-1 text-[#B42318]">{undash(info.notice)}</span>}
+      </span>
+    );
   else
     body = (
       <>
@@ -336,24 +391,31 @@ export function KeysSettings({
               picked={open === keyId(k)}
               onPick={onPick && (() => onPick(k))}
               team={team}
-              used={usedLine(uses?.[k.name], team)}
+              used={shared ? null : usedLine(uses?.[k.name], team)}
               onReplace={() => setForm({ replace: k, bots: [] })}
-              onRoutines={hasTemplates(k.name) ? () => setAsked(k.name) : undefined}
-              routines={hasTemplates(k.name) && firstOfApp(k.name) && <AppRoutines state={state} app={k.name} onOpenWatch={onOpenWatch} />}
+              // A shared workspace's routines are the owner's.
+              onRoutines={!shared && hasTemplates(k.name) ? () => setAsked(k.name) : undefined}
+              routines={!shared && hasTemplates(k.name) && firstOfApp(k.name) && <AppRoutines state={state} app={k.name} onOpenWatch={onOpenWatch} />}
+              switchesOff={shared && !info.shared?.acts}
               anchorRef={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))}
             />
             {/* A new value for this key, right under it. */}
-            {form?.replace?.name === k.name && form.replace.scope === k.scope && <AddKey info={info} team={team} replace={k} scope={k.scope} bots={[]} first={false} onSaved={done} onCancel={() => setForm(null)} />}
+            {form?.replace?.name === k.name && form.replace.scope === k.scope && <AddKey info={info} team={team} replace={k} scope={k.scope} shared={shared} bots={[]} first={false} onSaved={done} onCancel={() => setForm(null)} />}
           </Fragment>
         ))}
         {form?.replace ? null : form ? (
-          <AddKey info={info} team={team} scope={addScope} bots={form.bots} first={!shown.length} onSaved={done} onCancel={() => setForm(null)} />
+          <AddKey info={info} team={team} scope={addScope} shared={shared} bots={form.bots} first={!shown.length} onSaved={done} onCancel={() => setForm(null)} />
         ) : (
           saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>
         )}
         {failed && (
           <span role="alert" className="pt-2 text-[12px] leading-4 text-[#B42318]">
             {failed}
+          </span>
+        )}
+        {info.notice && (
+          <span role="alert" className="pt-2 text-[12px] leading-4 text-[#B42318]">
+            {undash(info.notice)}
           </span>
         )}
       </>
@@ -364,9 +426,13 @@ export function KeysSettings({
       <div className="flex items-end justify-between gap-3">
         <div className="flex flex-col gap-0.5">
           <span className="text-[15px] font-semibold leading-5">Keys</span>
-          <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Kept in your Orgo vault, the same keys as Orgo&apos;s Settings, Secrets. Bots call through Orgo and never see them.</span>
+          <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">
+            {shared
+              ? "This workspace's keys, kept in the owner's Orgo vault. Bots call through Orgo and never see them."
+              : "Kept in your Orgo vault, the same keys as Orgo's Settings, Secrets. Bots call through Orgo and never see them."}
+          </span>
         </div>
-        {info?.signedIn && !form && (
+        {info?.signedIn && holds && !form && (
           <button onClick={add} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
               <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -375,14 +441,14 @@ export function KeysSettings({
           </button>
         )}
       </div>
-      {info?.signedIn && info.workspaceKeys && (
+      {info?.signedIn && holds && info.workspaceKeys && (
         <div role="tablist" aria-label="Where the keys apply" className="flex gap-1 self-start rounded-full bg-[#F2F2F0] p-0.5">
           {SCOPES.map((x) => (
             <button
               key={x.id}
               role="tab"
               aria-selected={scope === x.id}
-              data-tip={x.tip}
+              data-tip={shared ? (x.id === "workspace" ? "This workspace's own keys." : "The owner's keys for all their workspaces.") : x.tip}
               onClick={() => {
                 setTab(x.id);
                 if (form && !form.replace) setForm(null);
@@ -435,6 +501,7 @@ function KeyLine({
   onRoutines,
   routines,
   anchorRef,
+  switchesOff,
 }: {
   k: KeyRow;
   state: AppState;
@@ -450,6 +517,8 @@ function KeyLine({
   /** What bots run from it on their own (routines.tsx AppRoutines), under its bots. */
   routines?: React.ReactNode;
   anchorRef: (el: HTMLSpanElement | null) => void;
+  /** In a shared workspace whose owner's Bops can't take the bots' switches yet: they're shown, not changed. */
+  switchesOff?: boolean;
 }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -481,10 +550,16 @@ function KeyLine({
     }
   };
   const when = setOn(k.updatedAt);
-  // Another workspace's, switched on here (Used in): its value, a new one and removing it are that workspace's.
-  const fromName = k.from ? (state.workspaces?.find((w) => w.id === k.from)?.name ?? "another workspace") : null;
+  // Another workspace's, switched on here (Used in): its value, a new one and removing it are that workspace's. In a
+  // shared workspace, the owner's own (for all their workspaces, or another of theirs): theirs alone.
+  const owners = !!state.shared && !!k.owner;
+  const fromName = owners ? null : k.from ? (state.workspaces?.find((w) => w.id === k.from)?.name ?? "another workspace") : null;
   // Where it applies is the tab it's under, so the line says only what's this key's own.
-  const meta = [fromName && `From ${fromName}`, k.readOnly && "Read only", when && `Updated ${when}`].filter(Boolean).join(" · ");
+  const meta = [owners && "The owner's", fromName && `From ${fromName}`, k.readOnly && "Read only", when && `Updated ${when}`].filter(Boolean).join(" · ");
+  // Its bots' switches in a shared workspace that haven't landed: waiting for the owner's Bops, or (the newest) not gone and why.
+  const sends = state.shared?.keySends?.filter((x) => x.name === k.name) ?? [];
+  const sendFailed = sends.at(-1)?.state === "failed" ? sends.at(-1) : undefined;
+  const sendWaits = sends.some((x) => x.state === "waiting");
   return (
     <div data-key={keyId(k)} className={`flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0 ${picked ? "-mx-2 rounded-xl px-2 shadow-[0_0_0_1.5px_#0A0A0A]" : ""}`}>
       <div className="flex items-center gap-2">
@@ -499,12 +574,12 @@ function KeyLine({
           </span>
         )}
         {meta && (
-          <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
+          <span data-tip={`${owners ? OWNERS_TIP : scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
             {meta}
           </span>
         )}
         <span className="flex-1" />
-        <div className={`flex shrink-0 items-center ${fromName ? "hidden" : ""}`}>
+        <div data-key-controls className={`flex shrink-0 items-center ${fromName || owners ? "hidden" : ""}`}>
           <button
             type="button"
             disabled={busy || v.busy}
@@ -563,16 +638,27 @@ function KeyLine({
       {!!team.length && (
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1">
-            <BotChips team={team} choices={KEY_CHOICES} level={(b) => (b.keys?.includes(k.name) ? "act" : "none")} what={k.name} disabled={busy} onSet={(b, to) => void toggle(b, to === "act")} />
+            <BotChips team={team} choices={KEY_CHOICES} level={(b) => (b.keys?.includes(k.name) ? "act" : "none")} what={k.name} disabled={busy || switchesOff} onSet={(b, to) => void toggle(b, to === "act")} />
           </div>
           {used && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{used}</span>}
         </div>
+      )}
+      {switchesOff && !!team.length && <span className="text-[12px] leading-4 text-[#9A9A98]">{SWITCH_UPDATE_LINE}</span>}
+      {sendWaits && <span className="text-[12px] leading-4 text-[#9A9A98]">{REPLY_WAITS_LINE}</span>}
+      {sendFailed?.error && sendFailed.error !== error && (
+        <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+          {undash(sendFailed.error)}
+        </span>
       )}
       {routines}
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
           <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
-            Remove {k.name} ({scopeLabel(k.scope).label.toLowerCase()}) from your Orgo vault? Your bots stop using it, and it&apos;s gone from Orgo too.
+            {state.shared ? (
+              <>Remove {k.name} from this workspace? Its bots stop using it, and it&apos;s gone from Orgo too.</>
+            ) : (
+              <>Remove {k.name} ({scopeLabel(k.scope).label.toLowerCase()}) from your Orgo vault? Your bots stop using it, and it&apos;s gone from Orgo too.</>
+            )}
           </span>
           <button disabled={busy} onClick={() => void remove()} className={`${btn} bg-[#B42318] text-white`}>
             {busy ? "Removing…" : "Remove"}
@@ -599,13 +685,16 @@ const ORGO_USES: Record<string, string> = { ANTHROPIC_API_KEY: "Anthropic", OPEN
 
 /**
  * Add a key: a service from the list Bops can call (by its vault name, as in Orgo's Secrets), the key pasted into a password field, and the bots that may use it. `replace`: a new value for a saved key,
- * which keeps who may use it. The value is cleared once Orgo has it.
+ * which keeps who may use it. The value is cleared once Orgo has it. A key pasted that says whose it is by how it starts
+ * (serviceOfKey) picks that service; picked another by hand after, one line says whose it looks like. `shared`: a workspace
+ * shared with the user, whose own keys these are (This workspace's, in the owner's vault).
  */
 function AddKey({
   info,
   team,
   replace,
   scope,
+  shared,
   bots: startBots,
   first,
   onSaved,
@@ -616,9 +705,10 @@ function AddKey({
   replace?: KeyRow;
   /** This workspace's own key, or one for all workspaces. */
   scope: Scope;
+  shared?: boolean;
   bots: string[];
   first: boolean;
-  onSaved: (name: string) => void;
+  onSaved: (name: string, note?: string) => void;
   onCancel: () => void;
 }) {
   // Every name Orgo can call. A service with two (Stripe) shows each one's name.
@@ -632,6 +722,20 @@ function AddKey({
   const [error, setError] = useState<string | null>(null);
   const name = replace?.name ?? pick;
   const p = info.providers.find((x) => x.name === name);
+  // The service the key pasted says it's for (serviceOfKey), and the one that last picked it: a hand pick after stands.
+  const names = services.map((x) => x.name);
+  const found = value ? serviceOfKey(value, names, pick) : null;
+  const lastFound = useRef<string | null>(null);
+  const looksLike = found && found !== name ? services.find((x) => x.name === found) : undefined;
+  const typed = (v: string) => {
+    setValue(v);
+    const f = serviceOfKey(v, names, pick);
+    if (f && f !== lastFound.current && !replace) {
+      setPick(f);
+      setError(null);
+    }
+    lastFound.current = f;
+  };
   const isSaved = !replace && inScope.some((k) => k.name === name);
   const canSave = !!p && !!value.trim() && !busy;
   const save = async () => {
@@ -640,11 +744,11 @@ function AddKey({
     setError(null);
     try {
       const res = await post("/api/keys", { name, value, botIds: replace ? [] : bots, scope });
-      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; note?: string };
       if (!res.ok || !j.ok) return setError(undash(j.error ?? "That didn't save. Try again."));
       setValue("");
       keysChanged();
-      onSaved(name);
+      onSaved(name, j.note ? undash(j.note) : undefined);
     } catch {
       setError("Couldn't reach Bops. Try again.");
     } finally {
@@ -705,15 +809,15 @@ function AddKey({
         <span className="text-[12px] leading-[17px] text-[#3A3A38]">
           {p.tip}
           {p.readOnly ? ` Orgo lets bots only read from ${p.label}.` : ""} <span className="text-[#9A9A98]">Get one in {p.where}.</span>
-          {isSaved && <span className="text-[#9A9A98]"> Saving replaces the one in your vault.</span>}
+          {isSaved && <span className="text-[#9A9A98]"> {shared ? "Saving replaces the one this workspace has." : "Saving replaces the one in your vault."}</span>}
           {info.workspaceKeys && <span className="text-[#9A9A98]"> {scope === "workspace" ? "For this workspace only." : "For all your workspaces."}</span>}
-          {ORGO_USES[p.name] && <span className="text-[#9A9A98]"> Orgo computers that use your {ORGO_USES[p.name]} key use this one too.</span>}
+          {ORGO_USES[p.name] && !shared && <span className="text-[#9A9A98]"> Orgo computers that use your {ORGO_USES[p.name]} key use this one too.</span>}
         </span>
       ) : null}
       <input
         type="password"
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => typed(e.target.value)}
         placeholder={p ? `Paste your ${p.label} key` : "Paste the key"}
         aria-label="Key"
         autoComplete="off"
@@ -721,6 +825,11 @@ function AddKey({
         autoFocus
         className={`${field} w-full font-mono text-[12.5px]`}
       />
+      {looksLike && (
+        <span data-looks-like className="text-[12px] leading-4 text-[#B54708]">
+          This key looks like {looksLike.label}&apos;s.
+        </span>
+      )}
       {!replace && !!team.length && (
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="pr-0.5 text-[12px] leading-4 text-[#9A9A98]">Bots that may use it</span>
@@ -752,9 +861,9 @@ function AddKey({
 type BotKeysProps = { state: AppState; bot: Bot; onAdd: () => void; className: string };
 
 /**
- * On a bot's profile: the keys in the vault, on or off for this bot, and the way to the Vault to add one.
- * Never in a workspace shared with the user: GET /api/keys answers with the viewer's own Orgo vault, and
- * the owner's keys are never shown to them, so it would list the viewer's keys as the owner's bot's.
+ * On a bot's profile: the keys in the vault, on or off for this bot, and the way to the Vault to add one. In a workspace
+ * shared with the user, only with Keys there: GET /api/keys answers with that workspace's keys then (the owner's marked as
+ * theirs), and without Keys it has none to show.
  */
 /**
  * A bot's rows: one per name, since this workspace's key and the account's by the same name are one to a bot,
@@ -768,7 +877,7 @@ export function botKeyRows<K extends { name: string; scope: Scope }>(keys: K[]):
 }
 
 export function BotKeys(props: BotKeysProps) {
-  return props.state.shared ? null : <BotKeysCard {...props} />;
+  return props.state.shared && !props.state.shared.keys ? null : <BotKeysCard {...props} />;
 }
 
 function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
@@ -777,7 +886,7 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
   const [error, setError] = useState<string | null>(null);
   const keys = botKeyRows(info?.keys ?? []);
   // A key this bot uses with starter routines (Stripe, Plain) offers them on its row, and by itself right after it's saved for this bot.
-  const routinesOn = (name: string) => hasTemplates(name) && !!b.keys?.includes(name);
+  const routinesOn = (name: string) => !state.shared && hasTemplates(name) && !!b.keys?.includes(name);
   const anchors = useRef(new Map<string, HTMLElement>());
   const [asked, setAsked] = useState<string | null>(null);
   const suggest = usePendingSuggest(state, (s) => s.botId === b.id && keys.some((k) => routinesOn(k.name) && sameApp(k.name, s.app)));
@@ -810,7 +919,7 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
         )}
       </div>
       {!info.signedIn || !keys.length ? (
-        <div className="px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[#6B6B6B]">{info.signedIn ? "No keys in your Orgo vault yet" : undash(info.error ?? "Sign in to Orgo to use Keys.")}</div>
+        <div className="px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[#6B6B6B]">{info.signedIn ? (state.shared ? "No keys for this workspace yet" : "No keys in your Orgo vault yet") : undash(info.error ?? "Sign in to Orgo to use Keys.")}</div>
       ) : (
         keys.map((k, i) => {
           const on = !!b.keys?.includes(k.name);
@@ -818,8 +927,8 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
             <div key={k.name} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === keys.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <span className="min-w-0 flex-1 truncate font-mono text-[13px] leading-[18px]">{k.name}</span>
               {/* Whose key it is, as the Vault says: an account one shows on every workspace's bots, off until switched on. */}
-              <span data-tip={scopeLabel(k.scope).tip} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
-                {scopeLabel(k.scope).label}
+              <span data-tip={state.shared && k.owner ? OWNERS_TIP : scopeLabel(k.scope).tip} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
+                {state.shared && k.owner ? "The owner's" : scopeLabel(k.scope).label}
               </span>
               {routinesOn(k.name) && (
                 <span ref={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))} className="flex shrink-0">
@@ -835,7 +944,7 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
                 role="switch"
                 aria-checked={on}
                 aria-label={on ? `Stop ${b.name} using ${k.name}` : `Let ${b.name} use ${k.name}`}
-                disabled={busy === k.name}
+                disabled={busy === k.name || (!!state.shared && !state.shared.keyActs)}
                 onClick={() => void toggle(k.name, !on)}
                 className={`flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-0.5 disabled:opacity-60 ${on ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}
               >

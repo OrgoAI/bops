@@ -6,8 +6,8 @@ import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
 import { accessSummary, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
 import { accessFor, adminGate, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
-import { ADMIN_POWERS_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
-import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
+import { ADMIN_POWERS_MIN_VERSION, KEYS_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
+import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
 /**
  * Shared workspaces, read only (members.ts, ws-slice.ts): who may watch is what orgo-web's bops-role
@@ -663,8 +663,86 @@ test("cleanAct keeps only an act's own fields, each checked", () => {
     { key, act: { act: "stop", sessionIds: ["s", "s"] } },
     { key, act: { act: "stop", sessionIds: Array.from({ length: MEMBER_STOP_MAX + 1 }, (_, i) => `s${i}`) } },
     { key, act: { act: "delete", messageId: "m" } },
+    { key, act: { act: "key", botId: "max", name: "stripe_secret_key", on: true } },
+    { key, act: { act: "key", botId: "max", name: "STRIPE SECRET", on: true } },
+    { key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: "yes" } },
+    { key, act: { act: "key", name: "GITHUB_TOKEN", on: true } },
   ])
     assert.equal(cleanAct(bad), null, JSON.stringify(bad)?.slice(0, 80));
+  // A bot's key: the bot, the key's vault name, on or off, and nothing else.
+  assert.deepEqual(cleanAct({ key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: false, value: "ghp_never" } }), { key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: false } });
+});
+
+/* ---------------- Keys ---------------- */
+
+/** The owner's state with keys: two bots that use some, and the names the owner's Mac said the workspace sees (and a value that must never pass). */
+const keyed = (memberAccess: MemberAccessMap = { "ann@acme.com": { others: "read", bots: {} } }, said: unknown = { at: 5, keys: [{ name: "STRIPE_SECRET_KEY", scope: "all" }, { name: "GITHUB_TOKEN", scope: "workspace" }, { name: "LINEAR_API_KEY", scope: "workspace", from: true }, { name: "bad name", scope: "all" }, { name: "OPENAI_API_KEY", scope: "elsewhere" }, { name: "RESEND_API_KEY", scope: "all", value: "re_never" }] }) => {
+  const blob = { ...team(memberAccess), bots: [{ id: "a", name: "A", workspaceId: "ws_acme", keys: ["STRIPE_SECRET_KEY"] }, { id: "b", name: "B", workspaceId: "ws_acme" }] };
+  (blob.workspaces[0] as Record<string, unknown>).keysForMembers = said;
+  return blob;
+};
+
+test("Keys as orgo-web says it: bops-role's keys is read (a real yes or no only) and gone by, an Admin's too (a share link's guest is a no); an Admin has it from an orgo-web that doesn't say, a Member never; never as the owner's view", async () => {
+  const { fetch } = fakeRoles({
+    "k-yes p1": { ...access("member"), keys: true },
+    "k-no p1": { ...access("member"), keys: false },
+    "k-odd p1": { ...access("member"), keys: "yes" } as unknown as WsAccess,
+    "k-old p1": access("member"),
+  });
+  resetMembers({ fetch });
+  assert.equal((await accessFor("u-yes", "k-yes", "p1"))?.keys, true);
+  assert.equal((await accessFor("u-no", "k-no", "p1"))?.keys, false);
+  assert.equal("keys" in ((await accessFor("u-odd", "k-odd", "p1")) ?? {}), false, "not a yes or no: not said");
+  assert.equal("keys" in ((await accessFor("u-old", "k-old", "p1")) ?? {}), false, "an orgo-web from before it says nothing");
+  assert.equal(keysOf(member({ keys: true })), true);
+  assert.equal(keysOf(member({ keys: false })), false);
+  assert.equal(keysOf(member()), false, "a Member, from an orgo-web that doesn't say: no");
+  assert.equal(keysOf({ role: "admin", id: "u-tom" }), true, "an Admin, from an orgo-web that doesn't say: yes (full control)");
+  assert.equal(keysOf({ role: "admin", id: "u-tom", keys: true }), true);
+  assert.equal(keysOf({ role: "admin", id: "u-tom", keys: false }), false, "orgo-web's no for an Admin (a share link's guest) stands");
+  assert.equal(keysOf(OWNER_VIEW), false, "the owner's own Keys page reads their vault: nothing in a slice");
+  // viewerOf carries it, and the owner's Bops taking key switches only to someone with Keys.
+  const user = { id: "u-ann", email: "ann@acme.com" } as Parameters<typeof viewerOf>[0];
+  assert.deepEqual([viewerOf(user, { ...access("member"), keys: true }, false, false, true).keyActs, viewerOf(user, access("member"), false, false, true).keyActs], [true, undefined]);
+});
+
+test("Keys in the slice: for someone with it, the names the owner's Mac said (an allow list, never a value) and each bot's keys; whether the owner's Bops takes their switches; all part of the fingerprint", () => {
+  const blob = keyed();
+  const s = sharedSlice(blob, "ws_acme", member({ keys: true, keyActs: true }));
+  assert.equal(s.keys, true);
+  assert.equal(s.keyActs, true);
+  assert.deepEqual(s.keyNames, [{ name: "STRIPE_SECRET_KEY", scope: "all" }, { name: "GITHUB_TOKEN", scope: "workspace" }, { name: "LINEAR_API_KEY", scope: "workspace", from: true }, { name: "RESEND_API_KEY", scope: "all" }]);
+  assert.ok(!JSON.stringify(s).includes("re_never"), "a value never passes");
+  assert.deepEqual(Object.fromEntries(s.bots.map((b) => [b.id, b.keys])), { a: ["STRIPE_SECRET_KEY"], b: undefined });
+  // An Admin: the same, from an orgo-web that doesn't say too; their own How I work beside it.
+  const admin = sharedSlice({ ...blob, bots: blob.bots.map((b) => ({ ...b, persona: "p" })) }, "ws_acme", { role: "admin", id: "u-tom" });
+  assert.deepEqual([admin.keys, admin.keyActs, admin.bots[0].keys, admin.bots[0].persona], [true, undefined, ["STRIPE_SECRET_KEY"], "p"]);
+  // Without Keys: none of it, as before (a Member orgo-web says no for, or doesn't say, and the owner).
+  for (const v of [member({ keys: false }), member()]) {
+    const plain = sharedSlice(blob, "ws_acme", v);
+    assert.deepEqual([plain.keys, plain.keyNames, plain.keyActs, plain.bots[0].keys], [undefined, undefined, undefined, undefined]);
+    assert.ok(!JSON.stringify(plain).includes("STRIPE_SECRET_KEY"), "no key or its name");
+  }
+  assert.equal(sharedSlice(blob, "ws_acme", OWNER_VIEW).keys, undefined);
+  // Before the owner's Mac said any: Keys, and no names yet.
+  assert.equal(sharedSlice(keyed(undefined, null), "ws_acme", member({ keys: true })).keyNames, undefined);
+  assert.equal(keyNamesOf(null), undefined);
+  // Fingerprint: given Keys, a key switched on a bot, a key added, the owner updating.
+  const hash = (b: Record<string, unknown>, v: SliceViewer) => sharedHash(sharedSlice(b, "ws_acme", v));
+  const v = member({ keys: true, keyActs: true });
+  assert.notEqual(hash(blob, v), hash(blob, member({ keys: false })));
+  assert.notEqual(hash(blob, v), hash({ ...blob, bots: blob.bots.map((b) => ({ ...b, keys: ["GITHUB_TOKEN"] })) }, v));
+  assert.notEqual(hash(blob, v), hash(keyed(undefined, { at: 6, keys: [{ name: "NOTION_API_KEY", scope: "all" }] }), v));
+  assert.notEqual(hash(blob, v), hash(blob, member({ keys: true })));
+});
+
+test("an older owner's state and a viewer without Keys: the slice is as it was, field for field", () => {
+  const before = team({ "ann@acme.com": { others: "read", bots: {} } }, { bots: [{ id: "a", name: "A", workspaceId: "ws_acme", keys: ["STRIPE_SECRET_KEY"] }] });
+  const s = sharedSlice(before, "ws_acme", member());
+  for (const k of ["keys", "keyNames", "keyActs"]) assert.equal(k in s, false, k);
+  assert.equal("keys" in s.bots[0], false, "a bot's keys stay the owner's");
+  // With the names said but nobody given Keys: the same.
+  assert.deepEqual(sharedSlice(keyed(), "ws_acme", member({ keys: false })), sharedSlice({ ...keyed(), workspaces: [{ ...(keyed().workspaces[0] as Record<string, unknown>), keysForMembers: undefined }] }, "ws_acme", member({ keys: false })));
 });
 
 test("the main bot's digest of what every bot's watches found tells someone only the lines of bots they have", () => {
@@ -1213,7 +1291,7 @@ const actOwner: Record<string, unknown> = {
 /** What each act route test queued, as the owner's Mac would get it, and what was dropped. */
 const queued: { owner: string; kind: string; payload: MemberActPayload; dedupe: string; expires: Date }[] = [];
 const dropped: string[] = [];
-function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean; edits?: boolean } = {}) {
+function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean; edits?: boolean; keysGate?: boolean } = {}) {
   queued.length = 0;
   dropped.length = 0;
   resetMembers({
@@ -1224,12 +1302,16 @@ function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEm
     count: async () => {},
     // Whether the owner's Bops takes an Admin's acts (members.ts adminGate): no, unless the test says. `edits`: a change to
     // a bot's "How I work" (a newer Bops than the other acts need), as `adminGate` unless the test says.
-    adminGate: async (_owner, min) => (min === ADMIN_POWERS_MIN_VERSION ? (opts.adminGate ?? false) : (opts.edits ?? opts.adminGate ?? false)),
+    // `keysGate`: whether it takes a "key" act (KEYS_MIN_VERSION), no unless the test says.
+    adminGate: async (_owner, min) => (min === ADMIN_POWERS_MIN_VERSION ? (opts.adminGate ?? false) : min === KEYS_MIN_VERSION ? (opts.keysGate ?? false) : (opts.edits ?? opts.adminGate ?? false)),
   });
   roles["act-sam proj-act"] = { role: "member", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts", joinedAt: 1_700_000_000_000 };
   roles["act-tom proj-act"] = { role: "admin", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
   roles["act-owner proj-act"] = { role: "owner", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
   roles["act-sam proj-old"] = { role: "member", ownerUserId: "act-owner", bopsWsId: null, name: "bops" };
+  // Keys: Kim, a Member orgo-web says has it (Ivy at Read only); Sam, as orgo-web says nothing of it, hasn't.
+  roles["act-kim proj-act"] = { role: "member", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts", keys: true };
+  emails["act-kim"] = "kim@example.com";
   // The owner's email, as orgo-web's bops-role says it (whether the workspace has apps).
   if (opts.ownerEmail) for (const k of ["act-sam proj-act", "act-tom proj-act", "act-owner proj-act"]) roles[k] = { ...roles[k], ownerEmail: opts.ownerEmail };
   emails["act-sam"] = "sam@example.com";
@@ -1434,6 +1516,42 @@ test("over HTTP: an Admin changes a bot's How I work once the owner's Bops takes
   assert.deepEqual([old.status, old.json.code, old.json.error], [409, "owner_bops_old", "The owner's Bops needs an update first."]);
   assert.equal(queued.length, 0);
   assert.equal((await act("act-tom", { key: "k_persona_09", act: { act: "where", sessionId: "t-max", to: "mac" } })).json.code, "member_owner_only", "its other acts go by their own gate");
+});
+
+test("over HTTP: a bot's key is switched by someone with Keys (an Admin, or a Member orgo-web says has it), for a bot they see at Read or more, once the owner's Bops takes it; queued as theirs with keys", async () => {
+  const kimOwner = { ...actOwner, workspaces: [{ ...(actOwner.workspaces as Record<string, unknown>[])[0], memberAccess: { ...((actOwner.workspaces as Record<string, unknown>[])[0].memberAccess as MemberAccessMap), "kim@example.com": { others: "none", bots: { ivy: "read" } } } }] };
+  actFakes({ owner: kimOwner, keysGate: true });
+  const r = await act("act-kim", { key: "k_key_0001", act: { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true } });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  assert.deepEqual(queued[0].payload.act, { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true });
+  assert.equal(queued[0].payload.keys, true);
+  assert.equal(queued[0].payload.member.userId, "act-kim");
+  assert.ok(queued[0].expires.getTime() - Date.now() <= MEMBER_ACT_MS + 1000, "waits ten minutes, as any act");
+  // An Admin: every bot, Zed too (no entry for anyone).
+  const t = await act("act-tom", { key: "k_key_0002", act: { act: "key", botId: "zed", name: "STRIPE_SECRET_KEY", on: false } });
+  assert.equal(t.status, 202);
+  assert.deepEqual([queued[1].payload.role, queued[1].payload.keys], ["admin", true]);
+  // A bot they don't see: no such.
+  assert.equal((await act("act-kim", { key: "k_key_0003", act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: true } })).status, 404);
+  // An Admin orgo-web says no for (joined with a share link): refused as anyone without Keys.
+  roles["act-tom proj-act"] = { ...roles["act-tom proj-act"], keys: false };
+  const guest = await act("act-tom", { key: "k_key_003b", act: { act: "key", botId: "zed", name: "GITHUB_TOKEN", on: true } });
+  assert.deepEqual([guest.status, guest.json.code], [403, "member_no_keys"]);
+  // A Member without Keys (orgo-web doesn't say), Write on the bot or not: refused, never queued.
+  queued.length = 0;
+  const sam = await act("act-sam", { key: "k_key_0004", act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: true } });
+  assert.deepEqual([sam.status, sam.json.code, sam.json.error], [403, "member_no_keys", "The owner or an Admin can give you Keys."]);
+  // The owner's Bops older than KEYS_MIN_VERSION: said so, never queued (it would drop it).
+  actFakes({ owner: kimOwner, keysGate: false, adminGate: true, edits: true });
+  const old = await act("act-kim", { key: "k_key_0005", act: { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true } });
+  assert.deepEqual([old.status, old.json.code], [409, "owner_bops_old"]);
+  assert.equal(queued.length, 0);
+  // A name that isn't a vault name: a bad body.
+  assert.equal((await act("act-kim", { key: "k_key_0006", act: { act: "key", botId: "ivy", name: "../secrets", on: true } })).status, 400);
+  // Other acts carry nothing new: an old owner's Mac reads them as before.
+  actFakes({ owner: kimOwner, keysGate: true });
+  assert.equal((await act("act-sam", chatAct("bot:max", "k_key_0007"))).status, 202);
+  assert.equal("keys" in queued[0].payload, false);
 });
 
 test("a bot's How I work is in an Admin's slice, who changes it, and never a Member's", () => {

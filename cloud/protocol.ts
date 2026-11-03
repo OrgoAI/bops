@@ -357,7 +357,11 @@ export const CLOUD_TUNNEL_HEADER = "x-bops-cloud";
  * (PATCH /v1/ws/<id>/routing) and wake a bot's computer (POST /v1/ws/<id>/wake); SharedWsSlice.adminActs says when the
  * owner's Bops is new enough to take what waits for it (ADMIN_POWERS_MIN_VERSION).
  */
-export const CLOUD_CAPS = ["roles", "admin_powers"] as const;
+/**
+ * "keys": it carries the Keys scope (WsAccess.keys from orgo-web, SharedWsSlice.keys: an Admin, a Member the owner or an
+ * Admin gave it) and takes the "key" act (MemberAct), so the owner's People sheet says Keys works for them now.
+ */
+export const CLOUD_CAPS = ["roles", "admin_powers", "keys"] as const;
 export type CloudCap = (typeof CLOUD_CAPS)[number];
 /** GET /health: the database answers (`ok`), how many Macs hold a tunnel, and CLOUD_CAPS (none from a Bops Cloud before them). */
 export type CloudHealth = { ok: boolean; macs: number; caps?: string[] };
@@ -715,7 +719,13 @@ export const WS_ROLES: readonly WsRole[] = ["owner", "admin", "member"];
  * An `admin` (Orgo's role) has every bot, Your Apps at Write and Use its computer in Bops, whatever the owner's state
  * keeps for them (cloud/ws-slice.ts viewerAccess); only the owner deletes the workspace.
  */
-export type WsAccess = { role: WsRole; ownerUserId: string; bopsWsId: string | null; name: string; joinedAt?: number; computerUse?: boolean; ownerEmail?: string };
+/**
+ * `keys`: whether they have Keys (SharedWsSlice.keys), from an orgo-web that keeps it (project_members.bops_keys): true for
+ * the owner and an Admin of a Bops workspace, a Member's as the owner or an Admin set it in People, false for a share
+ * link's guest whatever their role. Bops Cloud goes by it when it's there; an orgo-web from before sends none, and then an
+ * Admin has Keys and a Member doesn't (cloud/member-access.ts holdsKeys).
+ */
+export type WsAccess = { role: WsRole; ownerUserId: string; bopsWsId: string | null; name: string; joinedAt?: number; computerUse?: boolean; ownerEmail?: string; keys?: boolean };
 /** The code a project with no Bops workspace of its own is refused with (one "bops" project would show every workspace). */
 export const WS_NOT_SHAREABLE = "not_shareable";
 
@@ -780,7 +790,31 @@ export type SharedWsSlice = {
    * (ADMIN_PUBLISH_MIN_VERSION), so their Your Apps shows Publish (MemberAppAct env "prod"). Part of the fingerprint.
    */
   adminPublish?: true;
+  /**
+   * Keys, for someone other than the owner who has it (cloud/member-access.ts holdsKeys): as orgo-web says it (WsAccess.keys:
+   * an Admin, or a Member the owner or an Admin gave it; never a share link's guest), and an Admin from an orgo-web that doesn't say. They add, replace, remove, see and copy the workspace's
+   * own keys on orgo-web with their own Orgo key (its /api/projects/<id>/bops-keys routes: This workspace, kept in the
+   * owner's vault under the workspace's Orgo project), and pick which bots use any key the workspace sees (the "key" act).
+   * With it, each bot shown carries the keys it may use (lib/types.ts Bot.keys: names only). Part of the fingerprint.
+   * Unset for the owner, for anyone without it, and from a Bops Cloud before it.
+   */
+  keys?: true;
+  /**
+   * With `keys`: the keys the workspace's bots see, as the owner's Mac last read its vault (lib/types.ts
+   * Workspace.keysForMembers): names and whose, never a value. None before the owner's Mac has said.
+   */
+  keyNames?: SharedKey[];
+  /** With `keys`: the owner's Bops takes the "key" act (KEYS_MIN_VERSION), so bots' keys switch from here. Part of the fingerprint. */
+  keyActs?: true;
 };
+/**
+ * A key the workspace's bots see (SharedWsSlice.keyNames), by its vault name (STRIPE_SECRET_KEY): "workspace" its own
+ * (This workspace), "all" the owner's for all their workspaces, which stays the owner's (named, never shown, replaced or
+ * removed by anyone else); `from` another of the owner's workspaces' own, switched on here (Used in), the owner's too.
+ */
+export type SharedKey = { name: string; scope: "workspace" | "all"; from?: true };
+/** A key's vault name as a "key" act and SharedKey carry it: UPPER_SNAKE, as orgo-web keeps it. */
+export const KEY_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 /** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
 export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
 
@@ -867,6 +901,9 @@ export type MemberAct =
   // (lib/types.ts Bot.persona), at most MEMBER_MAX_PERSONA characters; empty clears it. `was`: the words it started from,
   // refused (NOT_WAITING, PERSONA_CHANGED) when the bot has others now.
   | { act: "persona"; botId: string; text: string; was: string }
+  // Keys (SharedWsSlice.keys), with the owner's Bops at KEYS_MIN_VERSION (OWNER_BOPS_OLD): let a bot they see use a key the
+  // workspace sees, by its vault name, or stop it (`on` false). Done by the owner's Mac, named as them (lib/server/member-acts.ts).
+  | { act: "key"; botId: string; name: string; on: boolean }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
 /**
@@ -912,6 +949,8 @@ export type MemberActPayload = {
   stored?: true;
   messageId?: string;
   role?: "admin";
+  /** Bops Cloud found they have Keys (cloud/member-access.ts holdsKeys, as orgo-web said it just now) as it took the act: what the owner's Mac goes by. */
+  keys?: true;
 };
 /**
  * 202. `macOn`: the owner's Bops is connected now (false: it waits up to MEMBER_ACT_MS for it). In a workspace whose chat
@@ -954,6 +993,14 @@ export const ADMIN_POWERS_MIN_VERSION = "0.0.39";
  * drop: refused the same way.
  */
 export const ADMIN_PUBLISH_MIN_VERSION = "0.0.40";
+/**
+ * The first Bops whose Mac takes the "key" act (lib/server/member-acts.ts) and says which keys a workspace sees for the
+ * people with Keys (Workspace.keysForMembers): an older one would drop it, so Bops Cloud refuses it (OWNER_BOPS_OLD) for
+ * an owner whose last Mac is older. Set to the release that carries it.
+ */
+export const KEYS_MIN_VERSION = "0.0.41";
+/** 403: the act is a Keys holder's (SharedWsSlice.keys), and the caller hasn't been given Keys. */
+export const MEMBER_NO_KEYS = "member_no_keys";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
 export const NOT_WAITING = "not_waiting";
 /** 403: the caller is the workspace's owner, who acts in their own Bops. */

@@ -29,6 +29,7 @@ const FAKES = {
   persist: forward("persist", ["onRunner"]),
   "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"]),
   "apps-for-members": forward("apps-for-members", ["noteMemberAct", "actKept", "seeApps"]),
+  keys: forward("keys", ["keyName", "keyProvider", "listKeys", "keysOf", "grantKey"]),
 };
 registerHooks({
   resolve(specifier, context, next) {
@@ -178,7 +179,27 @@ globalThis.__fake = {
     actKept: (wsId, app, key) => kept.some((k) => k[0] === wsId && k[1] === app && k[2].key === key),
     seeApps: async () => void did.push(["seeApps"]),
   },
+  // The owner's vault, as keys.ts reads it: `vault` (null: Orgo didn't answer), each key by name and Orgo project; the
+  // workspace sees the account's and its own project's (proj_acme).
+  keys: {
+    keyName: (n) => n.trim().toUpperCase().replace(/-/g, "_"),
+    keyProvider: (n) => (["GITHUB_TOKEN", "STRIPE_SECRET_KEY", "LINEAR_API_KEY"].includes(n) ? { name: n } : undefined),
+    listKeys: async (o) => {
+      did.push(["vault", !!o?.fresh]);
+      if (!vault) throw new Error("Bops couldn't reach Orgo.");
+      return vault;
+    },
+    keysOf: (all, wsId) => all.filter((k) => !k.workspaceId || (wsId === "ws_acme" && k.workspaceId === "proj_acme")),
+    grantKey: (name, botId, on) => {
+      did.push(["grant", name, botId, on]);
+      const b = state.bots.find((x) => x.id === botId);
+      const rest = (b.keys ?? []).filter((k) => k !== name);
+      b.keys = on ? [...rest, name] : rest.length ? rest : undefined;
+    },
+  },
 };
+/** The owner's vault as the keys fake reads it (null: Orgo didn't answer). */
+let vault = [];
 /** How many times the state was read, and what a read brings in. */
 let pulls = 0;
 let onPull = () => {};
@@ -201,6 +222,7 @@ const event = (act, o = {}) => ({
   ...(o.computer === false ? {} : { computer: true }),
   ...(o.role ? { role: o.role } : {}),
   ...(o.stored ? { stored: true, messageId: o.messageId } : {}),
+  ...(o.keys ? { keys: true } : {}),
 });
 const warned = [];
 console.warn = (line) => warned.push(String(line));
@@ -780,6 +802,53 @@ await check("a stored message from an Admin hours ago: an Admin only while orgo-
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(did, []);
   resetAdmins();
+});
+
+await check("a bot's key, switched by someone with Keys: a bot of the workspace they see (Read is enough), a key the workspace sees now (the vault read afresh), said in its chat as theirs; once", async () => {
+  const later = () => new Promise((r) => setTimeout(r, 10));
+  fresh();
+  vault = [{ name: "GITHUB_TOKEN", workspaceId: null }, { name: "LINEAR_API_KEY", workspaceId: "proj_acme" }, { name: "STRIPE_SECRET_KEY", workspaceId: "proj_other" }];
+  const ivy = () => state.bots.find((b) => b.id === "ivy");
+  // Sam: Ivy at Read, Keys as Bops Cloud vouched.
+  await memberEvent(event({ act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }, { keys: true, key: "key_key_01" }), "e_k1");
+  await later();
+  assert.deepEqual(ivy().keys, ["GITHUB_TOKEN"]);
+  assert.deepEqual(did.filter((d) => d[0] !== "update"), [["vault", true], ["grant", "GITHUB_TOKEN", "ivy", true], ["add", "system", "Sam let Ivy use GITHUB_TOKEN", null]]);
+  // This workspace's own (its project's): seen too. The same switch again changes nothing.
+  await memberEvent(event({ act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, { keys: true, key: "key_key_02" }), "e_k2");
+  await memberEvent(event({ act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, { keys: true, key: "key_key_02" }), "e_k2");
+  await later();
+  assert.deepEqual(ivy().keys, ["GITHUB_TOKEN", "LINEAR_API_KEY"]);
+  assert.equal(did.filter((d) => d[0] === "grant").length, 2);
+  // Off: no read of the vault (it only takes away), and said.
+  did.length = 0;
+  await memberEvent(event({ act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: false }, { keys: true, key: "key_key_03" }), "e_k3");
+  await later();
+  assert.deepEqual(did.filter((d) => d[0] !== "update"), [["grant", "GITHUB_TOKEN", "ivy", false], ["add", "system", "Sam stopped Ivy using GITHUB_TOKEN", null]]);
+  // An Admin: Zed too (no entry for anyone).
+  await memberEvent(event({ act: "key", botId: "zed", name: "GITHUB_TOKEN", on: true }, { member: ADA, role: "admin", keys: true, key: "key_key_04" }), "e_k4");
+  await later();
+  assert.deepEqual(state.bots.find((b) => b.id === "zed").keys, ["GITHUB_TOKEN"]);
+  for (const [i, [o, act, why, v]] of [
+    // Bops Cloud didn't vouch for Keys (an Admin orgo-web said no for, too): not theirs.
+    [{}, { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }, "no Keys"],
+    [{ member: ADA, role: "admin" }, { act: "key", botId: "zed", name: "GITHUB_TOKEN", on: true }, "no Keys"],
+    [{ keys: true }, { act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }, "no such bot"],
+    [{ keys: true }, { act: "key", botId: "zed", name: "GITHUB_TOKEN", on: true }, "not a bot they see"],
+    [{ keys: true }, { act: "key", botId: "ivy", name: "STRIPE_SECRET_KEY", on: true }, "not a key this workspace sees"],
+    [{ keys: true }, { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }, "the vault didn't answer", null],
+    [{ keys: true }, { act: "key", botId: "ivy", name: "OPENAI_API_KEY", on: true }, "no such key"],
+    [{ keys: true }, { act: "key", botId: "ivy", name: "github token", on: true }, "not a member's act"],
+    [{ keys: true }, { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: "yes" }, "not a member's act"],
+  ].entries()) {
+    fresh();
+    vault = v === undefined ? [{ name: "GITHUB_TOKEN", workspaceId: null }] : v;
+    await memberEvent(event(act, { ...o, key: `key_key_n${i}` }), `e_kn${i}`);
+    await later();
+    assert.deepEqual(did.filter((d) => d[0] === "grant" || d[0] === "add"), [], why);
+    assert.ok(warned.some((w) => w.includes(`e_kn${i}`) && w.includes(why)), why);
+  }
+  vault = [];
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -248,6 +248,7 @@ function bops() {
     if (fake.refuseWith) return { ok: false, status: fake.refuseWith.status, json: async () => structuredClone(fake.refuseWith.body) };
     if (method === "PATCH" && body.access && body.memberId) info.people.find((p) => p.id === body.memberId).access = A.cleanAccess(body.access);
     if (method === "PATCH" && body.role && body.memberId) info.people.find((p) => p.id === body.memberId).role = body.role;
+    if (method === "PATCH" && typeof body.keys === "boolean" && body.memberId) info.people.find((p) => p.id === body.memberId).keys = body.keys;
     if (method === "PATCH" && body.role && body.invite) info.invites.find((i) => i.email === body.invite).role = body.role;
     if (method === "POST") return { ok: true, status: 200, json: async () => ({ email: body.email, role: body.role, emailSent: true }) };
     return { ok: true, status: 200, json: async () => ({ ok: true }) };
@@ -750,6 +751,47 @@ await test("Use its computer goes to Orgo first: turned down it stays as it was,
   assert.equal(form.querySelector("[data-computer-note]").textContent, M.COMPUTER_WORDS.afterJoin);
   await f.done();
   for (const v of [M.COMPUTER_WORDS.afterJoin, M.WORDS.computerUnchanged, M.WORDS.computerUnreachable, M.WORDS.computerNotReady]) assert.ok(!/[–—]/.test(v) && !v.includes(" - ") && !/orbit/i.test(v), v);
+});
+
+await test("Keys: a switch per Member beside Use its computer, sent as {memberId, keys} alone; an Admin's on and locked; none on the owner's row; a guest's off with why; turned down, it stays as it was with why", async () => {
+  const fake = bops();
+  fake.info.people.push({ id: "m2", name: "Ada Admin", email: "ada@example.com", role: "admin", guest: false, access: { others: "none", bots: {} }, keys: true });
+  fake.info.people.push({ id: "m3", name: "Brave Lion", role: "viewer", guest: true, access: { others: "read", bots: {} } });
+  const m = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  assert.equal(rowOf(m.box, "Tess Ito").querySelector("[data-keys-access]"), null, "the owner's row: none");
+  const ada = rowOf(m.box, "Ada Admin").querySelector('[aria-label="Keys"]');
+  assert.deepEqual([buttonOf(ada, "On").getAttribute("aria-checked"), buttonOf(ada, "On").disabled, buttonOf(ada, "Off").disabled], ["true", true, true], "an Admin's: on and locked");
+  assert.equal(ada.getAttribute("data-tip"), M.KEYS_WORDS.admin);
+  await click(buttonOf(rowOf(m.box, "Jamie Lee"), "Bots"));
+  const jamie = () => rowOf(m.box, "Jamie Lee");
+  const keys = () => jamie().querySelector('[aria-label="Keys"]');
+  assert.ok(keys() && jamie().querySelector("[data-computer-access]"), "beside Use its computer");
+  assert.equal(buttonOf(keys(), "Off").getAttribute("aria-checked"), "true");
+  assert.equal(jamie().querySelector("[data-keys-note]").textContent, M.KEYS_WORDS.legend);
+  await click(buttonOf(keys(), "On"));
+  assert.deepEqual(fake.sent.at(-1), { method: "PATCH", body: { memberId: "m1", keys: true } }, "on its own: no bots, no role");
+  assert.equal(buttonOf(keys(), "On").getAttribute("aria-checked"), "true");
+  assert.equal(summaryOf(jamie()), "1 bot, read · Keys");
+  // orgo-web can't keep it yet: it stays as it was, and says why.
+  fake.refuseWith = { status: 503, body: { code: "KEYS_NOT_READY", error: M.KEYS_WORDS.notReady } };
+  await click(buttonOf(keys(), "Off"));
+  assert.equal(buttonOf(keys(), "On").getAttribute("aria-checked"), "true", "stays on");
+  assert.equal(jamie().querySelector('[role="alert"]')?.textContent, M.KEYS_WORDS.notReady);
+  fake.refuseWith = null;
+  // A share link's guest: off, and can't be turned on, with why.
+  await click(buttonOf(rowOf(m.box, "Brave Lion"), "Bots"));
+  const lion = rowOf(m.box, "Brave Lion");
+  assert.equal(buttonOf(lion.querySelector('[aria-label="Keys"]'), "On").disabled, true);
+  assert.equal(lion.querySelector("[data-keys-note]").textContent, M.KEYS_WORDS.guest);
+  await m.done();
+  // Bops Cloud without Keys yet: the line says it starts then.
+  const later = bops();
+  later.info.keysScope = "not_yet";
+  const n = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  await click(buttonOf(rowOf(n.box, "Jamie Lee"), "Bots"));
+  assert.equal(rowOf(n.box, "Jamie Lee").querySelector("[data-keys-note]").textContent, M.KEYS_WORDS.notYet);
+  await n.done();
+  for (const v of Object.values(M.KEYS_WORDS)) assert.ok(!/[–—]/.test(v) && !v.includes(" - ") && !/orbit/i.test(v), v);
 });
 
 /* ---------------- An Admin's sheet of a workspace shared with them ---------------- */
