@@ -28,6 +28,12 @@ check("a bot's message as plain text: a link's words, no address, brackets, **, 
   for (const t of ["Live: https://trailguides.example.com/live", "-5 degrees", "a * b", "re-run it", "1. Book\n2. Pay", "C# and #tags"]) assert.equal(plainText(t), t, t);
 });
 
+check("code stays as the chat shows it: a code block's lines and `code` verbatim, only the ``` and backticks go", () => {
+  assert.equal(plainText("```\ncode **x** [l](u)\n- y\n```"), "code **x** [l](u)\n- y\n");
+  assert.equal(plainText("Match `src/**` or `lib/**` here."), "Match src/** or lib/** here.");
+  assert.equal(plainText("Type `[a](b)` then **go**."), "Type [a](b) then go.");
+});
+
 check("steps are said as a person would", () => {
   assert.equal(plainStep("clicked (666, 115)"), "Clicked on the screen");
   assert.equal(plainStep("ran python3 - <<'PY' from urllib.request import urlopen"), "Looked things up online");

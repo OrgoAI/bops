@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { plainText } from "@/lib/plain-words";
+import { dropCitations, plainText } from "@/lib/plain-words";
 import { MAIN_WORKSPACE, waitingAsks, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, useSignOut } from "./account";
 import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
@@ -740,16 +740,19 @@ function ChatRow({
   // A routine's post says which routine, as the chat does above it ("From a routine · …"): an alert on its
   // own ("someone@example.com requests…") read as if it were the bot's own address.
   const routine = last?.routine && (state.routines.find((r) => r.id === last.routine!.id)?.title ?? "Routine");
+  // A bot's words in plain text, as its bubble shows them (chat-view.tsx Rich); a text, an email or a note as the chat
+  // shows it (TextCard, EmailCard, SystemNote: no markdown read), only without citation markers, as before.
+  const words = (m: NonNullable<typeof last>) => (m.role === "bot" ? plainText(m.text) : dropCitations(m.text));
   const preview = typing
     ? "typing…"
     : last
       ? last.role === "user"
         ? `${saidName(last, state) ?? ownerWho(state.shared)}: ${last.text}`
         : routine
-          ? `${undash(routine)}: ${plainText(last.text)}`
+          ? `${undash(routine)}: ${words(last)}`
           : c.kind === "group" && last.botId
-          ? `${state.bots.find((b) => b.id === last.botId)?.name}: ${plainText(last.text)}`
-          : plainText(last.text)
+          ? `${state.bots.find((b) => b.id === last.botId)?.name}: ${words(last)}`
+          : words(last)
       : solo
         ? // A shared workspace's chats aren't the user's to start.
           state.shared

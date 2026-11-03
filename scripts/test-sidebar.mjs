@@ -321,6 +321,13 @@ await test("A bot's reply on its row is the plain text the chat shows: a link's 
   assert.equal(words(line(render(world({ messages: [reply(said)] })))), words(renderToStaticMarkup(h(Rich, { text: said, botId: "boppy" }))));
   // A person's message is shown as they wrote it, as the chat shows it.
   assert.equal(line(render(world({ messages: [{ id: "m2", chatId: "chat_boppy", role: "user", text: "Use **bold** [here](https://trailguides.example.com)", at: min(4) }] }))), "You: Use **bold** [here](https://trailguides.example.com)");
+  // So is a text or an email someone sent, and a note: the chat shows them raw (TextCard, EmailCard, SystemNote), not as a bot's words.
+  const inbound = (id, text, extra) => ({ id, chatId: "chat_boppy", role: "system", text, at: min(3), ...extra });
+  const sms = { sms: { dir: "in", from: "+15551234567", to: "+15557654321" } };
+  assert.equal(line(render(world({ messages: [inbound("t1", "# 4521 is your code", sms)] }))), "# 4521 is your code");
+  assert.equal(line(render(world({ messages: [inbound("t2", "+ 1 for yes\n- or no", sms)] }))), "+ 1 for yes\n- or no");
+  assert.equal(line(render(world({ messages: [inbound("e1", "**Invoice** [view](https://trailguides.example.com/i)", { email: { from: "alex@example.com", to: "boppy@example.com", subject: "Invoice" } })] }))), "**Invoice** [view](https://trailguides.example.com/i)");
+  assert.equal(line(render(world({ messages: [inbound("n1", "* Boppy saved `look.ts`")] }))), "* Boppy saved `look.ts`");
 });
 
 await test("A thread's row says its title in plain words (an app's copy on its computer, not Local), the stored title as it was", () => {

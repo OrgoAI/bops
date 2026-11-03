@@ -9,18 +9,28 @@
  */
 export const dropCitations = (text: string) => text.replace(/\s?[^]*/g, "");
 
+/** The marks Inline (components/app/chat-view.tsx) reads in a bot's text, by its own pattern: **bold**, [a link](its address), `code`. */
+const INLINE_MARKS = /(\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|`[^`\n]+`)/g;
+
 /**
  * A bot's message as plain text, the words the chat shows without their look (components/app/chat-view.tsx Rich, by
- * its own patterns): a link's words, not its address; a code block's lines without the ``` around them; no ** or
- * backticks, no # before a heading or bullet before a list item, no citation markers. For a one-line preview.
+ * its own patterns): a code block's lines as they are, without the ``` around them; outside one, no # before a heading
+ * or bullet before a list item, a link's words and not its address, bold without its ** and code without its backticks
+ * (what's inside code as it is); no citation markers. For a one-line preview.
  */
 export const plainText = (text: string) =>
   dropCitations(text)
-    .replace(/```[a-z0-9-]*\n?([\s\S]*?)```/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)\s]+\)/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/`([^`\n]+)`/g, "$1")
-    .replace(/^[ \t]*(?:#{1,4}|[-*+•])[ \t]+/gm, "");
+    .split(/```[a-z0-9-]*\n?([\s\S]*?)```/g)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part
+            .replace(/^[ \t]*(?:#{1,4}|[-*+•])[ \t]+/gm, "")
+            .split(INLINE_MARKS)
+            .map((s, j) => (j % 2 === 0 ? s : s[0] === "[" ? s.slice(1, s.indexOf("](")) : s[0] === "`" ? s.slice(1, -1) : s.slice(2, -2)))
+            .join(""),
+    )
+    .join("");
 
 /** A link to a page on the computer it runs on (localhost, 127.0.0.1): it opens there and nowhere else. */
 export const isLocalLink = (href: string) => /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#]|$)/i.test(href);
