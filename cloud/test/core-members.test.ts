@@ -1618,7 +1618,7 @@ test("the slice says when the owner's Bops takes an Admin's acts (adminActs), an
   // And the bot's reason in plain words (AppApproval.reason): the headline an Admin's card says, as the owner's does.
   const said = sharedSlice({ ...blob, appApprovals: [{ id: "a2", botId: "max", chatId: "bot:max", action: "Call GitHub", kind: "api", api: { key: "GITHUB_TOKEN", label: "GitHub", method: "POST", path: "/x" }, reason: "Save the new button colour as a draft" }] }, "ws_act", { role: "admin", id: "u", adminActs: true });
   assert.equal(said.approvals?.[0]?.reason, "Save the new button colour as a draft");
-  assert.equal(said.approvals?.[0]?.api?.key, undefined, "never the key's vault name");
+  assert.deepEqual(said.approvals?.[0]?.api, { label: "GitHub", method: "POST", path: "/x" }, "never the key's vault name");
 });
 
 test("the gate: whether an owner's Bops takes an Admin's acts is asked once a minute, and no answer is a no", async () => {
