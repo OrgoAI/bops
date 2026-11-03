@@ -314,6 +314,16 @@ await test("Favorites: Issues, Tasks and People until the workspace changes them
   assert.deepEqual([...html.matchAll(/data-favorite="([^"]+)"/g)].map((m) => m[1]), ["issues", "todos", "people"]);
 });
 
+await test("Favorites in a workspace shared with the user: none of Knowledge's kinds (Knowledge is the owner's), Needs your attention still first", () => {
+  const shared = { projectId: "p9", name: "Acme", owner: "dana@acme.example", role: "admin", wsId: "ws_main", levels: { nova: "write" } };
+  let html = render(world({ shared }));
+  assert.equal(at(html, 'data-section="favorites"'), -1, "nothing waiting: no section");
+  html = render(world({ shared, sessions: [asking("t1", "nova", min(5))] }));
+  const fav = html.slice(at(html, 'data-section="favorites"'));
+  assert.ok(at(fav, 'data-favorite="attention"') > 0, "what waits on them stays");
+  assert.deepEqual([...fav.matchAll(/data-favorite="([^"]+)"/g)].map((m) => m[1]), ["attention"], "no Issues, Tasks or People");
+});
+
 await test("Favorites: pin, unpin and order, keeping a newer Bops's pins; what the server keeps", () => {
   assert.deepEqual(F.toggledFavorite(["issues", "todos"], "events"), ["issues", "todos", "events"], "a new pin goes last");
   assert.deepEqual(F.toggledFavorite(["issues", "todos"], "issues"), ["todos"]);

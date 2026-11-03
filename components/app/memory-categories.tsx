@@ -86,6 +86,8 @@ type Shared = {
   hide: Set<string>;
   sent: Map<string, number>;
   view: MemorySnapshot | null;
+  /** Why the categories couldn't be read, while there's no copy to show (null: none failed): the page says it, with Try again. */
+  failed: string | null;
   /** The Forget that can still be undone, and what went wrong with the last one sent (one object, replaced on a change). */
   forgetting: Forgetting;
 };
@@ -103,7 +105,7 @@ function sharedOf(user: string, ws: string) {
   if (!s)
     shared.set(
       keyOf(user, ws),
-      (s = { user, ws, snap: null, users: new Set(), asked: 0, shown: 0, reading: 0, readAt: 0, arrived: new Map(), hide: new Set(), sent: new Map(), view: null, forgetting: { undo: null, error: null } }),
+      (s = { user, ws, snap: null, users: new Set(), asked: 0, shown: 0, reading: 0, readAt: 0, arrived: new Map(), hide: new Set(), sent: new Map(), view: null, failed: null, forgetting: { undo: null, error: null } }),
     );
   return s;
 }
@@ -133,6 +135,7 @@ function show(s: Shared, snap: MemorySnapshot, asked = ++s.asked) {
   if (asked < s.shown) return;
   s.shown = asked;
   s.snap = snap;
+  s.failed = null;
   s.readAt = Date.now();
   // What's new since the first copy (that one is what was there: nothing in it is new).
   if (!s.known) s.known = new Set(snap.items.map((i) => i.id));
@@ -160,20 +163,39 @@ function read(s: Shared) {
   const rev = revOf(s.snap);
   s.reading++;
   void fetch(`/api/memory/categories?ws=${encodeURIComponent(s.ws)}${rev === undefined ? "" : `&rev=${rev}`}`, { cache: "no-store" })
-    .then((r) => (r.ok ? r.json() : null))
-    .then((j: unknown) => {
-      if (isSnapshot(j)) show(s, j, asked);
-      else if ((j as { unchanged?: unknown } | null)?.unchanged === true && s.snap && asked >= s.shown) {
+    .then(async (r) => ({ ok: r.ok, j: (await r.json().catch(() => null)) as unknown }))
+    .then(({ ok, j }) => {
+      if (ok && isSnapshot(j)) show(s, j, asked);
+      else if (ok && (j as { unchanged?: unknown } | null)?.unchanged === true && s.snap && asked >= s.shown) {
         // The copy here is current: as good as a new one, for when to read next.
         s.shown = asked;
         s.readAt = Date.now();
         plan(s);
+      } else {
+        const said = (j as { error?: unknown } | null)?.error;
+        fail(s, asked, typeof said === "string" && said ? said : "Couldn't load Knowledge.");
       }
     })
-    .catch(() => {})
+    .catch(() => fail(s, asked, "Couldn't reach Bops."))
     .finally(() => {
       s.reading--;
     });
+}
+
+/** A read that didn't work: said on the page while there's no copy to show (one shown already stays, and is read again as planned). */
+function fail(s: Shared, asked: number, why: string) {
+  if (s.snap || asked < s.shown) return;
+  s.failed = why;
+  tell(s);
+}
+
+/** Try again: the failure goes (the page waits on the read again) and the categories are read now. */
+function retry(user: string, ws: string) {
+  const s = shared.get(keyOf(user, ws));
+  if (!s) return;
+  s.failed = null;
+  tell(s);
+  read(s);
 }
 
 /** The next read: in a minute, or in 5 seconds while new things are being sorted. None while Bops is out of sight, or once no one shows them. */
@@ -364,13 +386,17 @@ async function previewDelete(ws: string, id: string): Promise<DeleteSession[] | 
 /**
  * A workspace's categories as the signed-in account (`user`: state.account.user.id) sees them, null
  * until they're in: the same copy wherever they show (what's forgotten here left out). `act` asks for
- * a change, and every list shows the categories as they are after it.
+ * a change, and every list shows the categories as they are after it. `failed`: why they couldn't be
+ * read, while there's nothing to show, and `retry` reads them again. `on` false: none are read (a
+ * workspace shared with the user: its Knowledge is on the owner's Bops).
  */
-export function useMemoryCategories(ws: string, user = "") {
-  const subscribe = useCallback((changed: () => void) => watch(user, ws, changed), [user, ws]);
-  const snap = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.view ?? null, () => null);
+export function useMemoryCategories(ws: string, user = "", on = true) {
+  const subscribe = useCallback((changed: () => void) => (on ? watch(user, ws, changed) : () => {}), [user, ws, on]);
+  const snap = useSyncExternalStore(subscribe, () => (on ? (shared.get(keyOf(user, ws))?.view ?? null) : null), () => null);
+  const failed = useSyncExternalStore(subscribe, () => (on ? (shared.get(keyOf(user, ws))?.failed ?? null) : null), () => null);
   const act = useCallback<MemoryAct>((body) => change(user, ws, body), [user, ws]);
-  return { snap, act };
+  const again = useCallback(() => retry(user, ws), [user, ws]);
+  return { snap, act, failed, retry: again };
 }
 
 const NOT_FORGETTING: Forgetting = { undo: null, error: null };
@@ -381,13 +407,15 @@ export const orbitStore = {
   forget,
   undo: undoForget,
   view: (user: string, ws: string) => shared.get(keyOf(user, ws))?.view ?? null,
+  failed: (user: string, ws: string) => shared.get(keyOf(user, ws))?.failed ?? null,
+  retry,
   forgetting: (user: string, ws: string) => shared.get(keyOf(user, ws))?.forgetting ?? NOT_FORGETTING,
   preview: previewDelete,
 };
 
-/** Forget for a page: what can be undone, what went wrong, and the calls. */
-export function useForget(ws: string, user = "") {
-  const subscribe = useCallback((changed: () => void) => watch(user, ws, changed), [user, ws]);
+/** Forget for a page: what can be undone, what went wrong, and the calls. `on` false: nothing is read (useMemoryCategories). */
+export function useForget(ws: string, user = "", on = true) {
+  const subscribe = useCallback((changed: () => void) => (on ? watch(user, ws, changed) : () => {}), [user, ws, on]);
   const state = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.forgetting ?? NOT_FORGETTING, () => NOT_FORGETTING);
   const forgetItems = useCallback((items: Pick<MemoryItem, "id" | "title">[]) => forget(user, ws, items), [user, ws]);
   const undo = useCallback(() => undoForget(user, ws), [user, ws]);
@@ -455,8 +483,8 @@ const watchSeen = (changed: () => void) => {
  * Whether Knowledge has something new for the footer's dot, from the same copy the page reads (and as
  * often). The first copy in a workspace Knowledge was never open in is marked seen as it comes.
  */
-export function useKnowledgeNews(ws: string, user = "") {
-  const { snap } = useMemoryCategories(ws, user);
+export function useKnowledgeNews(ws: string, user = "", on = true) {
+  const { snap } = useMemoryCategories(ws, user, on);
   const seen = useSyncExternalStore(watchSeen, () => seenOf(user, ws), () => undefined);
   const items = snap?.on ? snap.items : null;
   useEffect(() => {
@@ -717,9 +745,11 @@ function KnowledgeView({
   onCategory: (category: OrbitSection) => void;
   onClose: () => void;
 }) {
-  const { snap, act } = useMemoryCategories(ws, user);
-  const { list } = useIssues(ws, user);
-  const forgetting = useForget(ws, user);
+  // A workspace shared with the user: its Knowledge is kept on the owner's Bops, so none is read here (view-only.ts would refuse it).
+  const owners = state?.shared ? `Knowledge in ${state.shared.name} is kept on the owner's Bops, so it doesn't show here. To find something out, ask a bot in its chat.` : undefined;
+  const { snap, act, failed, retry } = useMemoryCategories(ws, user, !owners);
+  const { list } = useIssues(ws, user, !owners);
+  const forgetting = useForget(ws, user, !owners);
   // Pinned to the sidebar's Favorites from the chips (with the app's state only: it keeps them).
   const favorites = useFavorites(state, ws);
   const openIssues = list ? list.issues.filter(isOpen).length : undefined;
@@ -747,6 +777,7 @@ function KnowledgeView({
       .catch(() => ({ error: "Couldn't reach Bops." }) as Answer & { error?: string });
     return r.error ?? r;
   }, [ws]);
+  if (owners) return <MemoryPage snap={null} owners={owners} act={act} forgetting={forgetting} category="all" onCategory={onCategory} onClose={onClose} />;
   if (category === "issues")
     return (
       <IssuesPage
@@ -764,6 +795,8 @@ function KnowledgeView({
   return (
     <MemoryPage
       snap={snap}
+      failed={failed}
+      onRetry={retry}
       act={act}
       ask={ask}
       forgetting={forgetting}
@@ -911,6 +944,9 @@ function useWidth() {
 /** The page for a snapshot of the categories (MemoryView, without the fetching). */
 export function MemoryPage({
   snap,
+  failed,
+  onRetry,
+  owners,
   act,
   ask,
   forgetting,
@@ -927,6 +963,11 @@ export function MemoryPage({
   onClose,
 }: {
   snap: MemorySnapshot | null;
+  /** Why the categories couldn't be read (no copy to show), and Try again. */
+  failed?: string | null;
+  onRetry?: () => void;
+  /** A workspace shared with the user: what the page says in place of its Knowledge, which is the owner's (no kinds, nothing to add or ask). */
+  owners?: string;
   act: MemoryAct;
   ask?: (question: string) => Promise<Answer | string>;
   /** Forget, with Undo (useForget). */
@@ -1086,7 +1127,18 @@ export function MemoryPage({
 
   const listView = (
     <div ref={list} key={category} className="motion-fade-in flex flex-col gap-5">
-      {!snap ? (
+      {owners ? (
+        <p className="mx-auto max-w-[400px] py-12 text-center text-[13.5px] leading-5 text-[#6B6B6B]">{owners}</p>
+      ) : !snap && failed ? (
+        <div role="alert" className="flex flex-col items-center gap-3 py-12 text-center">
+          <span className="max-w-[360px] text-[13.5px] leading-5 text-[#6B6B6B]">{failed}</span>
+          {onRetry && (
+            <button onClick={onRetry} className={BUTTON}>
+              Try again
+            </button>
+          )}
+        </div>
+      ) : !snap ? (
         <div className="flex justify-center py-12">
           <Spinner size={16} color="#9A9A98" />
         </div>
@@ -1146,7 +1198,7 @@ export function MemoryPage({
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{GROUP_NAME}</span>
             <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
-              {snap?.on && items.length ? `${items.length.toLocaleString("en-US")} things your bots know, learned as you chat` : "What your bots know, learned as you chat"}
+              {owners ? "What the bots here know, learned as the owner chats" : snap?.on && items.length ? `${items.length.toLocaleString("en-US")} things your bots know, learned as you chat` : "What your bots know, learned as you chat"}
             </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
@@ -1219,7 +1271,7 @@ export function MemoryPage({
           </div>
         )}
 
-        <KnowledgeChips on={category} snap={snap} issues={issues} skills={skills} drafts={drafts} count={count} favorites={favorites} onPick={onCategory} />
+        {!owners && <KnowledgeChips on={category} snap={snap} issues={issues} skills={skills} drafts={drafts} count={count} favorites={favorites} onPick={onCategory} />}
 
         {snap?.on && (
           <div className="flex flex-col gap-2.5">

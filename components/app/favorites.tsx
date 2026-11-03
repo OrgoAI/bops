@@ -30,13 +30,13 @@ export function saveFavorites(ws: string, list: string[]) {
  * kept (a newer Bops's pins too, so a save never drops them), `shown` those this build knows. A change
  * shows at once, while it's saved, and the state's own takes over once it's in. `pinned` and `toggle`
  * for one kind, `save` for a whole new order. A workspace shared with the user is read only (`can`
- * false): its pins are its owner's, and none are saved.
+ * false) and shows none: its pins are its owner's, none are saved, and its Knowledge is on the owner's Bops.
  */
 export function useFavorites(state: AppState | undefined, ws = state ? currentWorkspace(state) : "") {
   const [pending, setPending] = useState<{ ws: string; list: string[] } | null>(null);
   const kept = storedFavorites(state?.workspaces?.find((w) => w.id === ws));
   const stored = pending?.ws === ws ? pending.list : kept;
-  const shown = favoritesOf({ favorites: stored });
+  const shown = state?.shared ? [] : favoritesOf({ favorites: stored });
   const can = !!state && !!ws && !state.shared;
   const save = (list: string[]) => {
     if (!can) return;
