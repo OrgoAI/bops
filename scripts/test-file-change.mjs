@@ -553,6 +553,36 @@ await check("a link the bot found (on a page, in its own words) is refused in pl
   assert.deepEqual(writes(), []);
 });
 
+await check("a teammate's picture link keeps their name on their words where the bot sees the picture; a teammate the owner hasn't let use the computer is information only: their link is never fetched or used", async () => {
+  freshRepo();
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const Pics = await import(`${root}/lib/server/chat-pictures.ts`);
+  site.set("/team.png", { type: "image/png", bytes: PNG(80) });
+  const url = `${SITE}/team.png`;
+  // Dee has Write on Boppy (Workspace.memberAccess), so their turn runs.
+  const had = S.getState().workspaces;
+  S.update((st) => (st.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, memberAccess: { "dee@acme.example": { others: "none", bots: { boppy: "write" }, at: 1 } } }]));
+  answers.push(reply("Nice logo."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, `Our new logo: ${url}`, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { userId: "u-dee", email: "dee@acme.example", name: "Dee" });
+  S.update((st) => (st.workspaces = had));
+  const theirs = asked[n].input.find((x) => x.role === "user" && Array.isArray(x.content) && x.content.some((c) => c.type === "input_text" && c.text.includes(url)));
+  assert.ok(theirs, "the picture shown with their message");
+  assert.match(theirs.content[0].text, /^\[Dee, someone Alex gave this bot to\] Our new logo: /, "named as theirs, never the owner's");
+  assert.ok(theirs.content.some((c) => c.type === "input_image"));
+  const used = await changeFiles("boppy", change({ files: [picture("public/logo.png", { imageUrl: url })] }), { chatId, member: "Dee" }, { chat: true }).then(() => null, (e) => e);
+  assert.ok(used instanceof P.NeedsOk, "their link can go in, asking the owner");
+  // Fenced: said without Use its computer.
+  site.set("/fenced.png", { type: "image/png", bytes: PNG(70) });
+  S.addMessage({ chatId, role: "user", text: `Use ${SITE}/fenced.png`, member: { userId: "u-eve", name: "Eve", noUse: true }, at: Date.now() });
+  const hits = siteHits.length;
+  assert.equal((await Pics.linkedPictures(chatId)).has(`${SITE}/fenced.png`), false, "not fetched for the bot to look at");
+  const fenced = await changeFiles("boppy", change({ files: [picture("public/logo.png", { imageUrl: `${SITE}/fenced.png` })] }), { chatId }, { chat: true });
+  assert.match(fenced.text, /^Bops only uses a picture from a link someone wrote in this chat themselves/);
+  assert.equal(siteHits.filter((h) => h === "/fenced.png").length, 0, "never fetched");
+  assert.ok(siteHits.length >= hits);
+});
+
 await check("no dashes in anything it said, and no key value anywhere", () => {
   for (const m of messages()) assert.ok(!DASHES.test(m.text), m.text);
   assert.ok(!logged.some((l) => l.includes(ORGO_KEY)));
