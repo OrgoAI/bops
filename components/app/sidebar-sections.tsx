@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { favoriteCount, favoriteLabel, movedFavorite, nudgedFavorite, toggledFavorite, type FavoriteKind } from "@/lib/favorites";
+import { favoriteCount, favoriteLabel, isFavoriteKind, movedFavorite, nudgedFavorite, pinnedChat, pinnedThread, toggledFavorite, type FavoriteKind, type FavoritePin } from "@/lib/favorites";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { alwaysScope, toDo } from "@/lib/permission";
 import { answersAsk, canAct, writesThread } from "@/lib/shared";
@@ -10,14 +10,14 @@ import { memberAct } from "./shared-act";
 import { live, waitingAsks, workspaceOf, type AppApproval, type AppState, type Session, type Watch } from "@/lib/types";
 import { menuPoint, SideMenu, useFavorites, type MenuItem } from "./favorites";
 import { Fold } from "./fold";
-import { Spinner } from "./mascot";
+import { Mascot, Spinner } from "./mascot";
 import { CategoryIcon, useMemoryCategories, type MemoryOpen } from "./memory-categories";
 import { isOpen, issueOrder, StatusDot, useIssues, type Issue } from "./orbit-issues";
 import { KeyIcon } from "./screen-cards";
 import { SETUP_NEEDS, type SetupItem } from "./setup";
 import { arrived, Chevron, Count, DeleteX, readSectionOpen, undash, usePop, useRise, writeSectionOpen } from "./side-group";
 import { SkillsIcon } from "./skills";
-import { ago, currentWorkspace, needsYou, NeedsYouDot, post, quietNothing, StatusIcon } from "./ui";
+import { ago, chatName, currentWorkspace, needsYou, NeedsYouDot, post, quietNothing, StatusIcon } from "./ui";
 
 /*
  * The sidebar's sections over the chats (sidebar.tsx): Favorites, with Needs your attention first while
@@ -96,7 +96,7 @@ export function railMark(threads: Session[], needs: BotNeeds | undefined, shared
  * `readOnly`: a shared workspace's thread, the owner's to delete (and what it asks, theirs to answer). `okWait`: a
  * request of its for the user's OK is unanswered (lib/types.ts waitsForOk): it waits on them, not working.
  */
-export function ThreadRow({ session: s, onClick, readOnly, okWait }: { session: Session; onClick: () => void; readOnly?: boolean; okWait?: boolean }) {
+export function ThreadRow({ session: s, onClick, readOnly, okWait, onMenu }: { session: Session; onClick: () => void; readOnly?: boolean; okWait?: boolean; /** Its right-click menu (Add to Favorites), drawn by the sidebar over everything; none: no menu. */ onMenu?: (e: React.MouseEvent) => void }) {
   // New since the sidebar opened: rises in, once.
   const row = useRise(() => arrived(s.id));
   // Its mark (as StatusIcon draws it) pops when it changes in place, as working turns to needs you.
@@ -105,6 +105,7 @@ export function ThreadRow({ session: s, onClick, readOnly, okWait }: { session: 
   return (
     <button
       onClick={onClick}
+      onContextMenu={onMenu}
       onAnimationEnd={row.done}
       data-thread={s.id}
       className={`group/thread flex h-[34px] shrink-0 items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${row.rise ? "motion-rise-in" : ""}`}
@@ -331,6 +332,7 @@ export function WithThreads({
   readOnly,
   row,
   onOpenThread,
+  threadMenu,
   ...acts
 }: {
   user: string;
@@ -347,6 +349,8 @@ export function WithThreads({
   readOnly?: boolean;
   row: (space: ReactNode) => ReactNode;
   onOpenThread: (s: Session) => void;
+  /** A thread row's right-click menu (pinning it to Favorites). */
+  threadMenu?: (s: Session) => ((e: React.MouseEvent) => void) | undefined;
 } & NeedActs) {
   const [open, setOpen] = useRemembered(THREADS, user, ws, botId, false);
   useEffect(() => {
@@ -391,7 +395,7 @@ export function WithThreads({
         <Fold open={open} lazy>
           <div key={botId} className="mb-1 ml-[52px] mr-0.5 flex flex-col border-l border-[#E6E6E3] pl-1.5">
             {cards.length > 0 && <Capped className="gap-1.5 pb-1.5 pt-0.5" rows={cards} />}
-            {threads.length > 0 && <Capped rows={threads.map((s) => <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} readOnly={readOnly} okWait={okWaits?.has(s.id)} />)} />}
+            {threads.length > 0 && <Capped rows={threads.map((s) => <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} readOnly={readOnly} okWait={okWaits?.has(s.id)} onMenu={threadMenu?.(s)} />)} />}
           </div>
         </Fold>
       )}
@@ -510,9 +514,10 @@ function Meta({ text }: { text: string | null }) {
 
 /**
  * Favorites: first, while anything waits on the user, Needs your attention, which opens every bot it's
- * under (attentionOf), and then the Knowledge kinds pinned to the sidebar (Issues, Tasks and People
- * until the user changes them; lib/favorites.ts), in their order, while Knowledge is there and something
- * is pinned. A kind's row opens Knowledge at it, with a number only when there's something to act on. Rows drag
+ * under (attentionOf), and then what the user pinned (lib/favorites.ts), in their order: Knowledge's kinds
+ * (while Knowledge is there), chats and threads (pinned from their row's right-click menu; one deleted
+ * since is skipped). Nothing is pinned until the user pins it: no section until then. A kind's row opens
+ * Knowledge at it, with a number only when there's something to act on; a chat's or thread's opens it. Rows drag
  * to a new place, or move with Option and the up or down arrow from the keyboard; a right-click has
  * Remove from Favorites, Move up and Move down. None of that in a workspace shared with the user, which
  * is read only (useFavorites `can`). It folds with its heading (open until folded, per workspace on this Mac).
@@ -522,25 +527,47 @@ export function FavoritesSection({
   attention = 0,
   onAttention,
   onOpenMemory,
+  onOpenChat,
+  onOpenThread,
 }: {
   state: AppState;
   /** How many things wait on the user (attentionOf), and what opens them. */
   attention?: number;
   onAttention?: () => void;
   onOpenMemory: (open: MemoryOpen) => void;
+  onOpenChat: (chatId: string) => void;
+  onOpenThread: (s: Session) => void;
 }) {
   const user = state.account?.user.id ?? "";
   const ws = currentWorkspace(state);
   const favorites = useFavorites(state, ws);
   const [open, setOpen] = useRemembered(GROUP, user, ws, "favorites", true);
-  const [menu, setMenu] = useState<{ id: FavoriteKind; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ id: FavoritePin; x: number; y: number } | null>(null);
   // Dragging: the row held, and the one it would land before (null: at the end).
-  const [drag, setDrag] = useState<{ id: FavoriteKind; before: FavoriteKind | null } | null>(null);
+  const [drag, setDrag] = useState<{ id: FavoritePin; before: FavoritePin | null } | null>(null);
   const rows = useRef<HTMLDivElement>(null);
-  const list = favorites.shown;
-  const kinds = categoriesOpen(state) && list.length > 0;
-  if (!kinds && !attention) return null;
-  const items = (id: FavoriteKind): MenuItem[] => [
+  // Each pin as a row: its words, its mark, what it opens, its number. None for a kind while Knowledge isn't there, or a chat or thread that's gone.
+  const rowOf = (id: FavoritePin) => {
+    if (isFavoriteKind(id)) {
+      if (!categoriesOpen(state)) return null;
+      const meta = id === "issues" ? <IssuesMeta ws={ws} user={user} on={!state.shared} /> : id === "todos" || id === "promises" || id === "events" ? <MemoryMeta id={id} ws={ws} user={user} /> : null;
+      return { label: favoriteLabel(id), icon: <KindIcon id={id} />, meta, open: () => onOpenMemory({ category: id }) };
+    }
+    const chat = state.chats.find((c) => c.id === pinnedChat(id));
+    const thread = state.sessions.find((x) => x.id === pinnedThread(id));
+    const bot = state.bots.find((b) => b.id === (thread?.botId ?? chat?.botIds[0]));
+    const face = <span className="flex size-[18px] items-center justify-center">{bot && <Mascot botId={bot.id} color={bot.color} size={18} />}</span>;
+    if (chat) return { label: chatName(chat, state.bots), icon: face, meta: null, open: () => onOpenChat(chat.id) };
+    if (thread) return { label: thread.title, icon: face, meta: null, open: () => onOpenThread(thread) };
+    return null;
+  };
+  const shown = favorites.shown.flatMap((id) => {
+    const r = rowOf(id);
+    return r ? [{ id, ...r }] : [];
+  });
+  const list = shown.map((r) => r.id);
+  if (!list.length && !attention) return null;
+  const items = (id: FavoritePin): MenuItem[] => [
     { label: "Remove from Favorites", onPick: () => favorites.save(toggledFavorite(favorites.stored, id)) },
     { label: "Move up", disabled: list[0] === id, onPick: () => favorites.save(nudgedFavorite(favorites.stored, id, -1)) },
     { label: "Move down", disabled: list[list.length - 1] === id, onPick: () => favorites.save(nudgedFavorite(favorites.stored, id, 1)) },
@@ -552,7 +579,7 @@ export function FavoritesSection({
     setDrag(null);
   };
   // Option and an arrow moves the row with the keyboard; focus stays on it in its new place.
-  const nudge = (id: FavoriteKind, by: -1 | 1) => {
+  const nudge = (id: FavoritePin, by: -1 | 1) => {
     const next = nudgedFavorite(favorites.stored, id, by);
     if (next.join() === favorites.stored.join()) return;
     favorites.save(next);
@@ -572,16 +599,14 @@ export function FavoritesSection({
           </button>
         )}
         <div ref={rows} className="flex flex-col" onDragOver={(e) => drag && e.preventDefault()} onDrop={(e) => (e.preventDefault(), drop())}>
-          {(kinds ? list : []).map((id, i) => {
-            const label = favoriteLabel(id);
-            const meta = id === "issues" ? <IssuesMeta ws={ws} user={user} on={!state.shared} /> : id === "todos" || id === "promises" || id === "events" ? <MemoryMeta id={id} ws={ws} user={user} /> : null;
+          {shown.map(({ id, label, icon, meta, open: go }, i) => {
             const line = drag && drag.id !== id && drag.before === id && list[i - 1] !== drag.id;
             return (
               <button
                 key={id}
                 data-favorite={id}
                 draggable={favorites.can}
-                onClick={() => onOpenMemory({ category: id })}
+                onClick={go}
                 aria-keyshortcuts={favorites.can ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
                 onKeyDown={(e) => {
                   if (!favorites.can || !e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
@@ -608,7 +633,7 @@ export function FavoritesSection({
                 className={`${ROW} relative ${drag?.id === id ? "opacity-40" : ""}`}
               >
                 {line && <span aria-hidden className="pointer-events-none absolute inset-x-2.5 -top-px h-[2px] rounded-full bg-ink" />}
-                <KindIcon id={id} />
+                {icon}
                 <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{label}</span>
                 {meta}
               </button>
@@ -617,7 +642,7 @@ export function FavoritesSection({
           {drag && drag.before === null && list[list.length - 1] !== drag.id && <span aria-hidden className="mx-2.5 h-[2px] rounded-full bg-ink" />}
         </div>
       </Fold>
-      {menu && <SideMenu x={menu.x} y={menu.y} label={favoriteLabel(menu.id)} items={items(menu.id)} onClose={() => setMenu(null)} />}
+      {menu && <SideMenu x={menu.x} y={menu.y} label={shown.find((r) => r.id === menu.id)?.label ?? "Favorite"} items={items(menu.id)} onClose={() => setMenu(null)} />}
     </section>
   );
 }

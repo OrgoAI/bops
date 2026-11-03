@@ -4,6 +4,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appsStayLine, live, type AppState, type Bot, type Effort } from "@/lib/types";
 import { Mascot } from "./mascot";
 import { AskInPlace, needsYou, post } from "./ui";
+import { pinItems, useFavorites } from "./favorites";
+import { chatPin } from "@/lib/favorites";
 import { EFFORT_HINT, type Section } from "./bot-panel";
 
 /** What the menu's actions do, from the app (bops-app.tsx). */
@@ -21,7 +23,7 @@ const EFFORTS: Effort[] = ["auto", "low", "medium", "high"];
 
 /**
  * A bot's right-click menu (the sidebar's rows): who it is and what it's doing, four quick actions
- * (chat, call, its computer, its profile), what it runs (routines, its number and inbox), its settings
+ * (chat, call, its computer, its profile), its chat pinned to Favorites or taken off, what it runs (routines, its number and inbox), its settings
  * (Just do it, how hard it thinks), and Delete, which asks first, in place, and says what goes with it. The main
  * bot runs the team, so it has no Delete. Esc, a click outside or a scroll closes it.
  */
@@ -59,6 +61,10 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
       ? { dot: "busy", text: working.length > 1 ? `Working on ${working.length} things` : `Working on ${working[0].title}` }
       : { dot: "", text: b.role || "Idle" };
   const routines = state.routines.filter((r) => r.botId === b.id);
+  // Its chat, to pin to the sidebar's Favorites (none in a shared workspace: nothing's saved there).
+  const favorites = useFavorites(state);
+  const chat = state.chats.find((c) => c.kind === "bot" && c.botIds[0] === b.id);
+  const pin = chat ? pinItems(favorites, chatPin(chat.id)) : [];
   const reach = [b.phone && "number", b.email && "inbox"].filter(Boolean).join(" and ");
   const effort = b.effort ?? "auto";
   const go = (f: () => void) => () => {
@@ -116,6 +122,11 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
         <button role="menuitem" onClick={go(() => actions.onNewTask(b.id))} className={row}>
           <span className="flex-1">New task for {b.name}…</span>
         </button>
+        {pin.map((item) => (
+          <button key={item.label} role="menuitem" onClick={go(item.onPick)} className={row}>
+            <span className="flex-1">{item.label}</span>
+          </button>
+        ))}
         <button role="menuitem" onClick={go(() => actions.onProfile(b.id, "routines"))} className={row}>
           <span className="flex-1">Routines</span>
           <span className="truncate text-[12px] text-[#9A9A98]">{routines.length ? `${routines.filter((r) => r.enabled).length} on` : "None yet"}</span>

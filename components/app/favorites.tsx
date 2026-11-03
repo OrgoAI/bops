@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { favoritesOf, storedFavorites, toggledFavorite, type FavoriteKind } from "@/lib/favorites";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { favoritesOf, storedFavorites, toggledFavorite, type FavoritePin } from "@/lib/favorites";
 import type { AppState } from "@/lib/types";
 import { currentWorkspace, post } from "./ui";
 
@@ -26,6 +26,22 @@ export function saveFavorites(ws: string, list: string[]) {
 }
 
 /**
+ * The list being saved, per workspace, until its save is in: one for every place that pins (the sidebar, a row's
+ * menu, Knowledge's chips), so a change made while another is saving builds on it, even from a menu that's gone.
+ */
+const pendingLists = new Map<string, { ws: string; list: string[] }>();
+const pendingUsers = new Set<() => void>();
+const watchPending = (changed: () => void) => {
+  pendingUsers.add(changed);
+  return () => void pendingUsers.delete(changed);
+};
+const setPending = (ws: string, list: string[] | null) => {
+  if (list) pendingLists.set(ws, { ws, list });
+  else pendingLists.delete(ws);
+  for (const changed of pendingUsers) changed();
+};
+
+/**
  * A workspace's pins (`ws`, else the one shown; no state: none, and nothing to change): `stored` as
  * kept (a newer Bops's pins too, so a save never drops them), `shown` those this build knows. A change
  * shows at once, while it's saved, and the state's own takes over once it's in. `pinned` and `toggle`
@@ -33,23 +49,23 @@ export function saveFavorites(ws: string, list: string[]) {
  * false): its pins are its owner's, and none are saved.
  */
 export function useFavorites(state: AppState | undefined, ws = state ? currentWorkspace(state) : "") {
-  const [pending, setPending] = useState<{ ws: string; list: string[] } | null>(null);
+  const pending = useSyncExternalStore(watchPending, () => pendingLists.get(ws) ?? null, () => pendingLists.get(ws) ?? null);
   const kept = storedFavorites(state?.workspaces?.find((w) => w.id === ws));
   const stored = pending?.ws === ws ? pending.list : kept;
   const shown = favoritesOf({ favorites: stored });
   const can = !!state && !!ws && !state.shared;
   const save = (list: string[]) => {
     if (!can) return;
-    setPending({ ws, list });
+    setPending(ws, list);
     void saveFavorites(ws, list)
       .catch(() => {})
-      .finally(() => setPending((p) => (p?.list === list ? null : p)));
+      .finally(() => pendingLists.get(ws)?.list === list && setPending(ws, null));
   };
   return {
     stored,
     shown,
-    pinned: (id: FavoriteKind) => shown.includes(id),
-    toggle: (id: FavoriteKind) => save(toggledFavorite(stored, id)),
+    pinned: (id: FavoritePin) => shown.includes(id),
+    toggle: (id: FavoritePin) => save(toggledFavorite(stored, id)),
     save,
     can,
   };
@@ -68,6 +84,10 @@ export function PinIcon({ on = false, size = 11 }: { on?: boolean; size?: number
 }
 
 export type MenuItem = { label: string; onPick: () => void; disabled?: boolean };
+
+/** A row menu's Favorites item for a chat or a thread: Add to Favorites, or Remove from Favorites once pinned. None where nothing's saved (`can` false: a shared workspace). */
+export const pinItems = (favorites: Favorites, pin: FavoritePin): MenuItem[] =>
+  favorites.can ? [{ label: favorites.pinned(pin) ? "Remove from Favorites" : "Add to Favorites", onPick: () => favorites.toggle(pin) }] : [];
 
 /**
  * A small menu where the right-click was (`x`, `y`; kept inside the window), as the bots' menu opens:
