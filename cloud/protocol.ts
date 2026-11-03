@@ -1122,3 +1122,5 @@ export type BrowserAct = { bot: string; project?: string; act: "take" | "release
 /** Why Bops Cloud won't let someone watch a bot's browser (403, with the words to show them). */
 export const BROWSER_NEEDS_WRITE = "browser_needs_write";
 export const BROWSER_NEEDS_COMPUTER = "browser_needs_computer";
+/** The bot shares its computer with a bot that isn't the viewer's at Write (hidden from them, at Read, or another workspace's): its screens are theirs too. */
+export const BROWSER_SHARED_COMPUTER = "browser_shared_computer";

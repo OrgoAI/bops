@@ -2,11 +2,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { bearer, type CloudUser } from "./auth.ts";
 import { HttpError, readJson, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
-import { levelOf, permits } from "./member-access.ts";
+import { botsOn } from "./computer-scope.ts";
+import { levelOf, permits, type MemberAccess } from "./member-access.ts";
 import { ROLE_MS, trackMemberStream, viewerOf, watchable } from "./members.ts";
 import {
   BROWSER_NEEDS_COMPUTER,
   BROWSER_NEEDS_WRITE,
+  BROWSER_SHARED_COMPUTER,
   isBrowserMethod,
   POINTER_KINDS,
   type BrowserAct,
@@ -29,7 +31,8 @@ import { computerUseOf, list, viewerAccess, wsOfBot } from "./ws-slice.ts";
  *   a new one replaces the last. It's told who watches each of its bots ("watch"), and what they ask.
  * - **A viewer** opens GET /v1/browser/watch?bot=<id>[&project=<Orgo workspace>] (server-sent events, BrowserEvent). Only
  *   the owner, or someone the owner gave Write on that bot AND Use its computer (mayUseBrowser: the check a member's chat
- *   turn on the computer goes by, turns.ts memberStill), as orgo-web and the owner's state say it now; looked at again
+ *   turn on the computer goes by, turns.ts memberStill), and Write on every other bot that works on that computer (they
+ *   share its screens), as orgo-web and the owner's state say it now; looked at again
  *   every ROLE_MS while it's open, and ended at once by orgo-web's notice that their access changed (members.ts). With
  *   `&only=activity` it hears only what the bot is doing with its browser and whether its computer is there, and isn't
  *   watching: the runner captures nothing for it (a Watch chip's, components/app/bops-app.tsx).
@@ -88,9 +91,11 @@ export type BrowserAccess = { account: string; person: BrowserPerson; desktop: s
 
 /**
  * Whether `user` may watch (and take control of) `botId`'s browser: their own bot (no `projectId`), or one in the
- * workspace shared with them as orgo-web says it now, where the owner gave them Write on it and Use its computer. 404
- * for a workspace or a bot they don't see (never saying whether it exists), 403 with the words for what they lack, 409
- * when the bot has no computer.
+ * workspace shared with them as orgo-web says it now, where the owner gave them Write on it and Use its computer, and
+ * on every other bot that works on its computer: bots that share a computer share its screens (lib/server/browser-runner.ts
+ * screenFor), so watching one shows, and taking over drives, whichever screen any of them holds. A bot hidden from them,
+ * at Read, or of another workspace there (a main bot on the free computer) keeps it the owner's. 404 for a workspace or a
+ * bot they don't see (never saying whether it exists), 403 with the words for what they lack, 409 when the bot has no computer.
  */
 export async function mayUseBrowser(user: CloudUser, key: string, projectId: string | null, botId: string, opts: { fresh?: boolean } = {}): Promise<BrowserAccess> {
   if (!BOT_ID.test(botId)) throw new HttpError(400, "bot must be a bot's id");
@@ -98,6 +103,8 @@ export async function mayUseBrowser(user: CloudUser, key: string, projectId: str
   let account = user.id;
   let owner = true;
   let blob: Record<string, unknown>;
+  // Someone other than the owner: their workspace and what they have of its bots, for the computer's other bots below.
+  let theirs: { ws: string; access: MemberAccess } | null = null;
   if (projectId === null) blob = await ownerState(account);
   else {
     if (!PROJECT_ID.test(projectId)) throw new HttpError(400, "project must be an Orgo workspace id");
@@ -110,7 +117,8 @@ export async function mayUseBrowser(user: CloudUser, key: string, projectId: str
     if (access.role !== "owner") {
       owner = false;
       const viewer = viewerOf(user, access);
-      const level = levelOf(viewerAccess(ws, viewer), botId);
+      theirs = { ws: target.ws, access: viewerAccess(ws, viewer) };
+      const level = levelOf(theirs.access, botId);
       if (level === "none") throw new HttpError(404, "No such bot");
       const name = nameOf(blob, botId);
       if (!permits(level, "write")) throw new HttpError(403, `Watching ${name}'s browser takes Write on ${name}, and the owner gave you Read. They can change it in People.`, { code: BROWSER_NEEDS_WRITE });
@@ -120,6 +128,9 @@ export async function mayUseBrowser(user: CloudUser, key: string, projectId: str
   if (!list(blob.bots).some((b) => b.id === botId)) throw new HttpError(404, "No such bot");
   const desktop = computerFor(blob, botId);
   if (!desktop) throw new HttpError(409, `${nameOf(blob, botId)} has no computer, so it has no browser to show.`, { code: "browser_no_computer" });
+  const mine = theirs;
+  if (mine && botsOn(blob, desktop).some((b) => wsOfBot(b) !== mine.ws || !permits(levelOf(mine.access, b.id as string), "write")))
+    throw new HttpError(403, `${nameOf(blob, botId)} shares its computer with bots you don't have, so only the owner can watch its browser.`, { code: BROWSER_SHARED_COMPUTER });
   return { account, person, desktop, botName: nameOf(blob, botId), owner };
 }
 
