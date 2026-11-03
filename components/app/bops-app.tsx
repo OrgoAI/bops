@@ -1,6 +1,6 @@
 "use client";
 
-import { appsName, appsOwnShown, appsShown } from "@/lib/apps-access";
+import { APPS_NAME, appsOwnShown, appsShown } from "@/lib/apps-access";
 import { screenMap } from "@/lib/screens";
 import { chatAsks } from "@/lib/asks";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -2071,7 +2071,7 @@ export function Settings({
     item("logins", "Logins", { value: logins || undefined }),
     ...(!shared ? [item("email", "Email and phone")] : []),
   ];
-  const team_: NavItem[] = [...(apps ? [item("apps", appsName(state))] : []), ...(domains ? [item("domains", "Domains")] : [])];
+  const team_: NavItem[] = [...(apps ? [item("apps", APPS_NAME)] : []), ...(domains ? [item("domains", "Domains")] : [])];
   const navRow = (x: NavItem) => (
     <button
       key={x.id}

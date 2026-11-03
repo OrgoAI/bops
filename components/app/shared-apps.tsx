@@ -18,7 +18,7 @@ import { ago } from "./ui";
 
 /** Every word the shared page says (the tests read them for dashes and the old name). */
 export const SHARED_APPS_WORDS = {
-  title: "Apps",
+  title: "Your Apps",
   readLine: (ws: string) => `Apps on the web in ${ws}. You can look.`,
   writeLine: (ws: string) => `Apps on the web in ${ws}. You can deploy them.`,
   asOf: (when: string) => `As of ${when}`,

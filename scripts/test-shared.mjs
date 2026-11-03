@@ -1878,10 +1878,9 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   const v = viewState(team(), copy.openNow(), copy.data(), {}, copy.acts());
   assert.deepEqual(v.shared.apps.list.map((a) => a.name), ["shop"]);
   assert.equal(A.appsShown(v), true, "the footer's apps button and its page");
-  // Named for what they are there: the owner's apps on the web, which neither the viewer nor their bots made.
-  assert.equal(A.appsName(v), "Apps", "the footer's button, its tab and its New Tab tile, as the page's title");
+  // One name everywhere (owner, 11-02); the line under it says whose apps they are.
+  assert.equal(A.APPS_NAME, "Your Apps", "the footer's button, its tab and its New Tab tile, as the page's title, in a shared workspace too");
   assert.equal(A.appsLine(v), `Apps on the web in ${v.shared.name}`);
-  assert.equal(A.appsName(team()), "Your Apps", "in their own workspace, as before");
   assert.equal(A.appsLine(team()), "Apps your bots made for you");
   assert.equal(A.appsOwnShown(v), false, "Settings, Domains, Bops' app skills and the made apps stay the owner's");
   const none = viewState(team(), copy.openNow(), cloudState(), {});
