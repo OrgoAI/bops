@@ -37,15 +37,22 @@ function Diff({ lines }: { lines: DiffLine[] }) {
   return (
     <pre data-proposal-diff className="max-h-[280px] overflow-auto rounded-xl bg-[#F7F7F6] py-1.5 font-mono text-[11.5px] leading-4 text-[#3A3A38]">
       {shown.map((l, i) => (
-        <div key={i} className={`whitespace-pre-wrap px-3 [overflow-wrap:anywhere] ${l.t === "-" ? "bg-[#FEF3F2] text-[#912018]" : l.t === "+" ? "bg-[#ECFDF3] text-[#05603A]" : ""}`}>
-          <span aria-hidden className="select-none pr-1.5 opacity-60">
-            {l.t === " " ? " " : l.t}
-          </span>
-          {l.s || " "}
-        </div>
+        <DiffRow key={i} line={l} />
       ))}
       {lines.length > shown.length && <div className="px-3 text-[#9A9A98]">and {lines.length - shown.length} more lines</div>}
     </pre>
+  );
+}
+
+/** One line of a diff, in a pre: taken out in red, put in in green, kept in grey, its sign quiet before it. A change's card has them too (keys.tsx ApiAsk). */
+export function DiffRow({ line: l }: { line: DiffLine }) {
+  return (
+    <div className={`whitespace-pre-wrap px-3 [overflow-wrap:anywhere] ${l.t === "-" ? "bg-[#FEF3F2] text-[#912018]" : l.t === "+" ? "bg-[#ECFDF3] text-[#05603A]" : ""}`}>
+      <span aria-hidden className="select-none pr-1.5 opacity-60">
+        {l.t === " " ? " " : l.t}
+      </span>
+      {l.s || " "}
+    </div>
   );
 }
 

@@ -8,8 +8,9 @@ import { useState, type ReactNode } from "react";
  * Shut, they stay mounted (so the motion has something to fold) but are out of reach: inert, so no
  * tab stop or click lands in them, and hidden from screen readers. With reduced motion, it's instant.
  * `lazy`: nothing is rendered until it first opens (for a long list of folds, each with much inside).
+ * `up`: it opens above what opens it (a card docked at the bottom grows upward), so it settles up instead.
  */
-export function Fold({ open, lazy = false, children, className = "" }: { open: boolean; lazy?: boolean; children: ReactNode; className?: string }) {
+export function Fold({ open, lazy = false, up = false, children, className = "" }: { open: boolean; lazy?: boolean; up?: boolean; children: ReactNode; className?: string }) {
   // Opened once: kept from then on, so it can fold shut with its content in it.
   const [opened, setOpened] = useState(open);
   if (open && !opened) setOpened(true);
@@ -20,7 +21,7 @@ export function Fold({ open, lazy = false, children, className = "" }: { open: b
       className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none ${open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"} ${className}`}
     >
       <div className="min-h-0 overflow-hidden">
-        <div className={`transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "translate-y-0" : "-translate-y-1.5"}`}>{lazy && !opened ? null : children}</div>
+        <div className={`transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "translate-y-0" : up ? "translate-y-1.5" : "-translate-y-1.5"}`}>{lazy && !opened ? null : children}</div>
       </div>
     </div>
   );
