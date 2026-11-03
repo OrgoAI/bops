@@ -23,7 +23,7 @@ const forward = (mod, names) => names.map((n) => `export const ${n} = (...a) => 
 const FAKES = {
   store: forward("store", ["bot", "chat", "getState", "ownerName", "session", "addMessage", "pullState"]),
   chat: forward("chat", ["handleMessage", "answerMessage"]),
-  sessions: forward("sessions", ["replyToSession", "stopSession", "dismissWaiting", "compactThread"]),
+  sessions: forward("sessions", ["replyToSession", "stopSession", "dismissWaiting", "compactThread", "setWhere"]),
   "chat-summary": forward("chat-summary", ["compactChat"]),
   permission: forward("permission", ["replyToAsk"]),
   persist: forward("persist", ["onRunner"]),
@@ -96,6 +96,8 @@ function fresh(o = {}) {
       { id: "t-app", botId: "max", chatId: "bot:max", title: "Work on site", status: "running", replies: [], app: { wsId: "ws_acme", name: "site" } },
       { id: "t-app-mac", botId: "max", chatId: "bot:max", title: "Work on site", status: "running", replies: [], movedFrom: "t-app" },
       { id: "t-onmac", botId: "max", chatId: "bot:max", title: "Messages", status: "running", runsOn: "mac", replies: [] },
+      // Waiting for someone to say where it runs (Session.askWhere).
+      { id: "t-where", botId: "max", chatId: "bot:max", title: "Plan a trip", status: "queued", askWhere: true, replies: [] },
     ],
     appApprovals: [
       { id: "ask-1", botId: "max", chatId: "bot:max", threadId: "t-max", action: "Send an email", kind: "email" },
@@ -149,6 +151,7 @@ globalThis.__fake = {
     stopSession: (id, reason) => did.push(["stop", id, reason]),
     dismissWaiting: (id, reason) => did.push(["dismiss", id, reason]),
     compactThread: async (id, by) => (did.push(["compact thread", id, by]), compactSays),
+    setWhere: (id, to) => did.push(["where", id, to]),
   },
   "chat-summary": { compactChat: async (id, by) => (did.push(["compact chat", id, by]), compactSays) },
   permission: { replyToAsk: (id, reply, message, member) => (did.push(["answer", id, reply, message, member]), undefined) },
@@ -586,16 +589,71 @@ await check("an Admin with no entry chats with every bot, replies, answers and u
   assert.deepEqual(did.map((d) => d[0]), ["chat", "reply", "answer", "chat"], "Use its computer too, whatever Bops Cloud's flag says");
   assert.equal(did[3][4].role, "admin", "a group's turn too");
   assert.equal(did[1][5].role, undefined, "a reply in a thread is kept without the role");
-  // The owner's own logins stay theirs, and work on the owner's Mac too: an Admin is no owner.
+  // The owner's own logins and the asks of a thread on their Mac: an Admin's to answer too (member-access.ts ADMIN_POWERS).
+  // Telling a thread on the owner's Mac more stays the owner's: it has their browsers and logins.
   did.length = 0;
   await memberEvent(event({ act: "answer", askId: "ask-gmail", reply: "always" }, { member: ADA, role: "admin", key: "key_admin_005" }), "e_ad5");
+  await memberEvent(event({ act: "answer", askId: "ask-key", reply: "once" }, { member: ADA, role: "admin", key: "key_admin_005b" }), "e_ad5b");
+  await memberEvent(event({ act: "answer", askId: "ask-onmac", reply: "reject" }, { member: ADA, role: "admin", key: "key_admin_005c" }), "e_ad5c");
   await memberEvent(event({ act: "reply", sessionId: "t-onmac", text: "go" }, { member: ADA, role: "admin", key: "key_admin_006" }), "e_ad6");
-  assert.deepEqual(did, [], "the owner's logins and Mac stay the owner's");
+  await memberEvent(event({ act: "dismiss", sessionId: "t-onmac" }, { member: ADA, role: "admin", key: "key_admin_006b" }), "e_ad6b");
+  assert.deepEqual(did.map((d) => d.slice(0, 3)), [["answer", "ask-gmail", "always"], ["answer", "ask-key", "once"], ["answer", "ask-onmac", "reject"]], "answered as theirs; the Mac thread told nothing");
+  assert.deepEqual(did[0][4], ADA, "named as the Admin's answer");
   // No role: their entry (none) counts, as for anyone.
   fresh();
   await memberEvent(event({ act: "chat", chatId: "bot:ivy", text: "hi" }, { member: ADA, key: "key_admin_007" }), "e_ad7");
   assert.deepEqual(did, []);
   assert.ok(warned.some((w) => w.includes("e_ad7") && w.includes("not done")));
+});
+
+await check("a Member with Write never answers the owner's own asks, nor one of a thread on the owner's Mac", async () => {
+  fresh();
+  for (const [i, askId] of ["ask-gmail", "ask-old", "ask-key", "ask-onmac"].entries()) await memberEvent(event({ act: "answer", askId, reply: "once" }, { key: `key_mem_ans_${i}` }), `e_ma${i}`);
+  assert.deepEqual(did, []);
+  assert.equal(warned.filter((w) => /e_ma\d: not done \((the owner's apps or keys|on the owner's Mac)\)/.test(w)).length, 4);
+  // Sam's own kind of ask on Max: answered.
+  await memberEvent(event({ act: "answer", askId: "ask-1", reply: "once" }, { key: "key_mem_ans_ok" }), "e_maok");
+  assert.deepEqual(did.map((d) => d.slice(0, 2)), [["answer", "ask-1"]]);
+});
+
+await check("an answer waits as long as its ask: one sent hours ago is still done (an Admin's goes by orgo-web's list then); any other act that old isn't", async () => {
+  const hoursAgo = Date.now() - 3 * 3_600_000;
+  fresh();
+  await memberEvent(event({ act: "answer", askId: "ask-1", reply: "once" }, { key: "key_late_ans", at: hoursAgo }), "e_la1");
+  await memberEvent(event({ act: "reply", sessionId: "t-max", text: "late" }, { key: "key_late_rep", at: hoursAgo }), "e_la2");
+  assert.deepEqual(did.map((d) => d.slice(0, 2)), [["answer", "ask-1"]]);
+  assert.ok(warned.some((w) => w.includes("e_la2") && w.includes("too late")));
+  // An Admin's answer that old: only while orgo-web says they're one now.
+  fresh();
+  resetAdmins({ key: async () => "owner-key", list: async () => ({ status: 200, json: { members: [{ id: "user_ada", email: "ada@example.com", role: "member" }] } }) });
+  await memberEvent(event({ act: "answer", askId: "ask-gmail", reply: "once" }, { member: ADA, role: "admin", key: "key_late_adm", at: hoursAgo }), "e_la3");
+  assert.deepEqual(did, [], "made a Member since: the owner's login stays theirs");
+  resetAdmins({ key: async () => "owner-key", list: async () => ({ status: 200, json: { members: [{ id: "user_ada", email: "ada@example.com", role: "admin" }] } }) });
+  await memberEvent(event({ act: "answer", askId: "ask-gmail", reply: "once" }, { member: ADA, role: "admin", key: "key_late_adm2", at: hoursAgo }), "e_la4");
+  assert.deepEqual(did.map((d) => d.slice(0, 2)), [["answer", "ask-gmail"]]);
+  resetAdmins();
+  // Past a day: too late, whoever.
+  fresh();
+  await memberEvent(event({ act: "answer", askId: "ask-1", reply: "once" }, { key: "key_late_day", at: Date.now() - 25 * 3_600_000 }), "e_la5");
+  assert.deepEqual(did, []);
+});
+
+await check("where a thread runs: an Admin picks the bot's computer, said in the chat as theirs; never the owner's Mac, never a Member, never one already picked", async () => {
+  fresh();
+  await memberEvent(event({ act: "where", sessionId: "t-where", to: "cloud" }, { member: ADA, role: "admin", key: "key_where_01" }), "e_w1");
+  assert.deepEqual(did[0], ["where", "t-where", "cloud"]);
+  assert.ok(did.some((d) => d[0] === "add" && d[1] === "system" && /^Ada picked Max's computer for “Plan a trip”$/.test(d[2])), "said as theirs");
+  for (const [i, [o, act, why]] of [
+    [{ member: ADA, role: "admin" }, { act: "where", sessionId: "t-where", to: "mac" }, "on the owner's Mac"],
+    [{}, { act: "where", sessionId: "t-where", to: "cloud" }, "not an Admin"],
+    [{ member: ADA, role: "admin" }, { act: "where", sessionId: "t-max", to: "cloud" }, "not waiting"],
+    [{ member: ADA, role: "admin" }, { act: "where", sessionId: "t-where", to: "elsewhere" }, "not a member's act"],
+  ].entries()) {
+    fresh();
+    await memberEvent(event(act, { ...o, key: `key_where_n${i}` }), `e_wn${i}`);
+    assert.deepEqual(did, [], why);
+    assert.ok(warned.some((w) => w.includes(`e_wn${i}`) && w.includes(why)), why);
+  }
 });
 
 await check("an Admin's act on an app: Your Apps at Write with no entry, while apps are open to the owner", async () => {
