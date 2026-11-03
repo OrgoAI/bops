@@ -1,0 +1,5 @@
+- Pick a Medium or Large computer, and change it in Settings.
+- Bots can answer with your Mac closed, in Settings, General.
+- People you add are an Admin or a Member.
+- Admins get every bot, its computer and your apps.
+- Your Apps now shows for people in workspaces that have them.
