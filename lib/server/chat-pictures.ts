@@ -8,9 +8,13 @@ import { uploadPath } from "./uploads";
  * The pictures people put in a chat, for the bot to look at and for a change of files (repo-change.ts change_files):
  * the ones they attached (Message.images on their own messages, never a picture a bot made), numbered 1, 2, 3 in the
  * order they came, and the ones they linked in their own words, fetched through safe-fetch's checks (public addresses
- * only, PNG, JPEG, WebP or GIF, 12 MB at most). A link counts only when a person wrote it in this chat: never one a
- * bot found on a page, in an email or in an app's answer.
+ * only, PNG, JPEG, WebP or GIF, 12 MB at most). A link counts only when a person wrote it in this chat, as someone the
+ * bot may act for: never one a bot found on a page, in an email or in an app's answer, nor one from a member the owner
+ * hasn't let use the bot's computer (MemberSaid.noUse: their words are information only).
  */
+
+/** A person's own message in a chat, whose words the bot may act on (not a fenced member's). */
+const ownWords = (m: { chatId: string; role: string; member?: { noUse?: boolean } }, chatId: string) => m.chatId === chatId && m.role === "user" && !m.member?.noUse;
 
 /** A picture, its bytes in hand. */
 export type Picture = { type: string; bytes: Buffer };
@@ -32,7 +36,7 @@ export function uploadBytes(upId: string): Picture | null {
 export const linksIn = (text: string) => [...text.matchAll(/https?:\/\/[^\s<>"'`]+/g)].map((m) => m[0].replace(/[.,;:!?)\]]+$/, ""));
 
 /** Whether `url` is a link a person wrote in chat `chatId` (their own message's words). */
-export const linkedByPerson = (chatId: string, url: string) => getState().messages.some((m) => m.chatId === chatId && m.role === "user" && linksIn(m.text ?? "").includes(url));
+export const linkedByPerson = (chatId: string, url: string) => getState().messages.some((m) => ownWords(m, chatId) && linksIn(m.text ?? "").includes(url));
 
 /** Each link's picture (or why not) for a while, so the turn that looks at it and the change that uses it get the same bytes. */
 const CACHE_MS = 15 * 60_000;
@@ -75,7 +79,7 @@ const LOOK_MS = 10_000;
  */
 export async function linkedPictures(chatId: string): Promise<Map<string, string>> {
   const said = getState()
-    .messages.filter((m) => m.chatId === chatId && m.role === "user" && m.text)
+    .messages.filter((m) => ownWords(m, chatId) && m.text)
     .slice(-LOOKED_AT);
   const links = (m: { text: string } | undefined) => (m ? linksIn(m.text).filter(namesPicture).slice(0, LINKS_EACH) : []);
   const now = new Set(links(said.at(-1)));
