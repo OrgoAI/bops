@@ -170,8 +170,8 @@ export async function routingOf(userId: string, wsId: string, c?: pg.PoolClient)
  * owner let Bops Cloud decide, or said only whether a message may wake a computer billed by the hour).
  */
 export type RoutingRow = { mode: "mac" | "cloud"; setBy: string | null; setAt: number };
-/** Chosen by the owner or by Orgo's staff: never moved by itself. */
-export const chosen = (r: RoutingRow | undefined) => !!r && (r.setBy === "owner" || r.setBy === "staff");
+/** Chosen by the owner, an Admin of the workspace (members.ts setRoutingAsAdmin) or Orgo's staff: never moved by itself. */
+export const chosen = (r: RoutingRow | undefined) => !!r && (r.setBy === "owner" || r.setBy === "staff" || r.setBy === "admin");
 
 /** The owner's rows, by workspace (empty: none ever set). */
 export async function routedWorkspaces(c: pg.PoolClient | null, userId: string, lock = false): Promise<Map<string, RoutingRow>> {
@@ -843,6 +843,19 @@ function waitForRunner(userId: string, device: string, ms: number): Promise<void
     t.unref?.();
     set.add(finish);
   });
+}
+
+/**
+ * Wake one computer now, for someone who asked (an Admin, or a member with Use its computer, from the shared computer
+ * panel: members.ts wakeAsMember), as a turn's wake does (wakeLoop): with the owner's say on a computer billed by the
+ * hour (allowHourly). `ok` while it's waking or awake; else why not, in the chat's words (NOTES).
+ */
+export async function wakeComputer(userId: string, desktopId: string, wsId: string, names: { owner: string; bot: string }): Promise<{ ok: boolean; state: string; why?: string }> {
+  const { allowHourly } = await routingOf(userId, wsId);
+  const a = await askWake(userId, desktopId, allowHourly);
+  if (!a) return { ok: false, state: "unset", why: "Waking computers isn't set up here." };
+  if (a.state === "running" || a.state === "woke" || a.state === "storage" || a.state === "retry") return { ok: true, state: a.state };
+  return { ok: false, state: a.state, why: NOTES[refusalNote(a)](names.owner, names.bot) };
 }
 
 /** Why a computer won't wake, as the note its turns end with. */

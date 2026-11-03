@@ -917,6 +917,10 @@ export const MEMBER_OWNER_ONLY = "member_owner_only";
  * folding it up, or answering one of its asks), and the owner hasn't turned on Use its computer for them.
  */
 export const MEMBER_NO_COMPUTER = "member_no_computer";
+/** 404 from an Admin's change to someone's bots (POST /v1/ws/<id>/people): orgo-web doesn't list them now. */
+export const PEOPLE_GONE = "gone";
+/** 409 from the same: the owner and Admins have every bot, so nothing is kept for them. */
+export const ADMIN_HAS_ALL = "admin_has_all";
 /** 403: only the owner or an Admin does this (an Admin's act, AdminPower in member-access.ts). */
 export const ADMIN_ONLY = "admin_only";
 /** 409: an Admin's act, while the owner's Bops is older than ADMIN_POWERS_MIN_VERSION: it would drop it. */

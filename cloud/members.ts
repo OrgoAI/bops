@@ -1,13 +1,33 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { bearer, type CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
-import { HttpError, readBody, sendJson, type Route } from "./http.ts";
-import { query } from "./db.ts";
-import { canWatch, hub, liveScope, seedSeen, serveStream, type LiveTarget } from "./live.ts";
-import { adminMay, askOwnersOnly, cleanName, levelOf, permits, threadOwnersOnly, timeOf, writesChat, type AdminPower, type MemberAccess, type MemberWho } from "./member-access.ts";
+import { HttpError, readBody, readJson, sendJson, type Route } from "./http.ts";
+import { query, tx } from "./db.ts";
+import { canWatch, hub, liveScope, seedSeen, serveStream, stateWritten, type LiveTarget } from "./live.ts";
+import {
+  accessKey,
+  adminMay,
+  askOwnersOnly,
+  cleanAccess,
+  cleanName,
+  currentFor,
+  fitComputer,
+  levelOf,
+  permits,
+  threadOwnersOnly,
+  timeOf,
+  withEntry,
+  writesChat,
+  type AdminPower,
+  type MemberAccess,
+  type MemberAccessMap,
+  type MemberWho,
+} from "./member-access.ts";
 import { planSigned } from "./plans.ts";
 import {
+  ADMIN_HAS_ALL,
   ADMIN_ONLY,
+  PEOPLE_GONE,
   ADMIN_POWERS_MIN_VERSION,
   OWNER_BOPS_OLD,
   MEMBER_ACT_MS,
@@ -38,10 +58,10 @@ import {
   type WsAccess,
   type WsRole,
 } from "./protocol.ts";
-import { chatPage, chatsSeq, loadState, recentMessages, removedAfter, sendZipped, type MessageRow } from "./state.ts";
+import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, toJson, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
-import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, type SliceViewer } from "./ws-slice.ts";
-import { cancelMember, chatAutoFor, computerFor, macNewEnough, routedWorkspaces, routingOf, takeMessage } from "./turns.ts";
+import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
+import { cancelMember, chatAutoFor, computerFor, macNewEnough, recheckTurns, routedWorkspaces, routingOf, setRouting, takeMessage, wakeComputer } from "./turns.ts";
 
 /**
  * Shared workspaces (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -51,7 +71,8 @@ import { cancelMember, chatAutoFor, computerFor, macNewEnough, routedWorkspaces,
  * given), its threads with their notes and results, its routines and watches, what Needs you, the moods
  * as they happen. Never another bot's, nor the owner's vault, logins, keys, Macs or settings
  * (ws-slice.ts). Members never publish (POST /v1/live only ever goes into the caller's own account), and
- * Bops Cloud never edits the owner's state for them.
+ * Bops Cloud edits the owner's state for an Admin in one place only: the bots a Member has (peopleWrite), entry by
+ * entry as the owner's Mac keeps them, which the owner's Macs merge in.
  *
  * - **Who may**: orgo-web says, with the caller's own Orgo key (GET /api/projects/<id>/bops-role: the
  *   owner, an admin or a member; 404 for anyone else; and, from an orgo-web that sends it, when their
@@ -335,7 +356,10 @@ const readState: Route = {
   method: "GET",
   path: "/v1/ws/*",
   auth: "user",
-  handle: async (req, res, { user, url }) => {
+  handle: async (req, res, ctx) => {
+    const { user, url } = ctx;
+    // An Admin's list of who has which bots (the People sheet): peopleOf.
+    if (PEOPLE_PATH.test(url.pathname)) return peopleRead.handle(req, res, ctx);
     const projectId = STATE_PATH.exec(url.pathname)?.[1];
     if (!projectId) throw new HttpError(404, "Not found");
     const { access, target } = await watchable(user!, bearer(req), projectId);
@@ -667,7 +691,11 @@ const actIn: Route = {
   method: "POST",
   path: "/v1/ws/*",
   auth: "user",
-  handle: async (req, res, { user, url }) => {
+  handle: async (req, res, ctx) => {
+    const { user, url } = ctx;
+    // An Admin's change to someone's bots, and waking a bot's computer: their own routes, under the same prefix.
+    if (PEOPLE_PATH.test(url.pathname)) return peopleWrite.handle(req, res, ctx);
+    if (WAKE_PATH.test(url.pathname)) return wakeIn.handle(req, res, ctx);
     const projectId = ACT_PATH.exec(url.pathname)?.[1];
     if (!projectId) throw new HttpError(404, "Not found");
     let raw: unknown;
@@ -830,7 +858,227 @@ const changed: Route = {
   },
 };
 
-export const routes: Route[] = [readState, actIn, changed];
+/* ---------------- An Admin's powers that don't wait for the owner's Mac ---------------- */
+
+const PEOPLE_PATH = /^\/v1\/ws\/([A-Za-z0-9-]{1,64})\/people$/;
+const WAKE_PATH = /^\/v1\/ws\/([A-Za-z0-9-]{1,64})\/wake$/;
+const ROUTING_PATH = /^\/v1\/ws\/([A-Za-z0-9-]{1,64})\/routing$/;
+
+/** The caller, asked afresh, and the workspace, for an Admin's own routes: 403 ADMIN_ONLY for anyone else (the owner acts in their own Bops). */
+async function asAdmin(req: IncomingMessage, user: CloudUser, projectId: string) {
+  const key = bearer(req);
+  const { access, target } = await watchable(user, key, projectId, { fresh: true });
+  if (access.role === "owner") throw new HttpError(403, "This is your own workspace. Change it from your Bops.", { code: OWN_WORKSPACE });
+  if (access.role !== "admin") throw new HttpError(403, ADMIN_LINE, { code: ADMIN_ONLY });
+  return { key, access, target };
+}
+
+/** orgo-web's people of a project, with the caller's own key (GET /api/workspaces/<id>/members): its members and invites still waiting, or null. */
+async function orgoPeople(key: string, projectId: string): Promise<{ members: Record<string, unknown>[]; invites: Record<string, unknown>[] } | null> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${config.orgoOrigin()}/api/workspaces/${encodeURIComponent(projectId)}/members`, { headers: { Authorization: `Bearer ${key}`, Accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
+  } catch {
+    return null;
+  }
+  if (!res.ok) {
+    void res.body?.cancel().catch(() => {});
+    return null;
+  }
+  const j = (await res.json().catch(() => null)) as { members?: unknown; invites?: unknown } | null;
+  if (!j || !Array.isArray(j.members) || !Array.isArray(j.invites)) return null;
+  return { members: list(j.members), invites: list(j.invites).filter((i) => (i.status ?? "pending") === "pending") };
+}
+
+/** Whose entries a list of orgo-web's has: each Member (by email, else their user id) and each Member's invite, with when they joined. */
+function membersOf(people: { members: Record<string, unknown>[]; invites: Record<string, unknown>[] }) {
+  const out = new Map<string, { joinedAt?: number; invite?: true; memberId?: string }>();
+  for (const m of people.members) {
+    if (m.role === "owner" || m.role === "admin" || typeof m.id !== "string") continue;
+    const key = accessKey({ email: typeof m.email === "string" ? m.email : null, id: m.id });
+    if (key) out.set(key, { ...(timeOf(m.joined_at) !== undefined ? { joinedAt: timeOf(m.joined_at) } : {}), memberId: m.id });
+  }
+  for (const i of people.invites) {
+    if (i.role === "admin") continue;
+    const key = accessKey({ email: typeof i.email === "string" ? i.email : null });
+    if (key && !out.has(key)) out.set(key, { invite: true });
+  }
+  return out;
+}
+
+/**
+ * GET /v1/ws/<project>/people, for an Admin: the bots each Member and each Member's invite has (the owner's state keeps
+ * them: Workspace.memberAccess), only for people orgo-web lists to them now, and only entries for their membership now
+ * (currentFor). An Admin's, and the owner's, are never kept: they have every bot. These are people the Admin already
+ * sees on orgo-web's list.
+ */
+const peopleRead: Route = {
+  method: "GET",
+  path: "/v1/ws/*",
+  auth: "user",
+  handle: async (req, res, { user, url }) => {
+    const projectId = PEOPLE_PATH.exec(url.pathname)?.[1];
+    if (!projectId) throw new HttpError(404, "Not found");
+    const { key, target } = await asAdmin(req, user!, projectId);
+    const people = await orgoPeople(key, projectId);
+    if (!people) throw new HttpError(503, "Can't reach Orgo to read who's in this workspace. Try again.");
+    const ws = list((await ownerState(target.account)).workspaces).find((w) => w.id === target.ws);
+    if (!ws) throw new HttpError(404, "No such workspace");
+    const map = (ws.memberAccess && typeof ws.memberAccess === "object" ? ws.memberAccess : {}) as MemberAccessMap;
+    const entries: Record<string, MemberAccess> = {};
+    for (const [k, who] of membersOf(people)) {
+      const e = Object.hasOwn(map, k) ? cleanAccess(map[k]) : null;
+      if (e && currentFor(map[k], who.joinedAt)) entries[k] = { ...e, ...(typeof map[k].at === "number" ? { at: map[k].at } : {}), ...(map[k].invite ? { invite: true as const } : {}) };
+    }
+    sendJson(res, 200, { entries });
+  },
+};
+
+/** What an Admin sent for someone's bots, checked: who (a member by id, or a Member's invite by email) and their access, or null to forget it. */
+function peopleBody(b: unknown): { who: { memberId: string } | { invite: string }; access: MemberAccess | null } | null {
+  if (!b || typeof b !== "object" || Array.isArray(b)) return null;
+  const x = b as Record<string, unknown>;
+  const w = x.who && typeof x.who === "object" ? (x.who as Record<string, unknown>) : null;
+  const memberId = typeof w?.memberId === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(w.memberId) ? w.memberId : null;
+  const invite = typeof w?.invite === "string" && w.invite.length <= 320 && /^[^\s@]+@[^\s@]+$/.test(w.invite.trim()) ? w.invite.trim().toLowerCase() : null;
+  if (!!memberId === !!invite) return null;
+  const access = x.access === null ? null : cleanAccess(x.access);
+  if (x.access !== null && !access) return null;
+  return { who: memberId ? { memberId } : { invite: invite! }, access };
+}
+
+/**
+ * POST /v1/ws/<project>/people {who: {memberId} | {invite: email}, access | null}, for an Admin: the bots a Member (or a
+ * Member's invite) has, kept on the owner's state as the owner's Mac keeps them (member-access.ts withEntry), with every
+ * Mac closed. Who it is comes from orgo-web's list with the Admin's own key, asked now (never from the body): someone
+ * not listed is 404 gone, the owner or an Admin 409 (they have every bot). An invite never gets Use its computer, and
+ * access that leaves no Write turns it off (fitComputer). Written under the owner's lock as a new version by Bops Cloud
+ * (their Macs merge it in, entry by entry), then everyone watching hears it, and turns of anyone who may no longer run go.
+ * Bops Cloud writes the owner's state for an Admin only here (and the routing mirror).
+ */
+const peopleWrite: Route = {
+  method: "POST",
+  path: "/v1/ws/*",
+  auth: "user",
+  handle: async (req, res, { user, url }) => {
+    const projectId = PEOPLE_PATH.exec(url.pathname)?.[1];
+    if (!projectId) throw new HttpError(404, "Not found");
+    const body = peopleBody(await readJson<unknown>(req, 64 * 1024).catch(() => null));
+    if (!body) throw new HttpError(400, "Send {who: {memberId} | {invite}, access}");
+    await count(user!.id);
+    const asked = notices;
+    const { key, target } = await asAdmin(req, user!, projectId);
+    const people = await orgoPeople(key, projectId);
+    if (!people) throw new HttpError(503, "Can't reach Orgo to read who's in this workspace. Try again.");
+    let entryKey: string | null = null;
+    // A member's entry kept by their user id from before Orgo gave their email: never shows through once it's by email.
+    let idKey: string | null = null;
+    let invite = false;
+    if ("memberId" in body.who) {
+      const id = body.who.memberId;
+      const m = people.members.find((x) => x.id === id);
+      if (!m) throw new HttpError(404, "They're no longer in this workspace.", { code: PEOPLE_GONE });
+      if (m.role === "owner" || m.role === "admin") throw new HttpError(409, "The owner and Admins have every bot.", { code: ADMIN_HAS_ALL });
+      entryKey = accessKey({ email: typeof m.email === "string" ? m.email : null, id });
+      if (entryKey !== `user:${id}`) idKey = `user:${id}`;
+    } else {
+      const email = body.who.invite;
+      const i = people.invites.find((x) => typeof x.email === "string" && x.email.trim().toLowerCase() === email);
+      if (!i) throw new HttpError(404, "That invite isn't waiting any more.", { code: PEOPLE_GONE });
+      if (i.role === "admin") throw new HttpError(409, "An Admin's invite gives every bot.", { code: ADMIN_HAS_ALL });
+      entryKey = email;
+      invite = true;
+    }
+    if (!entryKey) throw new HttpError(400, "Orgo doesn't say who this is, so they can't be given bots.");
+    const k = entryKey;
+    const out = await tx(async (c) => {
+      await lockUser(c, target.account);
+      const blob = await lockedState(c, target.account);
+      const workspaces = list(blob.workspaces);
+      const ws = workspaces.find((w) => w.id === target.ws);
+      if (!ws) throw new HttpError(404, "No such workspace");
+      const map = (ws.memberAccess && typeof ws.memberAccess === "object" ? ws.memberAccess : undefined) as MemberAccessMap | undefined;
+      const had = map && Object.hasOwn(map, k) ? map[k] : undefined;
+      const botIds = list(blob.bots).filter((b) => wsOfBot(b) === target.ws).flatMap((b) => (typeof b.id === "string" ? [b.id] : []));
+      // An invite never has Use its computer (there's no member to give it to yet); none without Write.
+      const access = body.access && fitComputer(invite && body.access.computer === "use" ? { ...body.access, computer: "none" } : body.access, botIds);
+      const set = withEntry(map, k, access, invite ? { invite: true, ...(typeof had?.at === "number" ? { at: had.at } : {}) } : {});
+      const next = idKey && set && Object.hasOwn(set, idKey) ? withEntry(set, idKey, null) : set;
+      if (next === map) return null;
+      const written = { ...blob, workspaces: workspaces.map((w) => (w === ws ? { ...w, memberAccess: next ?? {} } : w)) };
+      await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+      return written;
+    });
+    if (out) {
+      announce(target.account);
+      stateWritten(target.account, out, "cloud");
+      void recheckTurns(target.account).catch((e: Error) => console.warn(`[members] turns recheck: ${e.message}`));
+      console.log(`[members] an Admin (${user!.id}) changed ${invite ? "an invite's" : "a member's"} bots in ${projectId}`);
+    }
+    // The Admin's access changed meanwhile (orgo-web's notice): what they did may not stand, so say so (the owner's Mac's next look keeps or drops it).
+    if ((noticed.get(keyOf(user!.id, projectId))?.n ?? 0) > asked) throw new HttpError(409, "Your access changed. Open the workspace again.");
+    sendJson(res, 200, { ok: true });
+  },
+};
+
+/**
+ * POST /v1/ws/<project>/wake {botId}: wake a bot's computer now (the shared computer panel), for an Admin or a member
+ * with Write on the bot and Use its computer (who can wake it by chatting already). As a turn's wake does, with the
+ * owner's say on one billed by the hour: never more of their money than a message to the bot would spend.
+ */
+const wakeIn: Route = {
+  method: "POST",
+  path: "/v1/ws/*",
+  auth: "user",
+  handle: async (req, res, { user, url }) => {
+    const projectId = WAKE_PATH.exec(url.pathname)?.[1];
+    if (!projectId) throw new HttpError(404, "Not found");
+    const b = await readJson<{ botId?: unknown }>(req, 4096).catch(() => null);
+    if (!b || typeof b.botId !== "string" || !anId(b.botId)) throw new HttpError(400, "Send {botId}");
+    await count(user!.id);
+    const { access: role, target } = await watchable(user!, bearer(req), projectId, { fresh: true });
+    if (role.role === "owner") throw new HttpError(403, "This is your own workspace. Wake it from your Bops.", { code: OWN_WORKSPACE });
+    const blob = await ownerState(target.account);
+    const viewer = viewerOf(user!, role);
+    const slice = sliceOf(blob, target.ws, viewer);
+    if (!slice.workspace || !slice.bots.some((x) => x.id === b.botId)) throw new HttpError(404, "No such bot");
+    const access = viewerAccess(slice.workspace, viewer);
+    if (!permits(levelOf(access, b.botId), "write")) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
+    if (!computerUseOf(slice.workspace, viewer)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
+    const desktop = computerFor(blob, b.botId);
+    if (!desktop) throw new HttpError(409, "This bot has no computer to wake.", { code: NOT_WAITING });
+    const names = { owner: "The owner", bot: String(slice.bots.find((x) => x.id === b.botId)?.name ?? "The bot") };
+    sendJson(res, 200, await wakeComputer(target.account, desktop, target.ws, names));
+  },
+};
+
+/**
+ * PATCH /v1/ws/<project>/routing {mode: "mac" | "cloud" | "auto"}: where the workspace's chat is answered, chosen by an
+ * Admin as the owner's switch does (turns.ts setRouting), kept as an Admin's choice ("admin": never moved by itself).
+ * "cloud" waits for the owner's own Mac to be new enough (never the Admin's Bops). Whether a message may wake a computer
+ * billed by the hour stays the owner's (it spends their money): 403.
+ */
+const routingIn: Route = {
+  method: "PATCH",
+  path: "/v1/ws/*",
+  auth: "user",
+  handle: async (req, res, { user, url }) => {
+    const projectId = ROUTING_PATH.exec(url.pathname)?.[1];
+    if (!projectId) throw new HttpError(404, "Not found");
+    const b = await readJson<{ mode?: unknown; allowHourly?: unknown }>(req, 4096).catch(() => null);
+    if (b && b.allowHourly !== undefined) throw new HttpError(403, "Only the owner can let messages wake a computer billed by the hour.", { code: OWNER_ALWAYS_CODE });
+    if (!b || (b.mode !== "mac" && b.mode !== "cloud" && b.mode !== "auto")) throw new HttpError(400, 'Send {mode: "mac" | "cloud" | "auto"}');
+    await count(user!.id);
+    const { target } = await asAdmin(req, user!, projectId);
+    const out = await setRouting(target.account, target.ws, { mode: b.mode }, "admin");
+    console.log(`[members] an Admin (${user!.id}) set ${projectId}'s chat to ${String(b.mode)}`);
+    sendJson(res, 200, { ok: true, ...out });
+  },
+};
+/** 403: what stays the owner's whatever (member-access.ts OWNER_ALWAYS): their money. */
+const OWNER_ALWAYS_CODE = "owner_only_always";
+
+export const routes: Route[] = [readState, actIn, changed, routingIn];
 
 /**
  * For tests: forget every answer kept, and use this clock, this way to reach orgo-web, this wait between
