@@ -2,8 +2,8 @@ import { CATEGORIES, settled, upcoming, type CategoryId, type MemoryItem } from 
 import type { Workspace } from "./types";
 
 /*
- * Favorites: Knowledge's kinds pinned to the sidebar (components/app/sidebar-sections.tsx), in the
- * user's order. Kept on the workspace (Workspace.favorites) in the synced state, so they follow the
+ * Favorites: what the user pinned to the sidebar (components/app/sidebar-sections.tsx), in their
+ * order: Knowledge's kinds, chats and threads. Nothing until they pin something. Kept on the workspace (Workspace.favorites) in the synced state, so they follow the
  * user to their other Macs; set through PATCH /api/workspaces (lib/server/workspaces.ts setFavorites).
  * Pure functions, shared by the app and the server.
  */
@@ -11,8 +11,16 @@ import type { Workspace } from "./types";
 /** A kind that can be pinned: Issues, Skills, or one of the categories (anything Knowledge opens as a section, but All). */
 export type FavoriteKind = "issues" | "skills" | CategoryId;
 
-/** What a workspace that never changed its favorites has: what the owner called the most important. */
-export const DEFAULT_FAVORITES: FavoriteKind[] = ["issues", "todos", "people"];
+/** A chat or a thread pinned, by its id ("chat:bot:boppy", "thread:ses_…"). */
+export type ItemPin = `chat:${string}` | `thread:${string}`;
+/** Anything pinned: a kind, a chat or a thread. */
+export type FavoritePin = FavoriteKind | ItemPin;
+
+export const chatPin = (chatId: string): ItemPin => `chat:${chatId}`;
+export const threadPin = (sessionId: string): ItemPin => `thread:${sessionId}`;
+/** A chat or thread pin's id, or null for a kind. */
+export const pinnedChat = (pin: string) => (pin.startsWith("chat:") ? pin.slice(5) : null);
+export const pinnedThread = (pin: string) => (pin.startsWith("thread:") ? pin.slice(7) : null);
 
 /** Every kind that can be pinned, with its name: in Knowledge's chip order. */
 export const FAVORITE_KINDS: { id: FavoriteKind; label: string }[] = [
@@ -22,20 +30,27 @@ export const FAVORITE_KINDS: { id: FavoriteKind; label: string }[] = [
 ];
 
 export const isFavoriteKind = (id: string): id is FavoriteKind => FAVORITE_KINDS.some((k) => k.id === id);
+/** A pin this build shows: a kind it knows, a chat or a thread (one since deleted is skipped where shown). */
+export const isFavoritePin = (id: string): id is FavoritePin => isFavoriteKind(id) || (ITEM.test(id) && (!!pinnedChat(id) || !!pinnedThread(id)));
 export const favoriteLabel = (id: FavoriteKind) => FAVORITE_KINDS.find((k) => k.id === id)?.label ?? id;
 
-/** The most a workspace keeps, and the shape of one pin: a kind's id (one this build doesn't know is kept, and skipped where shown). */
+/**
+ * The most a workspace keeps, and the shape of one pin: a kind's id, or a chat's or thread's ("chat:bot:boppy",
+ * "thread:ses_…"). One this build doesn't know is kept, and skipped where shown.
+ */
 export const MAX_FAVORITES = 24;
-const PIN = /^[a-z][a-z0-9_-]{0,39}$/;
+const KIND = /^[a-z][a-z0-9_-]{0,39}$/;
+const ITEM = /^(?:chat|thread):[A-Za-z0-9_:.%-]{1,100}$/;
 
 /**
- * A workspace's pins as stored (one a newer Bops added stays, so saving here never drops it): the
- * defaults while it never changed them (unset), else its list as it is, an empty one included.
+ * A workspace's pins as stored (one a newer Bops added stays, so saving here never drops it): none
+ * until the user pins something. (Bops once showed Issues, Tasks and People while a workspace never
+ * changed them; a workspace that kept those has none now. One that changed them keeps its list.)
  */
-export const storedFavorites = (w: Pick<Workspace, "favorites"> | undefined): string[] => (w?.favorites === undefined ? [...DEFAULT_FAVORITES] : w.favorites);
+export const storedFavorites = (w: Pick<Workspace, "favorites"> | undefined): string[] => w?.favorites ?? [];
 
 /** The pins to show, in the user's order: those this build knows, each once. */
-export const favoritesOf = (w: Pick<Workspace, "favorites"> | undefined): FavoriteKind[] => [...new Set(storedFavorites(w))].filter(isFavoriteKind);
+export const favoritesOf = (w: Pick<Workspace, "favorites"> | undefined): FavoritePin[] => [...new Set(storedFavorites(w))].filter(isFavoritePin);
 
 /** Pinned, or unpinned: a new pin goes last. */
 export const toggledFavorite = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
@@ -53,8 +68,8 @@ export function movedFavorite(list: string[], id: string, before: string | null)
 
 /** `id` one place up (-1) or down (1) among the pins shown. */
 export function nudgedFavorite(list: string[], id: string, by: -1 | 1) {
-  const shown = [...new Set(list)].filter(isFavoriteKind);
-  const i = shown.indexOf(id as FavoriteKind);
+  const shown = [...new Set(list)].filter(isFavoritePin);
+  const i = shown.indexOf(id as FavoritePin);
   const j = i + by;
   if (i < 0 || j < 0 || j >= shown.length) return list;
   // Down one: before the one after the next (or last); up one: before the one above.
@@ -64,7 +79,7 @@ export function nudgedFavorite(list: string[], id: string, by: -1 | 1) {
 /** A list as the server keeps it (PATCH /api/workspaces): ids of the right shape, each once, at most MAX_FAVORITES. Null: not a list. */
 export function cleanFavorites(v: unknown): string[] | null {
   if (!Array.isArray(v)) return null;
-  return [...new Set(v.filter((x): x is string => typeof x === "string" && PIN.test(x)))].slice(0, MAX_FAVORITES);
+  return [...new Set(v.filter((x): x is string => typeof x === "string" && (KIND.test(x) || ITEM.test(x))))].slice(0, MAX_FAVORITES);
 }
 
 /**

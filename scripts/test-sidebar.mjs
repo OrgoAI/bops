@@ -203,7 +203,7 @@ await test("Needs your attention: first in Favorites with how many things wait, 
   let html = render(world({ sessions: [session("s1", "nova")] }));
   assert.equal(at(html, 'data-favorite="attention"'), -1, "nothing waits: no row");
   const waiting = { sessions: [asking("s1", "nova", min(12))], watches: [alertOf("w1", "pip")] };
-  html = render(world(waiting));
+  html = render(world({ ...waiting, workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, favorites: ["issues"] }] }));
   const row = at(html, 'data-favorite="attention"');
   assert.ok(row > 0 && row < at(html, 'data-favorite="issues"'), "first in Favorites");
   assert.match(html, /Needs your attention<\/span><span[^>]*>2<\/span>/, "the thread waiting and the alert");
@@ -213,7 +213,7 @@ await test("Needs your attention: first in Favorites with how many things wait, 
   assert.ok(botBlock(render(world(waiting)), "pip").includes(`data-need="alert:w1:${min(2)}"`));
   stored.clear();
   // No pins: still there, alone.
-  html = render(world({ ...waiting, workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, favorites: [] }] }));
+  html = render(world(waiting));
   assert.ok(at(html, 'data-favorite="attention"') > 0 && at(html, 'data-favorite="issues"') === -1, "the row without the pins");
   // While searching, gone with the rest of Favorites.
   assert.equal(at(render(world(waiting), { search: "thread" }), 'data-favorite="attention"'), -1);
@@ -291,12 +291,14 @@ await test("A routine's post on a row says which routine, as the chat does above
 
 /* ---------------- Favorites ---------------- */
 
-await test("Favorites: Issues, Tasks and People until the workspace changes them; its own list after, an empty one hides it", () => {
-  assert.deepEqual(F.favoritesOf(undefined), ["issues", "todos", "people"]);
-  assert.deepEqual(F.favoritesOf({}), ["issues", "todos", "people"], "unset: the defaults");
-  assert.deepEqual(F.favoritesOf({ favorites: [] }), [], "an empty list is the user's");
+await test("Favorites: nothing until the user pins something (no section), then their list in their order", () => {
+  assert.deepEqual(F.favoritesOf(undefined), []);
+  assert.deepEqual(F.favoritesOf({}), [], "unset: nothing pinned, no seeded list");
+  assert.deepEqual(F.favoritesOf({ favorites: [] }), []);
   assert.deepEqual(F.favoritesOf({ favorites: ["events", "gone", "issues", "events"] }), ["events", "issues"], "a kind this build doesn't know is skipped, each once");
-  let html = render(world());
+  assert.equal(at(render(world()), 'data-section="favorites"'), -1, "a workspace that never pinned anything: no section");
+  const pinned = (ws, favorites) => world({ workspace: ws, workspaces: [{ id: "ws_main", name: "Main", createdAt: 1 }, { id: "ws_two", name: "Two", createdAt: 2 }].map((w) => (w.id === ws ? { ...w, favorites } : w)) });
+  let html = render(pinned("ws_main", ["issues", "todos", "people"]));
   const fav = html.slice(at(html, 'data-section="favorites"'), at(html, "Runs the team"));
   assert.deepEqual([...fav.matchAll(/data-favorite="([^"]+)"/g)].map((m) => m[1]), ["issues", "todos", "people"]);
   assert.match(fav, />Issues<.*>Tasks<.*>People</s);
@@ -310,14 +312,53 @@ await test("Favorites: Issues, Tasks and People until the workspace changes them
   assert.equal(at(render(world({ account: undefined })), 'data-section="favorites"'), -1, "no Knowledge (signed out): none");
   assert.equal(at(render(world(), { search: "x" }), 'data-section="favorites"'), -1, "none while searching");
   // Another workspace has its own.
-  html = render(world({ workspace: "ws_two", workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, favorites: [] }, { id: "ws_two", name: "Two", createdAt: 2 }] }));
-  assert.deepEqual([...html.matchAll(/data-favorite="([^"]+)"/g)].map((m) => m[1]), ["issues", "todos", "people"]);
+  html = render(pinned("ws_two", ["people"]));
+  assert.deepEqual([...html.matchAll(/data-favorite="([^"]+)"/g)].map((m) => m[1]), ["people"]);
+  assert.equal(at(render(pinned("ws_main", ["people"]), { search: "x" }), 'data-section="favorites"'), -1, "none while searching");
+});
+
+await test("Favorites: a pinned chat and a pinned thread show with their bot's face and open them; one deleted since is skipped; a chat shows without Knowledge too", () => {
+  const opened = [];
+  const t1 = session("t1", "nova", { title: "Check the trail guide PDF" });
+  // Dismissed: it stops asking, and stays in the sidebar, so its pin stays too.
+  const t2 = session("t2", "pip", { title: "Kept thread", dismissed: true });
+  const state = world({ sessions: [t1, t2], workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, favorites: ["chat:chat_pip", "thread:t1", "chat:gone", "thread:gone", "thread:t2", "people"] }] });
+  const html = render(state, { onOpenChat: (id) => opened.push(id) });
+  const fav = html.slice(at(html, 'data-section="favorites"'));
+  assert.deepEqual([...fav.matchAll(/data-favorite="([^"]+)"/g)].map((m) => m[1]).slice(0, 4), ["chat:chat_pip", "thread:t1", "thread:t2", "people"], "the gone ones skipped, a dismissed one kept");
+  assert.match(fav, /data-favorite="chat:chat_pip"[^]*?>Pip</, "the chat by its name");
+  assert.match(fav, /data-favorite="thread:t1"[^]*?>Check the trail guide PDF</, "the thread by its title");
+  const signedOut = render({ ...state, account: undefined });
+  assert.deepEqual([...signedOut.matchAll(/data-favorite="([^"]+)"/g)].map((m) => m[1]).slice(0, 2), ["chat:chat_pip", "thread:t1"], "chats and threads need no Knowledge; the kind does");
+  assert.equal(at(signedOut, 'data-favorite="people"'), -1);
+  // Kept as they are (a deleted one too, in case it's undone), and the server takes their shape.
+  assert.deepEqual(F.cleanFavorites(["chat:bot:boppy", "thread:ses_mh1x2a9f", "chat:", "thread:a b", "issues"]), ["chat:bot:boppy", "thread:ses_mh1x2a9f", "issues"]);
+});
+
+await test("Favorites: a chat's and a thread's row menu pins it (Add to Favorites) or takes it off; none in a shared workspace", async () => {
+  const { BotMenu } = await import(pathToFileURL(`${root}/components/app/bot-menu.tsx`).href);
+  const menu = (state) => renderToStaticMarkup(h(BotMenu, { state, bot: state.bots.find((b) => b.id === "pip"), x: 10, y: 10, onClose: noop, actions: { onChat: noop, onCall: noop, onComputer: noop, onProfile: noop, onNewTask: noop } }));
+  assert.match(menu(world()), /role="menuitem"[^>]*><span[^>]*>Add to Favorites</);
+  assert.match(menu(world({ workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, favorites: ["chat:chat_pip"] }] })), />Remove from Favorites</);
+  assert.ok(!menu(world({ shared: { projectId: "p9", name: "Acme", owner: "dana@acme.example", role: "admin", wsId: "ws_main" } })).includes("Favorites"), "a shared workspace's: nothing to pin");
+  // The thread row's menu: the same item, for its pin, and what picking it saves.
+  const saved = [];
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (saved.push(JSON.parse(init.body)), { ok: true, status: 200, json: async () => ({}) });
+  const fav = { can: true, pinned: (id) => id === "thread:t2", toggle: (id) => saved.push(id) };
+  assert.deepEqual(Fav.pinItems(fav, "thread:t1").map((i) => i.label), ["Add to Favorites"]);
+  assert.deepEqual(Fav.pinItems(fav, "thread:t2").map((i) => i.label), ["Remove from Favorites"]);
+  Fav.pinItems(fav, "thread:t1")[0].onPick();
+  assert.deepEqual(saved, ["thread:t1"]);
+  assert.deepEqual(Fav.pinItems({ ...fav, can: false }, "thread:t1"), [], "shared: none");
+  assert.deepEqual(F.toggledFavorite([], "chat:bot:pip"), ["chat:bot:pip"], "the first pin");
+  globalThis.fetch = fetch;
 });
 
 await test("Favorites: pin, unpin and order, keeping a newer Bops's pins; what the server keeps", () => {
   assert.deepEqual(F.toggledFavorite(["issues", "todos"], "events"), ["issues", "todos", "events"], "a new pin goes last");
   assert.deepEqual(F.toggledFavorite(["issues", "todos"], "issues"), ["todos"]);
-  assert.deepEqual(F.toggledFavorite(F.storedFavorites({}), "people"), ["issues", "todos"], "unpinning a default saves the rest as the user's");
+  assert.deepEqual(F.toggledFavorite(F.storedFavorites({}), "people"), ["people"], "a workspace that never pinned anything: the first pin");
   assert.deepEqual(F.movedFavorite(["a", "b", "c"], "c", "a"), ["c", "a", "b"]);
   assert.deepEqual(F.movedFavorite(["a", "b", "c"], "a", null), ["b", "c", "a"], "to the end");
   assert.deepEqual(F.movedFavorite(["a", "b", "c"], "b", "b"), ["a", "b", "c"]);
@@ -356,6 +397,36 @@ await test("Favorites: saves go one after another, so the newest list is the one
   await assert.rejects(Fav.saveFavorites("ws_main", ["people"]));
   globalThis.fetch = fetch;
   assert.equal((await Fav.saveFavorites("ws_main", ["people"])).status, 404, "the next one is sent");
+});
+
+await test("Favorites: a second pin made while the first is still saving keeps the first, whichever menu makes it", async () => {
+  const sent = [];
+  const answers = [];
+  const fetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    if (init?.method !== "PATCH") return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    sent.push(JSON.parse(init.body).favorites);
+    return new Promise((res) => answers.push(() => res({ ok: true, status: 200, json: async () => ({}) })));
+  };
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  // Two places that pin (a bot's menu, then another's, each its own useFavorites), the state not yet saying the first.
+  const state = world();
+  const take = () => {
+    let got;
+    renderToStaticMarkup(h(() => ((got = Fav.useFavorites(state, "ws_main")), null)));
+    return got;
+  };
+  take().toggle("chat:chat_pip");
+  await tick();
+  take().toggle("chat:chat_nova");
+  for (let i = 0; i < 4 && sent.length < 2; i++) {
+    answers.at(-1)?.();
+    await tick();
+  }
+  assert.deepEqual(sent, [["chat:chat_pip"], ["chat:chat_pip", "chat:chat_nova"]], "the second list builds on the first");
+  for (const answer of answers) answer();
+  await tick();
+  globalThis.fetch = fetch;
 });
 
 await test("Favorites: a number only when there's something to act on", () => {
