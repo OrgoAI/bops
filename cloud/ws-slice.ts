@@ -225,6 +225,8 @@ export type SliceViewer = {
   ownerEmail?: string;
   /** Whether the owner's Bops is new enough for an Admin's acts (protocol.ts ADMIN_POWERS_MIN_VERSION): SharedWsSlice.adminActs. */
   adminActs?: boolean;
+  /** Whether it publishes for an Admin (protocol.ts ADMIN_PUBLISH_MIN_VERSION): SharedWsSlice.adminPublish. */
+  adminPublish?: boolean;
 };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
@@ -292,7 +294,7 @@ const SITE_SEEN_WRITE: Spec = { ...SITE_SEEN, previewPassword: true };
 const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
 /** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
 const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
-const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, ok: true, said: true, at: true };
+const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, env: true, ok: true, said: true, at: true };
 const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
 /** The most apps a member is shown. */
 const MAX_SHARED_APPS = 30;
@@ -553,6 +555,8 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     // The owner's Bops takes an Admin's acts (members.ts adminGate), said to anyone but the owner: an Admin answers the
     // owner's own asks then, and a Member's window says an Admin can. An Admin's says when it can't yet (ownerOld).
     ...(access && viewer.adminActs ? { adminActs: true as const } : access && viewer.role === "admin" ? { ownerOld: true as const } : {}),
+    // An Admin's Publish in Your Apps, once the owner's Bops takes it (members.ts adminGate).
+    ...(access && viewer.role === "admin" && viewer.adminPublish ? { adminPublish: true as const } : {}),
   };
 }
 

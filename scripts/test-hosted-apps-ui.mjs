@@ -2837,6 +2837,56 @@ await test("Your Apps shared with the user: each site's Preview, where their Dep
   await old.done();
 });
 
+await test("Your Apps shared with an Admin, once the owner's Bops takes it (SharedOpen.adminPublish): Publish beside Deploy puts on Published what its Preview serves, and Go back works on Published's deploys too; never for a Member, nor while Bops Cloud doesn't say the owner's Bops takes it", async () => {
+  const { SharedAppsPage, actLine } = await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  const shop = {
+    name: "shop",
+    head: { id: "cs22222", message: "New cart", at: 9 },
+    sites: [{ name: "shop", url: null, preview: "https://k7p2qxm4wr3d.orgo.dev", previewLive: { id: "dp2", state: "succeeded", when: 10 }, previewServing: "cs22222", serving: "cs11111", live: { id: "d1", state: "succeeded", when: 7 }, domains: [{ domain: "shop.acme.example", status: "active" }] }],
+    deploys: [
+      { id: "dp2", state: "succeeded", at: "cs22222", rollback: false, when: 10, live: true, canRollback: false, site: "shop", env: "preview" },
+      { id: "dp1", state: "succeeded", at: "cs11111", rollback: false, when: 8, live: false, canRollback: true, site: "shop", env: "preview" },
+      { id: "d1", state: "succeeded", at: "cs11111", rollback: false, when: 7, live: true, canRollback: false, site: "shop", env: "prod" },
+      { id: "d0", state: "succeeded", at: "cs00000", rollback: false, when: 5, live: false, canRollback: true, site: "shop", env: "prod" },
+    ],
+  };
+  const state = (role, publish, app = shop) => ({ account: { user: { id: "u-ada", email: "ada@example.com" } }, shared: { projectId: "p", name: "Acme", owner: "Ava", role, wsId: "shared_p", ...(publish ? { adminActs: true, adminPublish: true } : role === "admin" ? { adminActs: true } : {}), apps: { level: "write", at: Date.now(), list: [app] } }, bots: [], workspaces: [] });
+  const buttons = (el, text) => [...el.querySelectorAll("button")].filter((b) => b.textContent === text);
+  routes["/api/workspaces/shared"] = { body: { ok: true } };
+  try {
+    const m = await mount(h(SharedAppsPage, { state: state("admin", true) }));
+    const card = m.box.querySelector('[data-shared-app="shop"]');
+    assert.deepEqual([...card.querySelectorAll("button")].map((b) => b.textContent).filter((t) => t === "Deploy" || t === "Publish"), ["Deploy", "Publish"], "Publish beside Deploy");
+    let from = calls.length;
+    await click(buttons(card, "Publish")[0]);
+    assert.deepEqual(posts(from, "/api/workspaces/shared").map((c) => c.body.act), [{ act: "deploy", app: "shop", env: "prod", at: "cs22222" }], "what its Preview serves, as they saw it");
+    await click(card.querySelector("button[aria-expanded]"));
+    const backs = buttons(card, "Go back to this one");
+    assert.deepEqual(backs.map((b) => b.parentElement.textContent.split(" · ").slice(0, 3).join(" · ")), ["Live · Preview · cs11111", "Live · Published · cs00000"], "the Preview's and Published's");
+    from = calls.length;
+    await click(backs[1]);
+    assert.deepEqual(posts(from, "/api/workspaces/shared").map((c) => c.body.act), [{ act: "rollback", app: "shop", deployment: "d0", env: "prod" }]);
+    await m.done();
+    // Nothing on its Preview yet: nothing to publish.
+    const none = await mount(h(SharedAppsPage, { state: state("admin", true, { ...shop, sites: [{ ...shop.sites[0], previewServing: null, previewLive: null }] }) }));
+    assert.equal(buttons(none.box, "Publish")[0].disabled, true);
+    await none.done();
+    // A Member, and an Admin whose owner's Bops (or Bops Cloud) doesn't say it takes Publish: the Preview's only, as before.
+    for (const [why, st] of [["a Member", state("member", true)], ["an Admin, the owner's Bops older", state("admin", false)]]) {
+      const x = await mount(h(SharedAppsPage, { state: st }));
+      assert.equal(buttons(x.box, "Publish").length, 0, why);
+      await click(x.box.querySelector("button[aria-expanded]"));
+      assert.deepEqual(buttons(x.box, "Go back to this one").map((b) => b.parentElement.textContent.split(" · ").slice(0, 2).join(" · ")), ["Live · Preview"], why);
+      await x.done();
+    }
+    // What an Admin did, said as it was: published, or tried to.
+    assert.match(actLine({ key: "k", userId: "u", name: "Ada", act: "deploy", env: "prod", ok: true, at: 1 }), /^Ada published it · /);
+    assert.match(actLine({ key: "k", userId: "u", name: "Ada", act: "deploy", env: "prod", ok: false, said: "No.", at: 1 }), /^Ada tried to publish it: No\. · /);
+  } finally {
+    delete routes["/api/workspaces/shared"];
+  }
+});
+
 /* ---------------- Local, Staging and Prod, all on the app's computer ---------------- */
 
 const E = await import(pathToFileURL(`${root}/components/app/app-envs.tsx`).href);

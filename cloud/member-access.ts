@@ -236,9 +236,11 @@ export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(acces
  * - people: invite, remove and change people (orgo-web, and the bots a Member has: Bops Cloud).
  * - workspace: rename the workspace, and say where its chat is answered.
  * - wake: wake a bot's computer.
+ * - publish: Publish an app, or roll back what's Published, from Your Apps (MemberAppAct env "prod"), with the owner's Bops
+ *   at ADMIN_PUBLISH_MIN_VERSION. (An Admin's own words publish it in chat too: lib/server/chat.ts askedForProd.)
  */
-export type AdminPower = "ownerAsk" | "macAsk" | "macThread" | "where" | "people" | "workspace" | "wake";
-export const ADMIN_POWERS: Readonly<Record<AdminPower, boolean>> = { ownerAsk: true, macAsk: true, macThread: false, where: true, people: true, workspace: true, wake: true };
+export type AdminPower = "ownerAsk" | "macAsk" | "macThread" | "where" | "people" | "workspace" | "wake" | "publish";
+export const ADMIN_POWERS: Readonly<Record<AdminPower, boolean>> = { ownerAsk: true, macAsk: true, macThread: false, where: true, people: true, workspace: true, wake: true, publish: true };
 /** Never an Admin's, whatever: the side that does each refuses it (orgo-web, Bops Cloud, the owner's Mac). */
 export const OWNER_ALWAYS = ["deleteWorkspace", "transfer", "makeOwner", "billing", "allowHourly", "payment", "resize"] as const;
 /** Whether `admin` (an Admin whose acts the owner's Bops takes) may do `power`. */

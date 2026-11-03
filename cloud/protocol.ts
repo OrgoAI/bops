@@ -775,6 +775,11 @@ export type SharedWsSlice = {
    */
   adminActs?: true;
   ownerOld?: true;
+  /**
+   * For an Admin alone, from a Bops Cloud that passes it: the owner's Bops is new enough to publish for them
+   * (ADMIN_PUBLISH_MIN_VERSION), so their Your Apps shows Publish (MemberAppAct env "prod"). Part of the fingerprint.
+   */
+  adminPublish?: true;
 };
 /** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
 export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
@@ -809,11 +814,12 @@ export type SharedApp = {
     domains?: { domain: string; status: string }[];
   }[];
   commits?: { id: string; message: string; author: string; at: number; changes: { added: number; modified: number; deleted: number } }[];
-  /** `env`: where it went (none: from an owner's Bops before Preview, Published's). Members go back on the Preview only. */
+  /** `env`: where it went (none: from an owner's Bops before Preview, Published's). Members go back on the Preview only, an Admin on Published too (adminPublish). */
   deploys?: { id: string; state: string; at: string | null; rollback: boolean; when: number | null; live: boolean; canRollback: boolean; site: string; env?: "preview" | "prod" }[];
   /** Each site's settings: Write only. */
   settings?: Record<string, { port: number | null; install: string | null; build: string | null; start: string | null; health?: string }>;
-  acts?: { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; ok: boolean; said?: string; at: number }[];
+  /** `env` "prod": an Admin's Publish (a deploy) or Roll back on Published. */
+  acts?: { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; env?: "prod"; ok: boolean; said?: string; at: number }[];
 };
 export type SharedWsState = {
   projectId: string;
@@ -859,10 +865,15 @@ export type MemberAct =
   | { act: "where"; sessionId: string; to: "mac" | "cloud" }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
-/** What a member with Your Apps at Write does to an app: deploy (the newest changeset, or `at`), go back to an earlier deploy, change a site's settings, or use one of the workspace's own domains (`zone`, its id). */
+/**
+ * What a member with Your Apps at Write does to an app: deploy (the newest changeset, or `at`), go back to an earlier deploy,
+ * change a site's settings, or use one of the workspace's own domains (`zone`, its id). `env` "prod" is an Admin's alone
+ * (ADMIN_ONLY), with the owner's Bops new enough (ADMIN_PUBLISH_MIN_VERSION, else OWNER_BOPS_OLD): a deploy is Publish (what
+ * the Preview serves goes on Published, `at` the changeset they saw there), a rollback goes back on Published. None: the Preview's.
+ */
 export type MemberAppAct =
-  | { act: "deploy"; app: string; site?: string; at?: string }
-  | { act: "rollback"; app: string; deployment: string; site?: string }
+  | { act: "deploy"; app: string; site?: string; at?: string; env?: "prod" }
+  | { act: "rollback"; app: string; deployment: string; site?: string; env?: "prod" }
   | { act: "settings"; app: string; site?: string; port?: number; install?: string; build?: string; start?: string; health?: string }
   | { act: "domain"; app: string; site?: string; zone: string; subdomain?: string };
 export const isAppAct = (a: { act: string }): a is MemberAppAct => a.act === "deploy" || a.act === "rollback" || a.act === "settings" || a.act === "domain";
@@ -932,6 +943,12 @@ export const OWNER_BOPS_OLD = "owner_bops_old";
  * Set to the release that carries them.
  */
 export const ADMIN_POWERS_MIN_VERSION = "0.0.39";
+/**
+ * The first Bops whose Mac publishes for an Admin (MemberAppAct env "prod", lib/server/member-acts.ts): an older one would
+ * put it on the Preview, so Bops Cloud refuses it (OWNER_BOPS_OLD) for an owner whose last Mac is older. Set to the release
+ * that carries it.
+ */
+export const ADMIN_PUBLISH_MIN_VERSION = "0.0.40";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
 export const NOT_WAITING = "not_waiting";
 /** 403: the caller is the workspace's owner, who acts in their own Bops. */

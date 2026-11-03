@@ -767,8 +767,8 @@ export type AppForMembers = {
   acts?: MemberAppAct[];
 };
 
-/** A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). */
-export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; ok: boolean; said?: string; at: number };
+/** A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). `env` "prod": an Admin's Publish or Roll back on Published. */
+export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; env?: "prod"; ok: boolean; said?: string; at: number };
 
 /** How much members are shown: apps, sites of each, changesets, deploys a site, and acts kept. */
 export const MEMBER_APPS = 30;

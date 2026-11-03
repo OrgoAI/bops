@@ -32,9 +32,10 @@ import type { OrgoMember } from "./orgo";
  * state keeps for them (adminOf): Bops Cloud asked orgo-web afresh as it took the act. One older than MEMBER_ACT_MS (a
  * stored message, up to a day) is an Admin only while orgo-web's list says so now, so a demotion whose notice was lost
  * isn't honored a day late; else their entry counts, as for anyone. An Admin also answers the owner's own asks (their
- * Connected apps and keys, a thread on this Mac) and picks where an undecided thread runs (the bot's computer, never this
- * Mac): member-access.ts ADMIN_POWERS. Only the owner deletes the workspace, tells a thread on this Mac more, or spends
- * their money: no act does. An answer waits as long as its ask (STORED_ACT_MS), as the run does.
+ * Connected apps and keys, a thread on this Mac), picks where an undecided thread runs (the bot's computer, never this
+ * Mac), and publishes an app or rolls back what's Published (MemberAppAct env "prod"): member-access.ts ADMIN_POWERS.
+ * Only the owner deletes the workspace, tells a thread on this Mac more, or spends their money: no act does. An answer
+ * waits as long as its ask (STORED_ACT_MS), as the run does.
  *
  * It's safe to act on as this Mac: only the tunnel can call that route, and this state agrees they have Write. One
  * refused, too late or of a shape this doesn't know is still taken (the event is acked), and dropped with a line in
@@ -64,8 +65,11 @@ const OPAQUE = /^[A-Za-z0-9_-]{1,80}$/;
 function appActOf(x: Record<string, unknown>): MemberAct | null {
   if (!isAppName(x.app) || (x.site !== undefined && !isSiteName(x.site))) return null;
   const site = typeof x.site === "string" ? { site: x.site } : {};
-  if (x.act === "deploy") return x.at === undefined || (typeof x.at === "string" && OPAQUE.test(x.at)) ? { act: "deploy", app: x.app, ...site, ...(typeof x.at === "string" ? { at: x.at } : {}) } : null;
-  if (x.act === "rollback") return typeof x.deployment === "string" && OPAQUE.test(x.deployment) ? { act: "rollback", app: x.app, deployment: x.deployment, ...site } : null;
+  // Published ("prod"): an Admin's alone (refused); none is the Preview's.
+  if ((x.act === "deploy" || x.act === "rollback") && x.env !== undefined && x.env !== "prod") return null;
+  const env = x.env === "prod" ? { env: "prod" as const } : {};
+  if (x.act === "deploy") return x.at === undefined || (typeof x.at === "string" && OPAQUE.test(x.at)) ? { act: "deploy", app: x.app, ...site, ...(typeof x.at === "string" ? { at: x.at } : {}), ...env } : null;
+  if (x.act === "rollback") return typeof x.deployment === "string" && OPAQUE.test(x.deployment) ? { act: "rollback", app: x.app, deployment: x.deployment, ...site, ...env } : null;
   if (x.act === "domain")
     return typeof x.zone === "string" && OPAQUE.test(x.zone) && (x.subdomain === undefined || (typeof x.subdomain === "string" && x.subdomain.length <= 63)) ? { act: "domain", app: x.app, ...site, zone: x.zone, ...(typeof x.subdomain === "string" ? { subdomain: x.subdomain } : {}) } : null;
   // Settings: the port, and the four commands (never its variables: changeEnv isn't a member's).
@@ -107,17 +111,12 @@ function ofApp(sessionId: string | undefined): boolean {
 /** Who the member is on their turn (chat.ts TurnOptions.member): an Admin's (adminOf) goes by the role, not by an entry. */
 const turnOf = (said: MemberSaid, admin: boolean): MemberTurn => (admin ? { ...said, role: "admin" } : said);
 
-/** How long orgo-web's list of a workspace's Admins is kept for a stored act (adminOf). */
+/** How long orgo-web's list of a workspace's Admins is kept (adminNow). */
 const ADMINS_MS = 60_000;
 const admins = new Map<string, { at: number; keys: Set<string> }>();
 
-/**
- * Whether the member is an Admin for this act: as Bops Cloud said it (MemberActPayload.role) on an act as fresh as any
- * (MEMBER_ACT_MS); on an older one (a stored message), only while orgo-web's list says so now (the owner's own key,
- * ADMINS_MS), and never when it can't be asked.
- */
 type ListMembers = (key: string, project: string) => Promise<{ status: number; json: { members?: unknown } } | null>;
-/** orgo-web's members list with the owner's own key (lib/server/orgo.ts), loaded only when a stored act needs it. */
+/** orgo-web's members list with the owner's own key (lib/server/orgo.ts), loaded only when adminNow needs it. */
 const realList: ListMembers = async (key, project) => (await import("./orgo")).orgoMembers.list(key, project);
 const ownerKey = async () => (await import("./orgo-auth")).loadOrgoKey();
 let listMembers: ListMembers = realList;
@@ -129,10 +128,23 @@ export function resetAdmins(o: { list?: ListMembers; key?: () => Promise<string 
   admins.clear();
 }
 
+/**
+ * Whether the member is an Admin for this act: as Bops Cloud said it (MemberActPayload.role) on an act as fresh as any
+ * (MEMBER_ACT_MS); on an older one (a stored message), only while orgo-web's list says so now (adminNow).
+ */
 export async function adminOf(p: MemberActPayload, who: MemberWho): Promise<boolean> {
   if (p.role !== "admin") return false;
   if (Number.isFinite(p.at) && Date.now() - p.at <= MEMBER_ACT_MS) return true;
-  const project = getState().workspaces?.find((w) => w.id === p.wsId)?.orgoProjectId ?? p.projectId;
+  return adminNow(p.wsId, who, p.projectId);
+}
+
+/**
+ * Whether orgo-web's list says `who` is an Admin of workspace `wsId` now (with this Bops' own key, kept ADMINS_MS), never
+ * when it can't be asked (no key, no workspace in Orgo, no answer). Also how a member's thread is briefed (sessions.ts
+ * memberNote): a role is never kept on a thread, so it's read where the thread is told who asked.
+ */
+export async function adminNow(wsId: string, who: Pick<MemberWho, "userId" | "email">, projectId?: string): Promise<boolean> {
+  const project = getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId ?? projectId;
   if (typeof project !== "string" || !project) return false;
   let got = admins.get(project);
   if (!got || Date.now() - got.at > ADMINS_MS) {
@@ -182,6 +194,8 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     if (appsLevelOf(access) !== "write") return "not at Write on Your Apps";
     const h = ws.hostedApps?.[act.app];
     if (!h || !sitesOfHosting(h, act.app).includes(act.site ?? act.app)) return "no such app";
+    // Publish, or going back on Published: the owner's and an Admin's (member-access.ts ADMIN_POWERS).
+    if (isPublish(act) && !adminMay("publish", admin)) return "not an Admin";
     return null;
   }
   // Compact: a chat's as saying something there, a thread's as replying in it.
@@ -378,7 +392,11 @@ const REFUSED: Record<string, string> = {
   "not at Write on Your Apps": "The owner took away Write on Your Apps.",
   "access from before they joined": "The owner took away Write on Your Apps.",
   "apps aren't open": "The owner took away Write on Your Apps.",
+  "not an Admin": "Only the owner or an Admin can publish.",
 };
+
+/** Whether an act on an app is Published's: Publish (a deploy) or going back there (a rollback), an Admin's alone. */
+const isPublish = (act: MemberAppAct) => (act.act === "deploy" || act.act === "rollback") && act.env === "prod";
 
 const keptAct = (p: MemberActPayload, act: MemberAppAct, who: MemberWho, ok: boolean, said?: string): KeptAct => ({
   key: p.key,
@@ -387,6 +405,7 @@ const keptAct = (p: MemberActPayload, act: MemberAppAct, who: MemberWho, ok: boo
   act: act.act,
   ...(act.site ? { site: act.site } : {}),
   ...(act.act === "domain" ? { domain: act.subdomain ? `${act.subdomain}.${act.zone}` : act.zone } : {}),
+  ...(isPublish(act) ? { env: "prod" as const } : {}),
   ok,
   ...(said ? { said } : {}),
   at: Date.now(),
@@ -407,8 +426,11 @@ async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, 
   let said: string | undefined;
   let domain: string | undefined;
   try {
-    // (A member's deploy, rollback and settings are the Preview's: publishing is the owner's alone.)
-    if (act.act === "deploy") await h.deployApp(p.wsId, act.app, { ...(act.at ? { at: act.at } : {}), ...(act.site ? { site: act.site } : {}), env: "preview" });
+    // (A Member's deploy, rollback and settings are the Preview's. An Admin's Publish, refused for anyone else, is the owner's
+    // Publish button's (promoteApp: what the Preview serves, `at` the changeset they saw there); going back on Published, its Roll back's.)
+    if (act.act === "deploy" && isPublish(act)) await h.promoteApp(p.wsId, act.app, act.at ? { site: act.site ?? act.app, at: act.at } : act.site ? { site: act.site } : {});
+    else if (act.act === "deploy") await h.deployApp(p.wsId, act.app, { ...(act.at ? { at: act.at } : {}), ...(act.site ? { site: act.site } : {}), env: "preview" });
+    else if (act.act === "rollback" && isPublish(act)) await h.rollbackApp(p.wsId, act.app, act.deployment, act.site);
     else if (act.act === "rollback")
       await h.rollbackApp(p.wsId, act.app, act.deployment, act.site, "preview").catch((e: unknown) =>
         // (Not one of the Preview's deploys: Published's, which only the owner rolls back.)

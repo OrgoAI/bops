@@ -329,7 +329,7 @@ const PREVIEW_ON_A_PUBLIC_URL = [
   "",
   "## Deploy and share",
   "1. Check it on Local first (Launch an app locally): that's where you look at your work.",
-  "2. deploy_app with app: it goes to the Preview. It goes live only when the owner's own words ask for that.",
+  "2. deploy_app with app: it goes to the Preview. It goes live only when the owner's or an Admin's own words ask for that.",
   "3. Wait until the preview address answers: `curl -s -o /dev/null -w '%{http_code}' <preview address>` gives a status below 500 (its password page counts: it's up).",
   "4. Give the user the link. Unless they turned its password off, say it asks for the one shown beside it in Bops.",
   "5. If the deploy fails, read its log, fix the cause, commit and deploy again. Never share a link that doesn't answer.",

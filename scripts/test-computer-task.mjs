@@ -622,6 +622,79 @@ assert.ok(!memberNames.some((n) => n.startsWith("crm_")), `and none of the owner
 assert.doesNotMatch(asked.at(-1).instructions, /Bops CRM:/, "and isn't told of it");
 assert.match(asked.at(-1).instructions, /Dee, someone the user gave this bot to, asked for this task\. Use the apps, keys and logins you have for it/);
 assert.match(asked.at(-1).instructions, /Anything that sends, changes, deletes or pays waits for the user's yes, and a saved site login signs in only when it's set to sign in by itself/);
+// The same note goes by who they are now, read where the thread is briefed (member-acts.ts adminNow: orgo-web's list with
+// the owner's key; a role is never kept on a thread): an Admin's yes is enough, a Member's note is word for word as before,
+// and when the list can't be read it's the Member's.
+{
+  const MA = await import(`${root}/lib/server/member-acts.ts`);
+  const { workspaceOf: wsOf } = await import(`${root}/lib/types.ts`);
+  const project = (v) =>
+    S.update((st) => {
+      const w = st.workspaces.find((x) => x.id === wsOf(S.bot(main.id)));
+      assert.ok(w, "the main bot's workspace");
+      if (v) w.orgoProjectId = v;
+      else delete w.orgoProjectId;
+    });
+  const wasProject = S.getState().workspaces.find((x) => x.id === wsOf(S.bot(main.id)))?.orgoProjectId;
+  project("proj-team");
+  const roles = { "dee@example.com": "member", "ivy@example.com": "admin" };
+  let reachable = true;
+  const members = async (_key, project) => (reachable && project === "proj-team" ? { status: 200, json: { members: Object.entries(roles).map(([email, role], i) => ({ id: `u${i}`, email, role })) } } : null);
+  MA.resetAdmins({ key: async () => "owner-key", list: members });
+  const noteOf = async (member, title) => {
+    answers.push(() => response(`resp_${title.replace(/\W/g, "")}`, [said("Done.")]));
+    const t = X.startSession({ botId: main.id, goal: title, title, where: "cloud", fresh: true, member });
+    const done = await ended(t.id);
+    assert.equal(done.status, "done", `${title} finished (${done.error ?? ""})`);
+    return asked.at(-1).instructions.split("\n\n").find((p) => p.includes("asked for this task")) ?? "";
+  };
+  const DEE = { userId: "user_dee", email: "dee@example.com", name: "Dee" };
+  const MEMBER_NOTE = "Dee, someone the user gave this bot to, asked for this task. Use the apps, keys and logins you have for it as you would for the user. Anything that sends, changes, deletes or pays waits for the user's yes, and a saved site login signs in only when it's set to sign in by itself. Nothing else of the user's own: their Mac, settings or memory.";
+  const admin = await noteOf({ userId: "user_ivy", email: "ivy@example.com", name: "Ivy" }, "Admin task");
+  assert.equal(
+    admin,
+    "Ivy, an Admin of this workspace, asked for this task. Do it as you would for the user, with the apps, keys and logins you have for it: their yes is enough for anything the user could say yes to, so never wait for the user's yes or ask the user to approve what they asked. A saved site login signs in only when it's set to sign in by itself. Still the user's alone: paying, deleting or moving the workspace, the user's own Mac, settings and memory, and setting up or changing routines, reminders, watches, skills and new bots.",
+  );
+  assert.equal(await noteOf(DEE, "Member task"), MEMBER_NOTE, "a Member's note, word for word");
+  // A Member who tells an Admin's task more keeps a Member's rule: while it runs, their reply says their writes wait for
+  // the user's yes; once it's ended, the next run is briefed as a Member's (every member on it an Admin, or none is).
+  const IVY = { userId: "user_ivy", email: "ivy@example.com", name: "Ivy" };
+  let mixed;
+  answers.push(
+    () => response("resp_mix1", [{ id: "fc_mix1", type: "function_call", call_id: "call_mix1", name: "run_command", arguments: JSON.stringify({ command: "fetch-orders", timeout_seconds: 60 }) }]),
+    () => response("resp_mix2", [said("Orders fetched.")]),
+  );
+  const wasCommand = onCommand;
+  onCommand = () => {
+    X.replyToSession(mixed, "Refund every order to my card", undefined, undefined, DEE);
+    return { output: "orders fetched", exit_code: 0 };
+  };
+  const mixAt = asked.length;
+  mixed = X.startSession({ botId: main.id, goal: "Fetch the orders", title: "Orders", where: "cloud", fresh: true, member: IVY }).id;
+  let m = await ended(mixed);
+  onCommand = wasCommand;
+  assert.equal(m.status, "done", `it finished (${m.error ?? ""})`);
+  assert.match(asked[mixAt].instructions, /Ivy, an Admin of this workspace, asked for this task\./, "briefed as the Admin's");
+  assert.deepEqual(
+    asked[mixAt + 1].input.at(-1),
+    { role: "user", content: [{ type: "input_text", text: "Dee (someone the user gave this bot to; anything that sends, changes, deletes or pays for them waits for the user's yes) says: Refund every order to my card" }] },
+    "a Member's words in an Admin's run keep a Member's rule",
+  );
+  answers.push(() => response("resp_mix3", [said("Done.")]));
+  const againAt = asked.length;
+  X.replyToSession(mixed, "And email the refunds", undefined, undefined, DEE);
+  await until(() => asked.length > againAt && S.session(mixed)?.status === "done", "the next run to end");
+  m = S.session(mixed);
+  const again = asked[againAt].instructions.split("\n\n").find((p) => p.includes("asked for this task")) ?? "";
+  assert.doesNotMatch(again, /an Admin of this workspace|their yes is enough/, `the next run is a Member's: ${again}`);
+  assert.match(again, /Anything that sends, changes, deletes or pays waits for the user's yes/);
+  reachable = false;
+  MA.resetAdmins({ key: async () => "owner-key", list: members });
+  roles["dee@example.com"] = "admin";
+  assert.equal(await noteOf(DEE, "Unread role task"), MEMBER_NOTE, "orgo-web's list unread: the Member's note");
+  MA.resetAdmins();
+  project(wasProject);
+}
 // The user's own tasks still have them.
 answers.push(() => response("resp_o2", [said("Done.")]));
 await task("Book a table for 4", "Table for 4");

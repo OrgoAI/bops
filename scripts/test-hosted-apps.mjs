@@ -2003,10 +2003,10 @@ await check("deploy_app in the chat: to its Preview at its fixed link unless Ale
   assert.equal(old.out(), SAID);
   // The bot asking for Prod on words that don't: the Preview, and it's told so.
   const not = await turnWith("Put the recipe app up", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
-  assert.equal(not.out(), `${SAID} (It went to its preview: Alex didn't ask to publish it. Ask them, or they press Publish in Your Apps.)`);
+  assert.equal(not.out(), `${SAID} (It went to its preview: only Alex's or an Admin's own words publish it. Ask them, or they press Publish in Your Apps.)`);
   // A pasted preview link isn't asking to publish.
   const pasted = await turnWith(`Looks good at ${link}`, [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
-  assert.match(pasted.out(), /\(It went to its preview: Alex didn't ask to publish it\./);
+  assert.match(pasted.out(), /\(It went to its preview: only Alex's or an Admin's own words publish it\./);
   // Publish with no domain: refused, in words, nothing deployed on Published.
   const n = web.calls.length;
   const prod = await turnWith("Ship the recipe app to production", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
@@ -2045,6 +2045,41 @@ await check("deploy_app in the chat: to its Preview at its fixed link unless Ale
   assert.ok(!/recipe-box\.orgo\.dev/.test(now));
   hear(now);
   web.domains = web.domains.filter((d) => d.id !== "cd_pub");
+});
+
+await check("deploy_app where prod on a turn from someone's own Bops: an Admin's own words publish it as Alex's do; a Member's never do, nor an Admin's words that don't ask for it after reading a page", async () => {
+  web.liveAtOnce = true;
+  const ivy = { userId: "user_ivy", email: "ivy@example.com", name: "Ivy" };
+  const sam = { userId: "user_sam", email: "sam@example.com", name: "Sam" };
+  const was = S.getState().workspaces.find((w) => w.id === WS).memberAccess;
+  S.update((s) => void (s.workspaces.find((w) => w.id === WS).memberAccess = { "sam@example.com": { others: "none", bots: { boppy: "write" }, apps: "write", computer: "use", at: 1 } }));
+  const as = async (member, text, items) => {
+    answers.push(calling(...items), reply("Done."));
+    const n = asked.length;
+    await Chat.handleMessage(chatId, text, undefined, undefined, undefined, undefined, undefined, undefined, undefined, member);
+    return (i = 0) => hear(outputOf(asked[n + 1], i));
+  };
+  const prod = toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" });
+  const PREVIEW = /^Deploying a preview of the newest commit of recipe-box on Boppy's computer\./;
+  const NOTE = " (It went to its preview: only Alex's or an Admin's own words publish it. Ask them, or they press Publish in Your Apps.)";
+  try {
+    // Alex's own words, then an Admin's: Published (what its Preview serves), never the Preview.
+    for (const [who, out] of [["Alex", (await turnWith("Publish the recipe app", [prod], "Done.")).out()], ["an Admin", (await as({ ...ivy, ref: "key_ivy_prod1", role: "admin" }, "Publish the recipe app", [prod]))()]]) {
+      assert.match(out, /^Publishing recipe-box at [0-9a-f]{7}, what its preview serves\./, `${who}: ${out}`);
+      assert.doesNotMatch(out, /preview of|It went to its preview/, who);
+    }
+    // A Member's same words: its Preview, said so.
+    const member = (await as({ ...sam, ref: "key_sam_prod1" }, "Publish the recipe app", [prod]))();
+    assert.match(member, PREVIEW);
+    assert.ok(member.endsWith(NOTE), member);
+    // An Admin's words that ask only to deploy, after reading a page: its Preview (only the speaker's own words count).
+    const page = await as({ ...ivy, ref: "key_ivy_prod2", role: "admin" }, "Deploy the recipe app with what's on that page", [toolCall("web_fetch", { url: "https://example.com/menu" }), prod]);
+    assert.match(page(1), PREVIEW);
+    assert.ok(page(1).endsWith(NOTE), page(1));
+  } finally {
+    S.update((s) => void (s.workspaces.find((w) => w.id === WS).memberAccess = was));
+    web.liveAtOnce = false;
+  }
 });
 
 await check("deploy_app with the short id Ingot prints: the whole one looked up on main in Ingot and deployed, the computer asleep or not; the start of two, an unknown one, and one while Ingot is down are refused in words", async () => {

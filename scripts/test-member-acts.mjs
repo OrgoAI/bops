@@ -27,7 +27,7 @@ const FAKES = {
   "chat-summary": forward("chat-summary", ["compactChat"]),
   permission: forward("permission", ["replyToAsk"]),
   persist: forward("persist", ["onRunner"]),
-  "hosted-apps": forward("hosted-apps", ["deployApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"]),
+  "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"]),
   "apps-for-members": forward("apps-for-members", ["noteMemberAct", "actKept", "seeApps"]),
 };
 registerHooks({
@@ -158,13 +158,13 @@ globalThis.__fake = {
   persist: { onRunner: () => runner },
   // The owner's page's own functions (hosted-apps.ts): each records what it was asked; `appFails` makes the next throw.
   "hosted-apps": (hosted = Object.fromEntries(
-    ["deployApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"].map((n) => [
+    ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"].map((n) => [
       n,
       async (...a) => {
         did.push([n, ...a]);
         if (appFails) throw new Error(appFails);
         // A deploy of Published's, which isn't one of the Preview's (hosted-apps.ts rollbackApp's 404).
-        if (n === "rollbackApp" && a[2] === "dep-prod") throw Object.assign(new Error("That isn't one of its recent deploys."), { status: 404 });
+        if (n === "rollbackApp" && a[2] === "dep-prod" && a[4] === "preview") throw Object.assign(new Error("That isn't one of its recent deploys."), { status: 404 });
         return n === "connectDomain" ? { domains: {}, domain: { domain: "store.acme.example" } } : {};
       },
     ]),
@@ -665,6 +665,37 @@ await check("an Admin's act on an app: Your Apps at Write with no entry, while a
   kept.length = 0;
   await memberEvent(event({ act: "deploy", app: "shop" }, { member: ADA, role: "admin", key: "key_admin_app2" }), "e_ad_app2");
   assert.ok(!did.some((d) => d[0] === "deployApp"), "never where apps aren't open to the owner");
+});
+
+await check("an Admin's Publish from Your Apps (env prod): what the Preview serves goes on Published (the changeset they saw), and Roll back goes back on Published, kept as theirs; a Member's is refused in words, nothing done", async () => {
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  kept.length = 0;
+  const admin = (act, key) => event(act, { member: ADA, role: "admin", key });
+  await memberEvent(admin({ act: "deploy", app: "shop", at: "cs-3", env: "prod" }, "key_pub_0001"), "e_pub1");
+  await memberEvent(admin({ act: "deploy", app: "shop", site: "admin", env: "prod" }, "key_pub_0002"), "e_pub2");
+  await memberEvent(admin({ act: "rollback", app: "shop", deployment: "dep-prod", env: "prod" }, "key_pub_0003"), "e_pub3");
+  await settleApps();
+  assert.deepEqual(did.filter((d) => d[0] !== "seeApps"), [
+    ["promoteApp", "ws_acme", "shop", { site: "shop", at: "cs-3" }],
+    ["promoteApp", "ws_acme", "shop", { site: "admin" }],
+    ["rollbackApp", "ws_acme", "shop", "dep-prod", undefined],
+  ]);
+  assert.deepEqual(kept.map((k) => [k[2].act, k[2].env, k[2].ok, k[2].name]), [
+    ["deploy", "prod", true, "Ada"],
+    ["deploy", "prod", true, "Ada"],
+    ["rollback", "prod", true, "Ada"],
+  ]);
+  // A Member with Your Apps at Write, sent with env prod (Bops Cloud refuses it first): refused here too, said where they'll see it.
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  kept.length = 0;
+  await memberEvent(TOM_EV({ act: "deploy", app: "shop", env: "prod" }), "e_pub4");
+  await memberEvent(TOM_EV({ act: "rollback", app: "shop", deployment: "dep-prod", env: "prod" }), "e_pub5");
+  await settleApps();
+  assert.deepEqual(did.filter((d) => d[0] !== "seeApps"), [], "nothing done");
+  assert.deepEqual(kept.map((k) => [k[2].act, k[2].ok, k[2].said]), [
+    ["deploy", false, "Only the owner or an Admin can publish."],
+    ["rollback", false, "Only the owner or an Admin can publish."],
+  ]);
 });
 
 await check("a stored message from an Admin hours ago: an Admin only while orgo-web's list says so now, never when it can't be asked", async () => {
