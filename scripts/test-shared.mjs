@@ -902,7 +902,8 @@ await check("a bot's localhost link in a shared workspace is text saying it open
   state.sessions = [...state.sessions, { ...state.sessions[0], id: "local", title: "Run Trail Guides Local", status: "running", createdAt: 8 }];
   state.messages = [...state.messages, { id: "m-local", chatId: "bot:boppy", role: "bot", botId: "boppy", text: "It runs. [Open the preview](http://localhost:3101/) or go to http://127.0.0.1:3101/start, or http://localhost:3000?view=home#cover now. Not http://localhost.example.com/ but http://localhost:3000. And http://localhost.", at: 10, sessionIds: ["local"] }];
   const shared = renderToStaticMarkup(h(LocalOnly.Provider, { value: state.bots }, h(ChatView, chatProps(state, "bot:boppy"))));
-  assert.ok(!/href="http:\/\/(localhost|127\.0\.0\.1)/.test(shared), "no link that would open the viewer's own localhost");
+  // (localhost.example.com is another host, a public one: since bare addresses are links, it may be one.)
+  assert.ok(!/href="http:\/\/(localhost|127\.0\.0\.1)(?=[:/"?#])/.test(shared), "no link that would open the viewer's own localhost");
   assert.match(text(shared), /Open the preview \(opens only on Dana's Boppy's computer\) or go to http:\/\/127\.0\.0\.1:3101\/start \(opens only on Dana's Boppy's computer\) ?, or/, "a comma after it stays the sentence's");
   assert.match(text(shared), /http:\/\/localhost:3000\?view=home#cover \(opens only on Dana's Boppy's computer\) now\./, "a query and a fragment stay with the address");
   assert.match(text(shared), /Not http:\/\/localhost\.example\.com\//);
