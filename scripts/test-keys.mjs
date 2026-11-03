@@ -186,6 +186,9 @@ globalThis.fetch = async (input, init) => {
   if (url.host === `127.0.0.1:${PORT}`) return realFetch(input, init);
   if (url.origin === "https://api.openai.com" && url.pathname === "/v1/responses") {
     const b = JSON.parse(await req.text());
+    // The chat's running summary (chat-summary.ts), made in the background once a chat is long enough: answered here,
+    // never from the queue, so a test's turns never lose an answer to it, however many turns ran before.
+    if (String(b.instructions ?? "").startsWith("You keep the running summary")) return json(response("resp_summary", [said("Alex and Boppy talked about keys.")]));
     asked.push(b);
     const next = answers.shift();
     return json(next ? await next(b) : response(`resp_${asked.length}`, [said("Done.")]));
@@ -588,6 +591,37 @@ await check("a POST asks the user, every time, even on Just do it: the chat turn
   assert.equal(messages().at(-1).text, "Boppy didn't do it: Archive the customer instead");
   assert.equal(brokerCalls().length, k);
   S.update(() => (S.bot("boppy").autoApprove = undefined));
+});
+
+await check("a write's ask carries the bot's reason in plain words, trimmed, on one line and capped; its facts line is Bops' own, from the service and the method, whatever the reason says", async () => {
+  const { apiFacts } = await import(`${root}/lib/permission.ts`);
+  const tool = (await turnWith("hi", [])).first.tools.find((t) => t.name === "call_api");
+  assert.deepEqual(tool.parameters.properties.reason.type, ["string", "null"]);
+  assert.deepEqual(tool.parameters.required, Object.keys(tool.parameters.properties), "strict: every field required, a GET's reason null");
+  assert.match(hear(tool.parameters.properties.reason.description), /under 80 characters/);
+  const askOf = async (a) => {
+    const e = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", query: null, body: null, ...a }, { chatId }, { chat: true }).then(() => null, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, `${a.method} asks`);
+    return e.ask;
+  };
+  assert.equal((await askOf({ method: "POST", path: "/v1/refunds", reason: "  Give the customer\n their money\tback  " })).reason, "Give the customer their money back");
+  const long = (await askOf({ method: "POST", path: "/v1/refunds", reason: "Give the customer their money back ".repeat(6) })).reason;
+  assert.ok(long.length <= 80 && long.startsWith("Give the customer their money back Give"), long);
+  // Characters that would hide or turn the words around on the card (a page the bot read could plant them): gone.
+  assert.equal((await askOf({ method: "POST", path: "/v1/refunds", reason: "Save a draft‮\u0007" })).reason, "Save a draft");
+  for (const reason of [null, " \n ", undefined]) assert.ok(!("reason" in (await askOf({ method: "POST", path: "/v1/refunds", reason }))), `no reason for ${JSON.stringify(reason)}: the old headline`);
+  // Bops' own words for what it does: a delete says so, and the service is the key's, whatever the reason claims.
+  const del = await askOf({ method: "DELETE", path: "/v1/customers/cus_2", reason: "Save a draft on GitHub" });
+  assert.equal(apiFacts(del.api), "Stripe · deletes something");
+  assert.equal(apiFacts((await askOf({ method: "PATCH", path: "/v1/customers/cus_2", reason: "Delete nothing" })).api), "Stripe · adds or changes something");
+  // On the request the chat opens (and the turn goes on from a no).
+  answers.push(calling(toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: '{"charge": "ch_3"}', reason: "Give the customer their money back" })), reply("Ok, not refunded."));
+  const a0 = asked.length;
+  await Chat.handleMessage(chatId, "refund ch_3");
+  const apr = S.getState().appApprovals.at(-1);
+  assert.deepEqual([apr.reason, apr.action, apr.api.method], ["Give the customer their money back", "Call Stripe", "POST"], "the reason next to the action, which Always allow still saves a rule by");
+  assert.equal(P.replyToAsk(apr.id, "reject"), undefined);
+  await until(() => asked.length === a0 + 2, "the turn to go on from the no");
 });
 
 await check("Always allow on a call with one of the user's keys saves a rule for that bot and that service, whatever it calls: the same call and any other to it go without asking after", async () => {

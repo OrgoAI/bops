@@ -2246,6 +2246,12 @@ export type AppApproval = {
   kind?: "app" | "email" | "api" | "data" | "brain";
   /** A call to an API with one of the user's keys: the key, its service, the method and the whole path. */
   api?: { key: string; label: string; method: string; path: string };
+  /**
+   * What the person gets, in the bot's own plain words ("Save the new button colour as a draft"): the card's headline,
+   * one line, at most 80 characters (lib/server/keys.ts plainReason). The bot's claim, never the truth of the call: the
+   * card's facts line (lib/permission.ts apiFacts) and Details say what is really sent. None: the action heads the card.
+   */
+  reason?: string;
   at: number;
   resume?: AskResume;
   reply?: AskAnswer;
