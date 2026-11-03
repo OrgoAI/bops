@@ -321,6 +321,13 @@ await test("A bot's reply on its row is the plain text the chat shows: a link's 
   const { Rich } = await import(pathToFileURL(`${root}/components/app/chat-view.tsx`).href);
   const words = (s) => s.replace(/<[^>]+>/g, "").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
   assert.equal(words(line(render(world({ messages: [reply(said)] })))), words(renderToStaticMarkup(h(Rich, { text: said, botId: "boppy" }))));
+  // A chat that ends on calls with a key says what its line in the chat says (keys.tsx ApiCalls), never "Called GitHub GET /repos/...".
+  const call = (id, s, path, label = "GitHub") => ({ id, chatId: "chat_boppy", role: "system", text: `Called ${label} GET ${path}`, at: min(10) + s * 1000 });
+  const reads = [1, 2, 3].map((n) => call(`c${n}`, n, `/repos/acme/site/contents/form-${n}.tsx`));
+  assert.equal(line(render(world({ messages: [reply("Done."), ...reads] }))), "Looked at 3 files on GitHub");
+  assert.equal(line(render(world({ messages: [...reads, call("s1", 4, "/v1/customers", "Stripe")] }))), "Looked at something on Stripe", "the run it ends on, another service's");
+  const failed = { id: "f1", chatId: "chat_boppy", role: "system", text: "Boppy couldn't call it: GitHub answered 404", appResult: { action: "GitHub GET /repos/acme/site/contents/x.tsx", ok: false, output: "" }, at: min(1) };
+  assert.equal(line(render(world({ messages: [...reads, failed] }))), "Boppy couldn&#x27;t call it: GitHub answered 404", "a failed one says why, as its note does");
   // A person's message is shown as they wrote it, as the chat shows it.
   assert.equal(line(render(world({ messages: [{ id: "m2", chatId: "chat_boppy", role: "user", text: "Use **bold** [here](https://trailguides.example.com)", at: min(4) }] }))), "You: Use **bold** [here](https://trailguides.example.com)");
   // So is a text or an email someone sent, and a note: the chat shows them raw (TextCard, EmailCard, SystemNote), not as a bot's words.

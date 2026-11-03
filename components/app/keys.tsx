@@ -6,8 +6,9 @@ import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot,
 import { BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon, usedLine } from "./apps";
 import { Mascot } from "./mascot";
 import { anchorOf, AppRoutines, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
+import { Fold } from "./fold";
 import { KeyIcon } from "./screen-cards";
-import { undash } from "./side-group";
+import { Chevron, undash } from "./side-group";
 import { post, teamOf } from "./ui";
 
 /*
@@ -894,6 +895,76 @@ export function apiCallOf(m: Message): ApiCall | null {
 }
 
 const methodColor = (method: string) => (method === "DELETE" ? "text-[#B42318]" : method === "GET" ? "text-[#6B6B6B]" : "text-ink");
+
+/**
+ * Whether a call changed something: anything but a GET, or one the user said yes to (`who`), as only a call that changes
+ * something asks first (lib/server/keys.ts callApi): a Slack GET that posts.
+ */
+const changes = (c: ApiCall) => c.method !== "GET" || c.who !== undefined;
+
+/** Whether two calls say one line (ApiCalls): the same service and who, both reads or both changes, neither failed. */
+export const oneLine = (a: ApiCall, b: ApiCall) => a.failed === undefined && b.failed === undefined && a.label === b.label && a.who === b.who && changes(a) === changes(b);
+
+/**
+ * Calls to one service in a row, in plain words, with how many: "Looked at 6 files on GitHub", "Boppy changed a file on
+ * GitHub". A file is what a path to one's contents names (GitHub's /contents/); anything else is a thing.
+ */
+export function callsSaid(calls: ApiCall[]) {
+  const [c] = calls;
+  const files = calls.every((x) => /\/contents(?:\/|$)/.test(x.path));
+  const what = calls.length === 1 ? (files ? "a file" : "something") : `${calls.length} ${files ? "files" : "things"}`;
+  const did = `${changes(c) ? "changed" : "looked at"} ${what} on ${c.label}`;
+  return c.who ? `${c.who} ${did}` : did[0].toUpperCase() + did.slice(1);
+}
+
+/**
+ * The calls a chat's messages end on, in a row as its line says them (oneLine, a quarter of an hour apart at most),
+ * oldest first: for the sidebar's last line (sidebar.tsx). None when the last isn't a call that went.
+ */
+export function lastCalls(messages: Message[]): ApiCall[] {
+  const calls: ApiCall[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const call = apiCallOf(messages[i]);
+    if (!call || call.failed !== undefined || (calls.length > 0 && (!oneLine(call, calls[0]) || messages[i + 1].at - messages[i].at > 15 * 60_000))) break;
+    calls.unshift(call);
+  }
+  return calls;
+}
+
+/**
+ * A bot's calls to one service in a row (oneLine) as one quiet line in the chat (callsSaid), which opens the list of
+ * what was called, each method and path whole; a single call's on hover too. A failed one keeps its own note (ApiNote).
+ */
+export function ApiCalls({ calls }: { calls: ApiCall[] }) {
+  const [open, setOpen] = useState(false);
+  const one = calls.length === 1 ? `${calls[0].method} ${calls[0].path}` : undefined;
+  return (
+    <div className="flex max-w-[440px] flex-col items-center gap-1">
+      <button
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        data-api-calls
+        title={one}
+        className="flex max-w-full items-center gap-1.5 rounded-full bg-[#F7F7F6] px-3 py-1 text-left text-[12px] leading-4 text-[#6B6B6B] outline-none hover:bg-[#F0F0EE] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+      >
+        <span className="flex shrink-0 text-[#9A9A98]">
+          <KeyIcon />
+        </span>
+        <span className="min-w-0">{callsSaid(calls)}</span>
+        <Chevron open={open} />
+      </button>
+      <Fold open={open} lazy className="w-full">
+        <ul className="flex flex-col gap-0.5 px-3 pt-0.5 text-[11px] leading-4 text-[#3A3A38]">
+          {calls.map((c, i) => (
+            <li key={i} data-api-call className="font-mono [overflow-wrap:anywhere]">
+              <span className={`font-semibold ${methodColor(c.method)}`}>{c.method}</span> {c.path}
+            </li>
+          ))}
+        </ul>
+      </Fold>
+    </div>
+  );
+}
 
 /** An API call in the chat, as a note like an app's: who called which service, the method and the path. */
 export function ApiNote({ call: c }: { call: ApiCall }) {

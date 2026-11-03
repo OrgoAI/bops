@@ -30,7 +30,7 @@ import { undash } from "./side-group";
 import { SelectIcon, TickBar, TickRow, TrashIcon, UndoLine, useMessageDeletes, type Gone } from "./message-deletes";
 import { num, privacyOf } from "@/lib/privacy";
 import { compactBlocked } from "@/lib/chat-summary";
-import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
+import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, oneLine, type ApiCall } from "./keys";
 import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { AGENTS, aiOf, hasProfile, isCli, threadAgent, upper } from "@/lib/agents";
 import { AgentChip, AgentMark } from "./agent-marks";
@@ -673,6 +673,25 @@ export function ChatView({
   const width = wide ? "mx-auto w-full max-w-[680px]" : "";
   // A delete's line: one message's where it was (before the first message shown after it), more over the message box.
   const deletedHere = linesFor(deletes.gone, c.id, visible);
+  // A bot's calls to one service in a row (keys.tsx oneLine), one line: the first's row says them all, the rest show
+  // nothing. Not across a delete's line or a quarter of an hour (the time over the next); a call with a thread's chip
+  // under it is a line of its own, so nothing after it goes above the chip; and none while picking messages, where
+  // each is its own row.
+  const callRuns = new Map<string, ApiCall[]>();
+  const inRun = new Set<string>();
+  let run: { calls: ApiCall[]; at: number } | null = null;
+  for (const m of ticking ? [] : visible) {
+    const call = apiCallOf(m);
+    const chip = chipsFor(m).length > 0;
+    if (call && run && !chip && oneLine(run.calls[0], call) && m.at - run.at <= 15 * 60_000 && !deletedHere.before.has(m.id)) {
+      run.calls.push(call);
+      run.at = m.at;
+      inRun.add(m.id);
+      continue;
+    }
+    run = call && call.failed === undefined && !chip ? { calls: [call], at: m.at } : null;
+    if (run) callRuns.set(m.id, run.calls);
+  }
 
   return (
     <PairOpen.Provider value={(id, focus) => setPair({ id, focus })}>
@@ -801,12 +820,14 @@ export function ChatView({
             </button>
           )}
           {visible.map((m, i) => {
+            if (inRun.has(m.id)) return null;
             const prev = i === 0 ? messages[hiddenCount - 1] : visible[i - 1];
             const gap = !prev || m.at - prev.at > 15 * 60_000;
             const row = (
               <MessageRow
                 m={m}
                 state={state}
+                apiRun={callRuns.get(m.id)}
                 showSender={c.kind === "group" || (!!m.botId && m.botId !== solo?.id)}
                 continued={!!prev && prev.role === m.role && prev.botId === m.botId && prev.member?.userId === m.member?.userId && !gap}
                 sessionById={sessionById}
@@ -1421,6 +1442,8 @@ type RowProps = {
   inReplies?: boolean;
   /** New since the chat opened, and how it moves in (undefined: it was already here, so it just shows). */
   arrival?: Arrival;
+  /** A call with a key that starts a run of them (keys.tsx oneLine): every call in the run, which its line says. */
+  apiRun?: ApiCall[];
 };
 
 /**
@@ -1476,7 +1499,7 @@ function MemberSendLine({ send, retry }: { send: NonNullable<Message["memberSend
   );
 }
 
-function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onOpenThread, onShowScreen, onShowMac, replyCount, root, onReply, onOpenReplies, onDelete, inReplies, arrival }: RowProps) {
+function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onOpenThread, onShowScreen, onShowMac, replyCount, root, onReply, onOpenReplies, onDelete, inReplies, arrival, apiRun }: RowProps) {
   // Decided once, as the row mounts: a poll or a new tapback draws it again but never replays it.
   // Yours carries on its pending copy's motion (a negative delay starts it partway, or past the end).
   const [enter] = useState(() =>
@@ -1919,12 +1942,13 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
       )
     ) : null;
 
-  // A call a bot made with one of your keys (keys.tsx): the service, the method and the path.
+  // A call a bot made with one of your keys (keys.tsx): in plain words, with the others in its run (ApiCalls); one
+  // that failed, the service, the method, the path and why (ApiNote).
   const api = apiCallOf(m);
   if (m.role === "system")
     return (
       <div className={`flex w-full flex-col items-center gap-1.5 self-center py-0.5 ${enterClass}`}>
-        {api ? <ApiNote call={api} /> : <SystemNote text={m.text} />}
+        {api ? api.failed !== undefined ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
         {chipList}
       </div>
     );
