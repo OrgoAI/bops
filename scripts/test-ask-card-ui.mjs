@@ -170,11 +170,14 @@ await test("the buttons are as before: Deny, Always allow, Allow once the primar
   assert.match(row, /<button[^>]*class="[^"]*bg-ink text-white[^"]*"[^>]*>Allow once</);
 });
 
-await test("the sidebar's card has the same headline, and the old one without a reason", () => {
+await test("the sidebar's card has the same headline, and the old one without a reason, over the same facts line", () => {
   const card = sidebar([ask({ reason: REASON })]);
   assert.ok(card.length > 0, "the card under Max");
-  assert.match(text(card), new RegExp(`^Max wants to: ${REASON}`));
-  assert.match(text(sidebar([ask()])), /^Max wants to call GitHub/);
+  assert.match(text(card), new RegExp(`^Max wants to: ${REASON} GitHub · adds or changes something Waiting`), "Bops' own line under the bot's words");
+  assert.match(text(sidebar([ask()])), /^Max wants to call GitHub GitHub · adds or changes something/);
+  // A reason that says it only reads can't hide a delete there either.
+  const del = sidebar([ask({ reason: "Look at the open issues", api: { key: "GITHUB_TOKEN", label: "GitHub", method: "DELETE", path: "/repos/acme/site" }, resources: ["DELETE /repos/acme/site"] })]);
+  assert.equal(text(marked(del, "data-ask-facts") ?? ""), "GitHub · deletes something");
 });
 
 /* ---------------- Opened ---------------- */
