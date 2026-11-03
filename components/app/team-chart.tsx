@@ -138,7 +138,8 @@ export const CHART_WORDS = {
   lineLeads: (lead: string, b: string) => `${lead} leads ${b}, so they can always ask each other.`,
   mayAskLabel: (a: string, b: string) => `${a} can ask ${b}`,
   answersLine: (lead: string, n: number) => `Reports to ${lead} · can ask ${n} ${n === 1 ? "bot" : "bots"}`,
-  chiefLine: (n: number) => `Runs the team · can ask ${n} ${n === 1 ? "bot" : "bots"}`,
+  // No one to ask yet (a team of one): that it runs the team, not "can ask 0 bots".
+  chiefLine: (n: number) => `Runs the team${n ? ` · can ask ${n} ${n === 1 ? "bot" : "bots"}` : ""}`,
   more: (n: number) => `+${n}`,
 };
 
@@ -1870,7 +1871,7 @@ function PeoplePart({
 
 /**
  * A bot's place on the chart in a line, for its profile: "Reports to Sam · can ask 3 bots" (the main bot:
- * "Runs the team · can ask 4 bots"). Null in a workspace shared with the user.
+ * "Runs the team · can ask 4 bots", or "Runs the team" with no bot to ask). Null in a workspace shared with the user.
  */
 export function chartLine(state: AppState, botId: string): string | null {
   if (state.shared) return null;

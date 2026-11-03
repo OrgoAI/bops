@@ -663,4 +663,11 @@ await test("the words: no dashes, and Knowledge never its old name", () => {
   }
 });
 
+await test("a bot's place in a line, for its profile: a main bot with no one to ask runs the team, never \"can ask 0 bots\"", () => {
+  // Boppy is the only bot in Main.
+  assert.equal(Chart.chartLine(stateWith(CHAIN, { workspace: "ws_main" }), "boppy"), "Runs the team");
+  const sam = Chart.chartLine(stateWith(), "sam");
+  assert.match(sam, /^Runs the team · can ask [1-9]\d* bots?$/, "with bots to ask, how many");
+});
+
 console.log(`\nteam chart: ${passed} passed`);
