@@ -35,9 +35,9 @@ export function Count({ n, quiet, scope, className }: { n: number; quiet: boolea
   );
 }
 
-export function Chevron({ open }: { open: boolean }) {
+export function Chevron({ open, up = false }: { open: boolean; up?: boolean }) {
   return (
-    <svg width="10" height="10" viewBox="0 0 12 12" className={`shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "rotate-90" : ""}`} aria-hidden>
+    <svg width="10" height="10" viewBox="0 0 12 12" className={`shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? (up ? "-rotate-90" : "rotate-90") : ""}`} aria-hidden>
       <path d="M4.5 3l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );

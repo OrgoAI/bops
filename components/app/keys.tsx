@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
+import type { DiffLine } from "@/lib/skill-proposals";
 import { KEYS_GIVEN_LINE, OWNERS_KEY_LINE, REPLY_WAITS_LINE } from "@/lib/shared";
 import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type FileChange, type LastUses, type Message, type Watch } from "@/lib/types";
 import { BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon, usedLine } from "./apps";
@@ -9,6 +10,7 @@ import { Mascot } from "./mascot";
 import { anchorOf, AppRoutines, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
 import { Fold } from "./fold";
 import { KeyIcon } from "./screen-cards";
+import { DiffRow } from "./skill-proposals";
 import { Chevron, undash } from "./side-group";
 import { post, teamOf } from "./ui";
 
@@ -1114,50 +1116,160 @@ export function apiAskOf(a: AppApproval): { name: string; label: string; method:
 const FILE_OP = { add: "added", change: "changed", delete: "deleted" } as const;
 const sizeOf = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
+/** A line of a change's words under its file: one taken out or put in, or Bops' note between them ("at line 12"). */
+type ChangeRow = DiffLine | { note: string };
+
+/**
+ * A change's words (AppApproval.preview, as lib/server/repo-change.ts writes them), file by file: the lines before the
+ * first file but the repository and branch, which the facts line says already (a new branch's base stays), each file's
+ * lines under its own "<path>: changed, 59 B" line, in the card's order, and how many lines it changes (null when one
+ * isn't a line: an older Bops's "and 4 more lines"). Null when the words aren't in that shape, which the card shows as they are.
+ */
+export function changeOf(change: FileChange, preview: string): { head: string[]; files: ChangeRow[][]; changed: number | null } | null {
+  // A line is never empty ("+ " at least), so a blank line only ever ends a part.
+  const parts = preview.split("\n\n");
+  const skip = parts.length - change.files.length;
+  if (skip !== 0 && skip !== 1) return null;
+  const files: ChangeRow[][] = [];
+  for (const [i, f] of change.files.entries()) {
+    const [first, ...rest] = parts[skip + i].split("\n");
+    if (!first.startsWith(`${f.path}: `)) return null;
+    files.push(rest.map((l) => (/^[+-] /.test(l) ? { t: l[0] as "+" | "-", s: l.slice(2) } : { note: l })));
+  }
+  const rows = files.flat();
+  return {
+    head: skip ? parts[0].split("\n").filter((l) => l !== `${change.repo}, branch ${change.branch}`) : [],
+    files,
+    changed: rows.every((r) => "t" in r || /^at line \d+$/.test(r.note)) ? rows.filter((r) => "t" in r).length : null,
+  };
+}
+
+/** The closed card's quiet line for a change: "2 files · 14 lines changed" (just the files when the lines can't be counted). */
+export function changeSize(change: FileChange, shown: ReturnType<typeof changeOf>) {
+  const n = change.files.length;
+  const lines = shown?.changed;
+  return `${n} file${n === 1 ? "" : "s"}${lines ? ` · ${lines} line${lines === 1 ? "" : "s"} changed` : ""}`;
+}
+
 /**
  * The call an approval card asks about, under Details (closed until it's opened): the method, the whole path, then what
  * goes with it, and whose key Orgo sends it with. The card's headline and facts line say it in plain words above.
+ *
+ * A change to files says its size on the closed card in one quiet line beside Details, and opens to every line it
+ * changes, file by file, in one scroll area that never outgrows the window: all of what Allow writes. Details stays
+ * under the pointer as it opens and shuts: its row sits under what it opens (the dock over the composer grows upward),
+ * and while the fold moves, whatever scrolls the card (that dock, once it's as tall as it gets) takes up any difference.
  */
 export function ApiAsk({ ask, detail, botName }: { ask: NonNullable<ReturnType<typeof apiAskOf>>; detail: string; botName: string }) {
   const [open, setOpen] = useState(false);
-  return (
-    <div className="flex flex-col gap-1">
-      <button
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        data-ask-details
-        className="flex items-center gap-1 self-start rounded-md py-0.5 text-[12px] font-medium leading-4 text-[#6B6B6B] outline-none hover:text-ink focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
-      >
-        Details
-        <Chevron open={open} />
-      </button>
-      <Fold open={open}>
-        <div className="flex flex-col gap-1.5 pt-0.5">
-          <div className="flex flex-col gap-1.5 rounded-xl bg-[#F7F7F6] px-3 py-2">
-            {/* A change to files in one go: each file and what happens to it, in place of a method and a path. */}
-            {ask.change ? (
-              <ul data-change-files className="flex flex-col gap-0.5 text-[12.5px] leading-[18px]">
-                {ask.change.files.map((f) => (
-                  <li key={f.path} data-change-file className="flex items-start gap-2">
+  const row = useRef<HTMLDivElement>(null);
+  const flip = () => {
+    setOpen(!open);
+    const el = row.current;
+    let box = el?.parentElement ?? null;
+    while (box && !/^(auto|scroll)$/.test(getComputedStyle(box).overflowY)) box = box.parentElement;
+    if (!el || !box) return;
+    const scroller = box;
+    const y = el.getBoundingClientRect().top;
+    // As long as the fold moves (fold.tsx: 200 ms), then a frame or two more.
+    const end = performance.now() + 320;
+    const hold = () => {
+      const d = el.getBoundingClientRect().top - y;
+      if (Math.abs(d) >= 0.5) scroller.scrollTop += d;
+      if (performance.now() < end) requestAnimationFrame(hold);
+    };
+    requestAnimationFrame(hold);
+  };
+  const toggle = (
+    <button
+      onClick={ask.change ? flip : () => setOpen(!open)}
+      aria-expanded={open}
+      data-ask-details
+      className="flex items-center gap-1 self-start rounded-md py-0.5 text-[12px] font-medium leading-4 text-[#6B6B6B] outline-none hover:text-ink focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+    >
+      Details
+      <Chevron open={open} up={!!ask.change} />
+    </button>
+  );
+  const keyLine = (
+    <span className="text-[12px] leading-4 text-[#6B6B6B]">
+      Orgo sends it to {ask.label} with your key (<span className="font-mono text-[11px]">{ask.name}</span>). {botName} never sees the key.
+    </span>
+  );
+  if (ask.change) {
+    const change = ask.change;
+    const shown = changeOf(change, detail);
+    return (
+      <div className="flex flex-col gap-1">
+        <Fold open={open} up>
+          <div className="flex flex-col gap-1.5 pb-1">
+            {/* As tall as leaves the open card inside the dock over the composer (45vh: chat-view.tsx), the rest of the card
+                being about 16rem, so its lines scroll here alone; never under 7.5rem or over 320px. */}
+            <div
+              role="region"
+              aria-label="What changes"
+              tabIndex={0}
+              data-change-diff
+              className="flex max-h-[clamp(7.5rem,calc(45vh-16rem),320px)] flex-col gap-2 overflow-y-auto rounded-xl bg-[#F7F7F6] py-1.5 outline-none focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+            >
+              {shown?.head.map((l) => (
+                <span key={l} className="px-3 text-[12px] leading-4 text-[#6B6B6B] [overflow-wrap:anywhere]">
+                  {l}
+                </span>
+              ))}
+              {change.files.map((f, i) => (
+                <div key={f.path} data-change-file className="flex flex-col gap-0.5">
+                  {/* Each file under its name: what happens to it and its size, as the facts line counts it. */}
+                  <div className="flex items-start gap-2 px-3 text-[12.5px] leading-[18px]">
                     <span className="min-w-0 flex-1 select-text font-mono text-[12px] text-ink [overflow-wrap:anywhere]">{f.path}</span>
                     <span className={`shrink-0 ${f.op === "delete" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
                       {FILE_OP[f.op]}
                       {f.bytes !== undefined ? ` · ${sizeOf(f.bytes)}` : ""}
                     </span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="flex items-start gap-2 font-mono text-[12.5px] leading-[18px]">
-                <span className={`shrink-0 rounded-md bg-white px-1.5 text-[11.5px] font-semibold shadow-[0_0_0_1px_#E6E6E3] ${methodColor(ask.method)}`}>{ask.method}</span>
-                <span className="min-w-0 select-text text-ink [overflow-wrap:anywhere]">{ask.path}</span>
-              </div>
-            )}
+                  </div>
+                  {!!shown?.files[i].length && (
+                    <pre className="font-mono text-[11.5px] leading-4 text-[#3A3A38]">
+                      {shown.files[i].map((r, j) =>
+                        "note" in r ? (
+                          <div key={j} className="whitespace-pre-wrap px-3 text-[#9A9A98] [overflow-wrap:anywhere]">
+                            {r.note}
+                          </div>
+                        ) : (
+                          <DiffRow key={j} line={r} />
+                        ),
+                      )}
+                    </pre>
+                  )}
+                </div>
+              ))}
+              {/* An older Bops's words, in another shape: as they are. */}
+              {!shown && detail && <pre className="whitespace-pre-wrap px-3 font-mono text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">{detail}</pre>}
+            </div>
+            {keyLine}
+          </div>
+        </Fold>
+        <div ref={row} className="flex items-center gap-2">
+          {toggle}
+          <span data-change-size className="text-[12px] leading-4 text-[#6B6B6B]">
+            {changeSize(change, shown)}
+          </span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      {toggle}
+      <Fold open={open}>
+        <div className="flex flex-col gap-1.5 pt-0.5">
+          <div className="flex flex-col gap-1.5 rounded-xl bg-[#F7F7F6] px-3 py-2">
+            <div className="flex items-start gap-2 font-mono text-[12.5px] leading-[18px]">
+              <span className={`shrink-0 rounded-md bg-white px-1.5 text-[11.5px] font-semibold shadow-[0_0_0_1px_#E6E6E3] ${methodColor(ask.method)}`}>{ask.method}</span>
+              <span className="min-w-0 select-text text-ink [overflow-wrap:anywhere]">{ask.path}</span>
+            </div>
             {detail && <pre className="max-h-[180px] overflow-y-auto whitespace-pre-wrap font-mono text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">{detail}</pre>}
           </div>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">
-            Orgo sends it to {ask.label} with your key (<span className="font-mono text-[11px]">{ask.name}</span>). {botName} never sees the key.
-          </span>
+          {keyLine}
         </div>
       </Fold>
     </div>
