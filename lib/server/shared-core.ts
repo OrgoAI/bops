@@ -646,6 +646,7 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       // The owner's Bops takes an Admin's acts (cloud/ws-slice.ts sharedSlice), or, for an Admin, not yet.
       ...(s.adminActs ? { adminActs: true as const } : {}),
       ...(s.ownerOld && open.role === "admin" ? { ownerOld: true as const } : {}),
+      ...(s.adminPublish && open.role === "admin" ? { adminPublish: true as const } : {}),
       ...(data.you ? { you: data.you } : {}),
       // Your Apps, when the owner gave it (cloud/ws-slice.ts appsFor), and what the user did to them that hasn't landed.
       ...(s.apps ? { apps: s.apps } : {}),

@@ -54,6 +54,8 @@ export type SharedOpen = SharedWorkspace & {
    */
   adminActs?: true;
   ownerOld?: true;
+  /** For an Admin: the owner's Bops publishes for them (SharedWsSlice.adminPublish), so Your Apps shows Publish. */
+  adminPublish?: true;
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
 };

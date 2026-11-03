@@ -33,6 +33,7 @@ import {
   CHAT_AUTO_OFF,
   PEOPLE_GONE,
   ADMIN_POWERS_MIN_VERSION,
+  ADMIN_PUBLISH_MIN_VERSION,
   OWNER_BOPS_OLD,
   MEMBER_ACT_MS,
   MEMBER_ACTS_A_MINUTE,
@@ -215,10 +216,12 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
  * Who the caller is to the workspace, as ws-slice.ts sharedSlice takes it: orgo-web's role (an Admin has every bot:
  * ws-slice.ts viewerAccess), their email (their access is kept by it), user id (a guest's is), when their membership
  * began (access set before isn't theirs), their Use its computer as orgo-web says it, and the owner's email (apps).
+ * `adminActs` and `adminPublish`: the owner's Bops takes an Admin's acts, and publishes for them (adminGate).
  */
-export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false): SliceViewer => ({
+export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false): SliceViewer => ({
   role: access.role,
   ...(adminActs && access.role !== "owner" ? { adminActs: true } : {}),
+  ...(adminPublish && access.role === "admin" ? { adminPublish: true } : {}),
   id: user.id,
   ...(user.email ? { email: user.email } : {}),
   ...(access.joinedAt !== undefined ? { joinedAt: access.joinedAt } : {}),
@@ -231,19 +234,20 @@ export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false): 
 /** How long whether an owner's Bops takes an Admin's acts is kept (adminGate). */
 const GATE_MS = 60_000;
 const gates = new Map<string, { at: number; yes: boolean }>();
-const realGate = (owner: string) => macNewEnough(owner, ADMIN_POWERS_MIN_VERSION);
-let gateOf: (owner: string) => Promise<boolean> = realGate;
+const realGate = (owner: string, min: string) => macNewEnough(owner, min);
+let gateOf: (owner: string, min: string) => Promise<boolean> = realGate;
 
 /**
- * Whether the owner's Bops takes an Admin's acts (protocol.ts ADMIN_POWERS_MIN_VERSION): the last Mac of theirs that said
- * its version (turns.ts macNewEnough), kept GATE_MS. An older one would drop what it doesn't know, so they're refused
- * here first (OWNER_BOPS_OLD). Never throws: no answer is a no.
+ * Whether the owner's Bops takes an Admin's acts (protocol.ts ADMIN_POWERS_MIN_VERSION), or those from `min` on (Publish:
+ * ADMIN_PUBLISH_MIN_VERSION): the last Mac of theirs that said its version (turns.ts macNewEnough), kept GATE_MS. An
+ * older one would drop what it doesn't know, so they're refused here first (OWNER_BOPS_OLD). Never throws: no answer is a no.
  */
-export async function adminGate(owner: string): Promise<boolean> {
-  const hit = gates.get(owner);
+export async function adminGate(owner: string, min = ADMIN_POWERS_MIN_VERSION): Promise<boolean> {
+  const k = `${min} ${owner}`;
+  const hit = gates.get(k);
   if (hit && now() - hit.at < GATE_MS) return hit.yes;
-  const yes = await gateOf(owner).catch(() => false);
-  gates.set(owner, { at: now(), yes });
+  const yes = await gateOf(owner, min).catch(() => false);
+  gates.set(k, { at: now(), yes });
   if (gates.size > CACHE_MAX) for (const [k, v] of gates) if (now() - v.at > GATE_MS) gates.delete(k);
   return yes;
 }
@@ -373,7 +377,7 @@ const readState: Route = {
     const blob = await ownerState(target.account);
     // What this caller is shown: all of it for the owner, else only the bots the owner gave them (by
     // their email or user id; none when neither is there). Its messages are only of the chats it has.
-    const viewer = viewerOf(user!, access, access.role !== "owner" && (await adminGate(target.account)));
+    const viewer = viewerOf(user!, access, access.role !== "owner" && (await adminGate(target.account)), access.role === "admin" && (await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION)));
     const slice = sharedSlice(blob, target.ws, viewer);
     const bots = viewer.role === "owner" ? undefined : botsOf(slice);
     const handed = bots && handedByOthers(blob, bots);
@@ -489,12 +493,15 @@ const command = (v: unknown) => typeof v === "string" && v.length <= 1000;
 function appAct(key: string, x: Record<string, unknown>): { key: string; act: MemberAct } | null {
   if (!appName(x.app) || (x.site !== undefined && !appName(x.site, 32))) return null;
   const site = x.site !== undefined ? { site: x.site as string } : {};
+  // Where a deploy or a rollback goes: the Preview (none), or Published ("prod": an Admin's, checked as it's taken).
+  const envOk = x.env === undefined || x.env === "prod";
+  const env = x.env === "prod" ? { env: "prod" as const } : {};
   switch (x.act) {
     case "deploy":
-      if (x.at !== undefined && (typeof x.at !== "string" || !OPAQUE.test(x.at))) return null;
-      return { key, act: { act: "deploy", app: x.app, ...site, ...(typeof x.at === "string" ? { at: x.at } : {}) } };
+      if ((x.at !== undefined && (typeof x.at !== "string" || !OPAQUE.test(x.at))) || !envOk) return null;
+      return { key, act: { act: "deploy", app: x.app, ...site, ...(typeof x.at === "string" ? { at: x.at } : {}), ...env } };
     case "rollback":
-      return typeof x.deployment === "string" && OPAQUE.test(x.deployment) ? { key, act: { act: "rollback", app: x.app, deployment: x.deployment, ...site } } : null;
+      return typeof x.deployment === "string" && OPAQUE.test(x.deployment) && envOk ? { key, act: { act: "rollback", app: x.app, deployment: x.deployment, ...site, ...env } } : null;
     case "settings": {
       if (x.port !== undefined && (typeof x.port !== "number" || !Number.isInteger(x.port) || x.port < 1 || x.port > 65535)) return null;
       const cmds = ["install", "build", "start", "health"] as const;
@@ -751,6 +758,8 @@ const actIn: Route = {
     if (role.role === "owner") throw new HttpError(403, "This is your own workspace. Act in it from your Bops.", { code: OWN_WORKSPACE });
     const blob = await ownerState(target.account);
     const actor: Actor = { role: role.role, adminActs: await adminGate(target.account) };
+    // Publish from Your Apps (env "prod"): an Admin's, with the owner's Bops new enough (an older one would put it on the Preview).
+    if ((body.act.act === "deploy" || body.act.act === "rollback") && body.act.env === "prod") adminOnly({ role: role.role, adminActs: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) });
     const viewer = viewerOf(user!, role, actor.adminActs);
     // Their own view, every item whole and with the owner's ids: what they may act on is only what they're shown.
     const slice = sliceOf(blob, target.ws, viewer);
@@ -1237,8 +1246,8 @@ export function resetMembers(
     cancel?: (projectId: string, userId: string) => Promise<void>;
     routed?: (owner: string, ws: string) => Promise<boolean>;
     storedFirst?: (owner: string, ws: string) => Promise<boolean>;
-    /** Whether the owner's Bops takes an Admin's acts (adminGate). A test that fakes the owner's state says no, unless it says. */
-    adminGate?: (owner: string) => Promise<boolean>;
+    /** Whether the owner's Bops takes an Admin's acts from `min` on (adminGate). A test that fakes the owner's state says no, unless it says. */
+    adminGate?: (owner: string, min: string) => Promise<boolean>;
     answerHere?: (o: Parameters<typeof answerOnComputer>[0]) => Promise<boolean>;
     /** How a computer is woken for an answer Bops Cloud wrote (unset: turns.ts wakeComputer). */
     wake?: typeof wakeComputer;

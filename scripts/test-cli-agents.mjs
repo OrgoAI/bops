@@ -1039,6 +1039,37 @@ await test("a reply picks the Codex thread back up: exec resume on the thread it
   assert.match(heardBy(r.pid).find((h) => h.got).got, /^Now add a test for it/);
 });
 
+await test("a member's thread on a brain is briefed by who they are now (member-acts.ts adminNow, read as it's briefed): an Admin's yes is enough, a Member's every write waits for the owner", async () => {
+  const MA = await import(`${root}/lib/server/member-acts.ts`);
+  const { workspaceOf } = await import(`${root}/lib/types.ts`);
+  const project = (v) =>
+    S.update((st) => {
+      const w = st.workspaces.find((x) => x.id === workspaceOf(S.bot(main.id)));
+      if (v) w.orgoProjectId = v;
+      else delete w.orgoProjectId;
+    });
+  const was = S.getState().workspaces.find((x) => x.id === workspaceOf(S.bot(main.id)))?.orgoProjectId;
+  project("proj-team");
+  const people = [{ id: "u1", email: "ivy@example.com", role: "admin" }, { id: "u2", email: "dee@example.com", role: "member" }];
+  MA.resetAdmins({ key: async () => "owner-key", list: async (_key, p) => (p === "proj-team" ? { status: 200, json: { members: people } } : null) });
+  const brief = async (member, goal) => {
+    const s = X.startSession({ botId: main.id, goal, title: goal, where: "cloud", fresh: true, member });
+    const t = await ended(s.id);
+    assert.equal(t.status, "done", `${goal} finished (${t.error ?? ""})`);
+    return settings(execs().at(-1).args).developer_instructions;
+  };
+  try {
+    const admin = await brief({ userId: "user_ivy", email: "ivy@example.com", name: "Ivy" }, "Fix the header");
+    assert.match(admin, /Ivy, an Admin of this workspace, asked for this task\. [^\n]*their yes is enough for anything [^\n]* could say yes to, so never wait for [^\n]*'s yes or ask [^\n]* to approve what they asked\./);
+    assert.doesNotMatch(admin, /someone [^\n]* gave this bot to, asked for this task|Anything that sends, changes, deletes or pays waits for/);
+    const member = await brief({ userId: "user_dee", email: "dee@example.com", name: "Dee" }, "Fix the footer");
+    assert.match(member, /Dee, someone [^\n]* gave this bot to, asked for this task\. [^\n]*Anything that sends, changes, deletes or pays waits for [^\n]*'s yes/);
+  } finally {
+    MA.resetAdmins();
+    project(was);
+  }
+});
+
 await test("a reply while Codex works waits for its next turn, and goes in then, on the same thread", async () => {
   const n = execs().length;
   X.replyToSession(cx1, "SLOW: check the totals");

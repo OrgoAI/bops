@@ -4822,7 +4822,7 @@ async function wholeId(wsId: string, name: string, at: string, ours: () => boole
 
 /**
  * deploy_app, for a bot: changeset `at` of an app (the newest on main when null; its short id works too) on its
- * Preview, in words for the model, with its fixed link. `where` prod (only when the owner's own words asked to
+ * Preview, in words for the model, with its fixed link. `where` prod (only when the owner's or an Admin's own words asked to
  * publish it: chat.ts) is Publish: what the Preview serves goes on its domain; an `at` that isn't what the
  * Preview serves is refused (it goes on the Preview first, to look at). `ours`: the state the work began on, when
  * it began before this call (deployAfterTask).

@@ -2069,6 +2069,44 @@ await check("an Admin's turn (MemberTurn.role) has every bot and Your Apps at Wr
   }
 });
 
+await check("an Admin's turn says they're an Admin: their yes is enough, never waiting for the owner, on the owner's Mac and on a computer's runner; a Member's line word for word as before", async () => {
+  const ivy = { userId: "user_ivy", email: "ivy@example.com", name: "Ivy" };
+  const sam = { userId: "user_sam", email: "sam@example.com", name: "Sam" };
+  const said = (text, member) => Chat.handleMessage(chatId, text, undefined, undefined, undefined, undefined, undefined, undefined, undefined, member);
+  /** The line of the turn's notes that says who's talking. */
+  const talking = (body) => body.input.filter((x) => x.role === "developer").flatMap((x) => String(x.content).split("\n")).find((l) => l.includes("is talking to you now")) ?? "";
+  const was = S.getState().workspaces[0].memberAccess;
+  answers.length = 0;
+  try {
+    S.update((s) => (s.workspaces[0].memberAccess = { "sam@example.com": { others: "none", bots: { boppy: "write" } } }));
+    // The owner's Mac (member-acts.ts handleMessage), then a computer's runner (runner-chat.ts answerMessage keeps the role).
+    answers.push(reply("Hi Ivy."));
+    let n = asked.length;
+    await said("change the site and put it live", { ...ivy, ref: "key_ivy_line1", role: "admin" });
+    const mac = talking(asked[n]);
+    const id = S.addMessage({ chatId, role: "user", text: "and the other page", member: { ...ivy, ref: "key_ivy_line2" } }).id;
+    answers.push(reply("On it."));
+    n = asked.length;
+    await Chat.answerMessage(chatId, id, { ...ivy, ref: "key_ivy_line2", role: "admin" });
+    const box = talking(asked[n]);
+    for (const [where, line] of [["the owner's Mac", mac], ["a computer's runner", box]]) {
+      assert.match(line, /^"Ivy" \(ivy@example\.com\) is talking to you now, not Alex: an Admin of this workspace\. Do what they ask as you would for Alex: their yes is enough for anything Alex could say yes to, so never ask Alex to approve what they ask, and never say it waits for Alex\./, `${where}: ${line}`);
+      assert.match(line, / Still Alex's alone: paying, deleting or moving the workspace, Alex's own Mac and settings, and setting up or changing routines, reminders, watches, skills and new bots\./, `${where}: ${line}`);
+      assert.doesNotMatch(line, /waits for Alex's yes|gave this bot to/, `${where}: ${line}`);
+    }
+    // A Member at Write: exactly the line they had before.
+    answers.push(reply("Hi Sam."));
+    n = asked.length;
+    await said("hello", { ...sam, ref: "key_sam_line1" });
+    assert.equal(
+      talking(asked[n]),
+      `"Sam" (sam@example.com) is talking to you now, not Alex: someone Alex gave this bot to. Do what they ask as you would for Alex. You may use the apps, keys and logins you have here for them, but anything that sends, changes, deletes or pays waits for Alex's yes, so say so. Nothing else of Alex's own: their Mac or settings. Routines, reminders, watches, skills, apps and new bots are Alex's to set up or change, and what Sam tells you about themselves is never a fact about Alex. Say who you're answering when it isn't clear.`,
+    );
+  } finally {
+    S.update((s) => (s.workspaces[0].memberAccess = was));
+  }
+});
+
 await check("a member's turn that paused for an OK goes on as theirs (ChatPause keeps who it was)", async () => {
   const sam = { userId: "user_sam", email: "sam@example.com", name: "Sam" };
   const ask = { id: "apr_sam", botId: "boppy", chatId, action: "Send it", resources: [], preview: "", at: 1, reply: { reply: "reject", at: 2 }, resume: { engine: "chat", responseId: "resp_paused", callId: "call_paused", call: { name: "use_app", arguments: "{}" }, outputs: [], turn: { member: sam, config: { model: "gpt-test", effort: "low" }, seen: [], madeUp: [], outsideRead: false } } };

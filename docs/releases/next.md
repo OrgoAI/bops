@@ -1,0 +1,1 @@
+- An Admin's yes is enough: bots no longer wait for the owner, and Admins can publish apps in chat or from Your Apps.

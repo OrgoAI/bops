@@ -13,7 +13,9 @@ import { ago } from "./ui";
  * addresses (each site's Preview link, where a member's Deploy goes, with its state), what they serve, deploys and
  * history, and domains; Write also sees a Preview's password, deploys, goes back to an earlier Preview deploy, changes
  * a site's settings and uses one of the workspace's own domains, each sent to the owner's Bops (memberAct), which does
- * it and keeps it on the app under their name. Never its variables, logs or a domain to buy: the owner's.
+ * it and keeps it on the app under their name. An Admin, once the owner's Bops takes it (SharedOpen.adminPublish), also
+ * publishes (what its Preview serves goes on Published) and goes back on Published. Never its variables, logs or a domain
+ * to buy: the owner's.
  */
 
 /** Every word the shared page says (the tests read them for dashes and the old name). */
@@ -32,6 +34,7 @@ export const SHARED_APPS_WORDS = {
   waiting: "Waiting for the owner's Bops to open.",
   failed: "That didn't go. Try again.",
   deploy: "Deploy",
+  publish: "Publish",
   goBack: "Go back to this one",
   save: "Save",
   use: "Use",
@@ -46,10 +49,10 @@ export const SHARED_APPS_WORDS = {
   live: "Live",
   notOnWeb: "Not on the web yet",
   subdomain: "Subdomain",
-  acted: (who: string, a: Pick<MemberAppAct, "act" | "site"> & { domain?: string }) =>
-    a.act === "deploy" ? `${who} deployed it` : a.act === "rollback" ? `${who} went back to an earlier deploy` : a.act === "settings" ? `${who} changed ${a.site ? `${a.site}'s` : "its"} settings` : `${who} pointed ${a.domain ?? "a domain"} at it`,
-  tried: (who: string, act: MemberAppAct["act"], said: string) =>
-    `${who} tried to ${act === "deploy" ? "deploy it" : act === "rollback" ? "go back to an earlier deploy" : act === "settings" ? "change its settings" : "use a domain"}: ${said}`,
+  acted: (who: string, a: Pick<MemberAppAct, "act" | "site"> & { domain?: string; env?: "prod" }) =>
+    a.act === "deploy" ? (a.env === "prod" ? `${who} published it` : `${who} deployed it`) : a.act === "rollback" ? `${who} went back to an earlier deploy` : a.act === "settings" ? `${who} changed ${a.site ? `${a.site}'s` : "its"} settings` : `${who} pointed ${a.domain ?? "a domain"} at it`,
+  tried: (who: string, act: MemberAppAct["act"] | "publish", said: string) =>
+    `${who} tried to ${act === "publish" ? "publish it" : act === "deploy" ? "deploy it" : act === "rollback" ? "go back to an earlier deploy" : act === "settings" ? "change its settings" : "use a domain"}: ${said}`,
 };
 const W = SHARED_APPS_WORDS;
 
@@ -66,7 +69,7 @@ export function asOf(at: number, now = Date.now()) {
 
 /** What a member's act on an app says, done or not, with when (the owner's rows and the member's own). */
 export function actLine(a: NonNullable<SharedApp["acts"]>[number]) {
-  return `${a.ok ? W.acted(a.name, a) : W.tried(a.name, a.act, a.said ?? W.failed)} · ${asOf(a.at)}`;
+  return `${a.ok ? W.acted(a.name, a) : W.tried(a.name, a.act === "deploy" && a.env === "prod" ? "publish" : a.act, a.said ?? W.failed)} · ${asOf(a.at)}`;
 }
 
 const BUTTON = "rounded-full px-3 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
@@ -76,6 +79,8 @@ export function SharedAppsPage({ state }: { state: AppState }) {
   const ws = state.shared?.name ?? "";
   if (!apps) return null;
   const write = apps.level === "write";
+  // An Admin whose owner's Bops publishes for them (Bops Cloud says so only then: ADMIN_PUBLISH_MIN_VERSION).
+  const publish = write && state.shared?.role === "admin" && state.shared.adminPublish === true;
   return (
     <div data-shared-apps className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
       <div className="flex flex-col gap-1">
@@ -88,7 +93,7 @@ export function SharedAppsPage({ state }: { state: AppState }) {
       ) : (
         <div className="flex flex-col gap-3">
           {apps.list.map((a) => (
-            <SharedAppCard key={a.name} app={a} apps={apps} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
+            <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
           ))}
         </div>
       )}
@@ -99,8 +104,8 @@ export function SharedAppsPage({ state }: { state: AppState }) {
 
 type Pending = NonNullable<NonNullable<AppState["shared"]>["appActs"]>[number];
 
-/** One app: its state, address and Deploy; its sites, history, deploys, settings and domains open below. */
-function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApps; acts: Pending[] }) {
+/** One app: its state, address and Deploy (and an Admin's Publish); its sites, history, deploys, settings and domains open below. */
+function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean }) {
   const [open, setOpen] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const write = apps.level === "write";
@@ -128,9 +133,23 @@ function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApp
           </span>
         </button>
         {write ? (
-          <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name })} className={`${BUTTON} bg-ink text-white`}>
-            {W.deploy}
-          </button>
+          <>
+            <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name })} className={`${BUTTON} bg-ink text-white`}>
+              {W.deploy}
+            </button>
+            {/* An Admin's Publish, as the owner's: what its Preview serves goes on Published (the changeset seen here, for an app of one site). */}
+            {publish && (
+              <button
+                type="button"
+                data-shared-publish
+                disabled={!!going || !pv || !site.previewServing}
+                onClick={() => void send({ act: "deploy", app: a.name, env: "prod", ...(pv && site.previewServing && !a.siteNames?.length ? { at: site.previewServing } : {}) })}
+                className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}
+              >
+                {W.publish}
+              </button>
+            )}
+          </>
         ) : (
           <span data-tip={W.readOnly} className="flex">
             <button type="button" disabled className={`${BUTTON} text-[#9A9A98] shadow-[0_0_0_1px_#ECECEA]`}>
@@ -202,9 +221,9 @@ function SharedAppCard({ app: a, apps, acts }: { app: SharedApp; apps: SharedApp
                     {[stateWord(d.state), d.env === "preview" ? W.preview : d.env === "prod" ? W.published : null, d.at ? shortId(d.at) : null, d.site !== a.name ? d.site : null, d.when ? ago(d.when) : null].filter(Boolean).join(" · ")}
                   </span>
                   {d.live && <span className="text-[#1E7A4C]">{W.live}</span>}
-                  {/* Members go back on its Preview only (lib/server/member-acts.ts): never on a Published deploy. */}
-                  {write && d.canRollback && !d.live && d.env !== "prod" && (
-                    <button type="button" disabled={!!going} onClick={() => void send({ act: "rollback", app: a.name, deployment: d.id, ...(d.site !== a.name ? { site: d.site } : {}) })} className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}>
+                  {/* Members go back on its Preview only (lib/server/member-acts.ts); an Admin who may publish, on Published too. */}
+                  {write && d.canRollback && !d.live && (d.env !== "prod" || publish) && (
+                    <button type="button" disabled={!!going} onClick={() => void send({ act: "rollback", app: a.name, deployment: d.id, ...(d.site !== a.name ? { site: d.site } : {}), ...(d.env === "prod" ? { env: "prod" as const } : {}) })} className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}>
                       {W.goBack}
                     </button>
                   )}

@@ -5,8 +5,8 @@ import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
 import { accessSummary, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
-import { accessFor, adminGate, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, watchable } from "../members.ts";
-import { MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
+import { accessFor, adminGate, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
+import { ADMIN_POWERS_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
 /**
@@ -1728,4 +1728,58 @@ test("over HTTP: in a workspace of Orgo's team, Your Apps at Write deploys, goes
     await refused({ act: "settings", app: "shop", port: 8080 }, 403, "member_apps_read_only");
   }
   assert.equal(queued.length, n, "nothing refused was queued");
+});
+
+test("Publish from Your Apps (a deploy or a rollback with env prod) is an Admin's, once the owner's Bops takes it: queued with where it goes; a Member's, an Admin's while the owner's Bops is older and any other env are refused, nothing queued; the slice says so to an Admin alone", async () => {
+  const blob = appsBlob({ apps: "write" });
+  // The owner's Bops takes an Admin's acts (ADMIN_POWERS_MIN_VERSION); Publish only while ownerNew (members.ts adminGate's `min`).
+  let ownerNew = true;
+  const fakes = () =>
+    resetMembers({
+      state: async () => blob,
+      queue: async (owner, kind, payload, dedupe, expires) => void queued.push({ owner, kind, payload: payload as MemberActPayload, dedupe, expires }),
+      isOn: () => true,
+      drop: async () => {},
+      count: async () => {},
+      adminGate: async (_owner: string, min: string = ADMIN_POWERS_MIN_VERSION) => min === ADMIN_POWERS_MIN_VERSION || ownerNew,
+    });
+  fakes();
+  queued.length = 0;
+  roles["apps-ada proj-apps"] = { role: "admin", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps", ownerEmail: STAFF_OWNER };
+  emails["apps-ada"] = "ada@example.com";
+  roles["apps-sam proj-apps"] = { role: "member", ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps", ownerEmail: STAFF_OWNER };
+  emails["apps-sam"] = "sam@example.com";
+  const go = (user: string, a: unknown, key: string) => act(user, { key, act: a }, "proj-apps");
+  assert.equal((await go("apps-ada", { act: "deploy", app: "shop", at: "cs-2", env: "prod" }, "k_pub_00001")).status, 202);
+  assert.deepEqual([queued.at(-1)?.payload.act, queued.at(-1)?.payload.role], [{ act: "deploy", app: "shop", at: "cs-2", env: "prod" }, "admin"]);
+  assert.equal((await go("apps-ada", { act: "rollback", app: "shop", deployment: "dep-1", env: "prod" }, "k_pub_00002")).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "rollback", app: "shop", deployment: "dep-1", env: "prod" });
+  // The Preview's, as before.
+  assert.equal((await go("apps-sam", { act: "deploy", app: "shop" }, "k_pub_00003")).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "deploy", app: "shop" });
+  const n = queued.length;
+  const refused = async (user: string, a: unknown, status: number, code?: string) => {
+    const r = await go(user, a, `k_no_${String(Math.random()).slice(2, 10)}`);
+    assert.deepEqual([r.status, r.json.code], [status, code], `${user} ${JSON.stringify(a)}`);
+  };
+  // A Member with Your Apps at Write: the Preview's only.
+  await refused("apps-sam", { act: "deploy", app: "shop", env: "prod" }, 403, "admin_only");
+  await refused("apps-sam", { act: "rollback", app: "shop", deployment: "dep-1", env: "prod" }, 403, "admin_only");
+  // No other env is an act.
+  await refused("apps-ada", { act: "deploy", app: "shop", env: "staging" }, 400);
+  // The owner's Bops older than Publish for Admins would put it on the Preview: refused first.
+  ownerNew = false;
+  fakes();
+  await refused("apps-ada", { act: "deploy", app: "shop", env: "prod" }, 409, "owner_bops_old");
+  await refused("apps-ada", { act: "rollback", app: "shop", deployment: "dep-1", env: "prod" }, 409, "owner_bops_old");
+  assert.equal(queued.length, n, "nothing refused was queued");
+  assert.equal((await go("apps-ada", { act: "deploy", app: "shop" }, "k_pub_00004")).status, 202, "the Preview's still");
+  // The slice: Publish for an Admin whose owner's Bops takes it (viewerOf, from the gate), never for a Member or the owner.
+  const slice = (role: "admin" | "member" | "owner", publish: boolean) => sharedSlice(blob, "ws_apps", viewerOf({ id: `u-${role}`, email: `${role}@example.com` } as Parameters<typeof viewerOf>[0], { role, ownerUserId: "apps-owner", bopsWsId: "ws_apps", name: "Apps", ownerEmail: STAFF_OWNER } as WsAccess, true, publish));
+  assert.equal(slice("admin", true).adminPublish, true);
+  assert.deepEqual([slice("admin", false).adminPublish, slice("member", true).adminPublish, slice("owner", true).adminPublish], [undefined, undefined, undefined]);
+  assert.notEqual(sharedHash(slice("admin", true)), sharedHash(slice("admin", false)), "the owner updating gives a new fingerprint");
+  // cleanAct: env prod kept on a deploy and a rollback; never on settings or a domain.
+  assert.deepEqual(cleanAct({ key: "k_12345678", act: { act: "deploy", app: "shop", env: "prod" } }), { key: "k_12345678", act: { act: "deploy", app: "shop", env: "prod" } });
+  assert.deepEqual(cleanAct({ key: "k_12345678", act: { act: "settings", app: "shop", port: 3000, env: "prod" } }), { key: "k_12345678", act: { act: "settings", app: "shop", port: 3000 } });
 });
