@@ -95,6 +95,7 @@ export function PreviewTab({
   copy,
   own,
   onScreen,
+  botBrowser,
 }: {
   ws: string;
   name: string;
@@ -114,6 +115,8 @@ export function PreviewTab({
   own: boolean;
   /** Its Local opened on its bot's screen: show that screen (`display`, the one it opened on, when the server said). */
   onScreen: (display?: number) => void;
+  /** Its bot's browser, for when the bot needs this page's session itself (a sign-in): the same address opened there, in your control. */
+  botBrowser?: { name: string; open: (url: string) => void };
 }) {
   const local = useLocal(ws, name);
   const mine = site ?? name;
@@ -432,6 +435,11 @@ export function PreviewTab({
             </svg>
           </button>
         </span>
+        {botBrowser && (
+          <button data-preview-bot-browser onClick={() => botBrowser.open(at)} className={PILL}>
+            {`Open in ${botBrowser.name}'s browser`}
+          </button>
+        )}
         {place === "local" && (
           <span data-tip={screen?.error ?? (screen?.said ? undefined : "Open it on its computer's screen")} className="flex shrink-0">
             <button data-preview-screen disabled={!!screen?.busy} onClick={() => void toScreen()} className={`${PILL} ${screen?.error ? "text-[#B42318]" : ""}`}>

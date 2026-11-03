@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import * as agent from "./agent.ts";
+import * as browser from "./browser.ts";
 import { appVersionOf, fromIphone, noteAppVersion, noteIphoneVersion, requireAppVersion, requireIphoneVersion, requireUsageAppVersion, startAppPolicy } from "./app-version.ts";
 import { bearer, computerSeenAt, requireUser, userForKey, type CloudUser } from "./auth.ts";
 import { captureCloudException, inTelemetryScope, shutdownTelemetry } from "./analytics.ts";
@@ -33,7 +34,7 @@ import * as verify from "./verify.ts";
 /**
  * Bops Cloud. One process serves every user: each module owns its routes (session.ts, proxy.ts,
  * verify.ts, lines.ts, handles.ts, plans.ts, ops.ts, tunnel.ts, hooks.ts, slack.ts, state.ts, pages.ts,
- * usage.ts, agent.ts, live.ts, members.ts, turns.ts, delete-user.ts) and this file only puts them together. See README.md.
+ * usage.ts, agent.ts, live.ts, members.ts, turns.ts, delete-user.ts, browser.ts) and this file only puts them together. See README.md.
  */
 
 const health: Route = {
@@ -72,8 +73,9 @@ export const routes = (): Route[] => [
   ...members.routes,
   ...turns.routes,
   ...deleteUser.routes,
+  ...browser.routes,
 ];
-export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades];
+export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades, ...browser.upgrades];
 
 /** The request's address, or null when it can't be read as one ("//" and the like): a 400, never a crash. */
 function requestUrl(req: IncomingMessage): URL | null {
@@ -256,6 +258,8 @@ async function main() {
     turns.closeRunners();
     // Every live stream ends: each device reconnects to the next start, and is reset (live.ts).
     live.closeAll();
+    // Every bot's browser stream and runner socket ends too: each reconnects to the next start (browser.ts).
+    browser.closeBrowser();
     // Usage events still queued go out first (up to 2 seconds).
     void shutdownTelemetry().finally(() => server.close(() => process.exit(0)));
     setTimeout(() => process.exit(0), 5_000).unref();

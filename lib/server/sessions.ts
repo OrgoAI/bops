@@ -4029,9 +4029,10 @@ function describe(tool?: string, args?: Record<string, unknown>) {
  * running there, the thread that ended there waiting on them at the screen (a sign in, a code, a check, a payment:
  * waitingAt) is the one they're there for: handing the screen back carries it on, on the computer that ran it
  * (returnControl, replyToSession). `forThread`: the thread whose card they came from (its Sign in), that one; null,
- * none (a brain's sign in on a free screen).
+ * none (a brain's sign in on a free screen). `by`: who took it, when it isn't the owner at this Bops (someone in the
+ * bot's browser, through its computer's runner: browser-runner.ts), named in the chat.
  */
-export async function takeOver(botId: string, display: number, forThread?: string | null) {
+export async function takeOver(botId: string, display: number, forThread?: string | null, by?: string) {
   const held = getState().takeover;
   const same = held?.botId === botId && held.display === display;
   // One screen at a time: moving to another screen hands the last one back first.
@@ -4043,8 +4044,9 @@ export async function takeOver(botId: string, display: number, forThread?: strin
     update((state) => (state.takeover = { botId, display, sessionId: (s ?? left)?.id, ...(left ? { found: "left" as const } : {}), since: Date.now() }));
     keepDriving();
     trackServerEvent("bops_takeover_started", { screen: getState().host === "mac" ? "mac" : "bot_computer", paused_task: !!s });
+    // The reason is the pause's mark (PAUSED), whoever took it: Hand back carries the thread on.
     if (s) stopSession(s.id, "Paused while you took over");
-    if (s) addMessage({ chatId: s.chatId, role: "system", text: `You took over from ${bot(s.botId)?.name} · paused ${s.title}` });
+    if (s) addMessage({ chatId: s.chatId, role: "system", text: `${by ?? "You"} took over from ${bot(s.botId)?.name} · paused ${s.title}` });
   }
   // An Orgo computer: Orgo hears it's in use now, and one that's asleep wakes for you. One that can't
   // (Free's hours this month used, say) hands control straight back, and the bot's chat says why.

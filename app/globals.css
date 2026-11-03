@@ -169,6 +169,69 @@
   }
 }
 
+/* Where a cursor pressed, on the bot's browser beside the chat (components/app/browser-cursor.tsx): a ring that opens
+   out once and goes. Reduced motion holds it still instead (it says where, so it stays). */
+@keyframes cursor-ring {
+  0% {
+    opacity: 0.95;
+    scale: 0.45;
+  }
+  100% {
+    opacity: 0;
+    scale: 1.25;
+  }
+}
+
+/* The bot browsing, on its browser beside the chat (components/app/bot-browser.tsx): its face breathes (motion says
+   it's working), and one slow light runs along the frame's edge, transform and opacity only. Reduced motion: the ring
+   holds still and the light goes; the edge stays. */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.06);
+  }
+}
+.browser-sweep {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 2px;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+.browser-sweep::before {
+  content: "";
+  position: absolute;
+  inset: -40% -20%;
+  background: linear-gradient(105deg, transparent 44%, rgb(10 10 10 / 0.55) 50%, transparent 56%);
+  animation: browser-sweep 4200ms cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+@keyframes browser-sweep {
+  0% {
+    transform: translateX(-75%);
+  }
+  70%,
+  100% {
+    transform: translateX(75%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .browser-sweep::before {
+    animation: none;
+    opacity: 0;
+  }
+}
+
 @keyframes cut-note {
   0% {
     opacity: 0;

@@ -1016,3 +1016,82 @@ export type RunnerResume = { ok: true; now: number; humanAt: number };
 export const TURN_LEASE_MS = 90_000;
 /** How often a runner beats. */
 export const TURN_BEAT_MS = 30_000;
+
+/* ---------------- The bot's browser (cloud/browser.ts, lib/browser-relay.ts) ---------------- */
+
+/**
+ * The bot's browser, as a tab beside the chat (components/app/bot-browser.tsx): the page in front of the Chrome of the
+ * screen its task holds, as a CDP screencast (JPEG frames) that the runner on its computer captures and Bops Cloud
+ * relays, never keeps. Bops Cloud lets watch, and take control, only the owner and a member with Write on that bot
+ * and Use its computer (cloud/browser.ts mayUseBrowser, the check a member's computer chat turn goes by: turns.ts
+ * memberStill). A person in control sends only these CDP methods, each with its parameters checked
+ * (lib/browser-relay.ts cleanInput); anything else is refused, on the runner, whatever Bops Cloud let through.
+ */
+export const BROWSER_METHODS = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"] as const;
+export type BrowserMethod = (typeof BROWSER_METHODS)[number];
+export const isBrowserMethod = (v: unknown): v is BrowserMethod => typeof v === "string" && (BROWSER_METHODS as readonly string[]).includes(v);
+
+/** Someone watching or in control, as Bops Cloud vouches for them: their Orgo user id and the name others see. */
+export type BrowserPerson = { id: string; name: string };
+
+/**
+ * A pointer event in the page, as the page itself saw it (trusted events only, watched from a world of the relay's own
+ * the page can't see: lib/browser-relay.ts): a move, a press, a release or a scroll, at CSS pixels of the page (the
+ * frame's own space). `by` on the wire: who drove it, the person in control, else the bot (null). Never kept.
+ */
+export type BrowserPointer = { kind: (typeof POINTER_KINDS)[number]; x: number; y: number };
+export const POINTER_KINDS = ["move", "down", "up", "wheel"] as const;
+
+/** A frame's geometry, from CDP's Page.screencastFrame metadata: the page's size in CSS pixels, and where it's scrolled to. */
+export type BrowserFrameMeta = { deviceWidth: number; deviceHeight: number; offsetTop: number; pageScaleFactor: number; scrollOffsetX: number; scrollOffsetY: number; timestamp?: number };
+
+/**
+ * What a bot is doing with its browser, as its computer says (lib/browser-relay.ts activity): a step browsing on it, or
+ * none (idle); a step waiting for the person in control to hand back (`waiting`); a sign-in it asked a person to do
+ * there (`signIn`: the page's address), or none. Bops Cloud keeps only the latest, in memory, for whoever may watch.
+ */
+export type BrowserActivity = { step: "browsing" | "idle"; waiting: boolean; signIn: string | null };
+
+/**
+ * What Bops Cloud tells a runner on its socket (WS /v1/browser/runner): who watches each of its bots' browsers now
+ * ("watch", the whole list each time; empty: nobody), and what a viewer asked ("take", "release", "input"). A take
+ * by the owner (`over`) takes control from a member who has it; a member's never takes it from anyone.
+ */
+export type BrowserToRunner =
+  | { t: "watch"; bot: string; viewers: BrowserPerson[] }
+  | { t: "take"; bot: string; who: BrowserPerson; over?: true }
+  | { t: "release"; bot: string; who: BrowserPerson }
+  | { t: "input"; bot: string; who: BrowserPerson; method: string; params: unknown };
+
+/** What a runner sends Bops Cloud, each for the bots whose viewers see that screen (`bots`); Bops Cloud passes each on to those viewers as a BrowserEvent. */
+export type RunnerToBrowser =
+  | { t: "frame"; bots: string[]; data: string; meta: BrowserFrameMeta }
+  | { t: "page"; bots: string[]; url: string; title: string; back: number | null }
+  | { t: "control"; bots: string[]; by: BrowserPerson | null }
+  | ({ t: "pointer"; bots: string[]; by: BrowserPerson | null } & BrowserPointer)
+  | ({ t: "activity"; bots: string[] } & BrowserActivity)
+  | { t: "refused"; bots: string[]; to: string; why: string };
+
+/**
+ * What a viewer's stream carries (GET /v1/browser/watch, server-sent events named for `t`): frames, the page's address and
+ * title (`back`: the history entry Back goes to, null when there's none), who has control (`you`: the viewer does), a
+ * pointer event on the page and who drove it (`you`: the viewer, whose own pointer is never drawn twice), what the bot
+ * is doing with it ("activity"), an input of theirs refused and why (no `code`), or the stream itself, as they may no
+ * longer watch (a `code`), and whether the bot's computer is connected at all ("computer"). `?only=activity`: a stream of
+ * "activity" and "computer" alone, which isn't watching (nothing is captured for it): a Watch chip's.
+ */
+export type BrowserEvent =
+  | { t: "frame"; data: string; meta: BrowserFrameMeta }
+  | { t: "page"; url: string; title: string; back: number | null }
+  | { t: "control"; by: BrowserPerson | null; you: boolean }
+  | ({ t: "pointer"; by: BrowserPerson | null; you: boolean } & BrowserPointer)
+  | ({ t: "activity" } & BrowserActivity)
+  | { t: "refused"; why: string; code?: string }
+  | { t: "computer"; connected: boolean };
+
+/** POST /v1/browser/act: take control, hand it back, or (in control) one CDP input. `project`: a shared workspace's Orgo id; none for the caller's own bots. */
+export type BrowserAct = { bot: string; project?: string; act: "take" | "release" | "input"; method?: string; params?: unknown };
+
+/** Why Bops Cloud won't let someone watch a bot's browser (403, with the words to show them). */
+export const BROWSER_NEEDS_WRITE = "browser_needs_write";
+export const BROWSER_NEEDS_COMPUTER = "browser_needs_computer";

@@ -14,7 +14,9 @@
     "app:build": "node -e \"require('fs').writeFileSync('desktop/repo.json', JSON.stringify({ path: process.cwd() }))\" && electron-builder --mac --dir -c.mac.identity=null",
     "app:install": "npm run app:build && rm -rf /Applications/Bops.app && ditto dist-desktop/mac-arm64/Bops.app /Applications/Bops.app",
     "fast": "next build && next start --port 3210",
-    "app:release": "scripts/release.sh"
+    "app:release": "scripts/release.sh",
+    "two-person": "node scripts/dev-two-person.mjs start",
+    "two-person:stop": "node scripts/dev-two-person.mjs stop"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

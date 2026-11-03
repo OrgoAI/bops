@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BLOCKER_LABEL, computerAsleep, computerCheckMs, computerInUse, DISPLAYS, isScreenWatch, live, streamsLive, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { freeComputerOpen, ownIsBops, setupShort } from "@/lib/orgo-plans";
+import { BotBrowser } from "./bot-browser";
 import { BotCursor } from "./bot-cursor";
 import { LiveDesktop, Waking } from "./live-desktop";
 import { LiveScreen, type ScreenInput } from "./live-screen";
@@ -18,7 +19,7 @@ import { canWake, OUT_OF_CREDIT_WAKE } from "@/lib/bops-billing";
 import { freeHoursOutLine } from "@/lib/plan-includes";
 import { AppLogo, botApps } from "./apps";
 import { botBezel, botOnInk, botWash, MonitorIcon, post, screenNo } from "./ui";
-import { readOnly, SHARED_SCREEN_WORDS, yourMac } from "@/lib/shared";
+import { browserLine, readOnly, seesBrowser, SHARED_SCREEN_WORDS, yourMac } from "@/lib/shared";
 import { useWindowVisible } from "./window-visible";
 import { ago, onSameComputer, screenMap, teamScreens, type ScreenKind, type TeamScreen } from "@/lib/screens";
 
@@ -418,6 +419,8 @@ export function ComputerView({
             ? "email"
             : null;
 
+  // A workspace shared with the user: the bot's browser, when the owner gave them Write on it and Use its computer.
+  if (!hasComputer && seesBrowser(state, b)) return <BotBrowser key={state.shared?.projectId} bot={b} project={state.shared?.projectId} hidden={hidden} inset />;
   if (!hasComputer) return <NoComputer state={state} bot={b} host={c} />;
 
   // The panel centers the screen with what's under it: thumbnails, the follow line, the status.
@@ -1239,13 +1242,15 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
     );
   // A workspace shared with the user: the computer (or the Mac) is the owner's, with nothing here to set up. An Admin
   // sees its screen live and can take control (SharedScreen); anyone else reads where its work shows, and someone who
-  // may use the computer is pointed at it on orgo.ai. Never an empty card the size of a screen.
+  // may use the computer is pointed at it on orgo.ai. A Member whose Bops could show the bot's browser in place of the
+  // computer (seesBrowser) is told why it doesn't yet (browserLine). Never an empty card the size of a screen.
   if (state.shared) {
     if (b.runsOn !== "mac" && state.shared.role === "admin" && state.shared.screens?.includes(b.id)) return <SharedScreen state={state} bot={b} />;
     const orgoUrl = b.runsOn !== "mac" && (state.shared.role === "admin" || state.shared.computer) ? state.shared.orgoUrl : undefined;
     return (
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 py-2 text-[14px] leading-5 text-[#6B6B6B]">
         <span>{`${b.name} works on ${b.runsOn === "mac" ? yourMac(state) : "the owner's computer"}. Its work shows in the chat.`}</span>
+        {browserLine(state, b) && <span data-browser-why>{browserLine(state, b)}</span>}
         {orgoUrl && <OrgoLink href={orgoUrl} label={state.shared.role === "admin" ? SHARED_SCREEN_WORDS.open : SHARED_SCREEN_WORDS.watch} />}
         {/* Someone who may use it wakes it here too, as a message to the bot would (Bops Cloud, with the owner's say on an hourly bill). */}
         {b.runsOn !== "mac" && state.shared.computer && !readOnly(state, [b.id]) && cloudWakes(state) && <WakeButton botId={b.id} />}

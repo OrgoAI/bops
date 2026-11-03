@@ -3,7 +3,7 @@
 import { createContext, createElement, useEffect, useRef, useState } from "react";
 import { APPS_NAME, appsLine } from "@/lib/apps-access";
 import { GROUP_NAME } from "@/lib/memory-categories";
-import { live, type AppState } from "@/lib/types";
+import { live, type AppState, type Bot } from "@/lib/types";
 import { computerOf } from "@/lib/screens";
 import { AutopilotIcon, type AutopilotSection } from "./autopilot";
 import type { Section } from "./bot-panel";
@@ -14,7 +14,7 @@ import { AppMark, AppsIcon } from "./made-apps";
 import { KnowledgeIcon, type OrbitSection } from "./memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MonitorIcon, teamOf } from "./ui";
-import { readOnly } from "@/lib/shared";
+import { readOnly, seesBrowser } from "@/lib/shared";
 
 /*
  * The right side is a row of tabs in the title bar, like a browser's. The first tab is always the
@@ -55,10 +55,55 @@ export type PanelTab =
    * http://localhost:<its port> on this Mac (`url`), in a session of its own (previewPartition). `bot`: the bot whose
    * copy of the app it's of (lib/hosted-apps.ts copyBotOf; none: the app's own folder's). Never saved.
    */
-  | { id: string; kind: "preview"; ws: string; name: string; site?: string; bot?: string; url: string };
+  | { id: string; kind: "preview"; ws: string; name: string; site?: string; bot?: string; url: string }
+  /** A bot's browser (bot-browser.tsx): the page in front on the screen its task holds, live, to watch and take over. Never saved. */
+  | { id: string; kind: "browser"; botId: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
+/**
+ * The tab beside it, for the owner and an Admin: the chat's bot's browser (bot-browser.tsx), when that bot works on a
+ * computer (browserBeside). It follows the chat too, and doesn't close. A Member's has no second tab: their first tab
+ * is the browser.
+ */
+export const BROWSER_TAB = "browser";
+
+/**
+ * Whether the viewer has `bot`'s browser in a tab beside its computer's: the owner, for a bot on a computer that's up; an
+ * Admin of a shared workspace (whose computer tab is the live view, SharedScreen), for a bot whose computer Bops Cloud
+ * shows them (SharedOpen.screens).
+ */
+export const browserBeside = (state: AppState, bot: Bot | undefined): bot is Bot =>
+  !!bot && bot.runsOn !== "mac" && (state.shared ? state.shared.role === "admin" && !!state.shared.screens?.includes(bot.id) : computerOf(state, bot)?.computerStatus === "ready");
+
+/**
+ * Whether the viewer may use `bot`'s browser here: the owner and an Admin (beside the computer, browserBeside); a Member
+ * the owner gave Write on it and Use its computer (in place of the computer, seesBrowser). Bops Cloud checks again
+ * before it shows a frame (cloud/browser.ts mayUseBrowser, by Bops Cloud's roles).
+ */
+export const browsesHere = (state: AppState, bot: Bot | undefined): bot is Bot => browserBeside(state, bot) || (!!bot && seesBrowser(state, bot));
+
+/** The browser tab beside the chat's computer (BROWSER_TAB): the owner's and an Admin's, for a bot it's for (browserBeside); else null. */
+export function browserTabOf(state: AppState, chatBotId: string): PanelTab | null {
+  const b = state.bots.find((x) => x.id === chatBotId);
+  return browserBeside(state, b) ? { id: BROWSER_TAB, kind: "browser", botId: chatBotId } : null;
+}
+
+/**
+ * Links that open in a bot's browser (bops-app.tsx): `may`, whether a link in that bot's message does for this viewer
+ * (it's someone who may use its browser; the owner's localhost links keep Local, its preview), or with no link, whether
+ * they may use it at all; `open`, its browser
+ * shown with the page opened there in the viewer's control (or asked first, when a bot step is using it). Null where
+ * there's no panel.
+ */
+export const OpenInBrowser = createContext<{ may: (botId: string, url?: string) => boolean; open: (botId: string, url: string) => void } | null>(null);
+
+/**
+ * A page to open in a bot's browser, asked for at `at`: the browser showing that bot takes it (bot-browser.tsx) and says
+ * so (`took`), and the ask is dropped, so a browser shown again later never opens it again.
+ */
+export type BrowserGo = { botId: string; url: string; at: number };
+export const BrowserGoTo = createContext<{ go: BrowserGo | null; took: (at: number) => void } | null>(null);
 
 /** A tab you're reading (a page, Logins, a CRM file, Knowledge and Skills in it, a profile, Routines, an app a bot made, an app on the web or the Apps home): a new "Needs you" doesn't take the panel from it. */
 export const isReading = (t?: PanelTab) =>
@@ -72,6 +117,7 @@ export const isReading = (t?: PanelTab) =>
     t.kind === "made-app" ||
     t.kind === "hosted-app" ||
     t.kind === "preview" ||
+    t.kind === "browser" ||
     t.kind === "made-apps");
 
 /**
@@ -151,11 +197,12 @@ export function TabBar({
   useEffect(() => {
     barShown = true;
   }, []);
-  const all: PanelTab[] = [{ id: CHAT_TAB, kind: "computer", botId: chatBotId }, ...tabs];
+  const browser = browserTabOf(state, chatBotId);
+  const all: PanelTab[] = [{ id: CHAT_TAB, kind: "computer", botId: chatBotId }, ...(browser ? [browser] : []), ...tabs];
   return (
     <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
       {all.map((t) => (
-        <Tab key={t.id} state={state} tab={t} on={t.id === active} closable={t.id !== CHAT_TAB} onPick={() => onPick(t.id)} onClose={() => onClose(t.id)} />
+        <Tab key={t.id} state={state} tab={t} on={t.id === active} closable={t.id !== CHAT_TAB && t.id !== BROWSER_TAB} onPick={() => onPick(t.id)} onClose={() => onClose(t.id)} />
       ))}
       {/* A workspace shared with the user: its New tab page lists the owner's things to open as if they were the viewer's (no new tab there). */}
       {!readOnly(state) && (
@@ -197,10 +244,15 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
   // The computer it works on: its own, or the main bot's it shares (lib/screens.ts), named for whose it is.
   const host = b ? computerOf(state, b) : undefined;
   const label =
-    t.kind === "computer"
-      ? // A shared workspace's computers are its owner's, whichever bot's name the owner's Bops gives them.
+    t.kind === "browser"
+      ? `${b?.name ?? "Bot"}'s browser`
+      : t.kind === "computer"
+      ? // A shared workspace's computers are its owner's, whichever bot's name the owner's Bops gives them; a bot whose
+        // browser the viewer sees there (seesBrowser) shows it in this tab.
         state.shared
-        ? b?.runsOn === "mac"
+        ? b && seesBrowser(state, b)
+          ? `${b.name}'s browser`
+          : b?.runsOn === "mac"
           ? "Owner's Mac"
           : "Owner's computer"
         : host && host.id !== b?.id
@@ -237,7 +289,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         opening ? "motion-tab-in" : ""
       } ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[#6B6B6B] hover:bg-[#EEEEEC]"}`}
     >
-      {t.kind === "computer" ? (
+      {t.kind === "computer" && !(b && seesBrowser(state, b)) ? (
         <MonitorIcon size={14} color={on ? "#0A0A0A" : "#6B6B6B"} />
       ) : t.kind === "bot" && b ? (
         <Mascot botId={b.id} color={b.color} size={15} antenna={false} />
@@ -314,7 +366,7 @@ const webPartition = (user?: string) => (user ? `persist:bops-web-${user.replace
  * A web page in a tab. In the Mac app its cookies and storage are the signed-in Orgo user's own
  * (`user`: a partition each), so another account signed in on this Mac never sees their sign-ins.
  */
-export function WebTab({ url, hidden, user, onPage }: { url: string; hidden: boolean; user?: string; onPage: (url: string, title: string) => void }) {
+export function WebTab({ url, hidden, user, onPage, botBrowser }: { url: string; hidden: boolean; user?: string; onPage: (url: string, title: string) => void; botBrowser?: { name: string; open: (url: string) => void } }) {
   // The tab loads its first address once; navigating inside it doesn't reload it from here.
   const [src, setSrc] = useState(url);
   const [at, setAt] = useState(url);
@@ -394,6 +446,12 @@ export function WebTab({ url, hidden, user, onPage }: { url: string; hidden: boo
             className="min-w-0 flex-1 truncate rounded-full bg-[#F2F2F0] px-3 py-1 font-mono text-[11.5px] leading-4 text-[#6B6B6B] outline-none focus:bg-white focus:text-ink focus:shadow-[0_0_0_1.5px_#0A0A0A]"
           />
         </form>
+        {/* For a page the bot needs its own session on (a sign-in): the same page in its browser, in your control. */}
+        {botBrowser && (
+          <button onClick={() => botBrowser.open(at)} className="shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0]">
+            {`Open in ${botBrowser.name}'s browser`}
+          </button>
+        )}
         <button onClick={() => window.open(at, "_blank")} className="shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0]">
           Open in browser
         </button>
@@ -417,10 +475,13 @@ export function NewTab({
   onKnowledge,
   onApps,
   onMac,
+  onBrowser,
 }: {
   state: AppState;
   onWeb: (url: string) => void;
   onComputer: (botId: string) => void;
+  /** A bot's browser (bot-browser.tsx), for a bot that works on a computer. */
+  onBrowser?: (botId: string) => void;
   onProfile: (botId: string) => void;
   onVault: () => void;
   /** Knowledge, what the bots know (memory-categories.tsx); none where it isn't open to this account. */
@@ -544,6 +605,11 @@ export function NewTab({
               <button onClick={() => onComputer(b.id)} title={`${b.name}'s computer`} className="flex size-7 items-center justify-center rounded-lg hover:bg-[#F2F2F0]">
                 <MonitorIcon size={14} color="#3A3A38" />
               </button>
+              {onBrowser && browsesHere(state, b) && (
+                <button onClick={() => onBrowser(b.id)} title={`${b.name}'s browser`} aria-label={`${b.name}'s browser`} className="flex size-7 items-center justify-center rounded-lg text-[#3A3A38] hover:bg-[#F2F2F0]">
+                  <GlobeIcon />
+                </button>
+              )}
               <button onClick={() => onProfile(b.id)} className="rounded-full px-2 py-1 text-[12px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0]">
                 Profile
               </button>

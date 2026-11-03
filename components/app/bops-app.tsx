@@ -11,6 +11,7 @@ import { AutopilotPage, type AutopilotOpen, type AutopilotSection } from "./auto
 import { Members } from "./members";
 import { TeamChart } from "./team-chart";
 import { BotPanel, type Section } from "./bot-panel";
+import { BotBrowser, WatchChip } from "./bot-browser";
 import { ChatEdge, gridColumns, storedChatWidth } from "./chat-edge";
 import { BotComputers } from "./bot-computers";
 import { BrainSettings } from "./brains";
@@ -23,7 +24,7 @@ import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BotMoodsFrom, CallTalking, Mascot, talkingStore } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
-import { CHAT_TAB, electron, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenBotLocal, OpenLink, OpenPreview, TabBar, WebTab, type PanelTab, type PreviewOpened } from "./panel-tabs";
+import { BROWSER_TAB, BrowserGoTo, browserTabOf, browsesHere, CHAT_TAB, electron, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenBotLocal, OpenInBrowser, OpenLink, OpenPreview, TabBar, WebTab, type BrowserGo, type PanelTab, type PreviewOpened } from "./panel-tabs";
 import { PreviewTab } from "./preview-tab";
 import { MadeAppsHome, MadeAppTab, OpenMadeApp } from "./made-apps";
 import { appsStamp, HostedAppTab, OpenAppTask, OpenHostedApp, OpenSettings } from "./hosted-apps";
@@ -55,7 +56,7 @@ import { RestartButton, RestartIcon, useCanRestart } from "./restart";
 import { RunsOnSettings } from "./runs-on";
 import { chatInWorkspace, currentWorkspace, option, post, radio, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
 import { viewOnly } from "./view-only";
-import { readOnlyLine } from "@/lib/shared";
+import { readOnlyLine, seesBrowser } from "@/lib/shared";
 import { duePings } from "@/lib/pings";
 import { UsageData, useAnalytics } from "./usage-data";
 import { YourData } from "./your-data";
@@ -417,6 +418,8 @@ function Bops({ state }: { state: AppState | null }) {
   // often the user's own too.
   viewOnly(state?.shared ? readOnlyLine() : null);
 
+  // A page asked to open in a bot's browser (showBrowser): the browser showing that bot takes it (bot-browser.tsx).
+  const [browserGo, setBrowserGo] = useState<BrowserGo | null>(null);
   if (!state) return <FirstLoad />;
 
   // Your Mac full width is the viewer's own Mac, never a workspace shared with them: opening one from the
@@ -442,7 +445,10 @@ function Bops({ state }: { state: AppState | null }) {
   // The apps the bots made stay the owner's, in a workspace shared with Your Apps too.
   const ownApps = appsOwnShown(state);
   const tabs = tabsShown(openTabs, state, { chatBotId, ws: currentWorkspace(state), crm, memory, apps });
-  const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
+  // The owner's browser tab beside the first (the chat's bot's browser), when that bot has a computer up.
+  const browserTab = browserTabOf(state, chatBotId);
+  if (active === BROWSER_TAB && !browserTab) setActive(CHAT_TAB);
+  const tab = active === CHAT_TAB ? undefined : active === BROWSER_TAB ? (browserTab ?? undefined) : tabs.find((t) => t.id === active);
   // The footer's pill: the Settings page's Logins or Your Apps while it's open there, else the page in sight on the right.
   const inSight = { settings: settings ? (settings.at ?? "profile") : undefined, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory };
   const footer = footerPageOf(inSight);
@@ -470,6 +476,7 @@ function Bops({ state }: { state: AppState | null }) {
         tab.kind === "made-app" ||
         tab.kind === "made-apps" ||
         tab.kind === "hosted-app" ||
+        tab.kind === "browser" ||
         (tab.kind === "computer" && tab.botId !== chatBotId) ||
         (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
@@ -781,6 +788,28 @@ function Bops({ state }: { state: AppState | null }) {
     setFocus(false);
     setPanelOpen(true);
   };
+  /**
+   * A bot's browser, shown (`url`: and that page opened there, in the viewer's control): the owner's tab beside the chat's
+   * computer for the chat's bot, a browser tab for another bot; a teammate's is that bot's computer tab.
+   */
+  const showBrowser = (botId: string, url?: string) => {
+    if (url) setBrowserGo({ botId, url, at: Date.now() });
+    if (botId === chatBotId && browserTab) return pickTab(BROWSER_TAB);
+    // A Member's: that bot's computer tab is its browser.
+    const b = state.bots.find((x) => x.id === botId);
+    if (b && seesBrowser(state, b)) return openComputer(botId);
+    openTab((t) => t.kind === "browser" && t.botId === botId, () => ({ id: tabId(), kind: "browser", botId }));
+  };
+  const openInBrowser = {
+    // The owner's localhost link keeps Local (its preview, with Select and Draw); a teammate's opens in the bot's browser.
+    may: (botId: string, url?: string) => browsesHere(state, state.bots.find((b) => b.id === botId)) && !(url && !state.shared && /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(url)),
+    open: (botId: string, url: string) => showBrowser(botId, url),
+  };
+  // The Watch chip: the chat's bot is browsing and its browser isn't in sight ("Boppy is browsing · Watch").
+  const chatBot = state.bots.find((b) => b.id === chatBotId);
+  const browserBot = browsesHere(state, chatBot) ? chatBot : undefined;
+  const browserInSight = panelOpen && !focus && (chatBot && seesBrowser(state, chatBot) ? showingComputer && bot.id === chatBotId : tab?.kind === "browser" && tab.botId === chatBotId);
+  const watchChip = browserBot && !browserInSight && <WatchChip key={`${browserBot.id}:${state.shared?.projectId ?? ""}`} bot={browserBot} project={state.shared?.projectId ?? ""} onWatch={() => showBrowser(browserBot.id)} />;
 
   /**
    * Show a watched thing: its Mac window in Your Mac, the bot's screen it's on, or (a web page, which has
@@ -904,6 +933,7 @@ function Bops({ state }: { state: AppState | null }) {
         callSlot={setCallSlot}
         prefill={prefill}
         onPrefilled={() => setPrefill(null)}
+        above={watchChip}
       />
       {/* New task from a bot's menu, for a bot with more than one agent: over the message box of its chat, the chat still in view. */}
       {newThreadFor && !thread && state.bots.some((x) => x.id === newThreadFor) && (
@@ -987,6 +1017,8 @@ function Bops({ state }: { state: AppState | null }) {
     <BotMoodsFrom state={state} call={call ? { botId: call, speaking: false } : null}>
     <CallTalking.Provider value={callTalking}>
     <OpenLink.Provider value={openWeb}>
+    <OpenInBrowser.Provider value={openInBrowser}>
+    <BrowserGoTo.Provider value={{ go: browserGo, took: (at) => setBrowserGo((g) => (g?.at === at ? null : g)) }}>
     <OpenCrm.Provider value={openCrm}>
     <OpenMadeApp.Provider value={openMadeApp}>
     <OpenHostedApp.Provider value={openHostedApp}>
@@ -1149,6 +1181,7 @@ function Bops({ state }: { state: AppState | null }) {
                         bot={appBot && appChat ? { name: appBot.name, chatId: appChat } : undefined}
                         copy={t.bot}
                         own={!state.shared}
+                        botBrowser={browsesHere(state, appBot) ? { name: appBot.name, open: (u: string) => showBrowser(appBot.id, u) } : undefined}
                         // (Local on its screen was 99 before the server said which.)
                         onScreen={(display) => h?.botId && showScreen(t.bot ?? h.botId, display ?? 99)}
                       />
@@ -1164,6 +1197,7 @@ function Bops({ state }: { state: AppState | null }) {
                           user={state.account?.user.id}
                           hidden={t.id !== active}
                           onPage={(url, title) => setTabs((all) => all.map((x) => (x.id === t.id ? { ...x, title: title || hostOf(url) } : x)))}
+                          botBrowser={browserBot && { name: browserBot.name, open: (url) => showBrowser(browserBot.id, url) }}
                         />
                       ),
                   )}
@@ -1198,6 +1232,13 @@ function Bops({ state }: { state: AppState | null }) {
                         closeTab(tab.id);
                         openComputer(id);
                       }}
+                      // The chat's bot's browser is the tab beside its computer (the owner's): this new tab gives way to it.
+                      onBrowser={(id) => {
+                        if (id === chatBotId && browserTab) {
+                          closeTab(tab.id);
+                          pickTab(BROWSER_TAB);
+                        } else setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "browser", botId: id } : t)));
+                      }}
                       onProfile={(id) => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "bot", botId: id, section: "details" } : t)))}
                       onVault={() => {
                         closeTab(tab.id);
@@ -1231,6 +1272,9 @@ function Bops({ state }: { state: AppState | null }) {
                       }
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
+                  ) : tab?.kind === "browser" && state.bots.some((b) => b.id === tab.botId) ? (
+                    // Of the workspace open now: a switch to another with a bot of the same id starts it afresh (bot-browser.tsx `project`).
+                    <BotBrowser key={`${tab.id}:${state.shared?.projectId ?? ""}`} bot={state.bots.find((b) => b.id === tab.botId)!} project={state.shared?.projectId} />
                   ) : tab?.kind === "vault" ? (
                     <LoginsPage state={state} keysFor={tab.keysFor} onOpenWatch={showWatch} onClose={() => leaveTab(tab.id)} />
                   ) : tab?.kind === "made-app" ? (
@@ -1419,6 +1463,8 @@ function Bops({ state }: { state: AppState | null }) {
     </OpenHostedApp.Provider>
     </OpenMadeApp.Provider>
     </OpenCrm.Provider>
+    </BrowserGoTo.Provider>
+    </OpenInBrowser.Provider>
     </OpenLink.Provider>
     </CallTalking.Provider>
     </BotMoodsFrom>

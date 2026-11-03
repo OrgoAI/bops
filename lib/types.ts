@@ -835,6 +835,11 @@ export type Message = {
   memberSend?: MemberSend;
   /** Tapbacks on this message, the user's and the bots'. One each. */
   reactions?: Reaction[];
+  /**
+   * The bot asks a person to sign in in its browser, at this page, because it can't itself (lib/browser-relay.ts
+   * activity signIn): the chat shows "Sign in in <bot>'s browser", which opens its browser there in their control.
+   */
+  signIn?: { url: string };
   /** Replies the bot offered, shown as buttons the user can tap to answer. */
   options?: string[];
   /** Worth interrupting the user for (a finished task they're waiting on): a chime, and a notification if Bops is behind. */

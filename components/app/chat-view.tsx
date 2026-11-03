@@ -8,7 +8,7 @@ import { trackEvent } from "@/lib/analytics";
 import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, withRemoteTyping, workBot, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
-import { OpenBotLocal, OpenLink, OpenPreview } from "./panel-tabs";
+import { OpenBotLocal, OpenInBrowser, OpenLink, OpenPreview } from "./panel-tabs";
 import { appCoders } from "@/lib/hosted-apps";
 import { appsShown } from "@/lib/apps-access";
 import { appsOwnShown } from "@/lib/apps-access";
@@ -171,8 +171,10 @@ function Prose({ text }: { text: string }) {
 function Inline({ text }: { text: string }) {
   // Links open as a tab on the right; ⌘-click still opens your browser. A page a bot made opens there too.
   // So does a file it linked: Bops fetches it from the bot's computer (or this Mac) first, as the link itself goes nowhere.
+  // A web page in a bot's message opens in that bot's browser, for someone who may use it (its session, its sign-ins).
   const openLink = useContext(OpenLink);
   const openLocal = useContext(OpenBotLocal);
+  const inBrowser = useContext(OpenInBrowser);
   const botId = useContext(LinkedBy);
   // A file that couldn't be opened says why right after the text, in place (never a browser alert), until the next try.
   const [failed, setFailed] = useState<string | null>(null);
@@ -209,8 +211,15 @@ function Inline({ text }: { text: string }) {
                   void openFile(link[2], link[1], e.metaKey || e.ctrlKey || e.shiftKey);
                   return;
                 }
-                // A bot's localhost link is its app's Local: its preview beside the chat (else its screen), never this Mac's own localhost.
-                if (botId && openLocal && /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(link[2])) {
+                const local = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(link[2]);
+                // A bot's web page (a teammate's localhost link too: its app, on its computer), in its browser, in your control.
+                if (botId && inBrowser && !page && /^https?:/.test(link[2]) && !(e.metaKey || e.ctrlKey || e.shiftKey) && inBrowser.may(botId, link[2])) {
+                  e.preventDefault();
+                  inBrowser.open(botId, link[2]);
+                  return;
+                }
+                // The owner's: a bot's localhost link is its app's Local: its preview beside the chat (else its screen), never this Mac's own localhost.
+                if (botId && openLocal && local) {
                   e.preventDefault();
                   openLocal(botId, link[2]);
                   return;
@@ -237,6 +246,23 @@ function Inline({ text }: { text: string }) {
   );
 }
 
+/**
+ * A bot's ask to sign in for it (Message.signIn): its browser opened at that page, in the viewer's control, for someone
+ * who may use it; nothing for anyone else (its words say what it needs).
+ */
+function SignInAsk({ botId, url, state }: { botId: string; url: string; state: AppState }) {
+  const inBrowser = useContext(OpenInBrowser);
+  const b = state.bots.find((x) => x.id === botId);
+  if (!inBrowser || !b || !/^https?:\/\//i.test(url) || !inBrowser.may(botId)) return null;
+  return (
+    <div className="flex pt-0.5">
+      <button onClick={() => inBrowser.open(botId, url)} data-sign-in-ask className="rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white">
+        {`Sign in in ${b.name}'s browser`}
+      </button>
+    </div>
+  );
+}
+
 /* ---------------- Chat ---------------- */
 
 export function ChatView({
@@ -255,6 +281,7 @@ export function ChatView({
   callSlot,
   prefill,
   onPrefilled,
+  above,
 }: {
   state: AppState;
   chat: Chat;
@@ -282,6 +309,8 @@ export function ChatView({
    * the next, so it's never put in again; `onPrefilled` says it's in.
    */
   prefill?: { chatId: string; text: string; at: number } | null;
+  /** Over the message box, before anything else there: the Watch chip while the chat's bot is browsing out of sight (bops-app.tsx). */
+  above?: React.ReactNode;
   onPrefilled?: () => void;
 }) {
   // Who's typing: also a bot answering on its computer, or whose computer is waking to (lib/types.ts withRemoteTyping).
@@ -883,6 +912,7 @@ export function ChatView({
             )}
           </Fold>
 
+          {above}
           {picked && solo && !readOnly(state, c.botIds) && <div className="px-3 pb-1.5 text-[12px] leading-4 text-[#6B6B6B]">{pickLine(picked, solo, state)}</div>}
           {/* In a shared workspace: whether what they say runs on the bots' computers (Use its computer). Bots with none answer as before. */}
           {state.shared && !readOnly(state, c.botIds) && computerSaid && (
@@ -1892,6 +1922,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         <ReplyDrafts message={m} state={state} />
         {/* Changes it proposed to a skill, each a card with Accept and Reject (read only in a shared workspace). */}
         <SkillProposals message={m} state={state} />
+        {m.signIn && m.botId && <SignInAsk botId={m.botId} url={m.signIn.url} state={state} />}
         {replies}
         {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} state={state} />}
         {newest && (!ro || writes) && !!m.options?.length && (

@@ -83,6 +83,25 @@ export function computerLine(state: Viewing, bots: readonly { name: string }[]):
     : `The owner hasn't let you use ${whose}, so ${bots.length === 1 ? bots[0].name : "they"} won't answer what you say.`;
 }
 
+/**
+ * Whether a Member sees a shared workspace's bot's browser (components/app/bot-browser.tsx) in place of its computer:
+ * the owner gave them Write on it and Use its computer, as Bops Cloud checks again before it shows a frame
+ * (cloud/browser.ts mayUseBrowser). An Admin keeps the computer's live view there and has the browser in a tab beside it
+ * (panel-tabs.tsx browserBeside), as the owner does. Never a bot on the owner's Mac. False outside a shared workspace.
+ */
+export const seesBrowser = (state: Viewing, bot: { id: string; runsOn?: string }) =>
+  !!state.shared && state.shared.role !== "admin" && bot.runsOn !== "mac" && state.shared.levels?.[bot.id] === "write" && state.shared.computer === true;
+
+/**
+ * In a shared workspace, why a Member's Bops doesn't show the bot's browser in place of its computer (said after where
+ * its work shows, computer.tsx NoComputer), or null: an Admin, a bot on the owner's Mac, or one it shows.
+ */
+export function browserLine(state: Viewing, bot: { id: string; name: string; runsOn?: string }): string | null {
+  if (!state.shared || state.shared.role === "admin" || bot.runsOn === "mac" || seesBrowser(state, bot)) return null;
+  if (state.shared.levels?.[bot.id] !== "write") return `Its browser shows here once the owner gives you Write on ${bot.name} and Use its computer.`;
+  return "Its browser shows here once the owner turns on Use its computer for you.";
+}
+
 /** Who the owner's own words and doings are said by: "You" in the user's own workspace, "Owner" in one shared with them (they're never the user's). */
 export const ownerWho = (shared: SharedOpen | undefined) => (shared ? "Owner" : "You");
 
