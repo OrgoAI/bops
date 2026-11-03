@@ -15,7 +15,9 @@
 //   with their made-up keys and pointed at the local cloud and the fake orgo-web.
 //
 // It also answers on a control port for the end-to-end test (scripts/test-browser-tab-e2e.mjs): a bot step on the
-// stand-in's Chrome (page_script-style CDP), which waits while a person has control there, as the runner's do.
+// stand-in's Chrome (page_script-style CDP), which waits while a person has control there, as the runner's do; and
+// the owner's Bops shut and started again (POST /owner/stop, /owner/start: the owner's Mac closed, then opened), the
+// rest of the stack staying up.
 //
 // `stop` stops all of it and removes the temp folder. Nothing reaches a real service: every key is made up, the apps'
 // Keychain is a folder, and Chrome and the apps only ever load 127.0.0.1.
@@ -305,6 +307,8 @@ async function serve() {
     await shutdown(1);
   };
 
+  /** Children stopped on purpose (the owner's Bops shut through the control port): their exit doesn't stop the stack. */
+  const letGo = new Set();
   /** A child in its own process group (so stop ends what it starts too), its output in the stack's log with a prefix. */
   const run = (name, cmd, args, opts = {}) => {
     const c = spawn(cmd, args, { detached: true, stdio: ["ignore", "pipe", "pipe"], ...opts });
@@ -320,7 +324,7 @@ async function serve() {
     c.stdout.on("data", take);
     c.stderr.on("data", take);
     c.on("exit", (code) => {
-      if (!stopping) void fail(new Error(`${name} exited (${code})`));
+      if (!stopping && !letGo.has(c.pid)) void fail(new Error(`${name} exited (${code})`));
     });
     return { child: c, output: () => out };
   };
@@ -502,8 +506,9 @@ async function serve() {
     const app = (who, person, port, dist) => {
       const home = join(dir, `${who}-home`);
       const keychain = join(dir, `${who}-keychain`);
-      mkdirSync(home);
-      mkdirSync(keychain);
+      // (Again for the owner's Bops started after a shut: the same folders, so it's the same Mac.)
+      mkdirSync(home, { recursive: true });
+      mkdirSync(keychain, { recursive: true });
       writeFileSync(join(keychain, encodeURIComponent("orgo-api-key")), person.key);
       return run(who, process.execPath, [join(root, "node_modules", "next", "dist", "bin", "next"), "dev", "-p", String(port), "-H", "127.0.0.1"], {
         cwd: root,
@@ -519,7 +524,7 @@ async function serve() {
       });
     };
     say(`owner's Bops on ${ports.owner}, sam's on ${ports.sam}`);
-    const ownerApp = app("owner", OWNER, ports.owner);
+    let ownerApp = app("owner", OWNER, ports.owner);
     const samApp = app("sam", SAM, ports.sam, ".scratch/next-sam");
     await waitFor("both apps", () => /Ready in/.test(ownerApp.output()) && /Ready in/.test(samApp.output()), 120_000);
     // The first load compiles the page and signs in: both, before saying it's up.
@@ -540,6 +545,24 @@ async function serve() {
           await relay?.stop();
           relay = null;
           return send(200, { cut: true });
+        }
+        // The owner's Bops shut (the owner's Mac closed: its tunnel goes), and started again on the same folders; the rest stays up.
+        if (url.pathname === "/owner/stop" && req.method === "POST") {
+          const pid = ownerApp.child.pid;
+          letGo.add(pid);
+          process.kill(-pid, "SIGTERM");
+          // A moment to save what it holds to Bops Cloud, as a quit does; then nothing of it is left.
+          for (const end = Date.now() + 5000; groupAlive(pid) && Date.now() < end; ) await sleep(200);
+          await endGroup(pid);
+          children.splice(children.indexOf(pid), 1);
+          save();
+          return send(200, { stopped: true });
+        }
+        if (url.pathname === "/owner/start" && req.method === "POST") {
+          if (groupAlive(ownerApp.child.pid)) return send(409, { error: "the owner's Bops is running" });
+          ownerApp = app("owner", OWNER, ports.owner);
+          await waitFor("the owner's Bops", () => fetch(urls.owner).then((r) => r.ok, () => false), 240_000);
+          return send(200, { started: true });
         }
         if (url.pathname === "/relay/back" && req.method === "POST") {
           relay ??= startRelay(relayOptions);
