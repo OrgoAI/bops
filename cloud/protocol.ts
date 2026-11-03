@@ -959,7 +959,8 @@ export type MemberActPayload = {
  * 202. `macOn`: the owner's Bops is connected now (false: it waits up to MEMBER_ACT_MS for it). In a workspace whose chat
  * goes through Bops Cloud (cloud/turns.ts), a chat act is written at once: `stored` with the message's id (`messageId`)
  * and its turn's (`turn`, none when no answer is owed: the owner hasn't let them use the bot's computer), and `macOn`
- * true, so an app from before says "Sending…" until it lands (as it does at once).
+ * true, so an app from before says "Sending…" until it lands (as it does at once). So is an Admin's "persona" act there
+ * while the owner's Mac is away (cloud/members.ts personaHere): `stored`, and `macOn` true, so their window says Saved.
  */
 export type MemberActAnswer = { ok: true; macOn: boolean; stored?: true; messageId?: string; turn?: string };
 /** 403: a bot the act touches is at Read for the caller (or a group has one that is). */

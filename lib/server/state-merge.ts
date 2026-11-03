@@ -82,6 +82,7 @@ export function fromShared(blob: Blob, device: string): Blob {
  *   a request for the user's OK keeps its reply, never back to unanswered (mergeApproval), and one taken
  *   out on either side stays out, whatever the other changed: only the Bops that asked takes one out, once
  *   it has read the reply, so a second reply or a Stop that crossed it never brings it back to be read again;
+ *   a bot is this Mac's copy with its How I work the other side's where only that side changed it (keepHowIWork);
  *   a workspace goes field by field (each field changed on both is this Mac's), so a rename on one
  *   Mac and a names sync on the other (workspaces.ts noteOrgoName, which only notes when Orgo last
  *   changed its project) both stay, and the old name never comes back over the new one, and its
@@ -217,6 +218,7 @@ function mergeEither(key: string, b: unknown, m: unknown, t: unknown, top: boole
       : key === "sessions" ? (was: Blob, x: Blob, y: Blob) => mergeSession(was, x, y, me)
       : key === "appApprovals" ? mergeApproval
       : key === "workspaces" || (me?.older && key === "bots") ? (was: Blob, x: Blob, y: Blob) => mergeObject(was, x, y, false, me)
+      : key === "bots" ? keepHowIWork
       : undefined;
     return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], both, me?.older, top && key === "appApprovals");
   }
@@ -225,6 +227,25 @@ function mergeEither(key: string, b: unknown, m: unknown, t: unknown, top: boole
   if (!top && key === "chain") return me?.older ? t : m;
   if (isObject(m) && isObject(t)) return mergeObject(isObject(b) ? b : {}, m, t, false, me);
   return me?.older ? t : m;
+}
+
+/** A bot's "How I work" and who wrote it (Bot.persona, Bot.personaBy): one field, as one Save or an Admin's change writes both. */
+const HOW_I_WORK = ["persona", "personaBy"] as const;
+
+/**
+ * A bot changed on both sides: this Mac's copy, with its How I work (HOW_I_WORK) the other side's where only that side
+ * changed it: an Admin's change Bops Cloud kept while this Mac was away (cloud/members.ts personaHere) stands over this
+ * Mac's older words, whatever else of the bot this Mac changed meanwhile. Changed on both, this Mac's as before.
+ */
+function keepHowIWork(base: Blob, mine: Blob, theirs: Blob): Blob {
+  const changed = (x: Blob) => HOW_I_WORK.some((k) => !same(x[k], base[k]));
+  if (changed(mine) || !changed(theirs)) return mine;
+  const out: Blob = { ...mine };
+  for (const k of HOW_I_WORK) {
+    if (theirs[k] === undefined) delete out[k];
+    else out[k] = theirs[k];
+  }
+  return out;
 }
 
 /**
