@@ -77,7 +77,9 @@ jobs:
             docker exec -i "$PG" psql -U postgres -d "$db" -v ON_ERROR_STOP=1 -v bops_app_password=bops-local -f - < db/provision.sql
           done
       - name: Bops Cloud core tests
-        run: node --test "cloud/test/core-*.test.ts"
+        # One file at a time, as the edge tests: run all at once on a small runner, timing tests (a wait
+        # for a background write, many calls at once) fail by turns though each passes alone.
+        run: node --test --test-concurrency=1 "cloud/test/core-*.test.ts"
         env:
           BOPS_TEST_DATABASE_URL: postgres://bops_app:bops-local@127.0.0.1:5432/orgo_core
       - name: Bops Cloud edge and router tests
