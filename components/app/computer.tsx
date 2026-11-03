@@ -1248,7 +1248,7 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
         <span>{`${b.name} works on ${b.runsOn === "mac" ? yourMac(state) : "the owner's computer"}. Its work shows in the chat.`}</span>
         {orgoUrl && <OrgoLink href={orgoUrl} label={state.shared.role === "admin" ? SHARED_SCREEN_WORDS.open : SHARED_SCREEN_WORDS.watch} />}
         {/* Someone who may use it wakes it here too, as a message to the bot would (Bops Cloud, with the owner's say on an hourly bill). */}
-        {b.runsOn !== "mac" && state.shared.computer && !readOnly(state, [b.id]) && <WakeButton botId={b.id} />}
+        {b.runsOn !== "mac" && state.shared.computer && !readOnly(state, [b.id]) && cloudWakes(state) && <WakeButton botId={b.id} />}
       </p>
     );
   }
@@ -1300,6 +1300,9 @@ function OrgoLink({ href, label }: { href: string; label: string }) {
  * watched, and theirs to click and type on once they take control. Streamed with their own Orgo key
  * (/api/workspaces/shared/screen). When it can't open (asleep, or Orgo said no), it says so and points at orgo.ai.
  */
+/** Whether the shared workspace's Bops Cloud wakes a computer when asked (one with Admin powers says adminActs or ownerOld). */
+const cloudWakes = (state: AppState) => !!state.shared?.adminActs || !!state.shared?.ownerOld;
+
 /**
  * Wake a shared workspace's bot's computer (POST /api/workspaces/shared/wake: Bops Cloud wakes it as a message to the bot
  * would, so a computer billed by the hour wakes only where the owner lets messages wake it). Says why when it won't.
@@ -1340,7 +1343,7 @@ function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
         <button type="button" onClick={() => setFailed(false)} className="rounded-full px-2.5 py-1 text-[13px] font-medium leading-4 text-ink hover:bg-black/[0.04]">
           Try again
         </button>
-        <WakeButton botId={b.id} onAwake={() => setFailed(false)} />
+        {cloudWakes(state) && <WakeButton botId={b.id} onAwake={() => setFailed(false)} />}
         {orgoUrl && <OrgoLink href={orgoUrl} label={SHARED_SCREEN_WORDS.open} />}
       </p>
     );
