@@ -1,5 +1,5 @@
 import "server-only";
-import { BOPS_DEVICE_HEADER, type MemberAct, type SharedWsState } from "@/cloud/protocol";
+import { BOPS_DEVICE_HEADER, type MemberAct, type SharedKey, type SharedWsState } from "@/cloud/protocol";
 import type { SharedOpen, SharedWorkspace } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
 import { appHeaders } from "./app-version";
@@ -9,7 +9,7 @@ import { sharedWorkspaces } from "./orgo";
 import { orgoKey } from "./orgo-auth";
 import { onExit } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
-import { actWith, SharedCopy, viewState, type ActResult, type ReadResult } from "./shared-core";
+import { actWith, SharedCopy, switchedKeys, viewState, type ActResult, type ReadResult } from "./shared-core";
 import { getState, getVersion, stateUser, touchState } from "./store";
 
 /**
@@ -197,6 +197,34 @@ export function sharedAdminOpen({ anyRole = false } = {}): {
       if (!res) return null;
       return { status: res.status, json: ((await res.json().catch(() => null)) as Record<string, unknown> | null) ?? {} };
     },
+    refresh: () => open.copy.refresh(),
+  };
+}
+
+/**
+ * The shared workspace open now, for its Keys (lib/server/shared-keys.ts): its Orgo project (never an id from a request),
+ * whether the user has Keys there (cloud/ws-slice.ts keysOf) and the owner's Bops takes their bots' key switches, the keys
+ * its bots see as the owner's Mac last said them (names only), and each bot's keys as switched here (switchedKeys). Null
+ * when none is open for the signed-in user.
+ */
+export function sharedKeysOpen(): {
+  projectId: string;
+  keys: boolean;
+  keyActs: boolean;
+  keyNames: SharedKey[];
+  bots: { id: string; keys: string[] }[];
+  refresh: () => Promise<void>;
+} | null {
+  const open = openNow();
+  if (!open) return null;
+  const s = open.data.state;
+  const acts = open.copy.acts();
+  return {
+    projectId: open.at.projectId,
+    keys: s.keys === true,
+    keyActs: s.keyActs === true,
+    keyNames: s.keys && Array.isArray(s.keyNames) ? s.keyNames : [],
+    bots: s.bots.flatMap((b) => (typeof b.id === "string" ? [{ id: b.id, keys: s.keys ? switchedKeys(b, acts) : [] }] : [])),
     refresh: () => open.copy.refresh(),
   };
 }

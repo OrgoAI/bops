@@ -312,6 +312,47 @@ const signedNotice = (body: unknown) => {
   });
 };
 
+test("Keys: a member orgo-web says has Keys reads the key names the owner's Mac said and each bot's keys (names only); one without reads nothing of keys", async () => {
+  const keysOwner = newUserId("keys-owner");
+  const kim = newUserId("kim");
+  const lee = newUserId("lee");
+  const P = "55555555-6666-7777-8888-999999999999";
+  roles[`${kim} ${P}`] = { role: "member", ownerUserId: keysOwner, bopsWsId: "ws_k", name: "Keys", keys: true };
+  roles[`${lee} ${P}`] = { role: "member", ownerUserId: keysOwner, bopsWsId: "ws_k", name: "Keys", keys: false };
+  const state = {
+    workspaces: [
+      {
+        id: "ws_k",
+        name: "Keys",
+        createdAt: 1,
+        memberAccess: { [`${kim}@example.com`]: { others: "none", bots: { max: "read" } }, [`${lee}@example.com`]: { others: "none", bots: { max: "write" } } },
+        keysForMembers: { at: 1, keys: [{ name: "GITHUB_TOKEN", scope: "all" }, { name: "STRIPE_SECRET_KEY", scope: "workspace" }] },
+      },
+    ],
+    bots: [{ id: "max", name: "Max", isMain: true, workspaceId: "ws_k", keys: ["GITHUB_TOKEN"] }],
+    chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_k" }],
+  };
+  try {
+    assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(keysOwner), body: JSON.stringify({ base: 0, state }) })).status, 200);
+    const get = async (userId: string) => {
+      const res = await fetch(`${cloud.url}/v1/ws/${P}/state`, { headers: { Authorization: `Bearer ${keyOf(userId)}` } });
+      assert.equal(res.status, 200);
+      return ((await res.json()) as SharedWsState).state;
+    };
+    const k = await get(kim);
+    assert.equal(k.keys, true);
+    assert.deepEqual(k.keyNames, [{ name: "GITHUB_TOKEN", scope: "all" }, { name: "STRIPE_SECRET_KEY", scope: "workspace" }]);
+    assert.deepEqual(k.bots.map((b) => b.keys), [["GITHUB_TOKEN"]]);
+    // The owner's Mac hasn't said it's new enough to take a switch: none here yet.
+    assert.equal(k.keyActs, undefined);
+    const l = await get(lee);
+    assert.deepEqual([l.keys, l.keyNames, l.keyActs], [undefined, undefined, undefined]);
+    assert.ok(!JSON.stringify(l).includes("GITHUB_TOKEN"), "no key or its name, Write on the bot or not");
+  } finally {
+    await dropUsers([keysOwner, kim, lee]);
+  }
+});
+
 test("a Write member's act waits for the owner's Mac once per key, and is handed over on the tunnel when it connects", async () => {
   roles[`${writer} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
   assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(actOwner), body: JSON.stringify({ base: 0, state: actBlob() }) })).status, 200);

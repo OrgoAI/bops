@@ -244,6 +244,16 @@ export type AdminPower = "ownerAsk" | "macAsk" | "macThread" | "where" | "people
 export const ADMIN_POWERS: Readonly<Record<AdminPower, boolean>> = { ownerAsk: true, macAsk: true, macThread: false, where: true, people: true, workspace: true, wake: true, publish: true, instructions: true };
 /** Never an Admin's, whatever: the side that does each refuses it (orgo-web, Bops Cloud, the owner's Mac). */
 export const OWNER_ALWAYS = ["deleteWorkspace", "transfer", "makeOwner", "billing", "allowHourly", "payment", "resize"] as const;
+/**
+ * Keys (protocol.ts SharedWsSlice.keys): add, replace, remove, see and copy the workspace's own keys, and pick which bots
+ * use any key it sees. The owner's always; anyone else's as orgo-web says it (`keys`: WsAccess.keys), which is yes for an
+ * Admin of a Bops workspace and for a Member the owner or an Admin gave it, and no for a share link's guest whatever their
+ * role. From an orgo-web that doesn't say (none), an Admin has it (an Admin has everything but deleting the workspace) and
+ * a Member doesn't. Fails closed. The owner's keys for all their workspaces stay theirs: a Keys holder sees their names and
+ * switches bots on and off for them, never more.
+ */
+export const holdsKeys = (role: unknown, keys?: unknown) => role === "owner" || keys === true || (role === "admin" && keys === undefined);
+
 /** Whether `admin` (an Admin whose acts the owner's Bops takes) may do `power`. */
 export const adminMay = (power: AdminPower, admin: boolean) => admin && ADMIN_POWERS[power];
 

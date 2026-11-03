@@ -509,7 +509,12 @@ async function look() {
     .then((m) => m.wakeForAnswers())
     .catch((e: Error) => console.warn(`[runner-install] waking for answers: ${e.message}`));
   // Bot access kept for people Orgo no longer lists goes, whether or not the People sheet is opened (in the background).
-  void forgetGoneMembers(key).catch((e: Error) => console.warn(`[runner-install] members: ${e.message}`));
+  // Then which keys the workspaces' bots see, for people with Keys there (keys.ts seeKeysNow, at most every ten minutes).
+  void forgetGoneMembers(key)
+    .catch((e: Error) => console.warn(`[runner-install] members: ${e.message}`))
+    .then(() => import("./keys"))
+    .then((m) => m.seeKeysNow())
+    .catch((e: Error) => console.warn(`[runner-install] members' keys: ${e.message}`));
   // Your Apps at Read for everyone already shared with, once per workspace (the scope is new), and what they see of the apps.
   try {
     giveAppsRead();

@@ -661,7 +661,8 @@ export async function findBopsWorkspace(key: string, { fresh = false, wsId }: { 
  * A member as orgo-web lists them (`joined_at`: when their membership began, from an orgo-web that sends it;
  * `bopsComputerUse`: their Use its computer, told to the owner alone, from an orgo-web that keeps it: MEMBER_COMPUTER_ROUTE).
  */
-export type OrgoMember = { id?: unknown; alt?: unknown; role?: unknown; email?: unknown; joined_at?: unknown; bopsComputerUse?: unknown };
+/** `bopsKeys`: their Keys (MEMBER_KEYS_ROUTE), told to the owner and Admins, from an orgo-web that keeps it. */
+export type OrgoMember = { id?: unknown; alt?: unknown; role?: unknown; email?: unknown; joined_at?: unknown; bopsComputerUse?: unknown; bopsKeys?: unknown };
 /** An invite as orgo-web lists it (the token only for the owner; the times from an orgo-web that sends them). */
 export type OrgoInvite = { email?: unknown; role?: unknown; status?: unknown; token?: unknown; created_at?: unknown; expires_at?: unknown; expired?: unknown };
 
@@ -675,6 +676,16 @@ export type OrgoInvite = { email?: unknown; role?: unknown; status?: unknown; to
  * and Bops Cloud reads the caller's from bops-role (cloud/protocol.ts WsAccess.computerUse).
  */
 export const MEMBER_COMPUTER_ROUTE = { method: "PATCH", path: "/api/workspaces/{projectId}/members", field: "bopsComputerUse" } as const;
+
+/**
+ * orgo-web's route for a member's Keys (project_members.bops_keys: they manage the workspace's own keys and pick which
+ * bots use a key, cloud/protocol.ts SharedWsSlice.keys): its members route again, called by the owner's Mac with the
+ * owner's key, or an Admin's Bops with theirs. PATCH {memberId, bopsKeys: boolean} answers {success: true, bopsKeys} with
+ * the value now kept (an Admin's is always true); 503 KEYS_UNAVAILABLE on an orgo-web without its column; and, from an
+ * orgo-web before it, 400 (a role was required). GET gives the owner and Admins each member's (OrgoMember.bopsKeys), and
+ * Bops Cloud reads the caller's from bops-role (cloud/protocol.ts WsAccess.keys).
+ */
+export const MEMBER_KEYS_ROUTE = { method: "PATCH", path: "/api/workspaces/{projectId}/members", field: "bopsKeys" } as const;
 
 /**
  * Who has access to a workspace, and changes to that (orgo-web's member routes; /api/workspaces/{id}/…
@@ -707,6 +718,12 @@ export const orgoMembers = {
   /** Change someone's role. Orgo's words here: "member" (a Member) or "admin" (an Admin). */
   setRole: (key: string, workspace: string, memberId: string, role: "member" | "admin") =>
     callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "PATCH", body: { memberId, role } }),
+  /** Keys for a member, on or off (MEMBER_KEYS_ROUTE): orgo-web keeps it, and its bops-keys routes and Bops Cloud go by it. */
+  setKeys: (key: string, workspace: string, memberId: string, on: boolean) =>
+    callOrgo<Record<string, unknown>>(key, MEMBER_KEYS_ROUTE.path.replace("{projectId}", encodeURIComponent(workspace)), {
+      method: MEMBER_KEYS_ROUTE.method,
+      body: { memberId, [MEMBER_KEYS_ROUTE.field]: on },
+    }),
   /** Use its computer for a member, on or off (MEMBER_COMPUTER_ROUTE): orgo-web keeps it and goes by it. */
   setComputer: (key: string, workspace: string, memberId: string, use: boolean) =>
     callOrgo<Record<string, unknown>>(key, MEMBER_COMPUTER_ROUTE.path.replace("{projectId}", encodeURIComponent(workspace)), {

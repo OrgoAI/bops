@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
-import { accessOf, adminAccess, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import type { SharedApp, SharedApps, SharedGroup, SharedWsSlice, WsRole } from "./protocol.ts";
+import { accessOf, adminAccess, appsLevelOf, currentFor, holdsKeys, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
+import { KEY_NAME, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedWsSlice, type WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -13,7 +13,7 @@ import type { SharedApp, SharedApps, SharedGroup, SharedWsSlice, WsRole } from "
  * its chats (the owner's 1:1 chats with bots too, the owner's own messages in them included), its
  * threads with what makes them Need you, their notes and results, what its bots wait on the owner's OK for
  * (read only), its routines, its watched screens, and its chats' messages. Never: the usage ledger, the Macs, the vault, keys or their names, channels and
- * their pair codes, connected accounts, the bot to key mapping, the owner's own settings, who else the
+ * their pair codes, connected accounts, the bot to key mapping (both only to someone with Keys: keysOf, names only), the owner's own settings, who else the
  * owner added or what they may see (memberAccess), or anything of another workspace. A message the owner
  * kept "between us" (Message.secret) is shown like any other, and so is all that came of it: that mark
  * only keeps things out of the shared memory. Something the owner wants kept from a member stays with a
@@ -67,6 +67,9 @@ const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, c
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
 /** An Admin's: its "How I work" too (Bot.persona), which they change (the "persona" act). Never a Member's. */
 const ADMIN_BOT: Spec = { ...BOT, persona: true };
+/** With Keys (keysOf): the keys each bot may use too (Bot.keys: names only), which they switch (the "key" act). */
+const KEYS_BOT: Spec = { ...BOT, keys: true };
+const ADMIN_KEYS_BOT: Spec = { ...ADMIN_BOT, keys: true };
 /** `readAt` is the owner's own (their unread dots), and `typing` is never synced: the moods say it. */
 const CHAT: Spec = { id: true, kind: true, botIds: true, title: true, createdAt: true, workspaceId: true };
 const SESSION: Spec = {
@@ -229,6 +232,10 @@ export type SliceViewer = {
   adminActs?: boolean;
   /** Whether it publishes for an Admin (protocol.ts ADMIN_PUBLISH_MIN_VERSION): SharedWsSlice.adminPublish. */
   adminPublish?: boolean;
+  /** Their Keys as orgo-web said it (WsAccess.keys), when it did: keysOf. */
+  keys?: boolean;
+  /** Whether the owner's Bops takes the "key" act (protocol.ts KEYS_MIN_VERSION): SharedWsSlice.keyActs. */
+  keyActs?: boolean;
 };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
@@ -274,6 +281,34 @@ function keptComputer(workspace: Record<string, unknown> | null, viewer: SliceVi
   const map = isObject(workspace?.memberAccess) ? (workspace.memberAccess as MemberAccessMap) : undefined;
   const kept: unknown = accessOf(map, viewer);
   return isObject(kept) && currentFor(kept, viewer.joinedAt) ? kept.computer : undefined;
+}
+
+/**
+ * Whether `viewer`, someone other than the owner, has Keys (member-access.ts holdsKeys): as orgo-web says it (SliceViewer.keys),
+ * else (an orgo-web that doesn't say) an Admin yes and a Member no. Never from the owner's state. What their slice carries the keys for (keyNamesOf,
+ * Bot.keys) and the "key" act is checked against (members.ts botsTouched).
+ */
+export const keysOf = (viewer: SliceViewer): boolean => viewer.role !== "owner" && holdsKeys(viewer.role, viewer.keys);
+
+/** The most key names a slice carries (a vault has far fewer Bops can call). */
+const MAX_KEY_NAMES = 100;
+
+/**
+ * The keys the workspace's bots see, as the owner's Mac last said them (Workspace.keysForMembers, lib/server/keys-for-members.ts):
+ * an allow list of each one's vault name, whose it is ("workspace" or "all") and whether it's another workspace's switched
+ * on here (`from`). Never a value (the owner's Mac never has one to say). Undefined when it hasn't said.
+ */
+export function keyNamesOf(workspace: Record<string, unknown> | null): SharedKey[] | undefined {
+  const kept = isObject(workspace?.keysForMembers) ? workspace.keysForMembers : undefined;
+  if (!kept || !Array.isArray(kept.keys)) return undefined;
+  const out: SharedKey[] = [];
+  for (const k of kept.keys) {
+    if (!isObject(k) || typeof k.name !== "string" || !KEY_NAME.test(k.name) || (k.scope !== "workspace" && k.scope !== "all")) continue;
+    if (out.some((x) => x.name === k.name && x.scope === k.scope && !!x.from === (k.from === true))) continue;
+    out.push({ name: k.name, scope: k.scope, ...(k.from === true ? { from: true as const } : {}) });
+    if (out.length >= MAX_KEY_NAMES) break;
+  }
+  return out;
 }
 
 /* ---------------- Your Apps ---------------- */
@@ -534,9 +569,13 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   // An Admin's: the computer each bot shown works on, to stream it with their own Orgo key (orgo-web hands its password to an Admin alone).
   const screens = viewer.role === "admin" ? screensOf(blob, s.bots) : undefined;
   const sites = apps ? sitesOf(s.workspace, s.bots) : undefined;
+  // Keys: the keys the workspace sees and each bot's (names only), for someone who has it (keysOf).
+  const keys = !!access && keysOf(viewer);
+  const keyNames = keys ? keyNamesOf(s.workspace) : undefined;
+  const botSpec = viewer.role === "admin" ? (keys ? ADMIN_KEYS_BOT : ADMIN_BOT) : keys ? KEYS_BOT : BOT;
   return {
     workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
-    bots: all(s.bots, viewer.role === "admin" ? ADMIN_BOT : BOT),
+    bots: all(s.bots, botSpec),
     chats: s.chats.map((c) => keepChat(c, bots)),
     sessions: s.sessions.map((x) => keepSession(x, bots, chats)),
     routines: all(s.routines, ROUTINE),
@@ -559,6 +598,9 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     ...(access && viewer.adminActs ? { adminActs: true as const } : access && viewer.role === "admin" ? { ownerOld: true as const } : {}),
     // An Admin's Publish in Your Apps, once the owner's Bops takes it (members.ts adminGate).
     ...(access && viewer.role === "admin" && viewer.adminPublish ? { adminPublish: true as const } : {}),
+    // Keys (keysOf), what the workspace's bots see of keys, and whether the owner's Bops takes their "key" act: part of
+    // the fingerprint, so being given Keys, a key added or the owner updating gives them a new one.
+    ...(keys ? { keys: true as const, ...(keyNames ? { keyNames } : {}), ...(viewer.keyActs ? { keyActs: true as const } : {}) } : {}),
   };
 }
 

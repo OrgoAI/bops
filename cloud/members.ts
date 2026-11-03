@@ -15,6 +15,7 @@ import {
   cleanName,
   currentFor,
   fitComputer,
+  holdsKeys,
   levelOf,
   permits,
   threadOwnersOnly,
@@ -34,6 +35,10 @@ import {
   PEOPLE_GONE,
   ADMIN_POWERS_MIN_VERSION,
   ADMIN_PUBLISH_MIN_VERSION,
+  KEY_NAME,
+  KEYS_MIN_VERSION,
+  MEMBER_NO_KEYS,
+  OWNERS_KEY_LINE,
   OWNER_BOPS_OLD,
   MEMBER_ACT_MS,
   MEMBER_MAX_PERSONA,
@@ -67,7 +72,7 @@ import {
 } from "./protocol.ts";
 import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, toJson, writeMessages, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
-import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
+import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, keyNamesOf, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckTurns, routedWorkspaces, routingOf, setRouting, takeMessage, wakeComputer } from "./turns.ts";
 
 /**
@@ -154,6 +159,9 @@ function accessOf(body: unknown): WsAccess | null {
     ...(typeof b.computerUse === "boolean" ? { computerUse: b.computerUse } : {}),
     // The owner's sign in email, from an orgo-web that sends it: whether the workspace has apps (ws-slice.ts appsOpenFor).
     ...(typeof b.ownerEmail === "string" && b.ownerEmail.trim() && b.ownerEmail.length <= 320 ? { ownerEmail: b.ownerEmail.trim() } : {}),
+    // Keys, from an orgo-web that keeps it: only a real yes or no, which goes for an Admin too (anything else is as if it
+    // didn't say, and then an Admin has it: member-access.ts holdsKeys).
+    ...(typeof b.keys === "boolean" ? { keys: b.keys } : {}),
   };
 }
 
@@ -217,10 +225,11 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
 /**
  * Who the caller is to the workspace, as ws-slice.ts sharedSlice takes it: orgo-web's role (an Admin has every bot:
  * ws-slice.ts viewerAccess), their email (their access is kept by it), user id (a guest's is), when their membership
- * began (access set before isn't theirs), their Use its computer as orgo-web says it, and the owner's email (apps).
- * `adminActs` and `adminPublish`: the owner's Bops takes an Admin's acts, and publishes for them (adminGate).
+ * began (access set before isn't theirs), their Use its computer and Keys as orgo-web says them, and the owner's email (apps).
+ * `adminActs` and `adminPublish`: the owner's Bops takes an Admin's acts, and publishes for them (adminGate). `keyActs`: it
+ * takes the "key" act (KEYS_MIN_VERSION), said to someone with Keys.
  */
-export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false): SliceViewer => ({
+export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false, keyActs = false): SliceViewer => ({
   role: access.role,
   ...(adminActs && access.role !== "owner" ? { adminActs: true } : {}),
   ...(adminPublish && access.role === "admin" ? { adminPublish: true } : {}),
@@ -229,7 +238,43 @@ export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, a
   ...(access.joinedAt !== undefined ? { joinedAt: access.joinedAt } : {}),
   ...(access.computerUse !== undefined ? { computerUse: access.computerUse } : {}),
   ...(access.ownerEmail !== undefined ? { ownerEmail: access.ownerEmail } : {}),
+  ...(access.keys !== undefined ? { keys: access.keys } : {}),
+  ...(keyActs && access.role !== "owner" && holdsKeys(access.role, access.keys) ? { keyActs: true } : {}),
 });
+
+/** Whether the caller, someone other than the owner, has Keys (member-access.ts holdsKeys: as orgo-web says, an Admin when it doesn't). */
+const keysHeld = (access: WsAccess) => access.role !== "owner" && holdsKeys(access.role, access.keys);
+
+/**
+ * The workspace's own keys as orgo-web lists them now (GET /api/projects/<id>/bops-keys), with the caller's key (they have
+ * Keys): names only. Null when orgo-web can't say (an orgo-web before the route, or no answer).
+ */
+async function liveWorkspaceKeys(key: string, projectId: string): Promise<Set<string> | null> {
+  try {
+    const res = await fetchImpl(`${config.orgoOrigin()}/api/projects/${encodeURIComponent(projectId)}/bops-keys`, {
+      headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const j = res.ok ? ((await res.json().catch(() => null)) as { keys?: unknown } | null) : (void res.body?.cancel().catch(() => {}), null);
+    if (!j || !Array.isArray(j.keys)) return null;
+    return new Set(j.keys.flatMap((k) => (k && typeof k === "object" && typeof (k as { name?: unknown }).name === "string" ? [(k as { name: string }).name] : [])));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a "key" act turning `name` on is for one of the owner's own keys (OWNERS_KEY_LINE), as far as Bops Cloud can tell:
+ * the names the owner's Mac last said (keyNamesOf) have it only as the owner's (for all their workspaces, or another
+ * workspace's of theirs), and orgo-web's list of the workspace's own keys doesn't have it either (one added there since the
+ * owner's Mac last said is the workspace's own). When either can't say, the owner's Mac decides, from its vault read afresh.
+ */
+async function ownersOwnKey(workspace: Record<string, unknown> | null, name: string, key: string, projectId: string): Promise<boolean> {
+  const said = keyNamesOf(workspace)?.filter((k) => k.name === name) ?? [];
+  if (!said.length || said.some((k) => k.scope === "workspace" && !k.from)) return false;
+  const live = await liveWorkspaceKeys(key, projectId);
+  return !!live && !live.has(name);
+}
 
 /* ---------------- An Admin's acts: the owner's Bops new enough ---------------- */
 
@@ -258,7 +303,7 @@ export async function adminGate(owner: string, min = ADMIN_POWERS_MIN_VERSION): 
  * Who acts, as the checks below take it: orgo-web's role (asked afresh) and whether the owner's Bops takes an Admin's acts
  * (`adminEdits`: a change to a bot's "How I work", asked only for an Admin's "persona" act).
  */
-type Actor = { role: WsRole; adminActs: boolean; adminEdits?: boolean };
+type Actor = { role: WsRole; adminActs: boolean; adminEdits?: boolean; keys?: boolean; keyActs?: boolean };
 /** Whether an Admin with the owner's Bops new enough may do `power` (member-access.ts ADMIN_POWERS). */
 const mayAdmin = (who: Actor, power: AdminPower) => adminMay(power, who.role === "admin" && who.adminActs);
 /** For an act only an Admin does: 403 ADMIN_ONLY for anyone else, 409 OWNER_BOPS_OLD while the owner's Bops can't take it (`taken`). */
@@ -268,6 +313,8 @@ function adminOnly(who: Actor, taken = who.adminActs) {
 }
 export const ADMIN_LINE = "Only the owner or an Admin can do this.";
 export const OWNER_OLD_LINE = "The owner's Bops needs an update first.";
+/** What someone without Keys is told for a "key" act (MEMBER_NO_KEYS). */
+export const NO_KEYS = "The owner or an Admin can give you Keys.";
 
 /* ---------------- Open streams, and orgo-web's notice ---------------- */
 
@@ -337,7 +384,7 @@ export async function watchProject(req: IncomingMessage, res: ServerResponse, us
       }
       unsure = 0;
       if (!now || now.ownerUserId !== target.account || now.bopsWsId !== target.ws) return false;
-      if (now.role !== access.role || now.computerUse !== access.computerUse) {
+      if (now.role !== access.role || now.computerUse !== access.computerUse || now.keys !== access.keys) {
         kept.delete(keyOf(user.id, projectId));
         return "end";
       }
@@ -382,7 +429,14 @@ const readState: Route = {
     const blob = await ownerState(target.account);
     // What this caller is shown: all of it for the owner, else only the bots the owner gave them (by
     // their email or user id; none when neither is there). Its messages are only of the chats it has.
-    const viewer = viewerOf(user!, access, access.role !== "owner" && (await adminGate(target.account)), access.role === "admin" && (await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION)));
+    const viewer = viewerOf(
+      user!,
+      access,
+      access.role !== "owner" && (await adminGate(target.account)),
+      access.role === "admin" && (await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION)),
+      // Someone with Keys: whether the owner's Bops takes their "key" act (asked only for them).
+      keysHeld(access) && (await adminGate(target.account, KEYS_MIN_VERSION)),
+    );
     const slice = sharedSlice(blob, target.ws, viewer);
     const bots = viewer.role === "owner" ? undefined : botsOf(slice);
     const handed = bots && handedByOthers(blob, bots);
@@ -478,6 +532,9 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
       const ok = (v: unknown): v is string => typeof v === "string" && v.trim().length <= MEMBER_MAX_PERSONA;
       return anId(x.botId) && ok(x.text) && ok(x.was) ? { key, act: { act: "persona", botId: x.botId, text: x.text.trim(), was: x.was } } : null;
     }
+    // Keys: a bot, a key's vault name, on or off.
+    case "key":
+      return anId(x.botId) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" ? { key, act: { act: "key", botId: x.botId, name: x.name, on: x.on } } : null;
     // A chat's or a thread's: one of them, never both.
     case "compact":
       if (anId(x.chatId) === anId(x.sessionId)) return null;
@@ -637,6 +694,15 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       if (t.askWhere !== true || !liveStatus(t)) throw new HttpError(409, "That's been picked.", { code: NOT_WAITING });
       return botOf(t);
     }
+    case "key": {
+      // A Keys holder's (member-access.ts holdsKeys, as orgo-web said it just now), once the owner's Bops takes it (KEYS_MIN_VERSION), for a bot in their view.
+      // Which names the workspace sees is the owner's Mac's to check, against its vault as it is then (lib/server/member-acts.ts):
+      // a key just added on orgo-web isn't in what it last said yet.
+      if (!who.keys) throw new HttpError(403, NO_KEYS, { code: MEMBER_NO_KEYS });
+      if (!who.keyActs) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
+      if (!slice.bots.some((x) => x.id === act.botId)) throw new HttpError(404, "No such bot");
+      return [act.botId];
+    }
     case "persona": {
       // An Admin's (ADMIN_POWERS.instructions), once the owner's Bops takes it (ADMIN_PUBLISH_MIN_VERSION).
       adminOnly(who, adminMay("instructions", who.adminEdits === true));
@@ -781,6 +847,8 @@ const actIn: Route = {
       adminActs: await adminGate(target.account),
       // A change to a bot's How I work: an Admin's, with the owner's Bops as new as Publish needs (an older one drops it).
       ...(role.role === "admin" && body.act.act === "persona" ? { adminEdits: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) } : {}),
+      // Keys: theirs as orgo-web said it just now, and the owner's Bops new enough to take a "key" act (asked only for one).
+      ...(body.act.act === "key" ? { keys: keysHeld(role), keyActs: keysHeld(role) && (await adminGate(target.account, KEYS_MIN_VERSION)) } : {}),
     };
     // Publish from Your Apps (env "prod"): an Admin's, with the owner's Bops new enough (an older one would put it on the Preview).
     if ((body.act.act === "deploy" || body.act.act === "rollback") && body.act.env === "prod") adminOnly({ role: role.role, adminActs: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) });
@@ -790,6 +858,12 @@ const actIn: Route = {
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
     if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
+    // A bot's keys: Keys, a bot they see (botsTouched). Not Write: Keys is a scope of its own. On, the workspace's own keys
+    // alone: one of the owner's own is theirs to give (ownersOwnKey). Off goes for any.
+    else if (body.act.act === "key") {
+      botsTouched(blob, slice, body.act, actor);
+      if (body.act.on && (await ownersOwnKey(slice.workspace, body.act.name, bearer(req), projectId))) throw new HttpError(403, OWNERS_KEY_LINE, { code: MEMBER_OWNER_ONLY });
+    }
     else {
       const bots = botsTouched(blob, slice, body.act, actor);
       // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.
@@ -828,6 +902,8 @@ const actIn: Route = {
       ...(body.act.act === "answer" ? { stored: true as const } : {}),
       // An Admin, as orgo-web said it just now (asked afresh): the owner's Mac from 0.0.38 gives them every bot. Older Macs go by the entry.
       ...(role.role === "admin" ? { role: "admin" as const } : {}),
+      // A "key" act's: they have Keys (checked above), which the owner's Mac goes by too.
+      ...(body.act.act === "key" ? { keys: true as const } : {}),
     };
     // One row per member and key (cloud_pending_dedupe): the same act sent again adds nothing. An answer waits as long as
     // its ask can (STORED_ACT_MS): the run waits for it, and the owner's Mac may be shut for hours (it asks orgo-web

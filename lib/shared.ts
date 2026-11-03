@@ -60,6 +60,14 @@ export type SharedOpen = SharedWorkspace & {
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
   /** The same for a bot's How I work (bot-panel.tsx HowIWork). */
   personaActs?: { key: string; botId: string; state: "sending" | "waiting" | "failed"; error?: string }[];
+  /**
+   * Keys (cloud/ws-slice.ts keysOf): the user manages this workspace's own keys and picks which bots use any key it sees
+   * (keys.tsx). `keyActs`: the owner's Bops takes those switches; without it they wait for its update.
+   */
+  keys?: true;
+  keyActs?: true;
+  /** A bot's key switched here that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
+  keySends?: { key: string; botId: string; name: string; on: boolean; state: "sending" | "waiting" | "failed"; error?: string }[];
 };
 
 /** The id a shared workspace has in the window's state: its own Bops id could be the same as one of the user's ("ws_main"). */
@@ -220,6 +228,10 @@ export const ON_MAC_LINE = "This runs on the owner's Mac. Only the owner can tel
 export const NO_COMPUTER_LINE = "This runs on the bot's computer, and the owner hasn't let you use it.";
 /** What only an Admin does (cloud/protocol.ts ADMIN_ONLY). */
 export const ADMIN_LINE = "Only the owner or an Admin can do this.";
+/** On one of the owner's own keys (for all their workspaces, or another of theirs): a bot's switch turns it off, never on. */
+export { OWNERS_KEY_LINE } from "@/cloud/protocol";
+/** In a shared workspace, for someone without Keys (cloud/protocol.ts MEMBER_NO_KEYS): who gives it. */
+export const KEYS_GIVEN_LINE = "The owner or an Admin can give you Keys.";
 /** Under an answer on its way while the owner's Bops is shut: it goes when it opens (as long as the ask waits). */
 export const ANSWER_WAITS_LINE = "The owner's Bops is closed. Your answer goes when it opens.";
 /** Under a reply or Dismiss on its way while it's shut: those wait only a while (cloud/protocol.ts MEMBER_ACT_MS), then say they didn't go. */

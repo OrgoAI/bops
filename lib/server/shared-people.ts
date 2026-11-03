@@ -1,11 +1,11 @@
 import "server-only";
-import { ADMIN_SHEET_WORDS, emailOf, WORDS, type MemberRole, type MembersInfo } from "@/lib/members";
+import { ADMIN_SHEET_WORDS, emailOf, KEYS_WORDS, WORDS, type MemberRole, type MembersInfo } from "@/lib/members";
 import { accessKey, accessOf, cleanAccess, fitComputer, inviteDefault, isComputerUse, usesComputer, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
 import { sharedWsId } from "@/lib/shared";
 import { cloudDoes } from "./cloud-caps";
 import { callOrgo, orgoMembers } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
-import { computerInOrgo, listOf, refusalOf, seatsOf, type Answer, type Got } from "./members";
+import { computerInOrgo, keysInOrgo, listOf, refusalOf, seatsOf, type Answer, type Got } from "./members";
 import { sharedAdminOpen } from "./shared";
 
 /*
@@ -79,6 +79,7 @@ async function sheetOf(o: Open): Promise<Sheet | Answer> {
       orgoUrl: o.orgoUrl ?? `${orgoOrigin()}/workspaces?project_id=${encodeURIComponent(o.projectId)}`,
       host: "orgo",
       fullAccess: "on",
+      keysScope: (await cloudDoes("keys")) ? "on" : "not_yet",
       keysOnComputers: false,
       you,
       people,
@@ -148,10 +149,23 @@ export async function inviteShared(body: { email?: unknown; role?: unknown; acce
 /**
  * PATCH {memberId, role?, access?} or {invite, role?, access?}: change someone's role (Member or Admin, never the
  * owner's), their Use its computer (orgo-web first), or a Member's bots (Bops Cloud), as the owner's sheet does it.
+ * {memberId, keys}: a Member's Keys, on its own (orgo-web keeps it: keysInOrgo); an Admin always has it.
  */
-export async function changeShared(body: { memberId?: unknown; invite?: unknown; role?: unknown; access?: unknown }): Promise<Answer> {
+export async function changeShared(body: { memberId?: unknown; invite?: unknown; role?: unknown; access?: unknown; keys?: unknown }): Promise<Answer> {
   const o = opened();
   if ("status" in o) return o;
+  if (body.keys !== undefined) {
+    const memberId = memberIdIn(body.memberId);
+    if (!memberId || typeof body.keys !== "boolean" || body.role !== undefined || body.access !== undefined) return no(400, "BAD_REQUEST", WORDS.whatToSend);
+    const s = await changeSheet(o);
+    if ("status" in s) return s;
+    if (memberId === s.info.you.id) return no(400, "SELF", ADMIN_SHEET_WORDS.ownerRow);
+    const person = s.info.people.find((p) => p.id === memberId);
+    if (!person) return no(404, "GONE", WORDS.gone);
+    if (person.role === "admin") return no(409, "ADMIN_HAS_ALL", KEYS_WORDS.admin);
+    if (person.guest && body.keys) return no(409, "KEYS_GUEST", KEYS_WORDS.guest);
+    return after(o, (await keysInOrgo(o.key, o.projectId, memberId, body.keys)) ?? ok({ ok: true }));
+  }
   const role = body.role === undefined ? undefined : roleIn(body.role);
   const access = body.access === undefined ? undefined : cleanAccess(body.access);
   if (role === null || access === null || (!role && access === undefined)) return no(400, "BAD_REQUEST", WORDS.whatToSend);

@@ -1,5 +1,7 @@
 import { KeysError, revealKey } from "@/lib/server/keys";
 import { notReady } from "@/lib/server/ready";
+import { sharedOpen } from "@/lib/server/shared";
+import { sharedReveal } from "@/lib/server/shared-keys";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +18,9 @@ export async function POST(request: Request) {
   const b = (await request.json().catch(() => ({}))) as { name?: unknown; scope?: unknown };
   if (typeof b.name !== "string" || !b.name.trim()) return Response.json({ error: "Which key?" }, { status: 400, headers: NO_STORE });
   try {
-    return Response.json(await revealKey(b.name, b.scope === "workspace" ? "workspace" : "all"), { headers: NO_STORE });
+    const scope = b.scope === "workspace" ? "workspace" : "all";
+    // A shared workspace's own key, from orgo-web with the user's own key (never the owner's for all their workspaces).
+    return Response.json(sharedOpen() ? await sharedReveal(b.name, scope) : await revealKey(b.name, scope), { headers: NO_STORE });
   } catch (e) {
     return Response.json({ error: (e as Error).message }, { status: e instanceof KeysError ? e.status : 500, headers: NO_STORE });
   }

@@ -1567,7 +1567,7 @@ await check("a bot's Keys card has one row per key, the workspace's where it has
   assert.deepEqual(botKeyRows([{ name: "A", scope: "all" }, { name: "B", scope: "all" }]).map((k) => k.name), ["A", "B"]);
   // The row's label and tip are the Vault's own ("All workspaces", "This workspace").
   const card = readFileSync(`${root}/components/app/keys.tsx`, "utf8").split("function BotKeysCard")[1].split("/* ---------------- In the chat")[0];
-  assert.match(card, /data-tip=\{scopeLabel\(k\.scope\)\.tip\}[^>]*>\s*\{scopeLabel\(k\.scope\)\.label\}/);
+  assert.match(card, /data-tip=\{state\.shared && k\.owner \? OWNERS_TIP : scopeLabel\(k\.scope\)\.tip\}[^>]*>\s*\{state\.shared && k\.owner \? "The owner's" : scopeLabel\(k\.scope\)\.label\}/);
 });
 
 await check("a thread of the user's own that ended waiting for a sign in on its bot's computer: its card has I signed in, a reply that carries the same run on where it ran, next to Sign in; not while it's still at work; in a workspace shared with them, the same card can't be answered", async () => {
@@ -2345,6 +2345,82 @@ await check("the owner's app work: an app thread's ask or question is answered o
   const card = src.slice(from, src.indexOf("\nfunction ", from + 1));
   assert.ok(card.includes("REPLY_WAITS_LINE") && !card.includes("ANSWER_WAITS_LINE"));
   assert.equal(L.REPLY_WAITS_LINE, "Waiting for the owner's Bops to open.");
+});
+
+/* ---------------- Keys: a shared workspace's keys, for someone with Keys there ---------------- */
+
+/** A copy of the owner's workspace as Bops Cloud shows it to `role`, with (`keys`) or without Keys there. */
+const keysCopy = async ({ role = "member", keys = true, keyActs = true, botKeys = ["STRIPE_SECRET_KEY"] } = {}) => {
+  const c = cloudState();
+  c.role = role;
+  c.state = {
+    ...c.state,
+    levels: { boppy: "read" },
+    bots: c.state.bots.map((b) => ({ ...b, keys: botKeys })),
+    ...(keys ? { keys: true, keyNames: [{ name: "STRIPE_SECRET_KEY", scope: "all" }, { name: "GITHUB_TOKEN", scope: "workspace" }], ...(keyActs ? { keyActs: true } : {}) } : {}),
+  };
+  const copy = new SharedCopy(fakeRead({ status: 200, body: c }).read);
+  await copy.open({ ...listed, role });
+  return { copy, c };
+};
+
+await check("Keys in the window: a viewer with Keys has each bot's keys and their switches on their way shown as switched; without Keys, no bot carries any", async () => {
+  const { copy } = await keysCopy();
+  let v = viewState(own(), copy.openNow(), copy.data(), {}, copy.acts());
+  assert.deepEqual([v.shared.keys, v.shared.keyActs], [true, true]);
+  assert.deepEqual(v.bots[0].keys, ["STRIPE_SECRET_KEY"]);
+  const sent = [];
+  const r = await actWith(copy, { act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }, "key_switch_01", sam, async (b) => (sent.push(JSON.parse(b)), { status: 202, body: { ok: true, macOn: false } }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(sent[0].act, { act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true });
+  v = viewState(own(), copy.openNow(), copy.data(), {}, copy.acts());
+  assert.deepEqual(v.bots[0].keys, ["STRIPE_SECRET_KEY", "GITHUB_TOKEN"], "shown on while it waits for the owner's Bops");
+  assert.deepEqual(v.shared.keySends, [{ key: "key_switch_01", botId: "boppy", name: "GITHUB_TOKEN", on: true, state: "waiting" }]);
+  // Turned down: shown as it was, and why.
+  await actWith(copy, { act: "key", botId: "boppy", name: "STRIPE_SECRET_KEY", on: false }, "key_switch_02", sam, async () => ({ status: 409, body: { error: "The owner's Bops needs an update first.", code: "owner_bops_old" } }));
+  v = viewState(own(), copy.openNow(), copy.data(), {}, copy.acts());
+  assert.deepEqual(v.bots[0].keys, ["STRIPE_SECRET_KEY", "GITHUB_TOKEN"]);
+  assert.equal(v.shared.keySends.find((x) => x.key === "key_switch_02").state, "failed");
+  // Without Keys: nothing of them, even a key list some copy carried.
+  const none = await keysCopy({ keys: false });
+  const w = viewState(own(), none.copy.openNow(), none.copy.data(), {}, []);
+  assert.equal(w.bots[0].keys, undefined);
+  assert.equal(w.shared.keys, undefined);
+  assert.equal(w.shared.keySends, undefined);
+});
+
+await check("Keys acts, checked from the copy: Keys first, a bot they see (Read is enough), the owner's Bops new enough; one lands once the copy has it, and goes when Keys is taken away", async () => {
+  const L = await import(`${root}/lib/shared.ts`);
+  const no = await keysCopy({ keys: false });
+  assert.deepEqual(no.copy.refusal({ act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }), { status: 403, error: L.KEYS_GIVEN_LINE, code: "member_no_keys" });
+  const old = await keysCopy({ keyActs: false });
+  assert.deepEqual(old.copy.refusal({ act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }), { status: 409, error: L.OWNER_UPDATE_LINE, code: "owner_bops_old" });
+  const a = await keysCopy();
+  assert.equal(a.copy.refusal({ act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }), null, "Read on the bot is enough: Keys is its own scope");
+  assert.equal(a.copy.refusal({ act: "key", botId: "nobody", name: "GITHUB_TOKEN", on: true }).status, 404);
+  await actWith(a.copy, { act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }, "key_switch_03", sam, async () => ({ status: 202, body: { ok: true, macOn: true } }));
+  assert.equal(a.copy.acts().length, 1);
+  a.copy["read"] = fakeRead({ status: 200, body: { ...a.c, hash: "h-keyed", state: { ...a.c.state, bots: a.c.state.bots.map((b) => ({ ...b, keys: ["STRIPE_SECRET_KEY", "GITHUB_TOKEN"] })) } } }).read;
+  await a.copy.refresh();
+  assert.equal(a.copy.acts().length, 0, "landed");
+  // Keys taken away while one waits: it didn't go, and says so.
+  const b = await keysCopy();
+  await actWith(b.copy, { act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }, "key_switch_04", sam, async () => ({ status: 202, body: { ok: true, macOn: false } }));
+  const rest = { ...b.c.state };
+  for (const k of ["keys", "keyNames", "keyActs"]) delete rest[k];
+  b.copy["read"] = fakeRead({ status: 200, body: { ...b.c, hash: "h-nokeys", state: { ...rest, bots: rest.bots.map((x) => ({ ...x, keys: undefined })) } } }).read;
+  await b.copy.refresh();
+  assert.deepEqual(b.copy.acts().map((p) => [p.state, p.error]), [["failed", ACT_ACCESS_CHANGED]]);
+});
+
+await check("a bot's Keys card in a shared workspace: only for someone with Keys there", async () => {
+  const { BotKeys } = await import(pathToFileURL(`${root}/components/app/keys.tsx`).href);
+  const { copy } = await keysCopy();
+  const st = viewState(own(), copy.openNow(), copy.data(), {}, []);
+  assert.notEqual(BotKeys({ state: st, bot: st.bots[0], onAdd: noop, className: "" }), null);
+  const none = await keysCopy({ keys: false });
+  const st2 = viewState(own(), none.copy.openNow(), none.copy.data(), {}, []);
+  assert.equal(BotKeys({ state: st2, bot: st2.bots[0], onAdd: noop, className: "" }), null);
 });
 
 console.log(`${passed} passed, ${failures} failed`);

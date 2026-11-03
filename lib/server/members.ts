@@ -3,6 +3,7 @@ import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
 import {
   ADMIN_WORDS,
   emailOf,
+  KEYS_WORDS,
   WORDS,
   type FullAccess,
   type Invite,
@@ -21,7 +22,7 @@ import { trackServerEvent } from "./analytics";
 import { notePeopleIn } from "./apps-for-members";
 import { reachableFromComputers } from "./composio";
 import { computerToolOn } from "./computer-task";
-import { findBopsWorkspace, MEMBER_COMPUTER_ROUTE, orgoMembers, type OrgoInvite, type OrgoMember } from "./orgo";
+import { findBopsWorkspace, MEMBER_COMPUTER_ROUTE, MEMBER_KEYS_ROUTE, orgoMembers, type OrgoInvite, type OrgoMember } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import { cloudDoes } from "./cloud-caps";
 import { onRunner } from "./persist";
@@ -308,7 +309,9 @@ export function listOf(json: Record<string, unknown>, workspace: string, access:
       // Use its computer as orgo-web keeps it, where its list says (to the owner): what it goes by, over the copy here. An
       // Admin's is theirs whatever it says, and their entry is what they'd have as a Member.
       const shown: MemberAccess = typeof m.bopsComputerUse === "boolean" && m.role !== "admin" ? { ...kept, computer: m.bopsComputerUse ? "use" : "none" } : kept;
-      return { id, name: str(m.alt) ?? email ?? "Guest", ...(email ? { email } : {}), role: roleOf(m.role), guest: !email, access: levelsOf(shown) };
+      // Keys as orgo-web keeps it, where its list says: an Admin's always on, whatever it says.
+      const keys = m.role === "admin" ? true : typeof m.bopsKeys === "boolean" ? m.bopsKeys : undefined;
+      return { id, name: str(m.alt) ?? email ?? "Guest", ...(email ? { email } : {}), role: roleOf(m.role), guest: !email, access: levelsOf(shown), ...(keys !== undefined ? { keys } : {}) };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
   const now = Date.now();
@@ -381,6 +384,7 @@ async function load(key: string, { fresh = false } = {}): Promise<Loaded> {
         orgoUrl: `${orgoOrigin()}/workspaces?project_id=${encodeURIComponent(workspace)}`,
         host: getState().host === "mac" ? "mac" : "orgo",
         fullAccess: await fullAccessNow(),
+        keysScope: !stateInCloud() || (await cloudDoes("keys")) ? "on" : "not_yet",
         keysOnComputers: keysOnComputers(),
         you,
         people,
@@ -535,6 +539,55 @@ export async function computerInOrgo(key: string, workspace: string, memberId: s
 }
 
 /**
+ * Keys on or off for a member, in orgo-web (MEMBER_KEYS_ROUTE), with the caller's own key (the owner's, or an Admin's from
+ * their Bops: lib/server/shared-people.ts): null once orgo-web took it (its answer says the value it now keeps is this
+ * one), else why not in the app's words. One that can't keep it yet (503 KEYS_UNAVAILABLE; an orgo-web before it, which
+ * wants a role, 400; or an answer without the value) is KEYS_NOT_READY: "Keys can't be given yet". orgo-web's other
+ * refusals: a workspace that isn't Bops' (409 KEYS_BOPS_ONLY), a share link's guest (409 KEYS_GUEST), an Admin (409
+ * admin_always: theirs always) and the owner (400 owner_always); the sheet sends neither of the last two.
+ */
+export async function keysInOrgo(key: string, workspace: string, memberId: string, on: boolean): Promise<Answer | null> {
+  const got = (await orgoMembers.setKeys(key, workspace, memberId, on)) as Got;
+  const said = str(got?.json?.error) ?? "";
+  const code = str(got?.json?.code);
+  if (!got) return no(502, "KEYS_UNCHANGED", KEYS_WORDS.unreachable);
+  if (done(got)) {
+    const kept = got.json?.[MEMBER_KEYS_ROUTE.field];
+    return kept === on ? null : typeof kept === "boolean" ? no(502, "KEYS_UNCHANGED", KEYS_WORDS.unchanged) : no(503, "KEYS_NOT_READY", KEYS_WORDS.notReady);
+  }
+  if (got.status === 401) return no(401, "SIGNED_OUT", WORDS.rejected, { why: "rejected" });
+  if (got.status === 403) return no(403, "NOT_OWNER", WORDS.notOwner);
+  if (got.status === 404 && /member not found/i.test(said)) return no(404, "GONE", WORDS.gone);
+  if (got.status === 409 && code === "KEYS_GUEST") return no(409, "KEYS_GUEST", KEYS_WORDS.guest);
+  if (got.status === 409 && code === "KEYS_BOPS_ONLY") return no(409, "KEYS_BOPS_ONLY", KEYS_WORDS.bopsOnly);
+  if (got.status === 409 && code === "admin_always") return no(409, "ADMIN_HAS_ALL", KEYS_WORDS.admin);
+  if (got.status === 400 && code === "owner_always") return no(400, "SELF", KEYS_WORDS.owner);
+  if (got.status === 400 || (got.status === 503 && code === "KEYS_UNAVAILABLE")) return no(503, "KEYS_NOT_READY", KEYS_WORDS.notReady);
+  return no(502, "KEYS_UNCHANGED", KEYS_WORDS.unchanged);
+}
+
+/**
+ * PATCH /api/members {memberId, keys}: give a Member Keys, or take it away (orgo-web keeps it: keysInOrgo). Never the
+ * owner (who always has it), never an Admin (who always has it too: ADMIN_HAS_ALL), and on its own: nothing else rides along.
+ */
+async function changeKeys(body: { memberId?: unknown; keys?: unknown }): Promise<Answer> {
+  const who = await signedIn();
+  if ("status" in who) return who;
+  const memberId = memberIdIn(body.memberId);
+  if (!memberId || typeof body.keys !== "boolean") return no(400, "BAD_REQUEST", WORDS.whatToSend);
+  const sheet = await sheetFor(who.key);
+  if ("status" in sheet) return sheet;
+  if (sheet.info.you.id === memberId) return no(400, "SELF", ACCESS_WORDS.yours);
+  const person = sheet.info.people.find((p) => p.id === memberId);
+  if (!person) return no(404, "GONE", WORDS.gone);
+  if (person.role === "admin") return no(409, "ADMIN_HAS_ALL", KEYS_WORDS.admin);
+  // A share link's guest never gets it (orgo-web refuses it too); taking it away still goes.
+  if (person.guest && body.keys) return no(409, "KEYS_GUEST", KEYS_WORDS.guest);
+  const refused = await keysInOrgo(who.key, sheet.workspace, memberId, body.keys);
+  return refused ?? ok({ ok: true });
+}
+
+/**
  * The bots an invite still waiting gives (the team chart's Make it theirs, and its Undo), without sending it again:
  * kept by its email as the invite's, from when that access was first kept (member-access.ts currentFor), so it
  * counts only for the membership the invite begins. Only an invite Orgo lists as waiting now.
@@ -633,9 +686,11 @@ export async function invite(body: { email?: unknown; role?: unknown; access?: u
  * same). A role with a change to Use its computer is refused: the window sends them apart. {invite, access} (no memberId): an invite still
  * waiting gets these bots without being sent again (changeInviteAccess).
  */
-export async function changeAccess(body: { memberId?: unknown; role?: unknown; access?: unknown; invite?: unknown }): Promise<Answer> {
+export async function changeAccess(body: { memberId?: unknown; role?: unknown; access?: unknown; invite?: unknown; keys?: unknown }): Promise<Answer> {
   // (A waiting invite: its bots, or its role, without sending it again: changeInviteAccess.)
   if (body.invite !== undefined && body.memberId === undefined) return changeInviteAccess(body);
+  // (Keys, on its own: changeKeys.)
+  if (body.keys !== undefined) return body.role === undefined && body.access === undefined ? changeKeys(body) : no(400, "BAD_REQUEST", WORDS.whatToSend);
   const who = await signedIn();
   if ("status" in who) return who;
   const memberId = memberIdIn(body.memberId);

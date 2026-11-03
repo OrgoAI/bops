@@ -1750,6 +1750,71 @@ console.log("ok - bot access: forgotten at the Mac's look too, whether or not th
 }
 console.log("ok - bot access: only for the membership it was set in, so someone removed and back never finds their old bots");
 
+{
+  // Keys (MEMBER_KEYS_ROUTE): orgo-web keeps it per member, the sheet reads it back (bopsKeys), an Admin's always on.
+  const O = await import(`${root}/lib/server/orgo.ts`);
+  const MEMBERS_PATH = `/api/workspaces/${WS}/members`;
+  const PATCH_MEMBERS = `PATCH ${MEMBERS_PATH}`;
+  replies = usual();
+  assert.deepEqual(O.MEMBER_KEYS_ROUTE, { method: "PATCH", path: "/api/workspaces/{projectId}/members", field: "bopsKeys" }, "the route in one place");
+  list = { members: MEMBERS.map((m) => (m.id === "u-jamie" ? { ...m, bopsKeys: true } : m)), invites: INVITES, seats: seatsOf() };
+  r = await get();
+  const keysOf = (id) => r.body.people.find((p) => p.id === id).keys;
+  assert.deepEqual([keysOf("u-jamie"), keysOf("u-sam"), keysOf("u-guest")], [true, true, undefined], "orgo-web's word; an Admin's always on; none said, none");
+  assert.equal(r.body.keysScope, "not_yet", "Bops Cloud without Keys yet: the sheet says so");
+  list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+  // Given, then taken away: orgo-web is asked, with the owner's key, {memberId, bopsKeys} alone.
+  replies[PATCH_MEMBERS] = (c) => json(200, { success: true, bopsKeys: c.body.bopsKeys });
+  n = calls.length;
+  r = await route("PATCH", { memberId: "u-jamie", keys: true });
+  assert.deepEqual(r, { status: 200, body: { ok: true } });
+  r = await route("PATCH", { memberId: "u-jamie", keys: false });
+  assert.deepEqual(r, { status: 200, body: { ok: true } });
+  assert.deepEqual(
+    calls.slice(n).filter((c) => c.method === "PATCH").map((c) => [c.path, c.body, c.auth]),
+    [
+      [MEMBERS_PATH, { memberId: "u-jamie", bopsKeys: true }, `Bearer ${KEY}`],
+      [MEMBERS_PATH, { memberId: "u-jamie", bopsKeys: false }, `Bearer ${KEY}`],
+    ],
+  );
+  // Never sent: an Admin's (always on), a guest given it, the owner, someone not there, or with a role or bots beside it.
+  n = calls.length;
+  for (const [body, status, code] of [
+    [{ memberId: "u-sam", keys: false }, 409, "ADMIN_HAS_ALL"],
+    [{ memberId: "u-guest", keys: true }, 409, "KEYS_GUEST"],
+    [{ memberId: "u-owner", keys: true }, 400, "SELF"],
+    [{ memberId: "u-nobody", keys: true }, 404, "GONE"],
+    [{ memberId: "u-jamie", keys: true, role: "admin" }, 400, "BAD_REQUEST"],
+    [{ memberId: "u-jamie", keys: true, access: { others: "read", bots: {} } }, 400, "BAD_REQUEST"],
+    [{ memberId: "u-jamie", keys: "yes" }, 400, "BAD_REQUEST"],
+  ]) {
+    r = await route("PATCH", body);
+    assert.deepEqual([r.status, r.body.code], [status, code], JSON.stringify(body));
+  }
+  assert.equal(calls.slice(n).filter((c) => c.method === "PATCH").length, 0, "orgo-web never asked");
+  // orgo-web turns it down: said in the app's words, and nothing changes.
+  for (const [reply, status, code, error] of [
+    [() => json(503, { error: "Database unavailable", code: "KEYS_UNAVAILABLE" }), 503, "KEYS_NOT_READY", M.KEYS_WORDS.notReady],
+    [() => json(400, { error: "role is required" }), 503, "KEYS_NOT_READY", M.KEYS_WORDS.notReady],
+    [() => json(200, { success: true }), 503, "KEYS_NOT_READY", M.KEYS_WORDS.notReady],
+    [() => json(409, { error: "Not a Bops workspace", code: "KEYS_BOPS_ONLY" }), 409, "KEYS_BOPS_ONLY", M.KEYS_WORDS.bopsOnly],
+    [() => json(409, { error: "Guests can't", code: "KEYS_GUEST" }), 409, "KEYS_GUEST", M.KEYS_WORDS.guest],
+    [() => json(409, { error: "Admins always", code: "admin_always" }), 409, "ADMIN_HAS_ALL", M.KEYS_WORDS.admin],
+    [() => json(400, { error: "Owner always", code: "owner_always" }), 400, "SELF", M.KEYS_WORDS.owner],
+    [() => json(403, { error: "Only owners and admins" }), 403, "NOT_OWNER", M.WORDS.notOwner],
+    [() => json(404, { error: "Member not found" }), 404, "GONE", M.WORDS.gone],
+    [() => json(200, { success: true, bopsKeys: false }), 502, "KEYS_UNCHANGED", M.KEYS_WORDS.unchanged],
+    [offline, 502, "KEYS_UNCHANGED", M.KEYS_WORDS.unreachable],
+  ]) {
+    replies[PATCH_MEMBERS] = reply;
+    r = await route("PATCH", { memberId: "u-jamie", keys: true });
+    assert.deepEqual([r.status, r.body.code, r.body.error], [status, code, error]);
+  }
+  for (const w of Object.values(M.KEYS_WORDS)) noDashes(w);
+  replies = usual();
+}
+console.log("ok - Keys: given and taken away in orgo-web alone, never an Admin's, the owner's or a guest's; each refusal in the app's words");
+
 process.chdir(tmpdir());
 rmSync(scratch, { recursive: true, force: true });
 console.log("all passed");

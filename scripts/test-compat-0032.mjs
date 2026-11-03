@@ -999,5 +999,29 @@ check("a change card never goes through a merge, v0.0.32's or this build's: mess
   assert.ok(!old("lib/types.ts").includes("appChange"));
 });
 
+/* ---------------- Keys for people with Keys ---------------- */
+
+// Which keys a workspace's bots see, for the people with Keys there (Workspace.keysForMembers: names and whose, said by
+// this build's Mac, lib/server/keys.ts seeKeysFor). A workspace field, which v0.0.32 merges field by field and never
+// writes: kept whatever it saves. Lost, the people with Keys see the owner's key names again after this build's next read
+// of the vault; This workspace's own they read from orgo-web anyway. A bot's keys (Bot.keys) are as they always were.
+const SAID = { at: 5, keys: [{ name: "STRIPE_SECRET_KEY", scope: "all" }, { name: "GITHUB_TOKEN", scope: "workspace" }] };
+const keyed0 = () => {
+  const x = clone(base0);
+  x.workspaces[0].keysForMembers = clone(SAID);
+  return x;
+};
+check("v0.0.32 saving something else, renaming the same workspace or keeping a copy merged later keeps which keys its bots see", () => {
+  const mine = clone(keyed0());
+  mine.owner.name = "Ava B";
+  assert.deepEqual(V32.merge3(keyed0(), mine, keyed0()).workspaces[0].keysForMembers, SAID);
+  const renamed = clone(base0);
+  renamed.workspaces[0].name = "Acme";
+  const r = V32.merge3(clone(base0), renamed, keyed0());
+  assert.deepEqual([r.workspaces[0].name, r.workspaces[0].keysForMembers], ["Acme", SAID]);
+  assert.deepEqual(V32.merge3(clone(base0), renamed, keyed0(), KEPT).workspaces[0].keysForMembers, SAID);
+  assert.deepEqual(V32.toShared(V32.fromShared(keyed0(), "dev_old_mac"), "dev_old_mac").workspaces[0].keysForMembers, SAID, "loaded and written back, it rides along");
+});
+
 rmSync(dir, { recursive: true, force: true });
 console.log(`compat ${TAG}: ${passed} passed`);

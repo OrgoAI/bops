@@ -1,5 +1,6 @@
 /** Shared shapes for the Bops app state, used by both the server and the UI. */
 
+import type { SharedKey } from "@/cloud/protocol";
 import type { AppHosting, AppsForMembers, IngotToken } from "./hosted-apps";
 import type { Chain } from "./chain";
 import type { ComputerSize } from "./bops-billing";
@@ -352,6 +353,13 @@ export type Workspace = {
    * (cloud/ws-slice.ts appsFor); never variables, tokens, keys, logs or error text.
    */
   appsForMembers?: AppsForMembers;
+  /**
+   * The keys this workspace's bots see (lib/server/keys.ts keysOf), by name and whose, as this Mac last read the vault:
+   * what people with Keys are shown (cloud/ws-slice.ts keyNamesOf), so they switch bots on and off for any of them. Only
+   * there while anyone else is in the workspace (lib/server/keys.ts seeKeysFor); never a value. A Bops from before never
+   * writes it, and merges it as a workspace field.
+   */
+  keysForMembers?: KeysForMembers;
   /** Its bots' settings page settings, by bot id (BotSettings): none for a bot with nothing set. Never sent to members. */
   botSettings?: Record<string, BotSettings>;
   /**
@@ -380,6 +388,9 @@ export type Workspace = {
   /** The site each of its bots works on, by bot id (BotSite, read with siteOf). None for a bot that works on none. */
   botSites?: Record<string, BotSite>;
 };
+
+/** Workspace.keysForMembers: when this Mac read them, and each key by name and whose (cloud/protocol.ts SharedKey). */
+export type KeysForMembers = { at: number; keys: SharedKey[] };
 
 /** A login switched on in a workspace (Workspace.loginsOn): when. */
 export type LoginOn = { at: number };

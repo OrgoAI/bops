@@ -214,7 +214,7 @@ export function LoginsPage({
               <span className="mt-2 text-[22px] font-bold leading-7 tracking-[-0.02em]">Logins</span>
               <span className="mt-0.5 text-[13px] leading-[19px] text-[#6B6B6B]">
                 {shared
-                  ? "Your own apps, keys and site logins. They're yours, not this workspace's bots'."
+                  ? "Your own apps and site logins. They're yours, not this workspace's bots'. Keys here are this workspace's."
                   : `Apps, keys and site logins for ${wsName}'s bots. Each bot gets only the access you give it. Passwords stay in your Mac's Keychain, and no AI sees them.`}
               </span>
             </div>

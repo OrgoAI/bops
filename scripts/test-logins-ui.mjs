@@ -49,6 +49,8 @@ process.emitWarning = (warning, ...rest) => (rest[0]?.code === "MODULE_TYPELESS_
 const { parseHTML } = await import("linkedom");
 const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
 const doc = win.document;
+// Typing as React hears it: by the input event, when the document says it has one (linkedom's doesn't).
+doc.oninput = null;
 win.HTMLElement.prototype.focus = function () {};
 win.HTMLElement.prototype.scrollIntoView = () => {};
 globalThis.window = globalThis;
@@ -65,13 +67,13 @@ globalThis.EventSource = class {
 
 const NORTH_PROJECT = "66666666-2222-4333-8444-555555555555";
 /** Bops, faked: what each request sent, and the keys, members and uses it answers with. */
-const bops = { sent: [], keys: [] };
+const bops = { sent: [], keys: [], providers: [], keysInfo: {}, patch: null };
 const json = (j, status = 200) => ({ ok: status < 400, status, json: async () => j });
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
   const method = init.method ?? "GET";
   if (method === "GET") {
-    if (u.startsWith("/api/keys")) return json({ signedIn: true, keys: bops.keys, providers: [], workspaceKeys: true });
+    if (u.startsWith("/api/keys")) return json({ signedIn: true, keys: bops.keys, providers: bops.providers, workspaceKeys: true, ...bops.keysInfo });
     if (u.startsWith("/api/members"))
       return json({
         state: "ready",
@@ -92,6 +94,7 @@ globalThis.fetch = async (url, init = {}) => {
     return json({}, 404);
   }
   bops.sent.push({ url: u, method, body: init.body ? JSON.parse(init.body) : undefined });
+  if (bops.patch && u === "/api/keys" && method === "PATCH") return json(...bops.patch);
   return json({ ok: true });
 };
 
@@ -409,7 +412,7 @@ await test("a workspace shared with the viewer: their own logins, and plainly th
   try {
     const page = m.box.querySelector("[data-logins]");
     assert.match(page.querySelector("[data-shared-note]").textContent, /The owner's logins reach you only through their bots you can use\. Anything those bots send, change, delete or pay from them waits for the owner's yes\./);
-    assert.match(page.textContent, /Your own apps, keys and site logins/);
+    assert.match(page.textContent, /Your own apps and site logins\. They're yours, not this workspace's bots'\. Keys here are this workspace's\./);
     assert.deepEqual(nav(m.box).filter((x) => ["people", "chart", "email"].includes(x)), [], "no People, Org chart or Email and phone of someone else's");
     const gmail = [...page.querySelectorAll("[data-service]")].find((r) => r.textContent.includes("Google"));
     await click(gmail.querySelector("button[data-list-heading]"));
@@ -418,6 +421,159 @@ await test("a workspace shared with the viewer: their own logins, and plainly th
     assert.ok(!panel.querySelector("[data-used-in]") && !panel.querySelector("[data-which-bots]") && !panel.querySelector("[data-who-reaches]"));
   } finally {
     await m.done();
+  }
+});
+
+/* ---------------- Keys in a workspace shared with the viewer, and the form ---------------- */
+
+const PROVIDERS = [
+  { name: "STRIPE_SECRET_KEY", label: "Stripe", where: "Stripe Dashboard", tip: "Use a restricted key.", readOnly: false },
+  { name: "STRIPE_API_KEY", label: "Stripe", where: "Stripe Dashboard", tip: "Use a restricted key.", readOnly: false },
+  { name: "OPENAI_API_KEY", label: "OpenAI", where: "platform.openai.com", tip: "Make a project key.", readOnly: false },
+  { name: "GITHUB_TOKEN", label: "GitHub", where: "GitHub settings", tip: "Use a fine-grained token.", readOnly: false },
+];
+const row = (name, scope, extra = {}) => ({ ...PROVIDERS.find((p) => p.name === name), updatedAt: null, scope, bots: [], ...extra });
+const sharedState = (keys) =>
+  stateOf({
+    shared: { projectId: "p1", name: "Acme", owner: "Dee", role: "member", wsId: "shared_p1", ...(keys ? { keys: true, keyActs: true } : {}) },
+    workspace: "shared_p1",
+    bots: [
+      { id: "max", name: "Max", role: "Lead", color: "#123456", isMain: true, computerStatus: "ready", workspaceId: "shared_p1", keys: ["GITHUB_TOKEN"] },
+      { id: "ivy", name: "Ivy", role: "Support", color: "#654321", isMain: false, computerStatus: "ready", workspaceId: "shared_p1" },
+    ],
+  });
+const tab = (page, name) => [...page.querySelectorAll('[role="tab"]')].find((t) => t.textContent.startsWith(name));
+/** The key form's Save (a submit button: linkedom has no default action, so the form is submitted). */
+const submit = (form) =>
+  act(async () => {
+    form.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+  });
+const input = (el, value) =>
+  act(async () => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value").set.call(el, value);
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+    await settle();
+  });
+
+await test("Keys in a shared workspace, without Keys there: no keys and no Add, and plainly who gives Keys", async () => {
+  bops.providers = PROVIDERS;
+  bops.keysInfo = { shared: { keys: false, acts: false } };
+  const m = await mount(settings(sharedState(false)));
+  try {
+    const page = m.box.querySelector("[data-logins]");
+    assert.match(page.querySelector("[data-no-keys]").textContent, /People with Keys manage this workspace's keys\. The owner or an Admin can give you Keys\./);
+    assert.ok(!buttonOf(page, "Add a key"), "nothing to add");
+    assert.ok(!page.querySelector("[data-key]"));
+  } finally {
+    bops.keysInfo = {};
+    await m.done();
+  }
+});
+
+await test("Keys in a shared workspace, with Keys: This workspace's keys with Show, Copy, Replace and Remove; the owner's read only, marked theirs, with bot switches", async () => {
+  bops.providers = PROVIDERS;
+  bops.keys = [row("STRIPE_SECRET_KEY", "workspace", { updatedAt: "2026-10-15T00:00:00Z" }), row("GITHUB_TOKEN", "all", { owner: true, bots: ["max"] })];
+  bops.keysInfo = { shared: { keys: true, acts: true } };
+  const m = await mount(settings(sharedState(true)));
+  try {
+    const page = m.box.querySelector("[data-logins]");
+    assert.match(page.textContent, /This workspace's keys, kept in the owner's Orgo vault/);
+    assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true", "opens on This workspace");
+    const own = page.querySelector('[data-key="workspace:STRIPE_SECRET_KEY"]');
+    assert.ok(!own.querySelector("[data-key-controls]").className.includes("hidden"), "This workspace's: Show, Copy, Replace, Remove");
+    assert.ok([...own.querySelectorAll("button[aria-haspopup='menu']")].some((b) => b.textContent.trim() === "+2"), "its bots: either may be given it");
+    await click(tab(page, "All workspaces"));
+    const theirs = page.querySelector('[data-key="all:GITHUB_TOKEN"]');
+    assert.match(theirs.textContent, /The owner's/);
+    assert.ok(theirs.querySelector("[data-key-controls]").className.includes("hidden"), "the owner's: no eye, copy, pencil or trash");
+    // Only the bots using it are offered, to stop them: none is added (only the owner gives one of their own keys).
+    const adds = (row) => [...row.querySelectorAll("button[aria-haspopup='menu']")].filter((b) => /^\+\d/.test(b.textContent.trim()));
+    assert.equal(adds(theirs).length, 0, "no way to add Ivy");
+    assert.equal(theirs.querySelector("[data-tip=\"Only the owner can let bots use the owner's own keys.\"]") !== null, true, "and why, as its tip");
+    // Its bots' switch: Max off for it, through the shared workspace's own route.
+    await click([...theirs.querySelectorAll("button[aria-haspopup='menu']")].find((b) => b.textContent.includes("Max")));
+    await click([...doc.querySelectorAll("[role='menuitemradio']")].find((b) => b.textContent.includes("No access")));
+    assert.deepEqual(sent("/api/keys").at(-1), { url: "/api/keys", method: "PATCH", body: { name: "GITHUB_TOKEN", botId: "max", allowed: false } });
+    // Add a key: This workspace's, from either tab.
+    await click(buttonOf(page, "Add a key"));
+    assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true");
+    await input(page.querySelector('input[aria-label="Key"]'), "sk_live_example");
+    await submit(page.querySelector("form"));
+    assert.deepEqual(sent("/api/keys").at(-1).body, { name: "STRIPE_API_KEY", value: "sk_live_example", botIds: ["max"], scope: "workspace" }, "a Stripe pick kept, This workspace");
+  } finally {
+    bops.keys = [];
+    bops.keysInfo = {};
+    await m.done();
+  }
+});
+
+await test("Keys form: a pasted key picks its service by how it starts, a hand pick after says whose it looks like, and the form opens on the tab looked at", async () => {
+  const { serviceOfKey } = await import(pathToFileURL(`${root}/components/app/keys.tsx`).href);
+  const all = ["STRIPE_SECRET_KEY", "STRIPE_API_KEY", "OPENAI_API_KEY", "OPENAI_ADMIN_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_ADMIN_KEY", "GITHUB_TOKEN", "SLACK_BOT_TOKEN", "LINEAR_API_KEY", "NOTION_API_KEY", "RESEND_API_KEY", "POSTHOG_PERSONAL_API_KEY"];
+  const cases = {
+    github_pat_11ABC: "GITHUB_TOKEN",
+    ghp_abc: "GITHUB_TOKEN",
+    gho_abc: "GITHUB_TOKEN",
+    ghu_abc: "GITHUB_TOKEN",
+    ghs_abc: "GITHUB_TOKEN",
+    "sk-ant-admin01-abc": "ANTHROPIC_ADMIN_KEY",
+    "sk-ant-api03-abc": "ANTHROPIC_API_KEY",
+    "sk-admin-abc": "OPENAI_ADMIN_KEY",
+    "sk-proj-abc": "OPENAI_API_KEY",
+    "sk-svcacct-abc": "OPENAI_API_KEY",
+    "sk-abc": "OPENAI_API_KEY",
+    sk_live_abc: "STRIPE_SECRET_KEY",
+    sk_test_abc: "STRIPE_SECRET_KEY",
+    rk_live_abc: "STRIPE_SECRET_KEY",
+    rk_test_abc: "STRIPE_SECRET_KEY",
+    "xoxb-1-abc": "SLACK_BOT_TOKEN",
+    lin_api_abc: "LINEAR_API_KEY",
+    ntn_abc: "NOTION_API_KEY",
+    re_abc: "RESEND_API_KEY",
+    phx_abc: "POSTHOG_PERSONAL_API_KEY",
+  };
+  for (const [value, name] of Object.entries(cases)) assert.equal(serviceOfKey(value, all), name, value);
+  assert.equal(serviceOfKey("sk_live_abc", all, "STRIPE_API_KEY"), "STRIPE_API_KEY", "a Stripe pick stays");
+  assert.equal(serviceOfKey("sk_other", all), null, "sk_ isn't OpenAI's");
+  assert.equal(serviceOfKey("plain-token", all), null);
+  assert.equal(serviceOfKey("ghp_abc", ["STRIPE_SECRET_KEY"]), null, "only a service Bops can call");
+  // The owner's case: GitHub saved for all workspaces, the form open there, a GitHub token pasted.
+  bops.providers = PROVIDERS;
+  bops.keys = [row("GITHUB_TOKEN", "all"), row("OPENAI_API_KEY", "workspace")];
+  const m = await mount(settings(stateOf()));
+  try {
+    const page = m.box.querySelector("[data-logins]");
+    await click(tab(page, "All workspaces"));
+    await click(buttonOf(page, "Add a key"));
+    const select = page.querySelector('select[aria-label="Service"]');
+    assert.equal(select.value, "STRIPE_SECRET_KEY", "the first one not saved there, as before");
+    await input(page.querySelector('input[aria-label="Key"]'), "github_pat_11EXAMPLE");
+    assert.equal(page.querySelector('select[aria-label="Service"]').value, "GITHUB_TOKEN", "the pasted key picked GitHub");
+    assert.ok(!page.querySelector("[data-looks-like]"));
+    await choose(page.querySelector('select[aria-label="Service"]'), "STRIPE_SECRET_KEY");
+    assert.equal(page.querySelector("[data-looks-like]").textContent, "This key looks like GitHub's.");
+    await choose(page.querySelector('select[aria-label="Service"]'), "GITHUB_TOKEN");
+    await submit(page.querySelector("form"));
+    assert.deepEqual(sent("/api/keys").at(-1).body, { name: "GITHUB_TOKEN", value: "github_pat_11EXAMPLE", botIds: ["boppy"], scope: "all" }, "for the tab looked at: All workspaces");
+  } finally {
+    bops.keys = [];
+    await m.done();
+  }
+  // Opened on This workspace (it has keys of its own) without a tab picked: a new key is This workspace's.
+  bops.keys = [row("OPENAI_API_KEY", "workspace")];
+  const m2 = await mount(settings(stateOf()));
+  try {
+    const page = m2.box.querySelector("[data-logins]");
+    assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true");
+    await click(buttonOf(page, "Add a key"));
+    await input(page.querySelector('input[aria-label="Key"]'), "ghp_EXAMPLE");
+    await submit(page.querySelector("form"));
+    assert.equal(sent("/api/keys").at(-1).body.scope, "workspace", "the tab it opened on");
+  } finally {
+    bops.keys = [];
+    bops.providers = [];
+    await m2.done();
   }
 });
 
