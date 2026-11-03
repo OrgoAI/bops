@@ -437,7 +437,10 @@ const sharedState = (keys) =>
   stateOf({
     shared: { projectId: "p1", name: "Acme", owner: "Dee", role: "member", wsId: "shared_p1", ...(keys ? { keys: true, keyActs: true } : {}) },
     workspace: "shared_p1",
-    bots: [{ id: "max", name: "Max", role: "Lead", color: "#123456", isMain: true, computerStatus: "ready", workspaceId: "shared_p1", keys: ["GITHUB_TOKEN"] }],
+    bots: [
+      { id: "max", name: "Max", role: "Lead", color: "#123456", isMain: true, computerStatus: "ready", workspaceId: "shared_p1", keys: ["GITHUB_TOKEN"] },
+      { id: "ivy", name: "Ivy", role: "Support", color: "#654321", isMain: false, computerStatus: "ready", workspaceId: "shared_p1" },
+    ],
   });
 const tab = (page, name) => [...page.querySelectorAll('[role="tab"]')].find((t) => t.textContent.startsWith(name));
 /** The key form's Save (a submit button: linkedom has no default action, so the form is submitted). */
@@ -479,10 +482,15 @@ await test("Keys in a shared workspace, with Keys: This workspace's keys with Sh
     assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true", "opens on This workspace");
     const own = page.querySelector('[data-key="workspace:STRIPE_SECRET_KEY"]');
     assert.ok(!own.querySelector("[data-key-controls]").className.includes("hidden"), "This workspace's: Show, Copy, Replace, Remove");
+    assert.ok([...own.querySelectorAll("button[aria-haspopup='menu']")].some((b) => b.textContent.trim() === "+2"), "its bots: either may be given it");
     await click(tab(page, "All workspaces"));
     const theirs = page.querySelector('[data-key="all:GITHUB_TOKEN"]');
     assert.match(theirs.textContent, /The owner's/);
     assert.ok(theirs.querySelector("[data-key-controls]").className.includes("hidden"), "the owner's: no eye, copy, pencil or trash");
+    // Only the bots using it are offered, to stop them: none is added (only the owner gives one of their own keys).
+    const adds = (row) => [...row.querySelectorAll("button[aria-haspopup='menu']")].filter((b) => /^\+\d/.test(b.textContent.trim()));
+    assert.equal(adds(theirs).length, 0, "no way to add Ivy");
+    assert.equal(theirs.querySelector("[data-tip=\"Only the owner can let bots use the owner's own keys.\"]") !== null, true, "and why, as its tip");
     // Its bots' switch: Max off for it, through the shared workspace's own route.
     await click([...theirs.querySelectorAll("button[aria-haspopup='menu']")].find((b) => b.textContent.includes("Max")));
     await click([...doc.querySelectorAll("[role='menuitemradio']")].find((b) => b.textContent.includes("No access")));

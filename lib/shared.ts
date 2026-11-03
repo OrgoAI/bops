@@ -228,6 +228,8 @@ export const ON_MAC_LINE = "This runs on the owner's Mac. Only the owner can tel
 export const NO_COMPUTER_LINE = "This runs on the bot's computer, and the owner hasn't let you use it.";
 /** What only an Admin does (cloud/protocol.ts ADMIN_ONLY). */
 export const ADMIN_LINE = "Only the owner or an Admin can do this.";
+/** On one of the owner's own keys (for all their workspaces, or another of theirs): a bot's switch turns it off, never on. */
+export { OWNERS_KEY_LINE } from "@/cloud/protocol";
 /** In a shared workspace, for someone without Keys (cloud/protocol.ts MEMBER_NO_KEYS): who gives it. */
 export const KEYS_GIVEN_LINE = "The owner or an Admin can give you Keys.";
 /** Under an answer on its way while the owner's Bops is shut: it goes when it opens (as long as the ask waits). */

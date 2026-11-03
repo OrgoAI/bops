@@ -29,7 +29,7 @@ const FAKES = {
   persist: forward("persist", ["onRunner"]),
   "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"]),
   "apps-for-members": forward("apps-for-members", ["noteMemberAct", "actKept", "seeApps"]),
-  keys: forward("keys", ["keyName", "keyProvider", "listKeys", "keysOf", "grantKey"]),
+  keys: forward("keys", ["keyName", "keyProvider", "listKeys", "keysOf", "keysProject", "grantKey"]),
 };
 registerHooks({
   resolve(specifier, context, next) {
@@ -180,16 +180,17 @@ globalThis.__fake = {
     seeApps: async () => void did.push(["seeApps"]),
   },
   // The owner's vault, as keys.ts reads it: `vault` (null: Orgo didn't answer), each key by name and Orgo project; the
-  // workspace sees the account's and its own project's (proj_acme).
+  // workspace sees the account's, its own project's (proj_acme) and one of another workspace's switched on here (proj_north).
   keys: {
     keyName: (n) => n.trim().toUpperCase().replace(/-/g, "_"),
-    keyProvider: (n) => (["GITHUB_TOKEN", "STRIPE_SECRET_KEY", "LINEAR_API_KEY"].includes(n) ? { name: n } : undefined),
+    keyProvider: (n) => (["GITHUB_TOKEN", "STRIPE_SECRET_KEY", "LINEAR_API_KEY", "PLAIN_API_KEY", "NOTION_API_KEY"].includes(n) ? { name: n } : undefined),
+    keysProject: (wsId) => (wsId === "ws_acme" ? "proj_acme" : undefined),
     listKeys: async (o) => {
       did.push(["vault", !!o?.fresh]);
       if (!vault) throw new Error("Bops couldn't reach Orgo.");
       return vault;
     },
-    keysOf: (all, wsId) => all.filter((k) => !k.workspaceId || (wsId === "ws_acme" && k.workspaceId === "proj_acme")),
+    keysOf: (all, wsId) => all.filter((k) => !k.workspaceId || (wsId === "ws_acme" && (k.workspaceId === "proj_acme" || (k.workspaceId === "proj_north" && k.name === "PLAIN_API_KEY")))),
     grantKey: (name, botId, on) => {
       did.push(["grant", name, botId, on]);
       const b = state.bots.find((x) => x.id === botId);
@@ -804,45 +805,53 @@ await check("a stored message from an Admin hours ago: an Admin only while orgo-
   resetAdmins();
 });
 
-await check("a bot's key, switched by someone with Keys: a bot of the workspace they see (Read is enough), a key the workspace sees now (the vault read afresh), said in its chat as theirs; once", async () => {
+await check("a bot's key, switched by someone with Keys: on, only one of the workspace's own (the vault read afresh), for a bot of the workspace they see (Read is enough), said in its chat as theirs; off for any; once", async () => {
   const later = () => new Promise((r) => setTimeout(r, 10));
   fresh();
-  vault = [{ name: "GITHUB_TOKEN", workspaceId: null }, { name: "LINEAR_API_KEY", workspaceId: "proj_acme" }, { name: "STRIPE_SECRET_KEY", workspaceId: "proj_other" }];
+  // The workspace's own: LINEAR_API_KEY (one by that name for all workspaces too: the workspace's is the one bots use).
+  vault = [{ name: "GITHUB_TOKEN", workspaceId: null }, { name: "LINEAR_API_KEY", workspaceId: "proj_acme" }, { name: "LINEAR_API_KEY", workspaceId: null }, { name: "STRIPE_SECRET_KEY", workspaceId: "proj_other" }, { name: "PLAIN_API_KEY", workspaceId: "proj_north" }];
   const ivy = () => state.bots.find((b) => b.id === "ivy");
   // Sam: Ivy at Read, Keys as Bops Cloud vouched.
-  await memberEvent(event({ act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }, { keys: true, key: "key_key_01" }), "e_k1");
+  await memberEvent(event({ act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, { keys: true, key: "key_key_01" }), "e_k1");
   await later();
-  assert.deepEqual(ivy().keys, ["GITHUB_TOKEN"]);
-  assert.deepEqual(did.filter((d) => d[0] !== "update"), [["vault", true], ["grant", "GITHUB_TOKEN", "ivy", true], ["add", "system", "Sam let Ivy use GITHUB_TOKEN", null]]);
-  // This workspace's own (its project's): seen too. The same switch again changes nothing.
-  await memberEvent(event({ act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, { keys: true, key: "key_key_02" }), "e_k2");
-  await memberEvent(event({ act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, { keys: true, key: "key_key_02" }), "e_k2");
+  assert.deepEqual(ivy().keys, ["LINEAR_API_KEY"]);
+  assert.deepEqual(did.filter((d) => d[0] !== "update"), [["vault", true], ["grant", "LINEAR_API_KEY", "ivy", true], ["add", "system", "Sam let Ivy use LINEAR_API_KEY", null]]);
+  // The same switch again changes nothing.
+  await memberEvent(event({ act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, { keys: true, key: "key_key_01" }), "e_k1");
   await later();
-  assert.deepEqual(ivy().keys, ["GITHUB_TOKEN", "LINEAR_API_KEY"]);
-  assert.equal(did.filter((d) => d[0] === "grant").length, 2);
-  // Off: no read of the vault (it only takes away), and said.
+  assert.equal(did.filter((d) => d[0] === "grant").length, 1);
+  // The owner's own (for all their workspaces, or another workspace's of theirs switched on here): never on, an Admin's switch neither.
+  for (const [i, [name, who]] of [["GITHUB_TOKEN", SAM], ["PLAIN_API_KEY", SAM], ["GITHUB_TOKEN", ADA]].entries()) {
+    did.length = 0;
+    await memberEvent(event({ act: "key", botId: "ivy", name, on: true }, { keys: true, key: `key_own_${i}`, ...(who === ADA ? { member: ADA, role: "admin" } : {}) }), `e_own${i}`);
+    await later();
+    assert.deepEqual(did.filter((d) => d[0] === "grant" || d[0] === "add"), [], name);
+    assert.ok(warned.some((w) => w.includes(`e_own${i}`) && w.includes("the owner's own key")), name);
+  }
+  // Off for one of the owner's own the bot has (the owner gave it): goes, with no read of the vault (it only takes away).
+  ivy().keys = ["LINEAR_API_KEY", "GITHUB_TOKEN"];
   did.length = 0;
   await memberEvent(event({ act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: false }, { keys: true, key: "key_key_03" }), "e_k3");
   await later();
   assert.deepEqual(did.filter((d) => d[0] !== "update"), [["grant", "GITHUB_TOKEN", "ivy", false], ["add", "system", "Sam stopped Ivy using GITHUB_TOKEN", null]]);
   // An Admin: Zed too (no entry for anyone).
-  await memberEvent(event({ act: "key", botId: "zed", name: "GITHUB_TOKEN", on: true }, { member: ADA, role: "admin", keys: true, key: "key_key_04" }), "e_k4");
+  await memberEvent(event({ act: "key", botId: "zed", name: "LINEAR_API_KEY", on: true }, { member: ADA, role: "admin", keys: true, key: "key_key_04" }), "e_k4");
   await later();
-  assert.deepEqual(state.bots.find((b) => b.id === "zed").keys, ["GITHUB_TOKEN"]);
+  assert.deepEqual(state.bots.find((b) => b.id === "zed").keys, ["LINEAR_API_KEY"]);
   for (const [i, [o, act, why, v]] of [
     // Bops Cloud didn't vouch for Keys (an Admin orgo-web said no for, too): not theirs.
-    [{}, { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }, "no Keys"],
-    [{ member: ADA, role: "admin" }, { act: "key", botId: "zed", name: "GITHUB_TOKEN", on: true }, "no Keys"],
-    [{ keys: true }, { act: "key", botId: "boppy", name: "GITHUB_TOKEN", on: true }, "no such bot"],
-    [{ keys: true }, { act: "key", botId: "zed", name: "GITHUB_TOKEN", on: true }, "not a bot they see"],
+    [{}, { act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, "no Keys"],
+    [{ member: ADA, role: "admin" }, { act: "key", botId: "zed", name: "LINEAR_API_KEY", on: true }, "no Keys"],
+    [{ keys: true }, { act: "key", botId: "boppy", name: "LINEAR_API_KEY", on: true }, "no such bot"],
+    [{ keys: true }, { act: "key", botId: "zed", name: "LINEAR_API_KEY", on: true }, "not a bot they see"],
     [{ keys: true }, { act: "key", botId: "ivy", name: "STRIPE_SECRET_KEY", on: true }, "not a key this workspace sees"],
-    [{ keys: true }, { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }, "the vault didn't answer", null],
+    [{ keys: true }, { act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }, "the vault didn't answer", null],
     [{ keys: true }, { act: "key", botId: "ivy", name: "OPENAI_API_KEY", on: true }, "no such key"],
     [{ keys: true }, { act: "key", botId: "ivy", name: "github token", on: true }, "not a member's act"],
-    [{ keys: true }, { act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: "yes" }, "not a member's act"],
+    [{ keys: true }, { act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: "yes" }, "not a member's act"],
   ].entries()) {
     fresh();
-    vault = v === undefined ? [{ name: "GITHUB_TOKEN", workspaceId: null }] : v;
+    vault = v === undefined ? [{ name: "LINEAR_API_KEY", workspaceId: "proj_acme" }] : v;
     await memberEvent(event(act, { ...o, key: `key_key_n${i}` }), `e_kn${i}`);
     await later();
     assert.deepEqual(did.filter((d) => d[0] === "grant" || d[0] === "add"), [], why);

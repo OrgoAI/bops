@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
-import { KEYS_GIVEN_LINE, REPLY_WAITS_LINE } from "@/lib/shared";
+import { KEYS_GIVEN_LINE, OWNERS_KEY_LINE, REPLY_WAITS_LINE } from "@/lib/shared";
 import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type LastUses, type Message, type Watch } from "@/lib/types";
 import { BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon, usedLine } from "./apps";
 import { Mascot } from "./mascot";
@@ -48,7 +48,7 @@ const SCOPES: { id: Scope; label: string; tip: string }[] = [
 const scopeLabel = (scope: Scope) => SCOPES.find((x) => x.id === scope)!;
 
 /** A shared workspace's keys for all the owner's workspaces, and another of theirs switched on here: theirs alone. */
-const OWNERS_TIP = "The owner's own key. You can switch bots on or off for it, but only the owner can see, replace or remove it.";
+const OWNERS_TIP = "The owner's own key. Only the owner can see, replace or remove it, or let a bot use it. You can stop a bot using it.";
 /** In a shared workspace, without Keys. */
 const NO_KEYS_LINE = `People with Keys manage this workspace's keys. ${KEYS_GIVEN_LINE}`;
 /** In a shared workspace whose owner's Bops can't take the bots' switches yet (SharedWsSlice.keyActs). */
@@ -637,8 +637,16 @@ function KeyLine({
       )}
       {!!team.length && (
         <div className="flex items-center gap-2">
-          <div className="min-w-0 flex-1">
-            <BotChips team={team} choices={KEY_CHOICES} level={(b) => (b.keys?.includes(k.name) ? "act" : "none")} what={k.name} disabled={busy || switchesOff} onSet={(b, to) => void toggle(b, to === "act")} />
+          {/* The owner's own key: only the bots using it are offered, to stop them (OWNERS_KEY_LINE); none is added. */}
+          <div data-tip={owners ? OWNERS_KEY_LINE : undefined} className="min-w-0 flex-1">
+            <BotChips
+              team={owners ? team.filter((b) => b.keys?.includes(k.name)) : team}
+              choices={KEY_CHOICES}
+              level={(b) => (b.keys?.includes(k.name) ? "act" : "none")}
+              what={k.name}
+              disabled={busy || switchesOff}
+              onSet={(b, to) => void (owners && to === "act" ? undefined : toggle(b, to === "act"))}
+            />
           </div>
           {used && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{used}</span>}
         </div>
@@ -923,6 +931,8 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
       ) : (
         keys.map((k, i) => {
           const on = !!b.keys?.includes(k.name);
+          // The owner's own key in a shared workspace: turned off here, never on (OWNERS_KEY_LINE).
+          const ownersOff = !!state.shared && !!k.owner && !on;
           return (
             <div key={k.name} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === keys.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <span className="min-w-0 flex-1 truncate font-mono text-[13px] leading-[18px]">{k.name}</span>
@@ -944,7 +954,8 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
                 role="switch"
                 aria-checked={on}
                 aria-label={on ? `Stop ${b.name} using ${k.name}` : `Let ${b.name} use ${k.name}`}
-                disabled={busy === k.name || (!!state.shared && !state.shared.keyActs)}
+                data-tip={ownersOff ? OWNERS_KEY_LINE : undefined}
+                disabled={busy === k.name || ownersOff || (!!state.shared && !state.shared.keyActs)}
                 onClick={() => void toggle(k.name, !on)}
                 className={`flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-0.5 disabled:opacity-60 ${on ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}
               >

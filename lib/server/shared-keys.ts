@@ -1,6 +1,6 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
-import { MEMBER_NO_KEYS, type MemberAct } from "@/cloud/protocol";
+import { MEMBER_NO_KEYS, OWNERS_KEY_LINE, type MemberAct, type SharedKey } from "@/cloud/protocol";
 import { KEYS_GIVEN_LINE } from "@/lib/shared";
 import { orgoHeaders } from "./app-version";
 import { KEY_PROVIDERS, KeysError, keyName, keyProvider } from "./keys";
@@ -143,12 +143,28 @@ export async function sharedKeysList(): Promise<{ keys: SharedKeyRow[]; scope: {
 /** An act's key (cloud/protocol.ts MemberActBody.key): a new one each time. */
 const actKey = () => `key_${randomBytes(12).toString("base64url")}`;
 
-/** Let a bot of the shared workspace use a key, or stop it (the "key" act, through Bops Cloud): null, or why not. */
-export async function sharedGrant(name: string, botId: string, on: boolean): Promise<{ status: number; error: string } | null> {
+/** Whether the keys the workspace's bots see have `name` only as the owner's own (for all their workspaces, or another workspace's of theirs). */
+const ownersOnly = (names: SharedKey[], name: string) => {
+  const of = names.filter((k) => k.name === name);
+  return of.length > 0 && !of.some((k) => k.scope === "workspace" && !k.from);
+};
+
+/**
+ * Let a bot of the shared workspace use a key, or stop it (the "key" act, through Bops Cloud): null, or why not. On, only
+ * one of the workspace's own: one the owner's Mac said is the owner's alone is refused here first, unless orgo-web lists it
+ * as the workspace's now (added since), and Bops Cloud and the owner's Mac check again. `saved`: a key of This workspace
+ * just saved here, which orgo-web has. Off goes for any.
+ */
+export async function sharedGrant(name: string, botId: string, on: boolean, o: { saved?: boolean } = {}): Promise<{ status: number; error: string } | null> {
   const n = keyName(name);
   if (!keyProvider(n)) return { status: 404, error: "No such key." };
   const open = withKeys();
   if (!open.bots.some((b) => b.id === botId)) return { status: 404, error: "That bot isn't here." };
+  if (on && !o.saved && ownersOnly(open.keyNames, n)) {
+    const live = await projectKeys<{ keys?: unknown }>(open.projectId, "GET").catch(() => null);
+    const here = !!live && Array.isArray(live.keys) && live.keys.some((k) => !!k && typeof k === "object" && (k as { name?: unknown }).name === n);
+    if (!here) return { status: 403, error: OWNERS_KEY_LINE };
+  }
   const act: MemberAct = { act: "key", botId, name: n, on };
   const r = await actShared(act, actKey());
   return r.ok ? null : { status: r.status || 502, error: r.error };
@@ -168,22 +184,21 @@ export async function sharedSave(name: string, value: string, botIds: string[]):
   await projectKeys(open.projectId, "POST", "", { name: n, value: v });
   let note: string | undefined;
   for (const botId of botIds.filter((id, i, all) => all.indexOf(id) === i && open.bots.some((b) => b.id === id && !b.keys.includes(n)))) {
-    const no = await sharedGrant(n, botId, true).catch((e: unknown) => ({ status: 502, error: e instanceof Error ? e.message : "That didn't go." }));
+    const no = await sharedGrant(n, botId, true, { saved: true }).catch((e: unknown) => ({ status: 502, error: e instanceof Error ? e.message : "That didn't go." }));
     if (no) note ??= `Saved. The bots you picked didn't get it: ${no.error}`;
   }
   return { name: n, ...(note ? { note } : {}) };
 }
 
 /**
- * Take a key out of This workspace (orgo-web), and from the bots that use it when no other key by that name is left for
- * them here (the owner's for all their workspaces, say, which they keep).
+ * Take a key out of This workspace (orgo-web), and from every bot that uses it: one by that name the owner has for all
+ * their workspaces would be what those bots use next, and that's the owner's to give (OWNERS_KEY_LINE).
  */
 export async function sharedRemove(name: string): Promise<void> {
   const n = keyName(name);
   if (!keyProvider(n)) throw new KeysError("No such key.", 404);
   const open = withKeys();
   await projectKeys(open.projectId, "DELETE", `/${encodeURIComponent(n)}`);
-  if (open.keyNames.some((k) => k.name === n && (k.scope === "all" || k.from))) return;
   for (const b of open.bots) if (b.keys.includes(n)) await sharedGrant(n, b.id, false).catch(() => null);
 }
 

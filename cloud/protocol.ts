@@ -810,7 +810,8 @@ export type SharedWsSlice = {
 /**
  * A key the workspace's bots see (SharedWsSlice.keyNames), by its vault name (STRIPE_SECRET_KEY): "workspace" its own
  * (This workspace), "all" the owner's for all their workspaces, which stays the owner's (named, never shown, replaced or
- * removed by anyone else); `from` another of the owner's workspaces' own, switched on here (Used in), the owner's too.
+ * removed by anyone else, nor given to a bot: OWNERS_KEY_LINE); `from` another of the owner's workspaces' own, switched on
+ * here (Used in), the owner's too.
  */
 export type SharedKey = { name: string; scope: "workspace" | "all"; from?: true };
 /** A key's vault name as a "key" act and SharedKey carry it: UPPER_SNAKE, as orgo-web keeps it. */
@@ -903,6 +904,8 @@ export type MemberAct =
   | { act: "persona"; botId: string; text: string; was: string }
   // Keys (SharedWsSlice.keys), with the owner's Bops at KEYS_MIN_VERSION (OWNER_BOPS_OLD): let a bot they see use a key the
   // workspace sees, by its vault name, or stop it (`on` false). Done by the owner's Mac, named as them (lib/server/member-acts.ts).
+  // On is for the workspace's own keys alone: one it sees only as the owner's (scope "all", or `from`) is refused
+  // (MEMBER_OWNER_ONLY, OWNERS_KEY_LINE); off goes for any.
   | { act: "key"; botId: string; name: string; on: boolean }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
@@ -999,6 +1002,11 @@ export const ADMIN_PUBLISH_MIN_VERSION = "0.0.40";
  * an owner whose last Mac is older. Set to the release that carries it.
  */
 export const KEYS_MIN_VERSION = "0.0.41";
+/**
+ * 403 MEMBER_OWNER_ONLY for a "key" act turning on one of the owner's own keys (SharedKey scope "all", or `from`): their
+ * personal or company keys, which only the owner lets bots use. Turning one off still goes.
+ */
+export const OWNERS_KEY_LINE = "Only the owner can let bots use the owner's own keys.";
 /** 403: the act is a Keys holder's (SharedWsSlice.keys), and the caller hasn't been given Keys. */
 export const MEMBER_NO_KEYS = "member_no_keys";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */

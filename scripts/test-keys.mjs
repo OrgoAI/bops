@@ -924,10 +924,26 @@ await check("in a shared workspace with Keys: a new key is This workspace's (org
     res = await KeysRoute.POST(req("POST", "/api/keys", { name: "RESEND_API_KEY", value: "re_fake_shared", botIds: ["ivy"], scope: "workspace" }));
     assert.deepEqual(await res.json(), { ok: true, name: "RESEND_API_KEY", note: "Saved. The bots you picked didn't get it: The owner's Bops needs an update first." });
     actSays = null;
-    // A bot's switch: an act (the owner's Bops does it).
+    // A bot's switch: an act (the owner's Bops does it), on for one of the workspace's own.
     acts.length = 0;
+    res = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "LINEAR_API_KEY", botId: "ivy", allowed: true }));
+    assert.deepEqual([res.status, acts.map((a) => a.act)], [200, [{ act: "key", botId: "ivy", name: "LINEAR_API_KEY", on: true }]]);
+    // The owner's own (for all their workspaces, or another of theirs): never on from here, and no act goes; off goes.
+    acts.length = 0;
+    for (const name of ["GITHUB_TOKEN", "PLAIN_API_KEY"]) {
+      res = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name, botId: "ivy", allowed: true }));
+      assert.deepEqual([res.status, (await res.json()).error], [403, "Only the owner can let bots use the owner's own keys."], name);
+    }
+    assert.equal(acts.length, 0);
+    res = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "GITHUB_TOKEN", botId: "max", allowed: false }));
+    assert.deepEqual([res.status, acts.map((a) => a.act)], [200, [{ act: "key", botId: "max", name: "GITHUB_TOKEN", on: false }]]);
+    // One added to This workspace since the owner's Mac last said (orgo-web lists it): the workspace's own, so it goes.
+    acts.length = 0;
+    projectVault.set("GITHUB_TOKEN", "ghp_fake_shared");
     res = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "GITHUB_TOKEN", botId: "ivy", allowed: true }));
-    assert.deepEqual([res.status, acts.map((a) => a.act)], [200, [{ act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }]]);
+    assert.deepEqual([res.status, acts.map((a) => a.act.name)], [200, ["GITHUB_TOKEN"]]);
+    projectVault.delete("GITHUB_TOKEN");
+    acts.length = 0;
     actSays = { ok: false, status: 403, error: "The owner or an Admin can give you Keys.", code: "member_no_keys" };
     res = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "GITHUB_TOKEN", botId: "ivy", allowed: false }));
     assert.deepEqual([res.status, (await res.json()).error], [403, "The owner or an Admin can give you Keys."]);
@@ -938,7 +954,13 @@ await check("in a shared workspace with Keys: a new key is This workspace's (org
     assert.deepEqual(await res.json(), { name: "LINEAR_API_KEY", value: "lin_api_fake_shared" });
     res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "GITHUB_TOKEN", scope: "all" }));
     assert.equal(res.status, 403);
-    // Remove: the owner's for all their workspaces stays theirs; This workspace's goes, and its bots stop using it.
+    // Saved here with a name the owner also has for all their workspaces: This workspace's now, so the bots picked get it.
+    acts.length = 0;
+    res = await KeysRoute.POST(req("POST", "/api/keys", { name: "GITHUB_TOKEN", value: "ghp_fake_shared_2", botIds: ["ivy"], scope: "workspace" }));
+    assert.deepEqual([(await res.json()).ok, acts.map((a) => a.act)], [true, [{ act: "key", botId: "ivy", name: "GITHUB_TOKEN", on: true }]]);
+    projectVault.delete("GITHUB_TOKEN");
+    // Remove: the owner's for all their workspaces stays theirs; This workspace's goes, and its bots stop using it (one of
+    // the owner's by that name would be what they use next, and that's the owner's to give).
     assert.equal((await KeyRoute.DELETE(req("DELETE", "/api/keys/GITHUB_TOKEN"), ctx("GITHUB_TOKEN"))).status, 403);
     acts.length = 0;
     res = await KeyRoute.DELETE(req("DELETE", "/api/keys/LINEAR_API_KEY?scope=workspace"), ctx("LINEAR_API_KEY"));
@@ -1044,7 +1066,7 @@ await check("no dashes in anything Bops said or told the model", () => {
 });
 
 await check("no key value in any log, or anything the model was sent", () => {
-  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
+  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
   for (const body of asked) for (const v of vault.values()) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
 });
 

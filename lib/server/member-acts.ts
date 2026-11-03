@@ -364,9 +364,11 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
 }
 
 /**
- * A bot's key switched on or off by someone with Keys, as the owner's own switch does (keys.ts grantKey): a key Bops can
- * call that this workspace sees now (the vault read afresh: one just added on orgo-web is there), never a value. Said in
- * the bot's chat as theirs. Off needs no read: it only ever takes away. The same act again changes nothing.
+ * A bot's key switched on or off by someone with Keys, as the owner's own switch does (keys.ts grantKey): on, a key Bops
+ * can call that this workspace has of its own now (the vault read afresh: one just added on orgo-web is there), never one
+ * it sees only as the owner's (for all their workspaces, or another workspace's of theirs switched on here: their personal
+ * or company keys, which only the owner gives a bot). Off goes for any, with no read: it only ever takes away. Said in the
+ * bot's chat as theirs. The same act again changes nothing.
  */
 async function keyEvent(wsId: string, act: Extract<MemberAct, { act: "key" }>, who: MemberWho, eventId: string) {
   const k = await import("./keys");
@@ -377,7 +379,10 @@ async function keyEvent(wsId: string, act: Extract<MemberAct, { act: "key" }>, w
   if (act.on) {
     const all = await k.listKeys({ fresh: true }).catch(() => null);
     if (!all) return void console.warn(`[members] event ${eventId}: not done (the vault didn't answer)`);
-    if (!k.keysOf(all, wsId).some((x) => x.name === name)) return void console.warn(`[members] event ${eventId}: not done (not a key this workspace sees)`);
+    const seen = k.keysOf(all, wsId).filter((x) => x.name === name);
+    if (!seen.length) return void console.warn(`[members] event ${eventId}: not done (not a key this workspace sees)`);
+    const project = k.keysProject(wsId);
+    if (!seen.some((x) => !!project && x.workspaceId === project)) return void console.warn(`[members] event ${eventId}: not done (the owner's own key)`);
   }
   if (!!b.keys?.includes(name) === act.on) return;
   k.grantKey(name, b.id, act.on);

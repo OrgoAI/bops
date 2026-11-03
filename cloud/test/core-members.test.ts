@@ -949,6 +949,8 @@ let cloud: Server;
 let base = "";
 /** bops-role's answers by "<user> <project>", as the fake orgo-web gives them (anything else 404). */
 const roles: Record<string, WsAccess> = {};
+/** Each project's own keys as orgo-web's bops-keys lists them (names), or the status it answers; none: 404. */
+const liveKeys: Record<string, string[] | number> = {};
 /** "<user> <project>"s bops-role answers 503 for, as orgo-web in trouble. */
 const failing = new Set<string>();
 /** The email Orgo's profile gives each user who has one. */
@@ -977,6 +979,12 @@ before(async () => {
     const id = /^Bearer (?:key-|orgo_vm_)([^~]+)/.exec(req.headers.authorization ?? "")?.[1];
     if (!id) return void res.writeHead(401).end();
     if (req.url === "/api/user/profile") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id, ...(emails[id] ? { email: emails[id] } : {}) }));
+    const keysOf = /^\/api\/projects\/([^/]+)\/bops-keys$/.exec(req.url ?? "")?.[1];
+    if (keysOf) {
+      const k = liveKeys[keysOf];
+      if (k === undefined || typeof k === "number") return void res.writeHead(typeof k === "number" ? k : 404, { "content-type": "application/json" }).end("{}");
+      return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ keys: k.map((name) => ({ name, updated_at: null })) }));
+    }
     const project = /^\/api\/projects\/([^/]+)\/bops-role$/.exec(req.url ?? "")?.[1];
     if (failing.has(`${id} ${project}`)) return void res.writeHead(503).end();
     const a = project && roles[`${id} ${project}`];
@@ -1552,6 +1560,36 @@ test("over HTTP: a bot's key is switched by someone with Keys (an Admin, or a Me
   actFakes({ owner: kimOwner, keysGate: true });
   assert.equal((await act("act-sam", chatAct("bot:max", "k_key_0007"))).status, 202);
   assert.equal("keys" in queued[0].payload, false);
+});
+
+test("over HTTP: the owner's own keys (for all their workspaces, or another of theirs) are never turned on for a bot by anyone else, an Admin too; turned off, they go; this workspace's own go either way", async () => {
+  const ws0 = (actOwner.workspaces as Record<string, unknown>[])[0];
+  const owner = {
+    ...actOwner,
+    workspaces: [{ ...ws0, keysForMembers: { at: 1, keys: [{ name: "STRIPE_SECRET_KEY", scope: "all" }, { name: "PLAIN_API_KEY", scope: "workspace", from: true }, { name: "LINEAR_API_KEY", scope: "workspace" }, { name: "LINEAR_API_KEY", scope: "all" }] } }],
+  };
+  actFakes({ owner, keysGate: true });
+  liveKeys["proj-act"] = ["LINEAR_API_KEY"];
+  try {
+    for (const name of ["STRIPE_SECRET_KEY", "PLAIN_API_KEY"]) {
+      const r = await act("act-tom", { key: `k_own_${name.slice(0, 6)}`, act: { act: "key", botId: "max", name, on: true } });
+      assert.deepEqual([r.status, r.json.code, r.json.error], [403, "member_owner_only", "Only the owner can let bots use the owner's own keys."], name);
+    }
+    assert.equal(queued.length, 0, "never queued");
+    // Off: goes.
+    assert.equal((await act("act-tom", { key: "k_own_off_1", act: { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: false } })).status, 202);
+    // This workspace's own (one by that name for all workspaces too): goes.
+    assert.equal((await act("act-tom", { key: "k_own_ws_01", act: { act: "key", botId: "max", name: "LINEAR_API_KEY", on: true } })).status, 202);
+    // Added to the workspace on orgo-web since the owner's Mac last said: orgo-web's list says it's the workspace's own.
+    liveKeys["proj-act"] = ["LINEAR_API_KEY", "STRIPE_SECRET_KEY"];
+    assert.equal((await act("act-tom", { key: "k_own_new_1", act: { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: true } })).status, 202);
+    // orgo-web can't say: the owner's Mac decides (it reads the vault afresh), so it's queued.
+    liveKeys["proj-act"] = 503;
+    assert.equal((await act("act-tom", { key: "k_own_unk_1", act: { act: "key", botId: "max", name: "PLAIN_API_KEY", on: true } })).status, 202);
+    assert.deepEqual(queued.map((q) => [q.payload.act.act === "key" && q.payload.act.name, q.payload.act.act === "key" && q.payload.act.on]), [["STRIPE_SECRET_KEY", false], ["LINEAR_API_KEY", true], ["STRIPE_SECRET_KEY", true], ["PLAIN_API_KEY", true]]);
+  } finally {
+    delete liveKeys["proj-act"];
+  }
 });
 
 test("a bot's How I work is in an Admin's slice, who changes it, and never a Member's", () => {

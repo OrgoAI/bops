@@ -38,6 +38,7 @@ import {
   KEY_NAME,
   KEYS_MIN_VERSION,
   MEMBER_NO_KEYS,
+  OWNERS_KEY_LINE,
   OWNER_BOPS_OLD,
   MEMBER_ACT_MS,
   MEMBER_MAX_PERSONA,
@@ -71,7 +72,7 @@ import {
 } from "./protocol.ts";
 import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, toJson, writeMessages, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
-import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
+import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, keyNamesOf, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckTurns, routedWorkspaces, routingOf, setRouting, takeMessage, wakeComputer } from "./turns.ts";
 
 /**
@@ -243,6 +244,37 @@ export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, a
 
 /** Whether the caller, someone other than the owner, has Keys (member-access.ts holdsKeys: as orgo-web says, an Admin when it doesn't). */
 const keysHeld = (access: WsAccess) => access.role !== "owner" && holdsKeys(access.role, access.keys);
+
+/**
+ * The workspace's own keys as orgo-web lists them now (GET /api/projects/<id>/bops-keys), with the caller's key (they have
+ * Keys): names only. Null when orgo-web can't say (an orgo-web before the route, or no answer).
+ */
+async function liveWorkspaceKeys(key: string, projectId: string): Promise<Set<string> | null> {
+  try {
+    const res = await fetchImpl(`${config.orgoOrigin()}/api/projects/${encodeURIComponent(projectId)}/bops-keys`, {
+      headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const j = res.ok ? ((await res.json().catch(() => null)) as { keys?: unknown } | null) : (void res.body?.cancel().catch(() => {}), null);
+    if (!j || !Array.isArray(j.keys)) return null;
+    return new Set(j.keys.flatMap((k) => (k && typeof k === "object" && typeof (k as { name?: unknown }).name === "string" ? [(k as { name: string }).name] : [])));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a "key" act turning `name` on is for one of the owner's own keys (OWNERS_KEY_LINE), as far as Bops Cloud can tell:
+ * the names the owner's Mac last said (keyNamesOf) have it only as the owner's (for all their workspaces, or another
+ * workspace's of theirs), and orgo-web's list of the workspace's own keys doesn't have it either (one added there since the
+ * owner's Mac last said is the workspace's own). When either can't say, the owner's Mac decides, from its vault read afresh.
+ */
+async function ownersOwnKey(workspace: Record<string, unknown> | null, name: string, key: string, projectId: string): Promise<boolean> {
+  const said = keyNamesOf(workspace)?.filter((k) => k.name === name) ?? [];
+  if (!said.length || said.some((k) => k.scope === "workspace" && !k.from)) return false;
+  const live = await liveWorkspaceKeys(key, projectId);
+  return !!live && !live.has(name);
+}
 
 /* ---------------- An Admin's acts: the owner's Bops new enough ---------------- */
 
@@ -826,8 +858,12 @@ const actIn: Route = {
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
     if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
-    // A bot's keys: Keys, a bot they see (botsTouched). Not Write: Keys is a scope of its own.
-    else if (body.act.act === "key") botsTouched(blob, slice, body.act, actor);
+    // A bot's keys: Keys, a bot they see (botsTouched). Not Write: Keys is a scope of its own. On, the workspace's own keys
+    // alone: one of the owner's own is theirs to give (ownersOwnKey). Off goes for any.
+    else if (body.act.act === "key") {
+      botsTouched(blob, slice, body.act, actor);
+      if (body.act.on && (await ownersOwnKey(slice.workspace, body.act.name, bearer(req), projectId))) throw new HttpError(403, OWNERS_KEY_LINE, { code: MEMBER_OWNER_ONLY });
+    }
     else {
       const bots = botsTouched(blob, slice, body.act, actor);
       // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.
