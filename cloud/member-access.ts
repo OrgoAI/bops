@@ -224,3 +224,35 @@ export const computerSummary = (access: { computer?: unknown }) => (usesComputer
 
 /** A short line for a person's Your Apps, as accessSummary words bots: "Your Apps, read"; nothing at None; "not set" before a level. */
 export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(access.apps) ? "Your Apps not set" : access.apps === "none" ? "" : `Your Apps, ${access.apps}`);
+
+/**
+ * What an Admin may do of what a Member with Write can't, each one check, wherever it's checked (Bops Cloud, the owner's
+ * Mac, the viewer's Mac and window). An Admin also needs the owner's Bops new enough (protocol.ts ADMIN_POWERS_MIN_VERSION,
+ * SharedWsSlice.adminActs): an older one would drop what it doesn't know. Off (false): still the owner's alone.
+ * - ownerAsk: answer an ask to use the owner's Connected apps or API keys (ownerOnlyAsk).
+ * - macAsk: answer an ask of a thread on the owner's Mac (a previewed action, yes or no).
+ * - macThread: tell a thread on the owner's Mac more (reply, Nothing to add): it has the owner's own browsers and logins. Off.
+ * - where: pick where an undecided thread runs ("{bot}'s computer" only: never the owner's Mac).
+ * - people: invite, remove and change people (orgo-web, and the bots a Member has: Bops Cloud).
+ * - workspace: rename the workspace, and say where its chat is answered.
+ * - wake: wake a bot's computer.
+ */
+export type AdminPower = "ownerAsk" | "macAsk" | "macThread" | "where" | "people" | "workspace" | "wake";
+export const ADMIN_POWERS: Readonly<Record<AdminPower, boolean>> = { ownerAsk: true, macAsk: true, macThread: false, where: true, people: true, workspace: true, wake: true };
+/** Never an Admin's, whatever: the side that does each refuses it (orgo-web, Bops Cloud, the owner's Mac). */
+export const OWNER_ALWAYS = ["deleteWorkspace", "transfer", "makeOwner", "billing", "allowHourly", "payment", "resize"] as const;
+/** Whether `admin` (an Admin whose acts the owner's Bops takes) may do `power`. */
+export const adminMay = (power: AdminPower, admin: boolean) => admin && ADMIN_POWERS[power];
+
+/**
+ * Why an ask is the owner's alone for this viewer (`admin`: an Admin whose acts the owner's Bops takes), or null when
+ * they may answer it (with Write on its bot): "logins" for the owner's Connected apps or keys (ownerOnlyAsk), "mac" for
+ * one of a thread on the owner's Mac. The same rule Bops Cloud, the owner's Mac and the viewer's window go by.
+ */
+export function askOwnersOnly(a: { kind?: unknown }, thread: { runsOn?: unknown } | undefined, admin: boolean): "logins" | "mac" | null {
+  if (ownerOnlyAsk(a.kind) && !adminMay("ownerAsk", admin)) return "logins";
+  if (thread?.runsOn === "mac" && !adminMay("macAsk", admin)) return "mac";
+  return null;
+}
+/** Whether telling a thread more (a reply, Nothing to add, Compact) is the owner's alone: one on the owner's Mac (macThread). */
+export const threadOwnersOnly = (thread: { runsOn?: unknown } | undefined, admin: boolean) => thread?.runsOn === "mac" && !adminMay("macThread", admin);

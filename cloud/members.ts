@@ -4,9 +4,12 @@ import { config } from "./config.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { query } from "./db.ts";
 import { canWatch, hub, liveScope, seedSeen, serveStream, type LiveTarget } from "./live.ts";
-import { cleanName, levelOf, ownerOnlyAsk, permits, timeOf, writesChat, type MemberAccess, type MemberWho } from "./member-access.ts";
+import { adminMay, askOwnersOnly, cleanName, levelOf, permits, threadOwnersOnly, timeOf, writesChat, type AdminPower, type MemberAccess, type MemberWho } from "./member-access.ts";
 import { planSigned } from "./plans.ts";
 import {
+  ADMIN_ONLY,
+  ADMIN_POWERS_MIN_VERSION,
+  OWNER_BOPS_OLD,
   MEMBER_ACT_MS,
   MEMBER_ACTS_A_MINUTE,
   STORED_ACT_MS,
@@ -188,14 +191,49 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
  * ws-slice.ts viewerAccess), their email (their access is kept by it), user id (a guest's is), when their membership
  * began (access set before isn't theirs), their Use its computer as orgo-web says it, and the owner's email (apps).
  */
-const viewerOf = (user: CloudUser, access: WsAccess): SliceViewer => ({
+const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false): SliceViewer => ({
   role: access.role,
+  ...(adminActs && access.role !== "owner" ? { adminActs: true } : {}),
   id: user.id,
   ...(user.email ? { email: user.email } : {}),
   ...(access.joinedAt !== undefined ? { joinedAt: access.joinedAt } : {}),
   ...(access.computerUse !== undefined ? { computerUse: access.computerUse } : {}),
   ...(access.ownerEmail !== undefined ? { ownerEmail: access.ownerEmail } : {}),
 });
+
+/* ---------------- An Admin's acts: the owner's Bops new enough ---------------- */
+
+/** How long whether an owner's Bops takes an Admin's acts is kept (adminGate). */
+const GATE_MS = 60_000;
+const gates = new Map<string, { at: number; yes: boolean }>();
+const realGate = (owner: string) => macNewEnough(owner, ADMIN_POWERS_MIN_VERSION);
+let gateOf: (owner: string) => Promise<boolean> = realGate;
+
+/**
+ * Whether the owner's Bops takes an Admin's acts (protocol.ts ADMIN_POWERS_MIN_VERSION): the last Mac of theirs that said
+ * its version (turns.ts macNewEnough), kept GATE_MS. An older one would drop what it doesn't know, so they're refused
+ * here first (OWNER_BOPS_OLD). Never throws: no answer is a no.
+ */
+export async function adminGate(owner: string): Promise<boolean> {
+  const hit = gates.get(owner);
+  if (hit && now() - hit.at < GATE_MS) return hit.yes;
+  const yes = await gateOf(owner).catch(() => false);
+  gates.set(owner, { at: now(), yes });
+  if (gates.size > CACHE_MAX) for (const [k, v] of gates) if (now() - v.at > GATE_MS) gates.delete(k);
+  return yes;
+}
+
+/** Who acts, as the checks below take it: orgo-web's role (asked afresh) and whether the owner's Bops takes an Admin's acts. */
+type Actor = { role: WsRole; adminActs: boolean };
+/** Whether an Admin with the owner's Bops new enough may do `power` (member-access.ts ADMIN_POWERS). */
+const mayAdmin = (who: Actor, power: AdminPower) => adminMay(power, who.role === "admin" && who.adminActs);
+/** For an act only an Admin does: 403 ADMIN_ONLY for anyone else, 409 OWNER_BOPS_OLD while the owner's Bops can't take it. */
+function adminOnly(who: Actor) {
+  if (who.role !== "admin") throw new HttpError(403, ADMIN_LINE, { code: ADMIN_ONLY });
+  if (!who.adminActs) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
+}
+export const ADMIN_LINE = "Only the owner or an Admin can do this.";
+export const OWNER_OLD_LINE = "The owner's Bops needs an update first.";
 
 /* ---------------- Open streams, and orgo-web's notice ---------------- */
 
@@ -304,7 +342,7 @@ const readState: Route = {
     const blob = await ownerState(target.account);
     // What this caller is shown: all of it for the owner, else only the bots the owner gave them (by
     // their email or user id; none when neither is there). Its messages are only of the chats it has.
-    const viewer = viewerOf(user!, access);
+    const viewer = viewerOf(user!, access, access.role !== "owner" && (await adminGate(target.account)));
     const slice = sharedSlice(blob, target.ws, viewer);
     const bots = viewer.role === "owner" ? undefined : botsOf(slice);
     const handed = bots && handedByOthers(blob, bots);
@@ -393,6 +431,8 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
     }
     case "dismiss":
       return anId(x.sessionId) ? { key, act: { act: "dismiss", sessionId: x.sessionId } } : null;
+    case "where":
+      return anId(x.sessionId) && (x.to === "mac" || x.to === "cloud") ? { key, act: { act: "where", sessionId: x.sessionId, to: x.to } } : null;
     // A chat's or a thread's: one of them, never both.
     case "compact":
       if (anId(x.chatId) === anId(x.sessionId)) return null;
@@ -484,6 +524,8 @@ const liveStatus = (s: Record<string, unknown>) => s.status === "running" || s.s
 function computerAct(blob: Record<string, unknown>, slice: ReturnType<typeof sliceOf>, act: MemberAct): boolean {
   const onComputer = (id: unknown) => typeof id === "string" && slice.sessions.some((x) => x.id === id && x.runsOn !== "mac");
   if (act.act === "reply" || act.act === "dismiss") return onComputer(act.sessionId);
+  // Where a thread runs: on the bot's computer.
+  if (act.act === "where") return act.to === "cloud";
   if (act.act === "compact") return "sessionId" in act && onComputer(act.sessionId);
   if (act.act === "answer") {
     const a = slice.approvals?.find((x) => x.id === act.askId);
@@ -493,7 +535,7 @@ function computerAct(blob: Record<string, unknown>, slice: ReturnType<typeof sli
   return false;
 }
 
-function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sliceOf>, act: MemberAct): string[] {
+function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sliceOf>, act: MemberAct, who: Actor = { role: "member", adminActs: false }): string[] {
   const thread = (id: string) => slice.sessions.find((x) => x.id === id);
   const botOf = (x: Record<string, unknown> | undefined) => (typeof x?.botId === "string" ? [x.botId] : []);
   switch (act.act) {
@@ -506,19 +548,33 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
     }
     case "compact":
       // A chat's, as saying something there; a thread's, as replying in it.
-      return "chatId" in act ? botsTouched(blob, slice, { act: "chat", chatId: act.chatId, text: "" }) : botsTouched(blob, slice, { act: "reply", sessionId: act.sessionId, text: "" });
+      return "chatId" in act ? botsTouched(blob, slice, { act: "chat", chatId: act.chatId, text: "" }, who) : botsTouched(blob, slice, { act: "reply", sessionId: act.sessionId, text: "" }, who);
     case "reply":
     case "dismiss": {
       const t = thread(act.sessionId);
       if (!t) throw new HttpError(404, "No such thread");
-      if (t.runsOn === "mac") throw new HttpError(403, ON_THEIR_MAC, { code: MEMBER_OWNER_ONLY });
+      if (threadOwnersOnly(t, mayAdmin(who, "macThread"))) throw new HttpError(403, ON_THEIR_MAC, { code: MEMBER_OWNER_ONLY });
+      return botOf(t);
+    }
+    case "where": {
+      adminOnly(who);
+      const t = thread(act.sessionId);
+      if (!t) throw new HttpError(404, "No such thread");
+      // The owner's own Mac, with their browsers and logins: theirs to pick.
+      if (act.to === "mac") throw new HttpError(403, "Only the owner can run this on their Mac.", { code: MEMBER_OWNER_ONLY });
+      if (t.askWhere !== true || !liveStatus(t)) throw new HttpError(409, "That's been picked.", { code: NOT_WAITING });
       return botOf(t);
     }
     case "answer": {
       const a = slice.approvals?.find((x) => x.id === act.askId);
       if (a) {
-        if (ownerOnlyAsk(a.kind)) throw new HttpError(403, THEIR_LOGINS, { code: MEMBER_OWNER_ONLY });
-        if (typeof a.threadId === "string" && thread(a.threadId)?.runsOn === "mac") throw new HttpError(403, ON_THEIR_MAC, { code: MEMBER_OWNER_ONLY });
+        // The owner's own (their logins, a thread on their Mac): an Admin's too, once the owner's Bops takes it.
+        const t = typeof a.threadId === "string" ? thread(a.threadId) : undefined;
+        const why = askOwnersOnly(a, t, who.role === "admin" && who.adminActs);
+        // An Admin's to answer, once the owner's Bops takes it: until then it would be dropped there.
+        if (why && who.role === "admin" && !who.adminActs && !askOwnersOnly(a, t, true)) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
+        if (why === "logins") throw new HttpError(403, THEIR_LOGINS, { code: MEMBER_OWNER_ONLY });
+        if (why === "mac") throw new HttpError(403, ON_THEIR_MAC, { code: MEMBER_OWNER_ONLY });
         return botOf(a);
       }
       // Answered already: said only for one they'd be shown (their view has only the ones still waiting), so
@@ -631,14 +687,15 @@ const actIn: Route = {
     const { access: role, target } = await watchable(user!, bearer(req), projectId, { fresh: true });
     if (role.role === "owner") throw new HttpError(403, "This is your own workspace. Act in it from your Bops.", { code: OWN_WORKSPACE });
     const blob = await ownerState(target.account);
-    const viewer = viewerOf(user!, role);
+    const actor: Actor = { role: role.role, adminActs: await adminGate(target.account) };
+    const viewer = viewerOf(user!, role, actor.adminActs);
     // Their own view, every item whole and with the owner's ids: what they may act on is only what they're shown.
     const slice = sliceOf(blob, target.ws, viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
     if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
     else {
-      const bots = botsTouched(blob, slice, body.act);
+      const bots = botsTouched(blob, slice, body.act, actor);
       // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.
       const inChat = body.act.act === "chat" || (body.act.act === "compact" && "chatId" in body.act);
       const may = inChat ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
@@ -665,8 +722,10 @@ const actIn: Route = {
       // An Admin, as orgo-web said it just now (asked afresh): the owner's Mac from 0.0.38 gives them every bot. Older Macs go by the entry.
       ...(role.role === "admin" ? { role: "admin" as const } : {}),
     };
-    // One row per member and key (cloud_pending_dedupe): the same act sent again adds nothing.
-    await queue(target.account, "member", payload, `member:${user!.id}:${body.key}`, new Date(Date.now() + MEMBER_ACT_MS));
+    // One row per member and key (cloud_pending_dedupe): the same act sent again adds nothing. An answer waits as long as
+    // its ask can (STORED_ACT_MS): the run waits for it, and the owner's Mac may be shut for hours (it asks orgo-web
+    // again for an Admin's that old: lib/server/member-acts.ts adminOf).
+    await queue(target.account, "member", payload, `member:${user!.id}:${body.key}`, new Date(Date.now() + (body.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS)));
     // Their access changed (orgo-web's notice) after it was asked and before this was queued, so the notice's own
     // drop may have run before the row was there: dropped now, as they may no longer act. (The owner's Mac checks
     // its own state too, which may not know of a removal for minutes.)
@@ -792,6 +851,8 @@ export function resetMembers(
     cancel?: (projectId: string, userId: string) => Promise<void>;
     routed?: (owner: string, ws: string) => Promise<boolean>;
     storedFirst?: (owner: string, ws: string) => Promise<boolean>;
+    /** Whether the owner's Bops takes an Admin's acts (adminGate). A test that fakes the owner's state says no, unless it says. */
+    adminGate?: (owner: string) => Promise<boolean>;
   } = {},
 ) {
   kept.clear();
@@ -800,6 +861,8 @@ export function resetMembers(
   fetchImpl = opts.fetch ?? ((...a) => fetch(...a));
   every = opts.every ?? ROLE_MS;
   ownerState = opts.state ?? savedState;
+  gates.clear();
+  gateOf = opts.adminGate ?? (opts.state ? async () => false : realGate);
   queue = opts.queue ?? realQueue;
   isOn = opts.isOn ?? realIsOn;
   drop = opts.drop ?? dropActs;
