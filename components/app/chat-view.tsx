@@ -93,6 +93,37 @@ export function Rich({ text, botId }: { text: string; botId?: string }) {
   );
 }
 
+/** A web address in a message's text, up to the next space (a full stop or bracket after it is the sentence's). */
+const WEB_ADDRESS = /(https?:\/\/\S*[^\s.,;:!?)\]])/;
+
+/**
+ * `text` with a place to wrap (<wbr>) after each "/", ".", "?", "&" and "-" in its web addresses (never inside "//"),
+ * so a long address breaks between its parts and not mid-word. A part still wider than the bubble breaks anywhere
+ * (the bubble's [overflow-wrap:anywhere]); the words around it wrap as before, and the text itself is unchanged.
+ */
+function AddressBreaks({ text }: { text: string }) {
+  const parts = text.split(WEB_ADDRESS);
+  if (parts.length === 1) return <>{text}</>;
+  return (
+    <>
+      {parts.map((p, i) =>
+        i % 2 ? (
+          <Fragment key={i}>
+            {p.split(/(?<=[/.?&-])(?![/.?&-])/).map((s, j) => (
+              <Fragment key={j}>
+                {j > 0 && <wbr />}
+                {s}
+              </Fragment>
+            ))}
+          </Fragment>
+        ) : (
+          p
+        ),
+      )}
+    </>
+  );
+}
+
 const isRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
 const isRule = (l: string) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
 const cells = (l: string) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
@@ -182,7 +213,7 @@ function Inline({ text }: { text: string }) {
   const onlyThere = (href: string) => !!localOnly && isLocalLink(href) && !(botId && inBrowser?.may(botId, href));
   const said = (words: string) => (
     <span data-local-link>
-      {words} <span className="text-[#6B6B6B]">({localOnlyLine(localOnly?.find((b) => b.id === botId)?.name)})</span>
+      <AddressBreaks text={words} /> <span className="text-[#6B6B6B]">({localOnlyLine(localOnly?.find((b) => b.id === botId)?.name)})</span>
     </span>
   );
   // A file that couldn't be opened says why right after the text, in place (never a browser alert), until the next try.
@@ -241,11 +272,11 @@ function Inline({ text }: { text: string }) {
               }}
               className={page ? "inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-0.5 font-medium no-underline shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]" : "underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink"}
             >
-              {link[1]}
+              <AddressBreaks text={link[1]} />
             </a>
           );
         }
-        return <Fragment key={i}>{p}</Fragment>;
+        return <AddressBreaks key={i} text={p} />;
       })}
       {failed && (
         <span role="alert" className="text-[12.5px] text-[#B42318]">
@@ -816,7 +847,7 @@ export function ChatView({
             // Up from the composer as you send it (not again when you come back to the chat before it lands).
             <div key={p.id} className={`flex max-w-[86%] flex-col items-end gap-1 self-end ${seen.has(p.id) ? "" : "motion-send-in"}`}>
               {p.previews && <MessageImages previews={p.previews} />}
-              {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[#0A0A0A] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]">{p.text}</div>}
+              {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[#0A0A0A] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]"><AddressBreaks text={p.text} /></div>}
             </div>
           ))}
           {c.typing.map((b) => {
@@ -1323,7 +1354,7 @@ function CompactedLine({ m, state, className = "" }: { m: Message; state: AppSta
       </CompactRule>
       {open && summary && (
         <div className="w-full max-w-[520px] whitespace-pre-wrap rounded-[14px] bg-[#F7F7F6] px-3.5 py-2.5 text-[13px] leading-[19px] text-[#3A3A38] [overflow-wrap:anywhere]">
-          {summary.text || (summary.rebuild ? "Writing the summary again." : "Nothing in it now.")}
+          <AddressBreaks text={summary.text || (summary.rebuild ? "Writing the summary again." : "Nothing in it now.")} />
         </div>
       )}
     </div>
@@ -1790,7 +1821,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             <div className={`flex flex-col gap-1 ${outgoing ? "items-end" : "items-start"}`}>
               {!!m.images?.length && <MessageImages images={m.images} align={outgoing ? "end" : "start"} />}
               {m.text && (
-                <div className={`select-text whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${outgoing ? "bg-ink text-white" : "bg-white text-ink shadow-[0_0_0_1px_#E2E2DF]"}`}>{m.text}</div>
+                <div className={`select-text whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${outgoing ? "bg-ink text-white" : "bg-white text-ink shadow-[0_0_0_1px_#E2E2DF]"}`}><AddressBreaks text={m.text} /></div>
               )}
             </div>
           </div>
@@ -2135,7 +2166,7 @@ function TextCard({ m, state, className = "" }: { m: Message; state: AppState; c
           <span className="text-[#9A9A98]">From</span>
           <span className="font-medium text-ink">{prettyPhone(t.from)}</span>
         </div>
-        <div className="select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere]">{m.text}</div>
+        <div className="select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere]"><AddressBreaks text={m.text} /></div>
       </div>
       {!!m.images?.length && <MessageImages images={m.images} align="start" />}
     </div>
@@ -2183,7 +2214,7 @@ function EmailCard({ m, state, className = "" }: { m: Message; state: AppState; 
         </div>
         <div className="text-[14px] font-semibold leading-5 [overflow-wrap:anywhere]">{e.subject}</div>
         {m.text && (
-          <div className={`select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere] ${open ? "" : "line-clamp-4"}`}>{m.text}</div>
+          <div className={`select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere] ${open ? "" : "line-clamp-4"}`}><AddressBreaks text={m.text} /></div>
         )}
         {long && (
           <button onClick={() => setOpen(!open)} className="self-start text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">

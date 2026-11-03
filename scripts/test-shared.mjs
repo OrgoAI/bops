@@ -90,7 +90,8 @@ const settle = async () => {
   for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 };
 const noop = () => {};
-const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;|&apos;/g, "'").replace(/\s+/g, " ");
+// A <wbr> (a place an address may wrap, chat-view.tsx AddressBreaks) is no text, so it's no space.
+const text = (html) => html.replace(/<wbr\/?>/g, "").replace(/<[^>]+>/g, " ").replace(/&#x27;|&apos;/g, "'").replace(/\s+/g, " ");
 
 /* ---------------- Fixtures ---------------- */
 
