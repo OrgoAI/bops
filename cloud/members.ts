@@ -35,6 +35,7 @@ import {
   PEOPLE_GONE,
   ADMIN_POWERS_MIN_VERSION,
   ADMIN_PUBLISH_MIN_VERSION,
+  CLOUD_PERSONA_MIN_VERSION,
   KEY_NAME,
   KEYS_MIN_VERSION,
   MEMBER_NO_KEYS,
@@ -85,7 +86,7 @@ import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckT
  * (ws-slice.ts). Members never publish (POST /v1/live only ever goes into the caller's own account), and
  * Bops Cloud edits the owner's state for an Admin in two places only: the bots a Member has (peopleWrite), entry by
  * entry as the owner's Mac keeps them, which the owner's Macs merge in; and a bot's How I work while the owner's Mac is
- * away, in a workspace whose chat goes through Bops Cloud (personaHere).
+ * away, in a workspace whose chat goes through Bops Cloud, with the owner's Bops new enough to keep it (personaHere).
  *
  * - **Who may**: orgo-web says, with the caller's own Orgo key (GET /api/projects/<id>/bops-role: the
  *   owner, an admin or a member; 404 for anyone else; and, from an orgo-web that sends it, when their
@@ -115,7 +116,7 @@ import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckT
  *   the owner's own taps would, with the member named as who said it. The member's own key for it makes a
  *   retry a no-op. Counted, MEMBER_ACTS_A_MINUTE a minute each. In a workspace whose chat goes through Bops Cloud
  *   (turns.ts), a chat act is written here at once instead, and its answer owed to the bot's computer (cloudChat); so is
- *   an Admin's How I work while the owner's Mac is away (personaHere), and an answer to a computer's runner's ask
+ *   an Admin's How I work while the owner's Mac is away (personaHere: CLOUD_PERSONA_MIN_VERSION), and an answer to a computer's runner's ask
  *   (answerOnComputer).
  *
  * The caller's key is held in memory while their stream is open, to ask again with it; never stored.
@@ -887,8 +888,9 @@ const actIn: Route = {
       if (slice.chats.some((c) => c.id === chatAct.chatId)) return cloudChat(res, { user: user!, role, target, viewer, projectId, key: body.key, act: chatAct, asked });
     }
     // An Admin's How I work in a workspace whose chat goes through Bops Cloud, while the owner's Mac is away: kept here now,
-    // so the bot's next turn there has it (personaHere). With the Mac on, it saves it as before.
-    if (body.act.act === "persona" && !isOn(target.account) && (await routed(target.account, target.ws))) {
+    // so the bot's next turn there has it (personaHere), once the owner's Bops keeps it through its own later writes
+    // (CLOUD_PERSONA_MIN_VERSION). With the Mac on, or an older one, it waits for that Mac as before.
+    if (body.act.act === "persona" && !isOn(target.account) && (await routed(target.account, target.ws)) && (await adminGate(target.account, CLOUD_PERSONA_MIN_VERSION))) {
       await personaHere({ target, viewer, actor, act: body.act, who: whoOf(user!), key: body.key, still: () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked });
       return sendJson(res, 202, { ok: true, macOn: true, stored: true } satisfies MemberActAnswer);
     }
