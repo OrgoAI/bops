@@ -1,5 +1,0 @@
-- Bots change files on GitHub with one ask, not one per step.
-- A change card shows every line it writes, file by file.
-- Web addresses a bot writes in chat are links you can click.
-- Admins can change How I work while the owner's Mac is shut.
-- Asks and waiting lines say plainly what happens and who can act.
