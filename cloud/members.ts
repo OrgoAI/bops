@@ -83,8 +83,9 @@ import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckT
  * given), its threads with their notes and results, its routines and watches, what Needs you, the moods
  * as they happen. Never another bot's, nor the owner's vault, logins, keys, Macs or settings
  * (ws-slice.ts). Members never publish (POST /v1/live only ever goes into the caller's own account), and
- * Bops Cloud edits the owner's state for an Admin in one place only: the bots a Member has (peopleWrite), entry by
- * entry as the owner's Mac keeps them, which the owner's Macs merge in.
+ * Bops Cloud edits the owner's state for an Admin in two places only: the bots a Member has (peopleWrite), entry by
+ * entry as the owner's Mac keeps them, which the owner's Macs merge in; and a bot's How I work while the owner's Mac is
+ * away, in a workspace whose chat goes through Bops Cloud (personaHere).
  *
  * - **Who may**: orgo-web says, with the caller's own Orgo key (GET /api/projects/<id>/bops-role: the
  *   owner, an admin or a member; 404 for anyone else; and, from an orgo-web that sends it, when their
@@ -113,7 +114,9 @@ import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckT
  *   (a "member" event, MEMBER_ACT_MS at most), which checks it again against its own state and does it as
  *   the owner's own taps would, with the member named as who said it. The member's own key for it makes a
  *   retry a no-op. Counted, MEMBER_ACTS_A_MINUTE a minute each. In a workspace whose chat goes through Bops Cloud
- *   (turns.ts), a chat act is written here at once instead, and its answer owed to the bot's computer (cloudChat).
+ *   (turns.ts), a chat act is written here at once instead, and its answer owed to the bot's computer (cloudChat); so is
+ *   an Admin's How I work while the owner's Mac is away (personaHere), and an answer to a computer's runner's ask
+ *   (answerOnComputer).
  *
  * The caller's key is held in memory while their stream is open, to ask again with it; never stored.
  */
@@ -708,8 +711,9 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       adminOnly(who, adminMay("instructions", who.adminEdits === true));
       const b = slice.bots.find((x) => x.id === act.botId);
       if (!b) throw new HttpError(404, "No such bot");
-      // Changed since the edit began (the owner's Mac checks again as it saves).
-      if ((typeof b.persona === "string" ? b.persona : "") !== act.was) throw new HttpError(409, PERSONA_CHANGED, { code: NOT_WAITING });
+      // Changed since the edit began (the owner's Mac checks again as it saves), unless to these very words (the same act again).
+      const saved = typeof b.persona === "string" ? b.persona : "";
+      if (saved !== act.was && saved !== act.text) throw new HttpError(409, PERSONA_CHANGED, { code: NOT_WAITING });
       return [act.botId];
     }
     case "answer": {
@@ -882,6 +886,12 @@ const actIn: Route = {
       const chatAct = body.act;
       if (slice.chats.some((c) => c.id === chatAct.chatId)) return cloudChat(res, { user: user!, role, target, viewer, projectId, key: body.key, act: chatAct, asked });
     }
+    // An Admin's How I work in a workspace whose chat goes through Bops Cloud, while the owner's Mac is away: kept here now,
+    // so the bot's next turn there has it (personaHere). With the Mac on, it saves it as before.
+    if (body.act.act === "persona" && !isOn(target.account) && (await routed(target.account, target.ws))) {
+      await personaHere({ target, viewer, actor, act: body.act, who: whoOf(user!), key: body.key, still: () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked });
+      return sendJson(res, 202, { ok: true, macOn: true, stored: true } satisfies MemberActAnswer);
+    }
     // An answer (Allow once, Deny) to an ask of a bot's computer's runner while the owner's Mac is away: written here, so
     // the run there goes on now, as the Mac would (answerOnComputer). Always allow saves a rule the Mac keeps: it waits.
     if (body.act.act === "answer" && body.act.reply !== "always" && !isOn(target.account)) {
@@ -970,6 +980,48 @@ async function answerOnComputer(o: { target: LiveTarget; viewer: SliceViewer; ac
   // Mac says it (lib/server/permission.ts tellNotWoken), once: the run goes on when the computer is up.
   void answerWake(target.account, target.ws, act.askId, out).catch((e: Error) => console.warn(`[members] waking for an answer: ${e.message}`));
   return true;
+}
+
+/**
+ * An Admin's change to a bot's How I work (the "persona" act), written on the owner's state by Bops Cloud while the owner's
+ * Mac is away, in a workspace whose chat goes through it: the bot's next turn on its computer has it (its runner reads its
+ * bots whole: computer-scope.ts forComputer), and the owner's Mac loads it as it opens (one that merges it with changes of
+ * its own keeps it too: lib/server/state-merge.ts). Checked again under the owner's lock, on the state as it is then, as
+ * the owner's Mac checks it (lib/server/member-acts.ts refused): an Admin whose owner's Bops takes it, a bot of the
+ * workspace, the words it began from still there (PERSONA_CHANGED), and no orgo-web notice for them since they were asked.
+ * Kept as the owner's Mac keeps it: named as theirs (Bot.personaBy) with the owner's own last words for work on the owner's
+ * Mac, and said in the bot's chat. The same act again (its key) changes nothing.
+ */
+async function personaHere(o: { target: LiveTarget; viewer: SliceViewer; actor: Actor; act: Extract<MemberAct, { act: "persona" }>; who: MemberWho; key: string; still: () => boolean }) {
+  const { target, act, who } = o;
+  // (cleanAct trimmed it; empty clears it, as lib/types.ts keptPersona.)
+  const text = act.text || undefined;
+  const out = await tx(async (c) => {
+    await lockUser(c, target.account);
+    const blob = await lockedState(c, target.account);
+    const slice = sliceOf(blob, target.ws, o.viewer);
+    if (!slice.workspace) throw new HttpError(404, "No such workspace");
+    botsTouched(blob, slice, act, o.actor);
+    const all = list(blob.bots);
+    const b = all.find((x) => x.id === act.botId);
+    if (!b) throw new HttpError(404, "No such bot");
+    if ((typeof b.persona === "string" ? b.persona : undefined) === text) return null;
+    const by = b.personaBy && typeof b.personaBy === "object" ? (b.personaBy as Record<string, unknown>) : null;
+    const ownerText = by ? by.ownerText : b.persona;
+    const changed: Record<string, unknown> = { ...b, personaBy: { name: who.name, ...(typeof ownerText === "string" && ownerText ? { ownerText } : {}) } };
+    if (text) changed.persona = text;
+    else delete changed.persona;
+    const written = { ...blob, bots: all.map((x) => (x === b ? changed : x)) };
+    await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+    // After the write, before it's kept: an orgo-web notice for them that landed meanwhile (even during it) takes it back.
+    if (!o.still()) throw new HttpError(404, "No such workspace");
+    return { written, bot: typeof b.name === "string" && b.name.trim() ? b.name.trim() : "the bot" };
+  });
+  if (!out) return;
+  announce(target.account);
+  stateWritten(target.account, out.written, "cloud");
+  // As the owner's Mac says it (lib/server/member-acts.ts), by the act's key: sent again, the same note.
+  await writeMessages(target.account, [{ id: `msg_persona_${who.userId}_${o.key}`, chatId: `bot:${act.botId}`, role: "system", botId: act.botId, text: `${who.name} changed how ${out.bot} works`, at: now() }]);
 }
 
 /** Wake the computer of a run Bops Cloud answered (answerOnComputer); when it can't be, a note in the ask's chat saying why. */

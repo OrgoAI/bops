@@ -10,7 +10,8 @@
 // back to waiting. A thread changed on both sides is the copy of the Bops
 // that runs it (Session.by), with the replies and steps of both and a stop, a move to the Mac or a dismiss
 // asked from elsewhere. A thread, routine or watch kept between us (secret) on either side stays so,
-// whichever side's copy wins: a merge never takes the mark back. Anything else changed on both sides still keeps the merging side's copy whole.
+// whichever side's copy wins: a merge never takes the mark back. A bot's How I work changed on one side only is that side's
+// (an Admin's that Bops Cloud kept never loses to the Mac's older words). Anything else changed on both sides still keeps the merging side's copy whole.
 //
 // Pure functions: nothing reaches Bops Cloud.
 // Usage: node scripts/test-state-merge.mjs
@@ -150,6 +151,26 @@ check("anything else changed on both sides keeps this side's copy whole", () => 
   const deepHere = { id: "w1", routines: [routine({ title: "Here" })] };
   const deepThere = { id: "w1", routines: [routine({ goal: "There" })] };
   assert.deepEqual(M.merge3({ watches: [deep] }, { watches: [deepHere] }, { watches: [deepThere] }).watches, [deepHere]);
+});
+
+check("a bot's How I work changed on one side only is that side's, whatever else either side changed on the bot (an Admin's, kept by Bops Cloud while the Mac was away)", () => {
+  const was = { id: "max", name: "Max", persona: "Sign off as Tara.", computerStatus: "ready" };
+  // This Mac's own change to the bot meanwhile, and the Admin's words Bops Cloud kept (cloud/members.ts personaHere).
+  const here = { ...was, computerStatus: "error" };
+  const by = { name: "Sam", ownerText: "Sign off as Tara." };
+  const there = { ...was, persona: "Keep replies short.", personaBy: by };
+  const mac = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [there] }).bots[0];
+  assert.deepEqual([mac.persona, mac.personaBy, mac.computerStatus], ["Keep replies short.", by, "error"], "the Mac's older words never stand over the Admin's");
+  const other = M.merge3({ bots: [was] }, { bots: [there] }, { bots: [here] }).bots[0];
+  assert.deepEqual([other.persona, other.personaBy], ["Keep replies short.", by], "merged the other way too");
+  // Cleared there (an Admin emptied it): cleared here too, named as theirs.
+  const cleared = { ...there };
+  delete cleared.persona;
+  const empty = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [cleared] }).bots[0];
+  assert.deepEqual([empty.persona, empty.personaBy], [undefined, by]);
+  // Changed on both sides (the owner's own Save here): this side's, as before.
+  const saved = { ...here, persona: "Owner's newer words" };
+  assert.deepEqual(M.merge3({ bots: [was] }, { bots: [saved] }, { bots: [there] }).bots, [saved]);
 });
 
 /* ---------------- Threads ---------------- */
