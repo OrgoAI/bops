@@ -7,6 +7,9 @@ const { version } = JSON.parse(readFileSync(join(process.cwd(), "package.json"),
 
 const nextConfig: NextConfig = {
   env: { BOPS_APP_VERSION: version },
+  // A second app from this folder at once (the local two-person stack, scripts/dev-two-person.mjs) builds into a
+  // folder of its own, as next dev locks its own. Unset, as everywhere else, it's Next's .next.
+  ...(process.env.BOPS_NEXT_DIST_DIR ? { distDir: process.env.BOPS_NEXT_DIST_DIR } : {}),
   // The desktop app is the product; Next's floating dev badge sat on top of the sidebar footer.
   devIndicators: false,
   // Loaded by Node, not bundled: the AgentMail SDK lazily imports optional payment packages

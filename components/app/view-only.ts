@@ -18,7 +18,8 @@
 /**
  * The calls that still go while it's open: the switcher (leaving, switching, its names, and an Admin's live screen of a
  * bot there, /api/workspaces/shared/screen, which takes the computer from the shared copy), signing in and out,
- * notices, usage events, what's on screen, the user's own vault, account and name.
+ * notices, usage events, what's on screen, the user's own vault, account and name, and the shared bot's browser
+ * (/api/browser: Bops Cloud decides who may watch it).
  */
 const ALLOWED = [
   /^\/api\/workspaces(\/|\?|$)/,
@@ -29,6 +30,9 @@ const ALLOWED = [
   /^\/api\/vault(\/|\?|$)/,
   /^\/api\/account(\/|\?|$)/,
   /^\/api\/owner(-email)?(\/|\?|$)/,
+  // The bot's browser (bot-browser.tsx): asked of Bops Cloud for the shared workspace's bot (lib/server/browser-view.ts
+  // names its project), never the user's own bot of that id; Bops Cloud lets through only an Admin, or Write with Use its computer.
+  /^\/api\/browser(\?|$)/,
 ];
 
 /** The reads that don't go while it's open: answered from the user's own bot or workspace of that id, never the shared one's. */

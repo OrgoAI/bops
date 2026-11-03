@@ -66,7 +66,7 @@ const { SharedCopy, viewState, GONE, actWith, ACT_EXPIRED, ACT_ACCESS_CHANGED, A
 const { needsYou, repliedSince } = await import(`${root}/lib/asks.ts`);
 const { duePings } = await import(`${root}/lib/pings.ts`);
 const { LiveSubscriber, RemoteMoods } = await import(`${root}/lib/server/live-core.ts`);
-const { readOnlyLine, sharedWsId, sharedBy, roleLabel, canAct, readOnly, saidBy } = await import(`${root}/lib/shared.ts`);
+const { readOnlyLine, sharedWsId, sharedBy, roleLabel, canAct, readOnly, saidBy, seesBrowser, browserLine } = await import(`${root}/lib/shared.ts`);
 const { viewOnly, callAllowed } = await import(`${root}/components/app/view-only.ts`);
 const { WorkspaceSwitcher, Sidebar } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
 const { ChatView, ThreadSheet } = await import(pathToFileURL(`${root}/components/app/chat-view.tsx`).href);
@@ -878,7 +878,13 @@ const everythingState = () => {
 const chatProps = (state, chatId) => ({ state, chat: state.chats.find((c) => c.id === chatId), wide: false, onOpenThread: noop, onShowBot: noop, onShowMac: noop, onShowScreen: noop, call: null, onCall: noop, callSlot: noop, prefill: null, onPrefilled: noop });
 /** Every "you" or "your" in the markup, tooltips and labels too (the bots' own words aside). */
 // (The line in place of what the viewer can't do there tells them what they can, so it says "you": lib/shared.ts readOnlyLine.)
-const READ_ONLY_LINES = ["You can watch this bot. Ask the owner for Write to chat with it.", "You can chat here once the owner gives you Write on every bot in it."];
+const READ_ONLY_LINES = [
+  "You can watch this bot. Ask the owner for Write to chat with it.",
+  "You can chat here once the owner gives you Write on every bot in it.",
+  // Why a Member's Bops doesn't show the bot's browser in place of its computer (lib/shared.ts browserLine).
+  "Its browser shows here once the owner gives you Write on",
+  "Its browser shows here once the owner turns on Use its computer for you.",
+];
 const yous = (html, ...allowed) => (html.match(/[^<>"]*\b(you|your|yours|yourself)\b[^<>"]*/gi) ?? []).filter((x) => ![...allowed, ...READ_ONLY_LINES].some((a) => x.includes(a)));
 
 await check("nothing in a shared workspace's open chat says the owner's as the viewer's or asks them to chat: its header, an empty chat, a text's or email's note, a thread's chip, sheet and asks", () => {
@@ -1057,7 +1063,9 @@ await check("the rest of what Bops says in the owner's voice reads as theirs: an
   assert.match(renderToStaticMarkup(h(KnowledgeButton, { state, expanded: false, pressed: false, onOpen: noop })), /Knowledge: what the owner&#x27;s bots know/);
   // The bot's computer, with the viewer's own app on their Mac: the owner's, shown by nothing here (a screen read by its id is the viewer's own bot's).
   const view = renderToStaticMarkup(h(ComputerView, { state: { ...state, host: "mac" }, bot: state.bots[0], display: 100, onDisplay: noop, follow: { on: true, auto: noop, resume: noop }, mode: "panel" }));
-  assert.match(text(view), /Dana's Boppy works on the owner's computer\./);
+  // At Read, no browser either: the line says why (lib/shared.ts browserLine).
+  assert.match(text(view), /Dana's Boppy works on the owner's computer\. Its work shows in the chat\./);
+  assert.match(text(view), /Its browser shows here once the owner gives you Write on Dana's Boppy and Use its computer\./);
   assert.ok(!/needs you|Mirroring|Follow/.test(view), "nothing on it waits on the viewer, and no screen of the viewer's own");
   // The user's own: as always.
   const mine = { ...state, shared: undefined };
@@ -1356,7 +1364,8 @@ await check("the viewer's own Mac is never a shared workspace's: no Your Mac tab
   assert.match(renderToStaticMarkup(h(TabBar, { state: mine, tabs: [mac], active: "chat", chatBotId: "boppy", onPick: noop, onClose: noop, onNew: noop })), /title="Working"/);
   // The owner's bot's computer: never the viewer's own browsers on this Mac (the mirror and screenshots by bot id are theirs).
   const view = renderToStaticMarkup(h(ComputerView, { state: st, bot: st.bots[0], display: 100, onDisplay: noop, follow: { on: true, auto: noop, resume: noop }, mode: "panel" }));
-  assert.match(text(view), /Dana's Boppy works on the owner's computer\./);
+  assert.match(text(view), /Dana's Boppy works on the owner's computer\. Its work shows in the chat\./);
+  assert.match(text(view), /Its browser shows here once the owner gives you Write on Dana's Boppy and Use its computer\./);
   assert.ok(!/Mirroring|This is my computer|Real screen|scale=/.test(view), text(view).slice(0, 400));
   const onMac = viewState({ ...own(), host: "mac" }, { ...listed, role: "member", wsId: WS }, { ...c, state: { ...c.state, bots: [{ ...c.state.bots[0], runsOn: "mac" }] } }, {});
   assert.match(text(renderToStaticMarkup(h(ComputerView, { state: onMac, bot: onMac.bots[0], display: 100, onDisplay: noop, follow: { on: true, auto: noop, resume: noop }, mode: "panel" }))), /Dana's Boppy works on the owner's Mac\./);
@@ -1911,6 +1920,37 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   assert.deepEqual([no.status, no.code], [403, "member_apps_read_only"]);
   const gone = await actWith(copy, { act: "deploy", app: "blog" }, "key_deploy_04", sam, async () => assert.fail("not sent"));
   assert.equal(gone.status, 404);
+});
+
+await check("the bot's browser in a shared workspace: a Member with Write and Use its computer has it in place of the computer, an Admin beside it, anyone else one line saying why; its route goes out", async () => {
+  const { browserBeside, browsesHere } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  const at = (levels, computer, role = "member", screens) => ({ shared: { projectId: "p1", name: "Acme", owner: "o@example.com", role, wsId: "shared_p1", levels, computer, ...(screens ? { screens } : {}) } });
+  const max = { id: "max", name: "Max" };
+  assert.equal(seesBrowser(at({ max: "write" }, true), max), true);
+  assert.equal(seesBrowser(at({ max: "write" }, false), max), false);
+  assert.equal(seesBrowser(at({ max: "read" }, true), max), false);
+  assert.equal(seesBrowser(at({ max: "write" }, true), { ...max, runsOn: "mac" }), false, "a bot on the owner's Mac has no browser to show");
+  assert.equal(seesBrowser({}, max), false, "the user's own workspace: their computer tab is theirs");
+  // An Admin keeps the computer's live view and has the browser beside it, for a bot whose computer Bops Cloud shows them.
+  const admin = at({ max: "write" }, true, "admin", ["max"]);
+  assert.equal(seesBrowser(admin, max), false, "never in place of the computer");
+  assert.equal(browserBeside(admin, max), true);
+  assert.equal(browserBeside(at({ max: "write" }, true, "admin"), max), false, "no computer shown for it: no browser either");
+  assert.equal(browserBeside(at({ max: "write" }, true), max), false, "a Member's is in place of the computer");
+  assert.equal(browsesHere(admin, max) && browsesHere(at({ max: "write" }, true), max), true);
+  assert.equal(browsesHere(at({ max: "write" }, false), max), false);
+  // Why not, after where its work shows (computer.tsx NoComputer): for a Member alone.
+  assert.equal(browserLine(at({ max: "read" }, true), max), "Its browser shows here once the owner gives you Write on Max and Use its computer.");
+  assert.equal(browserLine(at({ max: "write" }, false), max), "Its browser shows here once the owner turns on Use its computer for you.");
+  assert.equal(browserLine(at({ max: "write" }, true), { ...max, runsOn: "mac" }), null, "the owner's Mac line says it");
+  assert.equal(browserLine(admin, max), null);
+  assert.equal(browserLine(at({ max: "write" }, true), max), null, "shown: nothing to say");
+  for (const line of [browserLine(at({ max: "read" }, true), max), browserLine(at({ max: "write" }, false), max)]) assert.ok(!/[—–]/.test(line), "plain words, no dashes");
+  // Its stream and its acts go out while the shared workspace is open (Bops Cloud checks them); the owner's own routes stay shut.
+  assert.equal(callAllowed("GET", "/api/browser?bot=max"), true);
+  assert.equal(callAllowed("POST", "/api/browser"), true);
+  assert.equal(callAllowed("POST", "/api/browsers"), false);
+  assert.equal(callAllowed("POST", "/api/takeover"), false, "the owner's own takeover never goes from a shared workspace");
 });
 
 await check("an Admin sees a bot's computer live, with Take control and orgo.ai; a Member with Use its computer is pointed at orgo.ai; anyone else reads where its work shows; the role is said under the name", async () => {

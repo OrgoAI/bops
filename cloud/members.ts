@@ -216,7 +216,7 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
  * ws-slice.ts viewerAccess), their email (their access is kept by it), user id (a guest's is), when their membership
  * began (access set before isn't theirs), their Use its computer as orgo-web says it, and the owner's email (apps).
  */
-const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false): SliceViewer => ({
+export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false): SliceViewer => ({
   role: access.role,
   ...(adminActs && access.role !== "owner" ? { adminActs: true } : {}),
   id: user.id,
@@ -275,6 +275,9 @@ function track(userId: string, projectId: string, end: () => void): () => void {
     if (!set.size && open.get(id) === set) open.delete(id);
   };
 }
+
+/** Another stream a member has open of a project (the bot's browser: browser.ts), ended as theirs are by orgo-web's notice. Returns its untrack. */
+export const trackMemberStream = (userId: string, projectId: string, end: () => void) => track(userId, projectId, end);
 
 /** Someone's access to a project changed (orgo-web's notice): what was kept for them goes, and their streams of it end. */
 export function membersChanged(projectId: string, userId: string) {

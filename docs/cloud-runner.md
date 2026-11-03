@@ -96,8 +96,11 @@ else is asked about it. A 405 (an orgo-web before that GET), 403, any other answ
 seconds shows nothing.
 
 **What it runs** is an allow-list (`lib/server/persist.ts` `RUNNER_LOOPS`): the routines timer, the
-mirror of its own routines to Orgo, the threads it started, and telling Orgo its computer is in use
-while one of its tasks runs (`via: 'runner'`, so Orgo suspends it 5 minutes after, not 15). Everything
+mirror of its own routines to Orgo, the threads it started, telling Orgo its computer is in use
+while one of its tasks runs (`via: 'runner'`, so Orgo suspends it 5 minutes after, not 15), the chat turns
+Bops Cloud owes it, and its bots' browsers for whoever may watch them (`lib/server/browser-runner.ts`:
+a CDP screencast of the tab in front, relayed through Bops Cloud only while someone watches; cloud/README.md
+"The bot's browser"). Everything
 else that runs by itself stays on the Mac: watches, the digest, email, texts and calls, Telegram,
 Discord and Slack, the look at the bots' computers, routing through home internet, the Mac's time zone
 (a runner starts in the user's zone and follows it as the Mac keeps it, right before it runs anything),

@@ -172,6 +172,8 @@ const MESSAGE: Spec = {
   member: { userId: true, email: true, name: true, ref: true },
   reactions: [{ by: true, type: true, emoji: true, at: true }],
   options: true,
+  // A bot's ask to sign in in its browser (Message.signIn): the page, so someone who may use its browser opens it there.
+  signIn: { url: true },
   ping: true,
   needed: true,
   email: { dir: true, from: true, to: true, cc: true, subject: true, files: [{ name: true, size: true }], bulk: true },

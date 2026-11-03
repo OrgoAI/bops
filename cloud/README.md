@@ -975,6 +975,28 @@ Then:
   thinking while it's owed or running, held to each member's scope like every other event. Nothing of it
   goes in the message's row.
 
+### The bot's browser
+
+The page in front of the Chrome of the screen a bot's task holds, live in a tab beside the chat
+(`components/app/bot-browser.tsx`), for the owner and for a member the owner gave Write on that bot and Use its
+computer (`browser.ts`; the wire is `protocol.ts` "The bot's browser"). Bops Cloud relays and keeps nothing.
+
+- `WS /v1/browser/runner`: the runner on the bot's computer (`lib/browser-relay.ts`, started by
+  `lib/server/browser-runner.ts`), signed in as its computer, one per computer. It's told who watches each of its
+  bots (`watch`) and what they ask (`take`, `release`, `input`), and sends frames (a CDP screencast, JPEG), the page's
+  address and title, who has control, the bot's clicks, and refusals, each for the bots whose viewers see that screen.
+  It captures only while someone watches, and stops 5 seconds after the last one leaves.
+- `GET /v1/browser/watch?bot=<id>[&project=<Orgo workspace>]`: a viewer's server-sent events. Only the owner, or a
+  member with Write on that bot and Use its computer as orgo-web and the owner's state say it now (the check a
+  member's chat turn on the computer goes by); 403 `browser_needs_write` or `browser_needs_computer` with the words
+  to show, 404 for a workspace or bot they don't see, 409 for a bot with no computer. Checked again every minute
+  while it's open, and ended by orgo-web's notice that their access changed.
+- `POST /v1/browser/act { bot, project?, act: take | release | input, method?, params? }`: checked the same way, 409
+  when the bot's computer isn't connected. Input is one of six CDP methods (`BROWSER_METHODS`: mouse, key, text,
+  navigate, reload, back); the runner checks each one's parameters again (only http and https pages), holds who has
+  control (one person at a time), and refuses anyone else's input. While someone has control, the runner's own
+  takeover pauses the thread on that screen, and Hand back carries it on.
+
 ## The app's state
 
 The Mac app keeps no state of its own: signed in, its state is the user's here, and signing in on
@@ -1190,6 +1212,7 @@ deleted user's tombstone 3 days after the last delete (`DELETED_KEEP_DAYS`), or 
 | `tunnel.ts`, `hooks.ts`, `slack.ts`, `state.ts` | 3: the tunnel, webhooks, Slack, state |
 | `live.ts` | what each bot is doing right now, streamed to the user's devices (in memory only) |
 | `turns.ts` | chat through Bops Cloud: messages written here first, their answers owed to the bots' computers, the runners' stream, waking |
+| `browser.ts` | the bot's browser: the runner's socket, each viewer's stream, take over and input, and who may (in memory only) |
 | `lines.ts`, `voice.ts`, `calls.ts` | 4: who owns each line, a call's turns answered here, GPT-Live calls (dormant) |
 | `agent.ts`, `agent-prompt.ts`, `honcho.ts` | 5: the main bot's chat from the phone, what the bot is told there, and its memory |
 | `style.ts` | how every bot writes and asks, and what Bops is: the words the Mac's bots and the cloud's share (the app imports it too) |

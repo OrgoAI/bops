@@ -90,7 +90,8 @@ export const onRunner = () => process.env.BOPS_RUNNER === "1";
  * What runs by itself in Bops (a timer, a listener, a look that starts on import or from the state
  * route). On a computer's runner only RUNNER_LOOPS do: the routines timer, the mirror of its own
  * routines to Orgo, the threads it started, saying its computer is in use while one runs, and the chat
- * turns Bops Cloud owes its computer (runner-chat.ts). The rest
+ * turns Bops Cloud owes its computer (runner-chat.ts), and its bots' browsers relayed to whoever may watch them
+ * (browser-runner.ts). The rest
  * is the Mac's (MAC_LOOPS): the bots' watches, the digest, the access set and the map sent to Orgo
  * (access-sync.ts, bops-sync.ts), email, texts and calls, Telegram, Discord and Slack, the look at the
  * bots' computers, routing through home internet, the Mac's zone, Codex on the Mac, the free computer
@@ -99,7 +100,7 @@ export const onRunner = () => process.env.BOPS_RUNNER === "1";
  * Orbit, setting up runners, and the Keep chats and calls sweep (privacy.ts: it deletes for every Mac, and
  * prunes this Mac's own files).
  */
-export const RUNNER_LOOPS = ["routines", "routine-sync", "sessions", "in-use", "chat"] as const;
+export const RUNNER_LOOPS = ["routines", "routine-sync", "sessions", "in-use", "chat", "browser"] as const;
 export const MAC_LOOPS = [
   "watches",
   "digest",

@@ -28,6 +28,8 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
+    ".scratch/next-sam/types/**/*.ts",
+    ".scratch/next-sam/dev/types/**/*.ts",
     "**/*.mts"
   ],
   "exclude": ["node_modules", "cloud"]

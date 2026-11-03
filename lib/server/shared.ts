@@ -148,6 +148,9 @@ function openNow(): (Open & { at: SharedOpen; data: SharedWsState }) | null {
 /** Whether a workspace shared with the user is open now: the window shows its owner's state, where nothing is the user's to do (a Send among them). */
 export const sharedOpen = () => !!openNow();
 
+/** The Orgo id of the shared workspace open now (its bots' browsers are asked for by it: lib/server/browser-view.ts), else null. */
+export const sharedProjectId = () => openNow()?.at.projectId ?? null;
+
 /**
  * The Orgo computer a bot of the shared workspace open works on, for an Admin (Bops Cloud names it for an Admin alone:
  * SharedWsSlice.screens); null otherwise. Streamed with the user's own Orgo key (app/api/workspaces/shared/screen).
