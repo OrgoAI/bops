@@ -707,7 +707,7 @@ await test("How I work: typing while a Save goes keeps the new words, and the ne
   assert.deepEqual(first.body.act, { act: "persona", botId: "juno", text: "First", was: "Old" });
   assert.ok(buttonOf(adm.box, "Saving…"), "Saving… until the owner's copy has it");
   await set({ shared: { role: "admin", personaActs: [{ key: first.body.key, botId: "juno", state: "waiting" }] } });
-  assert.match(adm.box.textContent, /Waiting for the owner's Bops to open\./);
+  assert.match(adm.box.textContent, /Waiting for the workspace's Mac to open\./);
   assert.doesNotMatch(adm.box.textContent, /Saved/);
   await typeIn(box, "Second");
   await set({ shared: { role: "admin", personaActs: [] }, bot: { persona: "First" } });
@@ -716,8 +716,8 @@ await test("How I work: typing while a Save goes keeps the new words, and the ne
   await click(buttonOf(adm.box, "Save"));
   const second = bops.sent.filter((x) => x.url === "/api/workspaces/shared")[1];
   assert.equal(second.body.act.was, "First", "starts from the saved words");
-  await set({ shared: { role: "admin", personaActs: [{ key: second.body.key, botId: "juno", state: "failed", error: "The owner's Bops didn't open in time, so this didn't go." }] } });
-  assert.equal(adm.box.querySelector("[role=alert]")?.textContent, "The owner's Bops didn't open in time, so this didn't go.");
+  await set({ shared: { role: "admin", personaActs: [{ key: second.body.key, botId: "juno", state: "failed", error: "The workspace's Mac didn't open in time, so this didn't go." }] } });
+  assert.equal(adm.box.querySelector("[role=alert]")?.textContent, "The workspace's Mac didn't open in time, so this didn't go.");
   assert.ok(buttonOf(adm.box, "Save"), "Save again");
   await adm.done();
 });

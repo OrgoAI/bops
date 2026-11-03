@@ -1770,7 +1770,7 @@ await check("Write: what the viewer did shows as theirs at once, says how it sta
   const mine = shown().messages.find((m) => m.id === "acting_key_chat_0001");
   assert.deepEqual([mine.role, mine.member, mine.memberSend], ["user", { ...sam, ref: "key_chat_0001" }, { state: "waiting", key: "key_chat_0001" }]);
   const html = renderToStaticMarkup(h(ChatView, chatProps(shown(), "bot:boppy")));
-  assert.match(html, /Waiting for the owner&#x27;s Bops to open\./);
+  assert.match(html, /Waiting for the workspace&#x27;s Mac to open\./);
   assert.match(html, /bg-ink text-white[^"]*">Use the second list/, "on the right, as theirs");
   // Waiting too long: it didn't go, with Try again.
   t += 11 * 60_000;
@@ -2317,7 +2317,7 @@ await check("an answer waits as long as its ask: a Member's or an Admin's is sti
   assert.equal(copy.acts().find((p) => p.act.act === "answer").state, "failed", "not past a day");
   const v = viewState(own(), copy.openNow(), copy.data(), {}, copy.acts().map((p) => ({ ...p, state: "waiting" })));
   const html = text(renderToStaticMarkup(h(ThreadSheet, { state: v, session: v.sessions[0], onClose: noop, onShowComputer: noop })));
-  assert.match(html, /The owner's Bops is closed\. Your answer goes when it opens\./);
+  assert.match(html, /The workspace's Mac is closed\. Your answer goes when it opens\./);
 });
 
 await check("the owner's app work: an app thread's ask or question is answered only with Your Apps at Write (an Admin has it), else one line; refused here first; a reply waiting says only that it waits", async () => {
@@ -2344,7 +2344,13 @@ await check("the owner's app work: an app thread's ask or question is answered o
   const from = src.indexOf("function NeedsYouCard(");
   const card = src.slice(from, src.indexOf("\nfunction ", from + 1));
   assert.ok(card.includes("REPLY_WAITS_LINE") && !card.includes("ANSWER_WAITS_LINE"));
-  assert.equal(L.REPLY_WAITS_LINE, "Waiting for the owner's Bops to open.");
+  // What waits for a Mac someone else opens says so plainly, never "the owner" they can't act on: one line each, kept in
+  // lib/shared.ts and lib/server/shared-core.ts, and no copy of a waiting line in the window says "owner".
+  assert.equal(L.REPLY_WAITS_LINE, "Waiting for the workspace's Mac to open.");
+  assert.equal(L.ANSWER_WAITS_LINE, "The workspace's Mac is closed. Your answer goes when it opens.");
+  assert.equal(ACT_EXPIRED, "The workspace's Mac didn't open in time, so this didn't go.");
+  for (const f of ["chat-view.tsx", "shared-apps.tsx", "sidebar-sections.tsx", "keys.tsx", "bot-panel.tsx"])
+    assert.ok(!/owner[^"`\n]*(Bops|Mac) (to open|didn't open in time|is closed)/.test(readFileSync(`${root}/components/app/${f}`, "utf8")), `${f}: a line waiting for a Mac says "owner"`);
 });
 
 /* ---------------- Keys: a shared workspace's keys, for someone with Keys there ---------------- */

@@ -232,10 +232,13 @@ export const ADMIN_LINE = "Only the owner or an Admin can do this.";
 export { OWNERS_KEY_LINE } from "@/cloud/protocol";
 /** In a shared workspace, for someone without Keys (cloud/protocol.ts MEMBER_NO_KEYS): who gives it. */
 export const KEYS_GIVEN_LINE = "The owner or an Admin can give you Keys.";
-/** Under an answer on its way while the owner's Bops is shut: it goes when it opens (as long as the ask waits). */
-export const ANSWER_WAITS_LINE = "The owner's Bops is closed. Your answer goes when it opens.";
-/** Under a reply or Dismiss on its way while it's shut: those wait only a while (cloud/protocol.ts MEMBER_ACT_MS), then say they didn't go. */
-export const REPLY_WAITS_LINE = "Waiting for the owner's Bops to open.";
+/**
+ * Under an answer on its way while the owner's Bops is shut: it goes when it opens (as long as the ask waits). Said of the
+ * workspace's Mac, never "the owner": the person reading can't act on them (nor on the lines below).
+ */
+export const ANSWER_WAITS_LINE = "The workspace's Mac is closed. Your answer goes when it opens.";
+/** Under anything else on its way while it's shut (a message, a reply, How I work, an app's act): those wait only a while (cloud/protocol.ts MEMBER_ACT_MS), then say they didn't go. */
+export const REPLY_WAITS_LINE = "Waiting for the workspace's Mac to open.";
 /** The owner's app work (a thread on an app), for someone without Your Apps at Write (cloud/members.ts APP_WORK). */
 export const APP_WORK_LINE = "This is app work. Ask the owner for Write on Your Apps to answer it.";
 

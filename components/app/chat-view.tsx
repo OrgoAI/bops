@@ -1479,13 +1479,13 @@ function lasts(all: Message[]) {
 
 /**
  * How one of the viewer's own words in a shared workspace stands until the owner's Bops has written it
- * (Message.memberSend, ThreadReply.memberSend): on its way, waiting for the owner's Bops to open, or not sent,
+ * (Message.memberSend, ThreadReply.memberSend): on its way, waiting for the workspace's Mac to open (REPLY_WAITS_LINE), or not sent,
  * with why and Try again (the same act, by its key: it's never done twice).
  */
 function MemberSendLine({ send, retry }: { send: NonNullable<Message["memberSend"]>; retry: (key: string) => void }) {
   return (
     <span className={`px-1 text-[11.5px] leading-4 ${send.state === "failed" ? "text-[#B42318]" : "text-[#9A9A98]"}`}>
-      {send.state === "sending" ? "Sending…" : send.state === "waiting" ? "Waiting for the owner's Bops to open." : (send.error ?? "That didn't go.")}
+      {send.state === "sending" ? "Sending…" : send.state === "waiting" ? REPLY_WAITS_LINE : (send.error ?? "That didn't go.")}
       {send.state === "failed" && (
         <button onClick={() => retry(send.key)} className="ml-1.5 font-medium underline-offset-2 hover:underline">
           Try again
