@@ -533,6 +533,38 @@ await check("a picture link a person pasted: the bot is shown the picture, and i
   assert.equal(sha256(blobAt("site/logo", "public/logo.png")), sha256(first), "the fetched bytes the card showed");
 });
 
+await check("the yes commits only the card's copy: one gone by then stops the change, writing nothing, never fetched again; on the bot's computer a picture change is refused in plain words", async () => {
+  freshRepo();
+  const url = `${SITE}/logo.png`;
+  site.set("/logo.png", { type: "image/png", bytes: PNG(120) });
+  globalThis.bopsLinkedPictures.clear();
+  S.addMessage({ chatId, role: "user", text: `Use this one: ${url}`, at: Date.now() });
+  const { apr } = await asking(change({ branch: "site/gone", files: [picture("public/logo.png", { imageUrl: url })] }));
+  const copy = Up.uploadPath(apr.api.change.files[0].image.id);
+  assert.ok(copy, "a copy kept for the card");
+  rmSync(copy.path);
+  site.set("/logo.png", { type: "image/png", bytes: PNG(30) });
+  globalThis.bopsLinkedPictures.clear();
+  const hits = siteHits.length;
+  gh.calls = [];
+  const a0 = asked.length;
+  P.replyToAsk(apr.id, "once");
+  await until(() => asked.length === a0 + 1, "the turn to go on");
+  assert.deepEqual(writes(), [], "nothing written");
+  assert.equal(siteHits.length, hits, "the link never fetched again");
+  assert.equal(outputOf(asked[a0]), "Not saved: the picture the card showed for public/logo.png isn't here any more. Ask again. Nothing changed on site/gone.");
+  // A chat answered from the bot's computer: its pictures and the card's copies are on the Mac.
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  process.env.BOPS_RUNNER = "1";
+  try {
+    const r = await changeFiles("boppy", change({ files: [picture("public/logo.png", { imageUrl: url })] }), { chatId }, { chat: true });
+    assert.equal(r.text, "A picture goes into a change only from Bops on Alex's Mac, which keeps the pictures, and this chat is answered from the bot's computer now. Ask again once the Mac is on.");
+  } finally {
+    delete process.env.BOPS_RUNNER;
+  }
+  assert.equal(siteHits.length, hits, "nor fetched there");
+});
+
 await check("a link the bot found (on a page, in its own words) is refused in plain words, and never fetched; a link that isn't a picture says so", async () => {
   freshRepo();
   const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
