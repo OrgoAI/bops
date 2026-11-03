@@ -1213,7 +1213,7 @@ const actOwner: Record<string, unknown> = {
 /** What each act route test queued, as the owner's Mac would get it, and what was dropped. */
 const queued: { owner: string; kind: string; payload: MemberActPayload; dedupe: string; expires: Date }[] = [];
 const dropped: string[] = [];
-function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean } = {}) {
+function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean; edits?: boolean } = {}) {
   queued.length = 0;
   dropped.length = 0;
   resetMembers({
@@ -1222,8 +1222,9 @@ function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEm
     isOn: () => opts.on ?? true,
     drop: async (projectId, userId) => void dropped.push(`${projectId} ${userId}`),
     count: async () => {},
-    // Whether the owner's Bops takes an Admin's acts (members.ts adminGate): no, unless the test says.
-    adminGate: async () => opts.adminGate ?? false,
+    // Whether the owner's Bops takes an Admin's acts (members.ts adminGate): no, unless the test says. `edits`: a change to
+    // a bot's "How I work" (a newer Bops than the other acts need), as `adminGate` unless the test says.
+    adminGate: async (_owner, min) => (min === ADMIN_POWERS_MIN_VERSION ? (opts.adminGate ?? false) : (opts.edits ?? opts.adminGate ?? false)),
   });
   roles["act-sam proj-act"] = { role: "member", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts", joinedAt: 1_700_000_000_000 };
   roles["act-tom proj-act"] = { role: "admin", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
@@ -1399,6 +1400,50 @@ test("over HTTP: where a thread runs is an Admin's to pick, the bot's computer o
   await no("act-sam", { act: "where", sessionId: "t-where", to: "cloud" }, 403, "admin_only");
   assert.equal((await act("act-tom", { key: "k_where_bad", act: { act: "where", sessionId: "t-where", to: "moon" } })).status, 400);
   assert.equal(queued.length, 0);
+});
+
+test("over HTTP: an Admin changes a bot's How I work once the owner's Bops takes it; a Member never; an older owner's Bops is said, never queued", async () => {
+  actFakes({ adminGate: true, edits: true });
+  // Zed: no entry for anyone, an Admin's all the same (every bot).
+  const r = await act("act-tom", { key: "k_persona_01", act: { act: "persona", botId: "zed", text: "  Keep replies short.  ", was: "", extra: "dropped" } });
+  assert.equal(r.status, 202);
+  assert.deepEqual(queued[0].payload.act, { act: "persona", botId: "zed", text: "Keep replies short.", was: "" }, "trimmed, only its own fields");
+  assert.equal(queued[0].payload.role, "admin");
+  assert.ok(queued[0].expires.getTime() - Date.now() <= MEMBER_ACT_MS + 1000, "waits ten minutes, as any act");
+  // Empty clears it; as long as the owner's own box allows goes.
+  assert.equal((await act("act-tom", { key: "k_persona_02", act: { act: "persona", botId: "max", text: "", was: "" } })).status, 202);
+  assert.equal((await act("act-tom", { key: "k_persona_03", act: { act: "persona", botId: "max", text: "x".repeat(1500), was: "" } })).status, 202);
+  queued.length = 0;
+  // Longer than the box allows, or not words: refused as a bad body.
+  assert.equal((await act("act-tom", { key: "k_persona_04", act: { act: "persona", botId: "max", text: "x".repeat(1501), was: "" } })).status, 400);
+  assert.equal((await act("act-tom", { key: "k_persona_05", act: { act: "persona", botId: "max", text: 7, was: "" } })).status, 400);
+  assert.equal((await act("act-tom", { key: "k_persona_5b", act: { act: "persona", botId: "max", text: "Hi" } })).status, 400, "the words it started from are part of it");
+  // A bot that isn't the workspace's: no such.
+  assert.equal((await act("act-tom", { key: "k_persona_06", act: { act: "persona", botId: "nobody", text: "Hi", was: "" } })).status, 404);
+  // A Member, even with Write on the bot: an Admin's alone.
+  const m = await act("act-sam", { key: "k_persona_07", act: { act: "persona", botId: "max", text: "Hi", was: "" } });
+  assert.deepEqual([m.status, m.json.code], [403, "admin_only"]);
+  // Started from words the owner's state doesn't have now (someone changed them meanwhile): refused, never queued.
+  actFakes({ adminGate: true, owner: { ...actOwner, bots: (actOwner.bots as Record<string, unknown>[]).map((b) => (b.id === "max" ? { ...b, persona: "The owner's new" } : b)) } });
+  const stale = await act("act-tom", { key: "k_persona_7b", act: { act: "persona", botId: "max", text: "Mine", was: "" } });
+  assert.deepEqual([stale.status, stale.json.code, stale.json.error], [409, "not_waiting", "Changed by someone else. Here's the latest."]);
+  assert.equal(queued.length, 0);
+  // The owner's Bops takes an Admin's other acts but not this one yet: said so, never queued (it would drop it).
+  actFakes({ adminGate: true, edits: false });
+  const old = await act("act-tom", { key: "k_persona_08", act: { act: "persona", botId: "max", text: "Hi", was: "" } });
+  assert.deepEqual([old.status, old.json.code, old.json.error], [409, "owner_bops_old", "The owner's Bops needs an update first."]);
+  assert.equal(queued.length, 0);
+  assert.equal((await act("act-tom", { key: "k_persona_09", act: { act: "where", sessionId: "t-max", to: "mac" } })).json.code, "member_owner_only", "its other acts go by their own gate");
+});
+
+test("a bot's How I work is in an Admin's slice, who changes it, and never a Member's", () => {
+  const blob = { ...actOwner, bots: [{ id: "max", name: "Max", workspaceId: "ws_act", persona: "Keep replies short." }, { id: "ivy", name: "Ivy", workspaceId: "ws_act", persona: "Ivy's own" }] };
+  const of = (v: SliceViewer) => Object.fromEntries(sharedSlice(blob, "ws_act", v).bots.map((b) => [b.id, b.persona]));
+  assert.deepEqual(of({ role: "admin", id: "u-tom", adminActs: true }), { max: "Keep replies short.", ivy: "Ivy's own" });
+  assert.deepEqual(of({ role: "admin", id: "u-tom", adminActs: false }), { max: "Keep replies short.", ivy: "Ivy's own" }, "shown while the owner's Bops can't take a change yet");
+  assert.ok(!JSON.stringify(sharedSlice(blob, "ws_act", { role: "member", id: "u-sam", email: "sam@example.com" })).includes("Keep replies short."), "a Member's: as before");
+  const changed = { ...blob, bots: [{ ...blob.bots[0], persona: "Changed" }, blob.bots[1]] };
+  assert.notEqual(sharedHash(sharedSlice(changed, "ws_act", { role: "admin", id: "u-tom", adminActs: true })), sharedHash(sharedSlice(blob, "ws_act", { role: "admin", id: "u-tom", adminActs: true })), "a change gives a new fingerprint");
 });
 
 test("the slice says when the owner's Bops takes an Admin's acts (adminActs), and tells an Admin when it doesn't (ownerOld); never for the owner", () => {

@@ -1,7 +1,7 @@
 import { createBot, renameBot, setComputer } from "@/lib/server/bots";
 import { deleteBot } from "@/lib/server/remove";
 import { requestInbox } from "@/lib/server/mail";
-import { isCallVoice, MAX_PERSONA_CHARS, type AppAccess, type Effort } from "@/lib/types";
+import { isCallVoice, keptPersona, type AppAccess, type Effort } from "@/lib/types";
 import { withMailRule, type MailRule } from "@/lib/permission";
 import { editBotSettings } from "@/lib/server/bot-settings";
 import { bot, update } from "@/lib/server/store";
@@ -10,6 +10,7 @@ import { routineChanged } from "@/lib/server/routine-sync";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { GroupError, linkFrom, setBotSite } from "@/lib/server/bot-groups";
 import { sharedOpen } from "@/lib/server/shared";
+import { PERSONA_CHANGED } from "@/cloud/protocol";
 
 /**
  * A bot's settings (what it may do in the user's apps, "Just do it", where it works) and the bot
@@ -57,8 +58,9 @@ export async function PATCH(request: Request) {
     computer?: "shared" | "own";
     /** Get this bot an email (Max: up to 5; see requestInbox). */
     email?: true;
-    /** "How I work" (Bot.persona): trimmed, cut to MAX_PERSONA_CHARS; empty clears it. */
+    /** "How I work" (Bot.persona): trimmed, cut to MAX_PERSONA_CHARS; empty clears it. `was`: the words the edit began from. */
     persona?: string;
+    was?: string;
     /** The voice it speaks in on calls (BotSettings.callVoice): one of CALL_VOICES, or null for the one picked for its name. */
     callVoice?: string | null;
     /** Answers calls to its number (BotSettings.answersCalls). */
@@ -76,6 +78,8 @@ export async function PATCH(request: Request) {
   if (body.sequence !== undefined && (!["othersMail", "othersCalls"].includes(body.sequence?.id ?? "") || typeof body.sequence.on !== "boolean"))
     return Response.json({ error: "No such sequence." }, { status: 400 });
   if (body.othersMail !== undefined && !["never", "ask", "allow"].includes(body.othersMail)) return Response.json({ error: "Pick Never, With your OK or On its own." }, { status: 400 });
+  // How I work changed since the edit began (an Admin saved meanwhile): refused, with the words now.
+  if (typeof body.persona === "string" && typeof body.was === "string" && (b.persona ?? "") !== body.was) return Response.json({ error: PERSONA_CHANGED, persona: b.persona ?? "" }, { status: 409 });
   const site = body.site === undefined ? undefined : linkFrom(body.site);
   if (body.site !== undefined && site === undefined) return Response.json({ error: "Say which app, and which of its sites." }, { status: 400 });
   // Which site a bot works on is the owner's to say, with their own workspace open (as its name is).
@@ -110,7 +114,11 @@ export async function PATCH(request: Request) {
     if (body.runsOn && ["auto", "cloud", "mac"].includes(body.runsOn)) b.runsOn = body.runsOn;
     if (typeof body.autoApprove === "boolean") b.autoApprove = body.autoApprove || undefined;
     if (typeof body.dataOff === "boolean") b.dataOff = body.dataOff || undefined;
-    if (typeof body.persona === "string") b.persona = body.persona.trim().slice(0, MAX_PERSONA_CHARS).trim() || undefined;
+    // The owner's own words now: no Admin's mark on them (Bot.personaBy).
+    if (typeof body.persona === "string") {
+      b.persona = keptPersona(body.persona);
+      delete b.personaBy;
+    }
     if (body.othersMail) b.permissions = withMailRule(b.permissions, body.othersMail);
   });
   // The settings page's own, kept on the bot's workspace (lib/types.ts BotSettings): Bot.voice stays what voiceFor keeps.

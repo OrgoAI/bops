@@ -2212,6 +2212,85 @@ await check("where a thread runs: an Admin picks the bot's computer (never the o
   assert.equal(a.copy.acts().length, 0, "landed");
 });
 
+await check("a bot's How I work: an Admin sees the owner's words and Save sends them (refused here first for a Member or past 1500), and it lands once the owner's Bops kept them", async () => {
+  const { HowIWork } = await import(pathToFileURL(`${root}/components/app/bot-panel.tsx`).href);
+  const copyOf = async (role, persona) => {
+    const c = cloudState();
+    c.role = role;
+    c.state = { ...c.state, levels: { boppy: "write" }, computer: "use", bots: c.state.bots.map((b) => (b.id === "boppy" ? { ...b, persona } : b)) };
+    const copy = new SharedCopy(fakeRead({ status: 200, body: c }).read);
+    await copy.open({ ...listed, role });
+    return { copy, c };
+  };
+  const a = await copyOf("admin", "Keep replies short.");
+  // The window's bot carries the owner's words (the slice gives them to an Admin), and the box shows them.
+  const v = viewState(own(), a.copy.openNow(), a.copy.data(), {}, a.copy.acts());
+  const boppy = v.bots.find((b) => b.id === "boppy");
+  assert.equal(boppy.persona, "Keep replies short.");
+  assert.match(renderToStaticMarkup(h(HowIWork, { bot: boppy, className: "", shared: v.shared })), /<textarea[^>]*>Keep replies short\.<\/textarea>/);
+  assert.equal(a.copy.refusal({ act: "persona", botId: "boppy", text: "Be brief.", was: "" }), null);
+  assert.equal(a.copy.refusal({ act: "persona", botId: "boppy", text: "x".repeat(1501), was: "" }).error, ACT_TOO_LONG);
+  assert.equal(a.copy.refusal({ act: "persona", botId: "nobody", text: "Be brief.", was: "" }).status, 404);
+  assert.equal((await copyOf("member", undefined)).copy.refusal({ act: "persona", botId: "boppy", text: "Be brief.", was: "" }).code, "admin_only", "a Member with Write: still the owner's or an Admin's");
+  const sent = [];
+  const r = await actWith(a.copy, { act: "persona", botId: "boppy", text: "Be brief.", was: "Keep replies short." }, "key_persona_01", sam, async (b) => (sent.push(JSON.parse(b)), { status: 202, body: { ok: true, macOn: true } }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(sent[0].act, { act: "persona", botId: "boppy", text: "Be brief.", was: "Keep replies short." });
+  assert.equal(a.copy.acts().length, 1);
+  a.copy["read"] = fakeRead({ status: 200, body: { ...a.c, hash: "h-kept", state: { ...a.c.state, bots: a.c.state.bots.map((b) => (b.id === "boppy" ? { ...b, persona: "Be brief." } : b)) } } }).read;
+  await a.copy.refresh();
+  assert.equal(a.copy.acts().length, 0, "landed");
+  // The owner's Bops too old for it: Bops Cloud says so, and the window shows its words.
+  const old = await actWith(a.copy, { act: "persona", botId: "boppy", text: "Again", was: "Be brief." }, "key_persona_02", sam, async () => ({ status: 409, body: { error: "The owner's Bops needs an update first.", code: "owner_bops_old" } }));
+  assert.deepEqual([old.ok, old.code, old.error], [false, "owner_bops_old", "The owner's Bops needs an update first."]);
+});
+
+await check("a bot's How I work, as the window sees an Admin's change: waiting, then gone once kept; changed by someone else meanwhile, said so; a Member has no box", async () => {
+  const { BotPanel } = await import(pathToFileURL(`${root}/components/app/bot-panel.tsx`).href);
+  const c = cloudState();
+  c.role = "admin";
+  c.state = { ...c.state, levels: { boppy: "write" }, computer: "use", bots: c.state.bots.map((b) => (b.id === "boppy" ? { ...b, persona: "Old" } : b)) };
+  const copy = new SharedCopy(fakeRead({ status: 200, body: c }).read);
+  await copy.open({ ...listed, role: "admin" });
+  const acts = () => viewState(own(), copy.openNow(), copy.data(), {}, copy.acts()).shared.personaActs;
+  await actWith(copy, { act: "persona", botId: "boppy", text: "Mine", was: "Old" }, "k_persona_w1", sam, async () => ({ status: 202, body: { ok: true, macOn: false } }));
+  assert.deepEqual(acts(), [{ key: "k_persona_w1", botId: "boppy", state: "waiting" }], "the box can say it waits");
+  // Meanwhile the owner wrote other words: it won't go, and says why.
+  copy["read"] = fakeRead({ status: 200, body: { ...c, hash: "h-other", state: { ...c.state, bots: c.state.bots.map((b) => (b.id === "boppy" ? { ...b, persona: "The owner's new" } : b)) } } }).read;
+  await copy.refresh();
+  assert.deepEqual(acts(), [{ key: "k_persona_w1", botId: "boppy", state: "failed", error: "Changed by someone else. Here's the latest." }]);
+  // One that lands: gone (the box says Saved once the copy has its words).
+  await actWith(copy, { act: "persona", botId: "boppy", text: "Mine", was: "The owner's new" }, "k_persona_w2", sam, async () => ({ status: 202, body: { ok: true, macOn: true } }));
+  copy["read"] = fakeRead({ status: 200, body: { ...c, hash: "h-kept", state: { ...c.state, bots: c.state.bots.map((b) => (b.id === "boppy" ? { ...b, persona: "Mine" } : b)) } } }).read;
+  await copy.refresh();
+  assert.ok(!acts()?.some((p) => p.key === "k_persona_w2"), "landed");
+  // On its way with the owner's Mac on, and never kept: the window hears when it's too late, as for one waiting.
+  let heard = 0;
+  const timers = [];
+  const late = new SharedCopy(fakeRead({ status: 200, body: c }).read, { onChange: () => heard++ });
+  await late.open({ ...listed, role: "admin" });
+  const realTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms) => (timers.push({ fn, ms }), { unref() {} });
+  try {
+    await actWith(late, { act: "persona", botId: "boppy", text: "Mine", was: "Old" }, "k_persona_w3", sam, async () => ({ status: 202, body: { ok: true, macOn: true } }));
+  } finally {
+    globalThis.setTimeout = realTimeout;
+  }
+  const before = heard;
+  for (const t of timers.filter((x) => x.ms > 9 * 60_000)) t.fn();
+  assert.ok(heard > before, "told when it's too late, so the box stops saying Saving…");
+  // A Member never gets the words, so no box at all; an Admin has it.
+  const details = (role) => {
+    const d = cloudState();
+    d.role = role;
+    d.state = { ...d.state, levels: { boppy: "write" } };
+    const v = viewState(own(), { ...listed, role, wsId: WS }, d, {});
+    return text(renderToStaticMarkup(h(BotPanel, { state: { ...v, vault: [] }, bot: v.bots[0], section: "details", onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop })));
+  };
+  assert.ok(!/How I work/.test(details("member")), "no How I work for a Member");
+  assert.match(details("admin"), /How I work/);
+});
+
 await check("an answer waits as long as its ask: a Member's or an Admin's is still on its way after ten minutes, and says the owner's Bops is closed", async () => {
   const c = cloudState("running");
   c.state = { ...c.state, levels: { boppy: "write" }, computer: "use", approvals: [{ id: "apr-x", botId: "boppy", chatId: "bot:boppy", threadId: "s1", kind: "email", action: "Send an email", resources: [], at: 4 }] };

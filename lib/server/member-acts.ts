@@ -4,13 +4,13 @@ import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
 import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
-import { workBot, workspaceOf, type MemberSaid, type MemberTurn, type Message, type Workspace } from "@/lib/types";
+import { botChatId, keptPersona, workBot, workspaceOf, type MemberSaid, type MemberTurn, type Message, type Workspace } from "@/lib/types";
 import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
 import { compactThread, dismissWaiting, replyToSession, setWhere, stopSession } from "./sessions";
 import { compactChat } from "./chat-summary";
-import { addMessage, bot, chat, getState, ownerName, pullState, session } from "./store";
+import { addMessage, bot, chat, getState, ownerName, pullState, session, update } from "./store";
 import type { OrgoMember } from "./orgo";
 
 /**
@@ -33,9 +33,9 @@ import type { OrgoMember } from "./orgo";
  * stored message, up to a day) is an Admin only while orgo-web's list says so now, so a demotion whose notice was lost
  * isn't honored a day late; else their entry counts, as for anyone. An Admin also answers the owner's own asks (their
  * Connected apps and keys, a thread on this Mac), picks where an undecided thread runs (the bot's computer, never this
- * Mac), and publishes an app or rolls back what's Published (MemberAppAct env "prod"): member-access.ts ADMIN_POWERS.
- * Only the owner deletes the workspace, tells a thread on this Mac more, or spends their money: no act does. An answer
- * waits as long as its ask (STORED_ACT_MS), as the run does.
+ * Mac), publishes an app or rolls back what's Published (MemberAppAct env "prod"), and changes a bot's "How I work" as the
+ * owner's own Save does: member-access.ts ADMIN_POWERS. Only the owner deletes the workspace, tells a thread on this Mac
+ * more, or spends their money: no act does. An answer waits as long as its ask (STORED_ACT_MS), as the run does.
  *
  * It's safe to act on as this Mac: only the tunnel can call that route, and this state agrees they have Write. One
  * refused, too late or of a shape this doesn't know is still taken (the event is acked), and dropped with a line in
@@ -56,6 +56,9 @@ function actOf(a: unknown): MemberAct | null {
   if (x.act === "dismiss") return short(x.sessionId, 120) ? (x as MemberAct) : null;
   if (x.act === "where") return short(x.sessionId, 120) && (x.to === "mac" || x.to === "cloud") ? { act: "where", sessionId: x.sessionId as string, to: x.to } : null;
   if (x.act === "compact") return short(x.chatId, 120) !== short(x.sessionId, 120) ? (x as MemberAct) : null;
+  // (Empty clears it. One longer than Bops Cloud lets through is cut as the owner's own Save cuts it: keptPersona.)
+  if (x.act === "persona")
+    return short(x.botId, 120) && [x.text, x.was].every((v) => typeof v === "string" && v.length <= MEMBER_MAX_TEXT) ? { act: "persona", botId: x.botId as string, text: x.text as string, was: x.was as string } : null;
   if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
   return null;
 }
@@ -221,6 +224,13 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     }
     case "stop":
       return as.sessionIds.every(threadOk) ? null : "not at Write";
+    // A bot's "How I work": an Admin's (member-access.ts ADMIN_POWERS.instructions), for a bot of this workspace.
+    case "persona": {
+      if (!adminMay("instructions", admin)) return "not an Admin";
+      const b = bot(as.botId);
+      if (!b || workspaceOf(b) !== ws.id) return "no such bot";
+      return (b.persona ?? "") === as.was ? null : "changed since";
+    }
     case "answer": {
       const a = getState().appApprovals?.find((x) => x.id === as.askId);
       if (!a) return "no such ask";
@@ -316,6 +326,19 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       const s = session(act.sessionId);
       setWhere(act.sessionId, "cloud");
       if (s) addMessage({ chatId: s.chatId, role: "system", text: `${who.name} picked ${bot(s.botId)?.name ?? "the bot"}'s computer for “${s.title}”`, sessionIds: [s.id] });
+      return;
+    }
+    case "persona": {
+      // As the owner's own Save (app/api/bots/route.ts PATCH): trimmed and cut to MAX_PERSONA_CHARS, empty clears it.
+      // Named as theirs (Bot.personaBy), the owner's own last words kept for work on the owner's Mac (types.ts personaOf).
+      const b = bot(act.botId);
+      if (!b) return;
+      const ownerText = b.personaBy ? b.personaBy.ownerText : b.persona;
+      update(() => {
+        b.personaBy = { name: who.name, ...(ownerText ? { ownerText } : {}) };
+        b.persona = keptPersona(act.text);
+      });
+      addMessage({ chatId: botChatId(b.id), role: "system", botId: b.id, text: `${who.name} changed how ${b.name} works` });
       return;
     }
     case "compact": {

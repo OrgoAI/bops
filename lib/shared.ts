@@ -58,6 +58,8 @@ export type SharedOpen = SharedWorkspace & {
   adminPublish?: true;
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
+  /** The same for a bot's How I work (bot-panel.tsx HowIWork). */
+  personaActs?: { key: string; botId: string; state: "sending" | "waiting" | "failed"; error?: string }[];
 };
 
 /** The id a shared workspace has in the window's state: its own Bops id could be the same as one of the user's ("ws_main"). */

@@ -1,1 +1,2 @@
 - An Admin's yes is enough: bots no longer wait for the owner, and Admins can publish apps in chat or from Your Apps.
+- Admins can change how a shared bot works (How I work) from their own Bops, once the owner's Bops is updated.

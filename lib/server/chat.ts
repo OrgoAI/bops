@@ -19,7 +19,7 @@ import { contactLine, createBot, namesTheUser } from "./bots";
 import { creditsOut, noteOutOfCredit, outOfCreditWords } from "./cloud";
 import { noOwnComputer } from "./plan";
 import { agentLabel, agentName, agentNamed, aiOf, modelShort, paysLabel, readyAgents } from "@/lib/agents";
-import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, routineSent, settingsOf, TAPBACK_EMOJI, TAPBACKS, saidOf, workBot, workspaceOf, type AppApproval, type Bot, type ChannelKind, type Delivery, type MemberTurn, type Message, type ReplyDraft, type Routine, type RoutineRun, type Schedule, type Session, type SkillProposal, type Tapback } from "@/lib/types";
+import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, personaOf, routineSent, settingsOf, TAPBACK_EMOJI, TAPBACKS, saidOf, workBot, workspaceOf, type AppApproval, type Bot, type ChannelKind, type Delivery, type MemberTurn, type Message, type ReplyDraft, type Routine, type RoutineRun, type Schedule, type Session, type SkillProposal, type Tapback } from "@/lib/types";
 import { computerBriefing, teamBriefing } from "./briefing";
 import { belowOf, directOf, entryOf, inLine, mayAskIn, ownMemory, reachOf, readsTeam, worksForNow } from "@/lib/chain";
 import { asksNow, chartedFor, handOffRefused, namesList, teamNow } from "./chart";
@@ -288,7 +288,7 @@ function persona(b: Bot, others: Bot[]) {
   return [
     `You are ${b.name}, ${b.isMain ? `${owner}'s chief of staff` : `the ${b.role} bot`} in Bops. ${ownerLine()}`,
     // What the user wrote on its profile (How I work): their preferences, never Bops' rules.
-    howIWork(owner, b.persona?.slice(0, MAX_PERSONA_CHARS)),
+    howIWork(owner, personaOf(b).text?.slice(0, MAX_PERSONA_CHARS), false, personaOf(b).by),
     // The one style rule for the chat (WRITING is the standard under it).
     `This is a text conversation, like iMessage. Write short, plain, friendly replies: usually one to three sentences, no headings or tables. Use a numbered list only for 4 or more steps, and no diagrams unless ${owner} asks. By text or in a channel, write plain sentences only: no markdown, lists or links in brackets.`,
     WRITING,
