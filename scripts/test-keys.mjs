@@ -788,6 +788,53 @@ await check("a service's 4xx is a failure: an approved write and a GET both leav
   assert.ok(!messages().findLast((m) => m.role === "bot").called, "not kept as called");
 });
 
+/* ---------------- Out of steps (last: their long turns add many rows to the chat) ---------------- */
+
+/** A turn whose model reads one customer a round (call_api GET), `n` rounds, then does what `then` queues. */
+const readsThen = (n, ...then) => answers.push(...Array.from({ length: n }, (_, i) => calling(toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "GET", path: `/v1/customers/cus_r${i + 1}`, query: null, body: null }))), ...then);
+
+await check("an Admin's turn that reads seven times before it writes still gets to the write, which asks, named as theirs: a turn with keys has 12 rounds of calls, and Bops never says Done. for it", async () => {
+  const ann = { userId: "user_ann", email: "ann@example.com", name: "Ann", role: "admin" };
+  const had = S.getState().workspaces;
+  S.update((st) => (st.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, memberAccess: { "ann@example.com": { others: "none", bots: { boppy: "write" }, at: 1 } } }]));
+  const k = brokerCalls().length;
+  const m0 = messages().length;
+  try {
+    await Keys.listKeys({ fresh: true });
+    readsThen(7, calling(toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: '{"charge": "ch_8"}' })));
+    await Chat.handleMessage(chatId, "read the seven customers, then refund ch_8", undefined, undefined, undefined, undefined, undefined, undefined, undefined, ann);
+    assert.deepEqual(messages().slice(m0).filter((m) => m.role === "bot").map((m) => m.text), [], "no word from the bot meanwhile (never Done.): the card says it");
+    assert.equal(brokerCalls().length, k + 7, "the seven reads went out, and the write waits");
+    const apr = S.getState().appApprovals.at(-1);
+    assert.deepEqual([apr?.api?.method, apr?.api?.path, apr?.askedFor], ["POST", "/v1/refunds", "Ann"], "the write asks, named as Ann's");
+    // A no ends the turn it paused, in its own words.
+    answers.push(reply("Ok, I won't refund it."));
+    assert.equal(P.replyToAsk(apr.id, "reject", "Not now"), undefined);
+    await until(() => messages().findLast((m) => m.role === "bot")?.text === "Ok, I won't refund it.", "the turn to end on the no");
+    assert.equal(brokerCalls().length, k + 7, "nothing written");
+  } finally {
+    answers.length = 0;
+    S.update((st) => (st.workspaces = had));
+  }
+});
+
+await check("a turn still calling when its 12 rounds run out answers in the model's own words, told it's out of steps and given no tools: never a Done. from Bops over what it didn't do", async () => {
+  const a0 = asked.length;
+  const m0 = messages().length;
+  const words = "I read twelve customers and haven't refunded anything yet. Say go on and I'll do the refund.";
+  try {
+    readsThen(12, reply(words));
+    await Chat.handleMessage(chatId, "read every customer, then refund ch_9");
+    assert.deepEqual(messages().slice(m0).filter((m) => m.role === "bot").map((m) => m.text), [words], "its own words, not Done.");
+    assert.equal(asked.length, a0 + 13, "twelve rounds of calls, then one to answer");
+    const last = asked.at(-1);
+    assert.equal(last.tool_choice, "none", "no calls in the answer");
+    assert.match(hear(last.input.findLast((x) => x.role === "developer")?.content ?? ""), /out of steps/i, "told why");
+  } finally {
+    answers.length = 0;
+  }
+});
+
 /* ---------------- Plain words ---------------- */
 
 await check("no dashes in anything Bops said or told the model", () => {

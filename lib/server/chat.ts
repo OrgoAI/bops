@@ -1257,6 +1257,10 @@ const KIND_NAME: Record<ChannelKind, string> = { slack: "Slack", telegram: "Tele
 /** A lookup that threw, in plain words for the model. */
 /** What another call in a round is answered with when the turn paused at one that needs the user's OK: not done, to ask again. */
 const AFTER_PAUSE = "Not done: it came with a step that waited for the user's OK. Call it again if it's still needed.";
+/** Told to the model with the last round's answers (chat turn, outOfSteps): it answers now, with no tools. */
+const OUT_OF_STEPS = "You're out of steps for this reply: nothing more runs now. Say plainly what you did and what's still left, and never call something done that you didn't do.";
+/** Bops' own words when the model said nothing even then. */
+const STOPPED_SHORT = "I ran out of steps before I could finish, so I stopped here. Say go on and I'll carry on.";
 
 /** A tool that failed, in words for the model. One that needs the user's OK isn't a failure: the turn pauses there (NeedsOk). */
 const failed = (e: Error) => {
@@ -2477,16 +2481,21 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const { model, effort, mode } = routed.config;
     const reasoning = { effort, ...(mode ? { mode } : {}) };
     const speed = speedFor(model, waiting);
-    const create = (input: unknown[], previous?: string) =>
+    /** `answerNow`: no tools this once (tool_choice none), so the response is words only. */
+    const create = (input: unknown[], previous?: string, answerNow = false) =>
       withSpeed(speed, (tier, last) =>
         client.responses.create(
-          { model, reasoning, instructions, ...(previous ? { previous_response_id: previous } : {}), input: input as ResponseInputItem[], tools, ...include, ...tierParam(tier) },
+          { model, reasoning, instructions, ...(previous ? { previous_response_id: previous } : {}), input: input as ResponseInputItem[], tools, ...(answerNow ? { tool_choice: "none" as const } : {}), ...include, ...tierParam(tier) },
           { ...usageTags("chat", botId), ...(last ? {} : { maxRetries: 0 }) },
         ),
       );
     let response: Awaited<ReturnType<typeof create>>;
-    // App lookups come back to the model before it answers (a few rounds at most). Other tools
-    // called along the way (start_task…) are kept and handled with the final answer's.
+    // App lookups come back to the model before it answers (a few rounds at most; more with keys: a site change reads
+    // a few files, then writes). Other tools called along the way (start_task…) are kept and handled with the final
+    // answer's. Out of rounds, the model answers with no more calls, told so (outOfSteps): what it called then never
+    // goes unanswered while Bops says "Done." for it.
+    const rounds = keyed.length ? 12 : 6;
+    let outOfSteps = false;
     const earlier: typeof response.output = [];
     // Teammates asked along the way, shown over the reply.
     const asked: NonNullable<Message["asked"]> = [];
@@ -2710,7 +2719,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     stillOurs(ours);
     recordTokens("chat", response.model, response.usage, botId);
     sawWeb(response.output);
-    for (let round = 0; round < 6; round++) {
+    for (let round = 0; round < rounds; round++) {
       type Call = { call_id: string; name: string; arguments: string };
       const fcs = response.output.filter((o) => o.type === "function_call") as Call[];
       const calls = fcs.filter((c) => LOOKUPS.has(c.name));
@@ -2778,9 +2787,11 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         if (!bg) for (const n of notes.splice(0)) addMessage(noteLine(n));
         return { text: null, paused: true };
       }
+      outOfSteps = round === rounds - 1;
       response = await create(
-        answers.map((x) => ({ type: "function_call_output" as const, ...x })),
+        [...answers.map((x) => ({ type: "function_call_output" as const, ...x })), ...(outOfSteps ? [{ role: "developer" as const, content: OUT_OF_STEPS }] : [])],
         response.id,
+        outOfSteps,
       );
       stillOurs(ours);
       recordTokens("chat", response.model, response.usage, botId);
@@ -3011,6 +3022,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // A tapback can be the whole answer; otherwise there's always something to read.
     const said =
       text ||
+      (outOfSteps ? STOPPED_SHORT : null) ||
       (drafts.length ? readyWords(drafts.length) : null) ||
       (proposals.length ? proposedWords(proposals.length) : null) ||
       (sessionIds.length || pictures.length || built.length
