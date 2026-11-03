@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { closeDb, query } from "../db.ts";
+import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
 import type { SharedWsState } from "../protocol.ts";
@@ -166,4 +167,31 @@ test("waking a bot's computer: an Admin may (as a message would, with the owner'
   assert.equal((await call(member, "POST", "wake", { botId: "ivy" })).json.code, "member_read_only");
   assert.equal((await call(admin, "POST", "wake", { botId: "ivy" })).status, 200, "a bot sharing the main bot's computer wakes that one");
   assert.equal((await call(admin, "POST", "wake", { botId: "nobody" })).status, 404);
+});
+
+test("an Allow once or Deny to an ask of a bot's computer's runner, with the owner's Mac away: Bops Cloud writes it there now, named as theirs; Always allow, or an ask of the owner's Mac, waits for the Mac", async () => {
+  const runner = deviceIdOf(owner, "comp-max");
+  const ask = (id: string, askedBy: string) => ({ id, botId: "max", chatId: "bot:max", action: "Send an email", kind: "email", resources: [], at: 1, askedBy });
+  const state = { ...ownerState(), appApprovals: [ask("ask-run-1", runner), ask("ask-run-2", runner), ask("ask-mac-1", "mac-o")] };
+  const put1 = await put(state, await version());
+  assert.equal(put1.status, 200, JSON.stringify(put1.json));
+  const before = await version();
+  const act = (key: string, a: unknown) => call(admin, "POST", "act", { key, act: a });
+  const r = await act("k_cloud_answer_1", { act: "answer", askId: "ask-run-1", reply: "reject", message: "Not that one" });
+  assert.deepEqual([r.status, r.json.macOn], [202, true]);
+  assert.equal(await version(), before + 1, "written by Bops Cloud at once");
+  const kept = (await query<{ state: Record<string, unknown> }>("SELECT state FROM bops.app_state WHERE user_id = $1", [owner])).rows[0].state;
+  const reply = (kept.appApprovals as Record<string, unknown>[]).find((x) => x.id === "ask-run-1")!.reply as Record<string, unknown>;
+  assert.deepEqual([reply.reply, reply.message, reply.by, (reply.member as { userId: string }).userId], ["reject", "Not that one", "cloud", admin]);
+  assert.equal(((await slice(admin)).approvals ?? []).some((x) => x.id === "ask-run-1"), false, "no longer waiting, for anyone watching");
+  // Answered already: not again.
+  assert.equal((await act("k_cloud_answer_2", { act: "answer", askId: "ask-run-1", reply: "once" })).json.code, "not_waiting");
+  // Always allow saves a rule on the owner's Mac; an ask of the owner's Mac is its own: both wait for it, nothing written here.
+  const v = await version();
+  const always = await act("k_cloud_answer_3", { act: "answer", askId: "ask-run-2", reply: "always" });
+  const mac = await act("k_cloud_answer_4", { act: "answer", askId: "ask-mac-1", reply: "once" });
+  // (An Admin's answer waits for the owner's Bops to take an Admin's acts: here it doesn't say its version, so 409.)
+  assert.ok([202, 409].includes(always.status) && [202, 409].includes(mac.status), `${always.status} ${mac.status}`);
+  assert.equal(await version(), v, "nothing written for them");
+  await query("DELETE FROM bops.cloud_pending WHERE user_id = $1", [owner]);
 });

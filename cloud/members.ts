@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { bearer, type CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
+import { workBotOf } from "./computer-scope.ts";
+import { deviceIdOf } from "./device.ts";
 import { HttpError, readBody, readJson, sendJson, type Route } from "./http.ts";
 import { query, tx } from "./db.ts";
 import { canWatch, hub, liveScope, seedSeen, serveStream, stateWritten, type LiveTarget } from "./live.ts";
@@ -676,6 +678,8 @@ let routed: (owner: string, ws: string) => Promise<boolean> = realRouted;
 const realStoredFirst = async (owner: string, ws: string) => (await macNewEnough(owner)) && (chatAutoFor(owner) || (await routedWorkspaces(null, owner)).has(ws));
 let storedFirst: (owner: string, ws: string) => Promise<boolean> = realStoredFirst;
 let count: (userId: string) => Promise<void> = countAct;
+/** Bops Cloud answers a computer's runner's ask itself while the owner's Mac is away (answerOnComputer). */
+let answerHere: (o: Parameters<typeof answerOnComputer>[0]) => Promise<boolean> = (o) => answerOnComputer(o);
 
 /**
  * Who the member is on what they did, as the owner's Bops shows it: their Orgo name, else their email's name, made
@@ -738,6 +742,12 @@ const actIn: Route = {
       const chatAct = body.act;
       if (slice.chats.some((c) => c.id === chatAct.chatId)) return cloudChat(res, { user: user!, role, target, viewer, projectId, key: body.key, act: chatAct, asked });
     }
+    // An answer (Allow once, Deny) to an ask of a bot's computer's runner while the owner's Mac is away: written here, so
+    // the run there goes on now, as the Mac would (answerOnComputer). Always allow saves a rule the Mac keeps: it waits.
+    if (body.act.act === "answer" && body.act.reply !== "always" && !isOn(target.account)) {
+      const answered = await answerHere({ target, viewer, actor, act: body.act, who: whoOf(user!), still: () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked });
+      if (answered) return sendJson(res, 202, { ok: true, macOn: true } satisfies MemberActAnswer);
+    }
     const payload: MemberActPayload = {
       projectId,
       wsId: target.ws,
@@ -764,6 +774,48 @@ const actIn: Route = {
     sendJson(res, 202, { ok: true, macOn: isOn(target.account) } satisfies MemberActAnswer);
   },
 };
+
+/**
+ * An answer to an ask a bot's computer's runner made (AppApproval.askedBy is that computer's runner: device.ts deviceIdOf),
+ * Allow once or Deny, written on the owner's state by Bops Cloud while the owner's Mac is away, so the run there goes on
+ * now (the owner's Mac would only have written it there too: lib/server/permission.ts replyToAsk). Checked again under
+ * the owner's lock, on the state as it is then (botsTouched: who may answer it, and their Write), and only while
+ * orgo-web sent no notice for them. Named as theirs (AskAnswer.member), the runner told (announce nudges it) and its
+ * computer woken as for a turn. A reply is never taken back, and the earliest one stands (state-merge.ts mergeApproval),
+ * so one crossing the Mac's is safe. False when it isn't such an ask: the act then waits for the owner's Mac as before.
+ */
+async function answerOnComputer(o: { target: LiveTarget; viewer: SliceViewer; actor: Actor; act: Extract<MemberAct, { act: "answer" }>; who: MemberWho; still: () => boolean }): Promise<boolean> {
+  const { target, act } = o;
+  const out = await tx(async (c) => {
+    await lockUser(c, target.account);
+    const blob = await lockedState(c, target.account);
+    const asks = list(blob.appApprovals);
+    const a = asks.find((x) => x.id === act.askId);
+    if (!a || a.reply !== undefined || typeof a.botId !== "string") return null;
+    const desktop = computerFor(blob, a.botId);
+    // Its runner's device id, from the computer's id as Orgo gave it (a runner says it either way: lib/server/runner.ts).
+    const all = list(blob.bots);
+    const raw = workBotOf(all.find((b) => b.id === a.botId) ?? {}, all).computerId;
+    const devices = [desktop, typeof raw === "string" ? raw : null].flatMap((d) => (d ? [deviceIdOf(target.account, d)] : []));
+    if (!desktop || typeof a.askedBy !== "string" || !devices.includes(a.askedBy)) return null;
+    const slice = sliceOf(blob, target.ws, o.viewer);
+    if (!slice.workspace) return null;
+    const bots = botsTouched(blob, slice, act, o.actor);
+    if (!bots.length || !bots.every((id) => permits(levelOf(viewerAccess(slice.workspace, o.viewer), id), "write"))) return null;
+    if (!computerUseOf(slice.workspace, o.viewer) || !o.still()) return null;
+    const reply = { reply: act.reply, ...(act.reply === "reject" && act.message ? { message: act.message.slice(0, MEMBER_MAX_NOTE) } : {}), by: "cloud", at: Date.now(), member: o.who };
+    const written = { ...blob, appApprovals: asks.map((x) => (x === a ? { ...x, reply } : x)) };
+    await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+    const ws = all.find((b) => b.id === a.botId);
+    return { written, desktop, bot: typeof ws?.name === "string" && ws.name.trim() ? ws.name.trim() : "The bot" };
+  });
+  if (!out) return false;
+  announce(target.account);
+  stateWritten(target.account, out.written, "cloud");
+  // Its computer may be asleep while the run waits: woken as a turn's would be (the owner's say on an hourly bill).
+  void wakeComputer(target.account, out.desktop, target.ws, { owner: "The owner", bot: out.bot }).catch((e: Error) => console.warn(`[members] waking for an answer: ${e.message}`));
+  return true;
+}
 
 /**
  * A member's message in a chat of a workspace whose chat goes through Bops Cloud (turns.ts takeMessage): checked
@@ -1101,6 +1153,7 @@ export function resetMembers(
     storedFirst?: (owner: string, ws: string) => Promise<boolean>;
     /** Whether the owner's Bops takes an Admin's acts (adminGate). A test that fakes the owner's state says no, unless it says. */
     adminGate?: (owner: string) => Promise<boolean>;
+    answerHere?: (o: Parameters<typeof answerOnComputer>[0]) => Promise<boolean>;
   } = {},
 ) {
   kept.clear();
@@ -1111,6 +1164,8 @@ export function resetMembers(
   ownerState = opts.state ?? savedState;
   gates.clear();
   gateOf = opts.adminGate ?? (opts.state ? async () => false : realGate);
+  // (A test that fakes the owner's state has no state in Postgres to answer on: the act waits for the Mac, unless it says.)
+  answerHere = opts.answerHere ?? (opts.state ? async () => false : (o) => answerOnComputer(o));
   queue = opts.queue ?? realQueue;
   isOn = opts.isOn ?? realIsOn;
   drop = opts.drop ?? dropActs;
