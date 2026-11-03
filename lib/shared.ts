@@ -104,6 +104,34 @@ export function browserLine(state: Viewing, bot: { id: string; name: string; run
   return "Its browser shows here once the owner turns on Use its computer for you.";
 }
 
+/**
+ * Whether a shared workspace's side panel has nothing of the owner's to show this viewer: a Member who sees no bot's
+ * browser there (seesBrowser), so a computer tab only says where the work shows (computer.tsx NoComputer). The window
+ * opens it closed then, and the owner's work going on doesn't open it (bops-app.tsx). An Admin keeps the computer's live
+ * view and the browser beside it, and a Member with a browser has it in place of the computer. False outside one.
+ */
+export const panelEmpty = (state: Viewing, bots: readonly { id: string; runsOn?: string }[]) =>
+  !!state.shared && state.shared.role !== "admin" && !bots.some((b) => seesBrowser(state, b));
+
+/**
+ * The workspace the side panel was last set for (`ws`: a shared one's id, null for the user's own), and, when going
+ * into it closed the panel (panelEmpty), whether it was open before (`was`; null: it wasn't closed for it).
+ */
+export type PanelHeld = { ws: string | null; was: boolean | null };
+
+/**
+ * The side panel across workspace switches (bops-app.tsx), or null for no change. Only a switch counts: going into a
+ * shared workspace whose panel would show nothing of the owner's (panelEmpty) closes it, and leaving puts it back as
+ * it was before. Any other switch leaves it as it is, as does anything that changes inside a workspace: the panel
+ * opened or closed by hand, or the owner giving the viewer a browser there (or taking it away).
+ */
+export function panelAfterSwitch(held: PanelHeld | null, state: Viewing & { bots: readonly { id: string; runsOn?: string }[] }, open: boolean): { held: PanelHeld; open: boolean } | null {
+  const ws = state.shared?.wsId ?? null;
+  if (ws === (held?.ws ?? null)) return null;
+  const before = held?.was ?? open;
+  return panelEmpty(state, state.bots) ? { held: { ws, was: before }, open: false } : { held: { ws, was: null }, open: before };
+}
+
 /** Who the owner's own words and doings are said by: "You" in the user's own workspace, "Owner" in one shared with them (they're never the user's). */
 export const ownerWho = (shared: SharedOpen | undefined) => (shared ? "Owner" : "You");
 

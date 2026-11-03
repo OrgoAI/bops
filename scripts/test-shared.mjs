@@ -66,7 +66,7 @@ const { SharedCopy, viewState, GONE, actWith, ACT_EXPIRED, ACT_ACCESS_CHANGED, A
 const { needsYou, repliedSince } = await import(`${root}/lib/asks.ts`);
 const { duePings } = await import(`${root}/lib/pings.ts`);
 const { LiveSubscriber, RemoteMoods } = await import(`${root}/lib/server/live-core.ts`);
-const { readOnlyLine, sharedWsId, sharedBy, roleLabel, canAct, readOnly, saidBy, seesBrowser, browserLine } = await import(`${root}/lib/shared.ts`);
+const { readOnlyLine, sharedWsId, sharedBy, roleLabel, canAct, readOnly, saidBy, seesBrowser, browserLine, panelEmpty, panelAfterSwitch } = await import(`${root}/lib/shared.ts`);
 const { viewOnly, callAllowed } = await import(`${root}/components/app/view-only.ts`);
 const { WorkspaceSwitcher, Sidebar } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
 const { ChatView, ThreadSheet } = await import(pathToFileURL(`${root}/components/app/chat-view.tsx`).href);
@@ -1951,6 +1951,44 @@ await check("the bot's browser in a shared workspace: a Member with Write and Us
   assert.equal(callAllowed("POST", "/api/browser"), true);
   assert.equal(callAllowed("POST", "/api/browsers"), false);
   assert.equal(callAllowed("POST", "/api/takeover"), false, "the owner's own takeover never goes from a shared workspace");
+});
+
+await check("a shared workspace's side panel: closed when it would show nothing of the owner's (a Member with no bot's browser), and the owner's work doesn't open it; an Admin's and a browsing Member's open as always", () => {
+  const at = (levels, computer, role = "member", screens) => ({ shared: { projectId: "p1", name: "Acme", owner: "o@example.com", role, wsId: "shared_p1", levels, computer, ...(screens ? { screens } : {}) } });
+  const max = { id: "max", name: "Max" };
+  const mia = { id: "mia", name: "Mia", runsOn: "mac" };
+  assert.equal(panelEmpty(at({ max: "read" }, true), [max]), true, "Read on it: no browser, only a line");
+  assert.equal(panelEmpty(at({ max: "write" }, false), [max]), true, "no Use its computer");
+  assert.equal(panelEmpty(at({ mia: "write" }, true), [mia]), true, "a bot on the owner's Mac has no browser");
+  assert.equal(panelEmpty(at({ max: "write" }, true), [mia, max]), false, "a Member with a bot's browser: it's in place of the computer");
+  assert.equal(panelEmpty(at({}, false, "admin", ["max"]), [max]), false, "an Admin: the computer's live view, the browser beside it");
+  assert.equal(panelEmpty(at({}, false, "admin"), [max]), false, "an Admin keeps the panel, as the owner does");
+  assert.equal(panelEmpty({}, [max]), false, "the user's own workspace");
+  // Across switches (panelAfterSwitch): into such a workspace it closes, and leaving puts it back as it was; any other
+  // switch leaves it as it is (an Admin's, the user's own), as does anything that changes inside a workspace.
+  const ws = (st, wsId) => ({ shared: { ...st.shared, wsId }, bots: [max] });
+  const nothing = { ...at({ max: "read" }, true), bots: [max] };
+  const browsing = { ...at({ max: "write" }, true), bots: [max] };
+  const own = { bots: [max] };
+  const into = panelAfterSwitch({ ws: null, was: null }, nothing, false);
+  assert.deepEqual(into, { held: { ws: "shared_p1", was: false }, open: false }, "into it, closed before: closed, and that's kept");
+  assert.equal(panelAfterSwitch(into.held, nothing, true), null, "opened by hand there: it stays open");
+  assert.equal(panelAfterSwitch(into.held, browsing, true), null, "then the owner turns on Use its computer, same workspace: it stays open");
+  assert.equal(panelAfterSwitch(into.held, browsing, false), null, "or closed, if they'd closed it");
+  assert.deepEqual(panelAfterSwitch(into.held, own, true), { held: { ws: null, was: null }, open: false }, "back to the user's own: as it was before (closed)");
+  const fromOpen = panelAfterSwitch({ ws: null, was: null }, nothing, true);
+  assert.deepEqual(fromOpen, { held: { ws: "shared_p1", was: true }, open: false });
+  assert.deepEqual(panelAfterSwitch(fromOpen.held, own, false), { held: { ws: null, was: null }, open: true }, "open before: open again");
+  assert.deepEqual(panelAfterSwitch(fromOpen.held, ws(nothing, "shared_p2"), false), { held: { ws: "shared_p2", was: true }, open: false }, "one such workspace to another: as it was before the first");
+  const admin = { shared: { ...at({}, false, "admin", ["max"]).shared, wsId: "shared_p3" }, bots: [max] };
+  assert.deepEqual(panelAfterSwitch({ ws: null, was: null }, admin, false), { held: { ws: "shared_p3", was: null }, open: false }, "closed by hand, then an Admin's workspace: it stays closed");
+  assert.deepEqual(panelAfterSwitch({ ws: "shared_p3", was: null }, own, false), { held: { ws: null, was: null }, open: false }, "and back to the user's own: still closed");
+  assert.deepEqual(panelAfterSwitch({ ws: null, was: null }, browsing, true), { held: { ws: "shared_p1", was: null }, open: true }, "a Member with a browser: open, as it was");
+  assert.equal(panelAfterSwitch(null, own, true), null, "the first state, in the user's own: as it is");
+  // The window takes it from that on every render, and the follow-the-work line skips such a workspace.
+  const app = readFileSync(`${root}/components/app/bops-app.tsx`, "utf8");
+  assert.match(app, /const panelSwitch = state \? panelAfterSwitch\(panelHeld, state, panelOpen\) : null;\n *if \(panelSwitch\) \{\n *setPanelHeld\(panelSwitch\.held\);\n *setPanelOpen\(panelSwitch\.open\);/);
+  assert.match(app, /if \(lead && !browsing && !focus\) \{\n(?: *\/\/[^\n]*\n)* *if \(!panelEmpty\(state, state\.bots\)\) setPanelOpen\(true\);/);
 });
 
 await check("an Admin sees a bot's computer live, with Take control and orgo.ai; a Member with Use its computer is pointed at orgo.ai; anyone else reads where its work shows; the role is said under the name", async () => {
