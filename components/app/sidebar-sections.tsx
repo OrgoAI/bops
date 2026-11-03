@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { favoriteCount, favoriteLabel, movedFavorite, nudgedFavorite, toggledFavorite, type FavoriteKind } from "@/lib/favorites";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { alwaysScope, toDo } from "@/lib/permission";
+import { plainTitle } from "@/lib/plain-words";
 import { answersAsk, canAct, writesThread } from "@/lib/shared";
 import { askKind } from "@/lib/asks";
 import { memberAct } from "./shared-act";
@@ -109,14 +110,14 @@ export function ThreadRow({ session: s, onClick, readOnly, okWait }: { session: 
       data-thread={s.id}
       className={`group/thread flex h-[34px] shrink-0 items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${row.rise ? "motion-rise-in" : ""}`}
     >
-      <span className={`min-w-0 flex-1 truncate text-[14px] leading-[18px] ${live(s) || needsYou(s) ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
+      <span className={`min-w-0 flex-1 truncate text-[14px] leading-[18px] ${live(s) || needsYou(s) ? "text-ink" : "text-[#6B6B6B]"}`}>{plainTitle(s.title)}</span>
       {(live(s) || needsYou(s)) && (
         <span key={pop.n} onAnimationEnd={pop.done} className={`flex shrink-0 ${pop.pop ? "motion-dot-in" : ""}`}>
           <StatusIcon session={s} owner={readOnly} okWait={okWait} />
         </span>
       )}
       {!live(s) && !readOnly && (
-        <DeleteX label={`Delete ${s.title}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100 group-focus-visible/thread:opacity-100" />
+        <DeleteX label={`Delete ${plainTitle(s.title)}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100 group-focus-visible/thread:opacity-100" />
       )}
     </button>
   );
@@ -429,7 +430,9 @@ export function needsByBot(state: AppState, issues: Issue[] | null, setup: Setup
     const b = team.find((x) => x.id === a.botId);
     // (Never one only the owner answers: their apps or keys, or a thread on their Mac: answersAsk.)
     if (!b || (state.shared && (!canAct(state, [b.id]) || !answersAsk(state, a)))) continue;
-    const where = state.sessions.find((x) => x.id === a.threadId)?.title ?? state.routines.find((x) => x.id === a.routineId)?.title;
+    // Its thread's title as the thread's row says it (plainTitle), else its routine's.
+    const thread = state.sessions.find((x) => x.id === a.threadId);
+    const where = thread ? plainTitle(thread.title) : state.routines.find((x) => x.id === a.routineId)?.title;
     of(b.id).asks.push({ ask: a, botName: b.name, ...(where ? { where } : {}), ...(state.shared ? { shared: true } : {}) });
   }
   if (state.shared) return out;

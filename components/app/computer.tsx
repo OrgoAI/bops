@@ -22,6 +22,7 @@ import { botBezel, botOnInk, botWash, MonitorIcon, post, screenNo } from "./ui";
 import { browserLine, readOnly, seesBrowser, SHARED_SCREEN_WORDS, yourMac } from "@/lib/shared";
 import { useWindowVisible } from "./window-visible";
 import { ago, onSameComputer, screenMap, teamScreens, type ScreenKind, type TeamScreen } from "@/lib/screens";
+import { plainTitle } from "@/lib/plain-words";
 
 /* A bot's computer, shown as the work on it: it runs up to four things at once, one per screen. */
 
@@ -201,7 +202,7 @@ export function ComputerView({
     const s = holding.get(d);
     if (yours(d) && (!s || !live(s))) return "In control";
     if (!s) return "";
-    return helperOn(d) ? (s.helperTasks?.[d] ?? stepOn(d)?.detail ?? `Helping with ${s.title}`) : s.title;
+    return helperOn(d) ? (s.helperTasks?.[d] ?? stepOn(d)?.detail ?? `Helping with ${plainTitle(s.title)}`) : plainTitle(s.title);
   };
   /** What an idle screen has open, by its page title: a standing tab like X or LinkedIn is worth seeing. */
   const pageOn = (d: number) => {
@@ -943,12 +944,12 @@ export function ComputerView({
                       {alert && <span className="truncate rounded-[4px] bg-highlighter px-1 text-ink">{w.alert!.text}</span>}
                     </>
                   ) : infoOn(d)?.kind === "held" ? (
-                    <span className="truncate text-[#6B6B6B]" title={state.shared ? `Kept for "${infoOn(d)!.title}" while it waits on the owner, so their answer picks it up here` : `Kept for "${infoOn(d)!.title}" while it waits on you, so your answer picks it up here`}>
-                      <span className="font-semibold text-ink">{nameOf(infoOn(d)!.botId)}</span> · held for {infoOn(d)!.title}
+                    <span className="truncate text-[#6B6B6B]" title={state.shared ? `Kept for "${plainTitle(infoOn(d)!.title ?? "")}" while it waits on the owner, so their answer picks it up here` : `Kept for "${plainTitle(infoOn(d)!.title ?? "")}" while it waits on you, so your answer picks it up here`}>
+                      <span className="font-semibold text-ink">{nameOf(infoOn(d)!.botId)}</span> · held for {plainTitle(infoOn(d)!.title ?? "")}
                     </span>
                   ) : infoOn(d)?.left ? (
-                    <span className="truncate text-[#9A9A98]" title={`${nameOf(infoOn(d)!.left!.botId)} left "${infoOn(d)!.left!.title}" here ${ago(infoOn(d)!.left!.at)}`}>
-                      Left by {nameOf(infoOn(d)!.left!.botId)} · {infoOn(d)!.left!.title}
+                    <span className="truncate text-[#9A9A98]" title={`${nameOf(infoOn(d)!.left!.botId)} left "${plainTitle(infoOn(d)!.left!.title)}" here ${ago(infoOn(d)!.left!.at)}`}>
+                      Left by {nameOf(infoOn(d)!.left!.botId)} · {plainTitle(infoOn(d)!.left!.title)}
                     </span>
                   ) : (
                     <span className="truncate pl-0.5 text-[#9A9A98]">{pageOn(d)}</span>
@@ -986,12 +987,12 @@ export function ComputerView({
                   onScreen?.blocker || read?.blocker
                     ? `${botOn(display).name} needs ${you}: ${BLOCKER_LABEL[(onScreen?.blocker ?? read?.blocker)!]}${read?.url ? ` on ${new URL(read.url).hostname}` : ""}`
                     : onScreen
-                      ? `${whoOn(display)} · ${(helperOn(display) ? stepOn(display)?.detail : lastStep?.detail) ?? onScreen.title}`
+                      ? `${whoOn(display)} · ${(helperOn(display) ? stepOn(display)?.detail : lastStep?.detail) ?? plainTitle(onScreen.title)}`
                       : watchedHere?.alert
                         ? `New on ${watchedHere.site}: ${watchedHere.alert.text}`
                         : infoOn(display)?.kind === "held"
-                          ? `held for "${infoOn(display)!.title}" while ${nameOf(infoOn(display)!.botId)} waits on ${you}`
-                          : `free · left by ${nameOf(infoOn(display)!.left!.botId)}: "${infoOn(display)!.left!.title}" ${ago(infoOn(display)!.left!.at)}`
+                          ? `held for "${plainTitle(infoOn(display)!.title ?? "")}" while ${nameOf(infoOn(display)!.botId)} waits on ${you}`
+                          : `free · left by ${nameOf(infoOn(display)!.left!.botId)}: "${plainTitle(infoOn(display)!.left!.title)}" ${ago(infoOn(display)!.left!.at)}`
                 }`}
           </span>
           {!grid && watchedHere?.alert && !readOnly(state) && (
@@ -1508,7 +1509,7 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
           const snap = !hidden && visible && busy(t) && i < TEAM_LIVE && !!host;
           // A screen a thread just left shows the last frame it saw there (lib/server/frames.ts), as its thread does.
           const leftBy = t.kind === "free" && t.left ? state.sessions.find((x) => x.id === t.left!.sessionId) : undefined;
-          const words = t.kind === "free" && t.left ? `left ${t.left.title} · ${ago(t.left.at)}` : t.kind === "held" ? `held for ${t.title}` : t.kind === "watched" ? `watching ${t.title}` : t.kind === "driving" ? "you're driving" : (t.title ?? "");
+          const words = t.kind === "free" && t.left ? `left ${plainTitle(t.left.title)} · ${ago(t.left.at)}` : t.kind === "held" ? `held for ${plainTitle(t.title ?? "")}` : t.kind === "watched" ? `watching ${t.title}` : t.kind === "driving" ? "you're driving" : plainTitle(t.title ?? "");
           return (
             <button
               key={`${t.computerBotId}-${t.display}`}
@@ -1522,7 +1523,7 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
                   <LiveScreen key={`team-${t.computerBotId}-${t.display}`} bot={host} botId={host!.id} display={t.display} intervalMs={5000} scale={0.3} className="absolute inset-x-2 bottom-0 top-2 rounded-t-sm" />
                 ) : leftBy?.lastFrameAt ? (
                   // eslint-disable-next-line @next/next/no-img-element -- a frame Bops serves, sized by the tile
-                  <img src={`/api/frames?session=${leftBy.id}&t=${leftBy.lastFrameAt}`} alt={`The screen as ${leftBy.title} left it`} className="absolute inset-x-2 bottom-0 top-2 w-[calc(100%-1rem)] rounded-t-sm object-cover object-top opacity-80" />
+                  <img src={`/api/frames?session=${leftBy.id}&t=${leftBy.lastFrameAt}`} alt={`The screen as ${plainTitle(leftBy.title)} left it`} className="absolute inset-x-2 bottom-0 top-2 w-[calc(100%-1rem)] rounded-t-sm object-cover object-top opacity-80" />
                 ) : (
                   <div className="absolute inset-x-2.5 bottom-0 top-2 flex items-center justify-center rounded-t-sm bg-white/90">
                     {who && <Mascot botId={who.id} color={who.color} size={18} />}

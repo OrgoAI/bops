@@ -5,6 +5,7 @@ import { appsStayLine, live, type AppState, type Bot, type Effort } from "@/lib/
 import { Mascot } from "./mascot";
 import { AskInPlace, needsYou, post } from "./ui";
 import { EFFORT_HINT, type Section } from "./bot-panel";
+import { plainTitle } from "@/lib/plain-words";
 
 /** What the menu's actions do, from the app (bops-app.tsx). */
 export type BotMenuActions = {
@@ -54,9 +55,9 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
   const asking = sessions.find((s) => needsYou(s) && !s.askWhere);
   const working = sessions.filter((s) => live(s) && !s.askWhere);
   const status = asking
-    ? { dot: "needs", text: `Needs you: ${asking.title}` }
+    ? { dot: "needs", text: `Needs you: ${plainTitle(asking.title)}` }
     : working.length
-      ? { dot: "busy", text: working.length > 1 ? `Working on ${working.length} things` : `Working on ${working[0].title}` }
+      ? { dot: "busy", text: working.length > 1 ? `Working on ${working.length} things` : `Working on ${plainTitle(working[0].title)}` }
       : { dot: "", text: b.role || "Idle" };
   const routines = state.routines.filter((r) => r.botId === b.id);
   const reach = [b.phone && "number", b.email && "inbox"].filter(Boolean).join(" and ");

@@ -14,7 +14,7 @@
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-sidebar.mjs   (not with --conditions=react-server: these are client components)
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -249,6 +249,20 @@ await test("Needs your attention: what a bot waits on your OK for (wherever its 
   stored.clear();
 });
 
+await test("A request for your OK says its thread's plain title, as the thread's row does", () => {
+  stored.clear();
+  const waits = session("s_run", "nova", { status: "queued", endedAt: undefined, title: "Run Trail Guides Local" });
+  const ok = { id: "a9", botId: "nova", chatId: "chat_nova", askedBy: "dev_runner_c1", action: "Send Email in Gmail (sam@acme.com)", resources: ["dana@acme.example"], preview: "to: dana@acme.example", at: min(4), threadId: "s_run" };
+  const state = world({ sessions: [waits], appApprovals: [ok] });
+  assert.deepEqual(S.needsByBot(state, null, []).get("nova").asks.map((x) => x.where), ["Run Trail Guides on its computer"]);
+  stored.set("bops.threads.open.u1.ws_main.nova", "1");
+  const nova = botBlock(render(state), "nova");
+  assert.ok(nova.includes('data-need="ask:a9"'), "the card under Nova");
+  assert.match(nova, /Run Trail Guides on its computer/);
+  assert.doesNotMatch(nova, /Run Trail Guides Local/, "never the stored title beside the plain one");
+  stored.clear();
+});
+
 /* ---------------- The main bot ---------------- */
 
 await test("A shared workspace's empty chat: its bot's role once, as the line under the name, never again as a chip beside it", () => {
@@ -287,6 +301,39 @@ await test("A routine's post on a row says which routine, as the chat does above
   assert.match(render(world({ routines, messages: [post({ id: "r_alerts" })] })), />Outage and customer alerts: someone@example\.com requests cancellation</, "the routine's name first");
   assert.match(render(world({ messages: [post({ id: "r_gone" })] })), />Routine: someone@example\.com requests cancellation</, "a deleted routine");
   assert.match(render(world({ routines, messages: [post()] })), />someone@example\.com requests cancellation</, "a bot's own reply as before");
+});
+
+await test("A thread's row says its title in plain words (an app's copy on its computer, not Local), the stored title as it was", () => {
+  const t = session("t9", "nova", { title: "Run Trail Guides Local" });
+  const html = render(world({ sessions: [t] }), { search: "trail" });
+  assert.match(html, /data-thread="t9"[^>]*>(?:(?!<\/button>)[\s\S])*>Run Trail Guides on its computer</);
+  assert.equal(t.title, "Run Trail Guides Local");
+});
+
+await test("A thread's title is the same plain title wherever it shows: the bot's menu says it, and no component shows one raw", async () => {
+  const { BotMenu } = await import(pathToFileURL(`${root}/components/app/bot-menu.tsx`).href);
+  const menu = (sessions) => renderToStaticMarkup(h(BotMenu, { state: world({ sessions }), bot: world().bots.find((b) => b.id === "nova"), x: 10, y: 10, onClose: noop, actions: { onChat: noop, onCall: noop, onComputer: noop, onProfile: noop, onNewTask: noop } }));
+  assert.match(menu([session("t1", "nova", { title: "Run Trail Guides Local", status: "running", endedAt: undefined })]), /Working on Run Trail Guides on its computer/);
+  assert.match(menu([asking("t2", "nova", min(5), { title: "Open the brochure on localhost:3101" })]), /Needs you: Open the brochure on its computer/);
+  // Every thread title a component shows goes through plainTitle; the two uses that aren't shown are named.
+  const notShown = [/\.title\.toLowerCase\(\)\.includes\(q\)/, /const said = \[s\.title/];
+  const raw = [];
+  for (const f of readdirSync(`${root}/components/app`).filter((x) => x.endsWith(".tsx")))
+    readFileSync(`${root}/components/app/${f}`, "utf8")
+      .split("\n")
+      .forEach((line, i) => {
+        // The line without its plainTitle(...) calls (parentheses balanced), so only a title left outside one counts.
+        let shown = line;
+        for (let at = shown.indexOf("plainTitle("); at >= 0; at = shown.indexOf("plainTitle(")) {
+          let depth = 0;
+          let end = at + "plainTitle".length;
+          for (; end < shown.length; end++) if (shown[end] === "(") depth++;
+          else if (shown[end] === ")" && --depth === 0) break;
+          shown = shown.slice(0, at) + shown.slice(end + 1);
+        }
+        if (/\b(?:s|session|asking|thread|onScreen|leftBy|i\.session|current\.session|working\[0\]|t\.left)\.title\b|infoOn\([^)]*\)!?\.(?:left!?\.)?title\b|sessions\.find\(.*\)\??\.title\b/.test(shown) && !notShown.some((r) => r.test(line))) raw.push(`${f}:${i + 1}`);
+      });
+  assert.deepEqual(raw, [], "a thread title shown without plainTitle");
 });
 
 /* ---------------- Favorites ---------------- */

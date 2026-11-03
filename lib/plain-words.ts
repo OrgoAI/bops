@@ -9,6 +9,30 @@
  */
 export const dropCitations = (text: string) => text.replace(/\s?[^]*/g, "");
 
+/** A link to a page on the computer it runs on (localhost, 127.0.0.1): it opens there and nowhere else. */
+export const isLocalLink = (href: string) => /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#]|$)/i.test(href);
+
+/** What a bot's localhost link says in a workspace shared with the user, in place of opening: where it opens. */
+export const localOnlyLine = (botName?: string) => `opens only on ${botName ? `${botName}'s` : "the bot's"} computer`;
+
+/**
+ * The run target an app's copy has on the bot's computer, as a bot titles work on it: Bops calls that copy its Local
+ * (app-envs.tsx ENV_NAMES; "Run it as its Local" in the bot's instructions, lib/server/hosted-apps.ts appWork), so a
+ * bot writes "Run Trail Guides Local" or "Start the site locally". Only a title that runs, starts or opens something
+ * there: any other title ending in "local" ("Shop local") is the word.
+ */
+const RUN_LOCAL = /^((?:run|start|restart|stop|open|show|preview|launch)\s+\S.*?)\s+(?:local|locally)$/i;
+
+/**
+ * A thread's title as the window shows it (the stored title stays as the bot wrote it): an app's copy running on
+ * the bot's computer (RUN_LOCAL) and a localhost address said as where they are, its computer.
+ */
+export function plainTitle(title: string): string {
+  return title
+    .replace(RUN_LOCAL, "$1 on its computer")
+    .replace(/(?:https?:\/\/)?\b(?:localhost|127\.0\.0\.1)(?::\d+)?(?![\w:-]|\.[\w-])(?:[/?#](?:[^\s]*[^\s.,;:!?])?)?/gi, "its computer");
+}
+
 /** A step's detail, as a person would say it. */
 export function plainStep(detail: string): string {
   const d = detail.trim();

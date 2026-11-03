@@ -8,6 +8,7 @@ import { LiveScreen, type ScreenInput } from "./live-screen";
 import { WatchBadge, WatchEye, WatchOverlay, type Spot } from "./watch-overlay";
 import { Mascot } from "./mascot";
 import { botBezel, post } from "./ui";
+import { plainTitle } from "@/lib/plain-words";
 
 /**
  * Your Mac, shown like a bot's computer (computer.tsx): one big live screen in a frame, a row of
@@ -409,7 +410,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
               <button
                 key={i.key}
                 onClick={() => pick(i)}
-                title={i.session ? `${i.bot?.name} · ${i.session.title}` : i.sub}
+                title={i.session ? `${i.bot?.name} · ${plainTitle(i.session.title)}` : i.sub}
                 style={
                   waitingOn(i)
                     ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px #E8FF3A" }
@@ -459,7 +460,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
                       ? `Paused · ${current.watch.mac?.title ?? current.label} isn't showing here right now`
                       : `Watching ${current.watch.mac?.title ?? current.label} · ${current.watch.lookFor}`
                 : current?.session && live(current.session)
-                  ? `${current.bot?.name ?? "A bot"} · ${lastStep?.detail ?? current.session.activity ?? current.session.title}`
+                  ? `${current.bot?.name ?? "A bot"} · ${lastStep?.detail ?? current.session.activity ?? plainTitle(current.session.title)}`
                   : current?.kind === "browser" && current.session?.waitingOnYou
                     ? `${current.bot?.name ?? "A bot"} is waiting on you · take control of its Chrome to sign in for it`
                   : working.length
@@ -559,7 +560,7 @@ function WhoPill({ item: i }: { item: Item }) {
       {i.bot && <Mascot botId={i.bot.id} color={i.bot.color} size={13} antenna={false} />}
       <span className="shrink-0 font-semibold">{i.bot?.name ?? "A bot"}</span>
       <span className="truncate text-[#3A3A38]">
-        {i.label} · {i.session.title}
+        {i.label} · {plainTitle(i.session.title)}
       </span>
     </span>
   );
