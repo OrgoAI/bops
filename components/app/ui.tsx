@@ -189,17 +189,17 @@ export function StatusIcon({ session: s, size = 13, dark, owner, member, okWait 
 /**
  * One avatar for a chat: the bot, or two stacked bots for a group (the sidebar's rows and the chat's
  * header), each showing what it's doing as it does it, thinking over a reply in this chat. The chat's
- * header passes `life` (Mascot's): the sidebar's rows stay calm.
+ * header passes `life` and `listening` (Mascot's): the sidebar's rows stay calm.
  */
-export function ChatAvatar({ chat, bots, size = 44, life }: { chat: Chat; bots: Bot[]; size?: number; life?: boolean }) {
+export function ChatAvatar({ chat, bots, size = 44, life, listening }: { chat: Chat; bots: Bot[]; size?: number; life?: boolean; listening?: boolean }) {
   const members = chat.botIds.map((b) => bots.find((x) => x.id === b)).filter(Boolean) as Bot[];
-  if (chat.kind === "bot" && members[0]) return <Mascot botId={members[0].id} color={members[0].color} size={size} live chatId={chat.id} life={life} />;
+  if (chat.kind === "bot" && members[0]) return <Mascot botId={members[0].id} color={members[0].color} size={size} live chatId={chat.id} life={life} listening={listening} />;
   const small = Math.round(size * 0.68);
   return (
     <div className="relative shrink-0" style={{ width: size, height: size }}>
       {members.slice(0, 2).map((m, i) => (
         <div key={m.id} className="absolute" style={{ left: i * (size - small), top: i * (size - small) }}>
-          <Mascot botId={m.id} color={m.color} size={small} live chatId={chat.id} life={life} />
+          <Mascot botId={m.id} color={m.color} size={small} live chatId={chat.id} life={life} listening={listening} />
         </div>
       ))}
     </div>

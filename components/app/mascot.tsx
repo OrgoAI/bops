@@ -81,6 +81,7 @@ export function Mascot({
   live = false,
   chatId,
   life = false,
+  listening = false,
 }: {
   botId: string;
   color: string;
@@ -101,6 +102,8 @@ export function Mascot({
    * of them moving at the edge of the eye is noise.
    */
   life?: boolean;
+  /** The person is writing to this chat (or just sent it something): an idle bot opens its eyes and looks down at the box. */
+  listening?: boolean;
 }) {
   const signals = useContext(BotMoods);
   const talk = useContext(CallTalking);
@@ -109,11 +112,12 @@ export function Mascot({
   const talkingNow = () => onCall && talk.get();
   const talking = useSyncExternalStore(talk.subscribe, talkingNow, talkingNow);
   const mood = moodOf(talking ? { ...signals, call: { botId, speaking: true } } : signals, botId, chatId);
+  const pose: Mood = live && listening && mood === "idle" ? "listening" : mood;
   // The coder's mark, still and on top of any mood, only where it can be read.
   const coder = size >= CODER_MIN_SIZE && signals.coders.has(botId);
-  if (live && life && size >= LIFE_MIN_SIZE) return <LivelyMascot botId={botId} color={color} size={size} antenna={antenna} mood={mood} coder={coder} />;
-  if (live && isMoving(mood)) return <MovingMascot botId={botId} color={color} size={size} antenna={antenna} mood={mood} coder={coder} />;
-  return <MascotSvg botId={botId} color={color} size={size} antenna={antenna} mood={mood === "idle" ? "idle" : "awake"} coder={coder} />;
+  if (live && life && size >= LIFE_MIN_SIZE) return <LivelyMascot botId={botId} color={color} size={size} antenna={antenna} mood={pose} coder={coder} />;
+  if (live && isMoving(pose)) return <MovingMascot botId={botId} color={color} size={size} antenna={antenna} mood={pose} coder={coder} />;
+  return <MascotSvg botId={botId} color={color} size={size} antenna={antenna} mood={pose === "idle" || pose === "listening" ? pose : "awake"} coder={coder} />;
 }
 
 /** A mascot in a mood that moves (app/globals.css, mascot-*): its motion rests while the window is hidden. */

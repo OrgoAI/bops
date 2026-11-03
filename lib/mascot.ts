@@ -8,9 +8,10 @@
 /**
  * How a bot looks: idle (eyes closed, vibing) or awake (eyes open), the two the pictures use; and, in
  * the app, what it's doing at work (lib/bot-mood.ts picks it): thinking, writing, coding, speaking or
- * working, or shy for a few seconds after it's thanked.
+ * working, or shy for a few seconds after it's thanked. Listening is a still pose of the app's own: an
+ * idle bot whose person is writing to it (components/app/mascot.tsx), eyes open, looking down at the box.
  */
-export type Mood = "idle" | "awake" | MovingMood;
+export type Mood = "idle" | "awake" | "listening" | MovingMood;
 /** The moods a bot shows while it works, each a pose that app/globals.css sets moving (mascot-*). */
 export type MovingMood = "thinking" | "writing" | "coding" | "speaking" | "working" | "shy";
 export const MOVING_MOODS: readonly MovingMood[] = ["thinking", "writing", "coding", "speaking", "working", "shy"];
@@ -191,7 +192,7 @@ const MAIN_CHEEKS = `<g class="mascot-blush" fill="${BLUSH}"><ellipse cx="13.9" 
  * Idle shuts its eyes, upright. Writing leans toward its pencil, looking down; coding leans toward
  * its laptop the same way (the laptop's lid in its cups' highlighter), its cups bouncing as they do
  * at work; speaking faces you, its round mouth opening and closing; shy leans away, looking down,
- * its cheeks pink.
+ * its cheeks pink. Listening stands up straight like idle, its eyes open, looking down at the box.
  */
 function mainMarkup(mood: Mood, accent: boolean, blink: boolean) {
   const fill = accent ? HIGHLIGHTER : "#3A3A38";
@@ -201,6 +202,7 @@ function mainMarkup(mood: Mood, accent: boolean, blink: boolean) {
   let face: string;
   let tilt = 0;
   if (mood === "idle") face = mainEyes(false);
+  else if (mood === "listening") face = `<g transform="translate(0 1)">${open}</g>`;
   else if (mood === "writing" || mood === "coding") {
     tilt = -5;
     face = `<g transform="translate(-.6 .9)">${open}</g>`;
@@ -250,7 +252,9 @@ export function mascotMarkup(
 function moodMarkup(botId: string, color: string, mood: Mood, accent: boolean, blink: boolean) {
   if (isMainBotId(botId)) return mainMarkup(mood, accent, blink);
   if (!isMoving(mood)) {
-    const f = figure(botId, color, (c) => eyes(mood === "idle" ? "vibe" : faceOf(botId), c, blink));
+    const f = figure(botId, color, (c) =>
+      mood === "listening" ? `<g transform="translate(0 1)">${eyes(faceOf(botId), c, blink)}</g>` : eyes(mood === "idle" ? "vibe" : faceOf(botId), c, blink),
+    );
     return body(f.inner) + headphones(f.band, f.pad);
   }
   const face = (c: string) => {

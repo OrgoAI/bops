@@ -8,8 +8,8 @@
 // (codersOf), the coder's mark on every mascot of theirs big enough to read it, and when a thread is coding
 // (codingThread: running on one of the workspace's apps, the user's own ask, where apps show). Last, the mascots people
 // face (Mascot's life: the chat's header, an empty chat, a bot's profile): every drawing they start from as it was,
-// the blink's timing, the breath and the settle, held still with reduced motion, resting while the window is hidden,
-// and never on a list's rows.
+// the blink's timing, the breath and the settle, the listening pose while the person writes, held still with reduced
+// motion, resting while the window is hidden, and never on a list's rows.
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-bot-moods.mjs   (not with --conditions=react-server: these are client components)
@@ -94,7 +94,7 @@ await test("the idle and awake pictures are exactly what they were (every bot sh
   assert.equal(pictures(["penny", "otto", "rook", "bot", "max", "ivy-2", "writer", "zed"]), "b4d196e8d6593177a46c436ad79a04d5675d63b4d4516a21272202c0af8d8637", "the other bots");
   assert.equal(pictures(["boppy", "sam", "sam-2", "boppy-3"]), "8048cae8c1a81111749d191c79f20445af256ede668eb472eb776856cdfe82eb", "the main bot");
   // Flat: no blush, gloss or shine on the main bot in any mood (but shy, whose blush is the point).
-  for (const mood of ["idle", "awake", ...MOVING_MOODS.filter((m) => m !== "shy")]) assert.doesNotMatch(mascotMarkup("boppy", "#0A0A0A", { mood }).replace(/<g class="mascot-(thought|pencil|laptop)[\s\S]*$/, ""), /opacity|#FF8FB8/, mood);
+  for (const mood of ["idle", "awake", "listening", ...MOVING_MOODS.filter((m) => m !== "shy")]) assert.doesNotMatch(mascotMarkup("boppy", "#0A0A0A", { mood }).replace(/<g class="mascot-(thought|pencil|laptop)[\s\S]*$/, ""), /opacity|#FF8FB8/, mood);
 });
 
 await test("each moving mood is its own pose, still on its own, with the classes the app's motions use", () => {
@@ -536,7 +536,18 @@ await test("every pose the app draws today is exactly what it was, for every pic
   assert.equal(createHash("sha256").update(all).digest("hex"), "5a323960564d0ad4f31f2e42a17c7960d5c647a9c93aafec52083c44366c318d");
   // Blinking only marks the open eyes: take the class away and it's the same drawing.
   for (const id of ["boppy", "max", "penny", "otto", "rook", "ivy-2"])
-    for (const mood of moods) assert.equal(mascotMarkup(id, "#47C46B", { mood, blink: true }).replaceAll(' class="mascot-eye"', ""), mascotMarkup(id, "#47C46B", { mood }), `${id} ${mood}`);
+    for (const mood of [...moods, "listening"]) assert.equal(mascotMarkup(id, "#47C46B", { mood, blink: true }).replaceAll(' class="mascot-eye"', ""), mascotMarkup(id, "#47C46B", { mood }), `${id} ${mood}`);
+});
+
+await test("an idle bot listening (its person writing to it) opens its eyes and looks down at the box: a still pose, no mouth, nothing else", () => {
+  for (const id of ["boppy", "max", "penny", "otto"]) {
+    const listening = mascotMarkup(id, "#FF9F43", { mood: "listening" });
+    assert.match(listening, /<g transform="translate\(0 1\)">/, `${id}: eyes down`);
+    assert.doesNotMatch(listening, /mascot-|<g transform="rotate\(/, `${id}: still, its head upright`);
+    assert.notEqual(listening, mascotMarkup(id, "#FF9F43", { mood: "idle" }));
+    assert.notEqual(listening, mascotMarkup(id, "#FF9F43", { mood: "awake" }));
+  }
+  assert.doesNotMatch(mascotMarkup("boppy", "#0A0A0A", { mood: "listening" }), /cy="2[56]\.[68]"/, "no mouth");
 });
 
 await test("the mascots people face blink: every open eye, about 18 a minute at uneven gaps with one double, shut fast and open slower, each bot on its own beat", () => {
@@ -545,7 +556,7 @@ await test("the mascots people face blink: every open eye, about 18 a minute at 
   const ids = ["boppy", "max", "penny", "otto", "rook", "zed", "writer", "ivy"];
   assert.deepEqual([...new Set(ids.map(faceOf))].sort(), ["happy", "open", "wink"], "every face among them");
   for (const id of ids)
-    for (const mood of ["idle", "awake", ...MOVING_MOODS]) {
+    for (const mood of ["idle", "awake", "listening", ...MOVING_MOODS]) {
       const eyes = mascotMarkup(id, "#2EC4B6", { mood, blink: true }).match(/<[a-z]+ class="mascot-eye"/g) ?? [];
       assert.equal(eyes.length, mood === "idle" ? 0 : open(id), `${id} ${mood}`);
       assert.ok(eyes.every((e) => e === '<ellipse class="mascot-eye"'), `${id} ${mood}: eyes only`);
@@ -610,7 +621,7 @@ await test("they breathe while they vibe and settle into each new pose: slow and
   }
 });
 
-await test("only the mascots people face come alive, big enough to see: blinking open-eyed, breathing idle at the larger sizes", () => {
+await test("only the mascots people face come alive, big enough to see: blinking open-eyed, breathing idle at the larger sizes, listening while their person writes", () => {
   const bots = [
     { id: "max", name: "Max", color: "#FF9F43", role: "", status: "idle" },
     { id: "ivy", name: "Ivy", color: "#60A5FA", role: "", status: "idle" },
@@ -626,11 +637,16 @@ await test("only the mascots people face come alive, big enough to see: blinking
   assert.ok(BREATH_MIN_SIZE > 40 && BREATH_MIN_SIZE <= 64 && LIFE_MIN_SIZE <= 40);
   assert.ok(face({ botId: "ivy", color: "#60A5FA", size: 40 }).includes(mascotMarkup("ivy", "#60A5FA", { mood: "idle", blink: true })), "no breath at 40");
   assert.ok(face({ botId: "max", color: "#FF9F43", size: 40, chatId: "chat-max" }).includes(mascotMarkup("max", "#FF9F43", { mood: "thinking", blink: true })), "thinking, blinking");
+  // Listening: an idle bot looks down at the box; a busy one keeps doing what it does; a mascot that isn't live never listens.
+  assert.ok(face({ botId: "ivy", color: "#60A5FA", size: 40, listening: true }).includes(mascotMarkup("ivy", "#60A5FA", { mood: "listening", blink: true })), "listening");
+  assert.ok(face({ botId: "max", color: "#FF9F43", size: 40, chatId: "chat-max", listening: true }).includes(mascotMarkup("max", "#FF9F43", { mood: "thinking", blink: true })), "busy");
+  assert.ok(withMoods(sig, h(Mascot, { botId: "ivy", color: "#60A5FA", size: 40, listening: true })).includes(mascotMarkup("ivy", "#60A5FA", { mood: "idle" })), "not live");
   // The sidebar's rows (live, 44 px) and a group's small mascots (27 px, under LIFE_MIN_SIZE) stay as they were.
   const row = withMoods(sig, h(ChatAvatar, { chat: chat("chat-max", ["max"], ["max"]), bots, size: 44 }));
   assert.ok(row.includes(mascotMarkup("max", "#FF9F43", { mood: "thinking" })) && !/mascot-eye|mascot-breath|--mascot-blink-at/.test(row), "a row: calm");
-  const group = withMoods(sig, h(ChatAvatar, { chat: chat("g1", ["max"], ["max", "ivy"]), bots, size: 40, life: true }));
+  const group = withMoods(sig, h(ChatAvatar, { chat: chat("g1", ["max"], ["max", "ivy"]), bots, size: 40, life: true, listening: true }));
   assert.doesNotMatch(group, /mascot-eye|mascot-breath|--mascot-blink-at/, "a group's small mascots: calm");
+  assert.ok(group.includes(mascotMarkup("ivy", "#60A5FA", { mood: "listening" })), "but listening, still");
   // In the chat itself: the header (40 px) and the empty chat's mascot (64 px) come alive; the typing line's (24 px) doesn't.
   const c = chat("chat-max", ["max"], ["max"]);
   const st = { bots, brains: [], sessions: [], chats: [c], messages: [], host: "orgo" };

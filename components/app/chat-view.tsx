@@ -632,6 +632,8 @@ export function ChatView({
   const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => f.type.startsWith("image/"));
   // Sent messages the server's state doesn't have yet.
   const waiting = pending.filter((p) => p.chatId === c.id && !messages.some((m) => m.role === "user" && m.text === p.text && m.at >= p.at - 5000));
+  // The person writing here, or what they just sent still on its way: the header's and an empty chat's idle bot looks down at the box.
+  const listening = !!draft.trim() || waiting.length > 0;
 
   // What was already here when the chat opened just shows; only what arrives while it's open moves
   // in. Seeded once per chat, during render (an effect would be a frame late), with every message,
@@ -750,7 +752,7 @@ export function ChatView({
           ) : (
             <>
               <button onClick={() => solo && onShowBot(solo.id)} className="relative top-2 z-10" title={solo ? `${solo.name}'s profile` : undefined}>
-                <ChatAvatar chat={c} bots={state.bots} size={40} life />
+                <ChatAvatar chat={c} bots={state.bots} size={40} life listening={listening} />
               </button>
               <div className="relative flex flex-col items-center rounded-[14px] bg-white px-3.5 pb-1.5 pt-2.5 shadow-[0_0_0_1px_#E6E6E3,0_6px_16px_-8px_#00000020]">
                 <span className="text-[14px] font-semibold leading-[18px]">{chatName(c, state.bots)}</span>
@@ -764,7 +766,7 @@ export function ChatView({
           {/* An empty chat invites whoever can start it (the owner, or a teammate with Write on its bot) and offers a first ask. */}
           {messages.length === 0 && (!state.shared || (!!solo && state.shared.levels?.[solo.id] === "write")) && (
             <div className="m-auto flex max-w-[360px] flex-col items-center gap-3 py-10 text-center">
-              {solo && <Mascot botId={solo.id} color={solo.color} size={64} live chatId={c.id} life />}
+              {solo && <Mascot botId={solo.id} color={solo.color} size={64} live chatId={c.id} life listening={listening} />}
               <p className="text-[14px] leading-5 text-[#6B6B6B]">
                 {solo
                   ? solo.isMain
