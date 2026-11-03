@@ -13,6 +13,7 @@ import { KeyIcon } from "./screen-cards";
 import { DiffRow } from "./skill-proposals";
 import { Chevron, undash } from "./side-group";
 import { post, teamOf } from "./ui";
+import { readAllowed } from "./view-only";
 
 /*
  * Keys (lib/server/keys.ts): the user's API keys their bots may call services with. They're kept in the

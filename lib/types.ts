@@ -2273,7 +2273,14 @@ export type AppApproval = {
  * its base's), which the yes builds on, and each file, added, changed or deleted, with its new size: only these go in.
  * `mode`: a file that runs (git's 100755) as it was on that commit, which the yes keeps; any other is written 100644.
  */
-export type FileChange = { repo: string; branch: string; base?: string; at: string; files: { path: string; op: "add" | "change" | "delete"; bytes?: number; mode?: "100755" }[] };
+export type FileChange = {
+  repo: string;
+  branch: string;
+  base?: string;
+  at: string;
+  /** `image`: a picture from the chat goes there, byte for byte: the copy the card shows (an upload on this Mac, `id`), and the link a person wrote it at (`url`) when it came from one. */
+  files: { path: string; op: "add" | "change" | "delete"; bytes?: number; mode?: "100755"; image?: { id?: string; url?: string } }[];
+};
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
 export type AskReply = "once" | "always" | "reject";

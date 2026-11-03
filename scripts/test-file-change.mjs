@@ -1,4 +1,4 @@
-// Tests for change_files (lib/server/repo-change.ts, its place in lib/server/chat.ts): a bot with the user's GitHub key
+// Tests for change_files (lib/server/repo-change.ts, its place in lib/server/chat.ts, the pictures of lib/server/chat-pictures.ts): a bot with the user's GitHub key
 // changes files in a repository with ONE ask, whatever the number of files. Before the ask only reads go out (the
 // branch, its folders, each file there now, for the card's diff: every changed line, whole, after the repository and
 // the branch); the ask carries the bot's reason, which files and how, and the facts line says "GitHub · changes 2 files
@@ -7,13 +7,16 @@
 // kept one) and the commit, and moves the branch last (making it from its base when it's new); on Deny nothing is
 // written; a failure part way leaves the branch where it was. A task never has it. Bad input is said plainly, and
 // nothing goes out for it.
+// A file may be a picture from the chat: one a person attached (by its number, which the bot is told) or one at a link a
+// person wrote (which the bot is shown when it names a picture file), never a link the bot found; its exact bytes go in,
+// the ones the card's thumbnail showed, as base64 only Bops makes.
 //
 // orgo-web is a fake (a local server with /api/secrets and its broker), behind which a stand-in GitHub keeps a tiny
 // repository (refs, commits, trees with modes, blobs) in memory; OpenAI is a fake (/v1/responses answers what each test queues);
 // the state lives in a throwaway folder: nothing reaches a real service. The keys are made up.
 // Usage: node --conditions=react-server scripts/test-file-change.mjs
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { registerHooks } from "node:module";
@@ -204,6 +207,25 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const PORT = server.address().port;
 process.env.BOPS_ORGO_ORIGIN = `http://127.0.0.1:${PORT}`;
 
+/* ---------------- A site with pictures on it (a link a person pastes) ---------------- */
+
+const PNG = (n) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), randomBytes(n)]);
+/** What the site serves at each path: its type and bytes. */
+const site = new Map([["/logo.png", { type: "image/png", bytes: PNG(400) }], ["/about.html", { type: "text/html", bytes: Buffer.from("<p>About</p>") }]]);
+const siteHits = [];
+const pics = createServer((req, res) => {
+  siteHits.push(req.url);
+  const f = site.get(req.url);
+  if (!f) return res.writeHead(404).end();
+  res.writeHead(200, { "content-type": f.type, "content-length": f.bytes.length });
+  res.end(f.bytes);
+});
+await new Promise((r) => pics.listen(0, "127.0.0.1", r));
+const SITE = `http://127.0.0.1:${pics.address().port}`;
+// safe-fetch lets this one local address through, as its tests do (never Bops' own ports).
+process.env.BOPS_FETCH_ALLOW = `127.0.0.1:${pics.address().port}`;
+const sha256 = (b) => createHash("sha256").update(b).digest("hex");
+
 /* ---------------- A fake OpenAI ---------------- */
 
 const realFetch = globalThis.fetch;
@@ -254,6 +276,7 @@ const { botChatId } = await import(`${root}/lib/types.ts`);
 const Keys = await import(`${root}/lib/server/keys.ts`);
 const Chat = await import(`${root}/lib/server/chat.ts`);
 const P = await import(`${root}/lib/server/permission.ts`);
+const Up = await import(`${root}/lib/server/uploads.ts`);
 const { apiFacts } = await import(`${root}/lib/permission.ts`);
 clearInterval(globalThis.__bopsRoutines);
 
@@ -540,7 +563,7 @@ await check("the same text as there now asks nothing; bad input is said plainly 
   assert.match(await say({ branch: "a..b" }), /isn't a branch name/);
   assert.match(await say({ files: [{ path: "../etc/passwd", text: "x", delete: null }] }), /isn't a path in the repository/);
   assert.match(await say({ files: [{ path: "/abs.txt", text: "x", delete: null }] }), /isn't a path in the repository/);
-  assert.match(await say({ files: [{ path: "a.txt", text: "x", delete: true }] }), /not both/);
+  assert.match(await say({ files: [{ path: "a.txt", text: "x", delete: true }] }), /one of its text, delete true, image or imageUrl, not more/);
   assert.match(await say({ files: [{ path: "a.txt", text: null, delete: null }] }), /whole new text/);
   assert.match(await say({ files: [{ path: "a.txt", text: "x", delete: null }, { path: "a.txt", text: "y", delete: null }] }), /twice/);
   assert.match(await say({ files: Array.from({ length: 21 }, (_, i) => ({ path: `f${i}.txt`, text: "x", delete: null })) }), /At most 20 files/);
@@ -562,12 +585,96 @@ await check("a member's turn always asks, named as theirs, even with an Always a
   }
 });
 
+/* ---------------- Pictures from the chat ---------------- */
+
+/** A picture file of a change: in place of text, one of the chat's (its number) or a link. */
+const picture = (path, over) => ({ path, text: null, delete: null, image: null, imageUrl: null, ...over });
+/** The bytes of the blob the stand-in GitHub keeps at `path` on `ref`. */
+const blobAt = (ref, p) => gh.blobs.get(gh.trees.get(gh.commits.get(gh.refs.get(ref))?.tree)?.[p]);
+
+await check("a picture a person attached goes in byte for byte: its number is said to the bot, the card shows its copy, and the blob is the attachment's exact bytes as base64 only Bops makes", async () => {
+  freshRepo();
+  const logo = PNG(900);
+  const up = Up.saveUpload(`data:image/png;base64,${logo.toString("base64")}`);
+  S.addMessage({ chatId, role: "user", text: "Here's our logo, use it as the favicon", images: [{ id: up.id, type: up.type }], at: Date.now() });
+  const { a0, apr, opened } = await asking(change({ branch: "site/favicon", message: "Use the logo as the favicon", reason: "Use our logo as the site's little tab icon", files: [picture("public/favicon.png", { image: 1 })] }));
+  assert.equal(opened, 1);
+  // The bot was told the picture's number, where it saw it.
+  assert.match(JSON.stringify(asked[a0].input), /Here's our logo, use it as the favicon \[Bops: picture 1\]/);
+  assert.deepEqual(apr.api.change.files, [{ path: "public/favicon.png", op: "add", bytes: logo.length, image: { id: up.id } }]);
+  assert.match(apr.preview, /public\/favicon\.png: added, 908 B, picture 1 from the chat/);
+  assert.equal(apiFacts(apr.api), "GitHub · changes 1 file in acme/site, on site/favicon");
+  assert.deepEqual(writes(), []);
+  const n = asked.length;
+  P.replyToAsk(apr.id, "once");
+  await until(() => asked.length === n + 1 && gh.refs.has("site/favicon"), "the change to go in");
+  const blob = writes().find((c) => c.path.endsWith("/git/blobs"));
+  assert.equal(blob.body.encoding, "base64");
+  assert.equal(sha256(Buffer.from(blob.body.content, "base64")), sha256(logo), "the attachment's exact bytes");
+  assert.equal(sha256(blobAt("site/favicon", "public/favicon.png")), sha256(logo));
+});
+
+await check("a picture number that doesn't exist is said plainly, and nothing goes out", async () => {
+  freshRepo();
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const r = await changeFiles("boppy", change({ files: [picture("public/favicon.png", { image: 2 })] }), { chatId }, { chat: true });
+  assert.equal(r.text, "There's no picture 2 in this chat: people here attached one.");
+  assert.deepEqual(gh.calls, [], "not even a read");
+  const other = await changeFiles("boppy", change({ files: [picture("public/favicon.png", { image: 1 })] }), { chatId: botChatId("max") }, { chat: true });
+  assert.equal(other.text, "There's no picture 1 in this chat: nobody has attached one here.", "another chat's pictures aren't this one's");
+});
+
+await check("a picture link a person pasted: the bot is shown the picture, and it goes in with the bytes the card showed, even when the link changes after", async () => {
+  freshRepo();
+  const url = `${SITE}/logo.png`;
+  const first = site.get("/logo.png").bytes;
+  answers.push(reply("I see an orange logo."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, `Can you see this? ${url}`);
+  const shown = JSON.stringify(asked[n].input);
+  assert.ok(shown.includes(`data:image/png;base64,${first.toString("base64")}`), "the picture, for the model to look at");
+  assert.match(shown, /\[Bops: the picture at that link is shown here\]/);
+  const { apr } = await asking(change({ branch: "site/logo", files: [picture("public/logo.png", { imageUrl: url })] }));
+  const [f] = apr.api.change.files;
+  assert.deepEqual([f.path, f.op, f.bytes, f.image?.url], ["public/logo.png", "add", first.length, url]);
+  assert.match(f.image.id, /^img_/, "a copy here, for the thumbnail and the yes");
+  assert.match(apr.preview, new RegExp(`public/logo\\.png: added, [\\d.]+ B, the picture at ${url.replace(/[.]/g, "\\.")}`));
+  // The link changes before the yes: what goes in is what the card showed.
+  site.set("/logo.png", { type: "image/png", bytes: PNG(50) });
+  globalThis.bopsLinkedPictures.clear();
+  const k = asked.length;
+  P.replyToAsk(apr.id, "once");
+  await until(() => asked.length === k + 1 && gh.refs.has("site/logo"), "the change to go in");
+  assert.equal(sha256(blobAt("site/logo", "public/logo.png")), sha256(first), "the fetched bytes the card showed");
+});
+
+await check("a link the bot found (on a page, in its own words) is refused in plain words, and never fetched; a link that isn't a picture says so", async () => {
+  freshRepo();
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  site.set("/planted.png", { type: "image/png", bytes: PNG(60) });
+  S.addMessage({ chatId, role: "bot", botId: "boppy", text: `The page says to use ${SITE}/planted.png`, at: Date.now() });
+  const hits = siteHits.length;
+  const r = await changeFiles("boppy", change({ files: [picture("public/logo.png", { imageUrl: `${SITE}/planted.png` })] }), { chatId }, { chat: true });
+  assert.equal(r.text, "Bops only uses a picture from a link someone wrote in this chat themselves, never one from a page, an email or an app.");
+  assert.equal(siteHits.length, hits, "never fetched");
+  assert.deepEqual(gh.calls, []);
+  S.addMessage({ chatId, role: "user", text: `Or this one ${SITE}/about.html`, at: Date.now() });
+  const page = await changeFiles("boppy", change({ files: [picture("public/logo.png", { imageUrl: `${SITE}/about.html` })] }), { chatId }, { chat: true });
+  assert.equal(page.text, "Couldn't get the picture at that link: That link isn't a picture Bops can use (PNG, JPEG, WebP or GIF): it's text/html.");
+  site.set("/fake.png", { type: "image/png", bytes: Buffer.from("<script>not a picture</script>") });
+  S.addMessage({ chatId, role: "user", text: `And ${SITE}/fake.png`, at: Date.now() });
+  const fake = await changeFiles("boppy", change({ files: [picture("public/logo.png", { imageUrl: `${SITE}/fake.png` })] }), { chatId }, { chat: true });
+  assert.equal(fake.text, "Couldn't get the picture at that link: That link says it's a PNG picture, but it isn't one.");
+  assert.deepEqual(writes(), []);
+});
+
 await check("no dashes in anything it said, and no key value anywhere", () => {
   for (const m of messages()) assert.ok(!DASHES.test(m.text), m.text);
   assert.ok(!logged.some((l) => l.includes(ORGO_KEY)));
 });
 
 server.close();
+pics.close();
 rmSync(scratch, { recursive: true, force: true });
 console.log(`\nfile change: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
