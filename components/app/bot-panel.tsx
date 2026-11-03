@@ -250,7 +250,7 @@ function Details({
       {expand}
       {close}
       <div className={`flex size-[104px] items-center justify-center rounded-full ${glass} shadow-[inset_0_0_0_2px_#FFFFFF,0_14px_30px_-12px_#2832002E,0_0_0_1px_#0000000F]`}>
-        <Mascot botId={b.id} color={b.color} size={70} />
+        <Mascot botId={b.id} color={b.color} size={70} live life />
       </div>
       <div className="flex flex-col items-center gap-0.5">
         <div className="text-[26px] font-bold leading-[30px] tracking-[-0.02em]">{b.name}</div>

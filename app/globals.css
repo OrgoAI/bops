@@ -1201,6 +1201,118 @@
 .mascot-blush {
   animation: mascot-blush 1.6s ease-in-out infinite;
 }
+/*
+ * The mascots people face (components/app/mascot.tsx, Mascot's life: the chat's header, an empty chat, a bot's
+ * profile; never a list's rows), on top of their pose's own motion. Each eye blinks now and then: fast shut (90
+ * ms), a beat closed, slower open (170 ms), five in a 15 s round at uneven gaps of 2.8 to 4.8 s with one double,
+ * 20 a minute, near the rate people find friendliest in an animated face; each bot starts the round at its own place
+ * (lib/mascot.ts blinkPhase), so no two blink in step.
+ */
+@keyframes mascot-blink {
+  0%,
+  100% {
+    transform: scaleY(1);
+  }
+  5.333% {
+    transform: scaleY(1);
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  5.933%,
+  6.133% {
+    transform: scaleY(0.1);
+    animation-timing-function: cubic-bezier(0, 0.55, 0.45, 1);
+  }
+  7.267% {
+    transform: scaleY(1);
+  }
+  30.667% {
+    transform: scaleY(1);
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  31.267%,
+  31.467% {
+    transform: scaleY(0.1);
+    animation-timing-function: cubic-bezier(0, 0.55, 0.45, 1);
+  }
+  32.6% {
+    transform: scaleY(1);
+  }
+  62.667% {
+    transform: scaleY(1);
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  63.267%,
+  63.467% {
+    transform: scaleY(0.1);
+    animation-timing-function: cubic-bezier(0, 0.55, 0.45, 1);
+  }
+  64.6% {
+    transform: scaleY(1);
+  }
+  81.333% {
+    transform: scaleY(1);
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  81.933%,
+  82.133% {
+    transform: scaleY(0.1);
+    animation-timing-function: cubic-bezier(0, 0.55, 0.45, 1);
+  }
+  83.267% {
+    transform: scaleY(1);
+  }
+  84.333% {
+    transform: scaleY(1);
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+  84.933%,
+  85.133% {
+    transform: scaleY(0.1);
+    animation-timing-function: cubic-bezier(0, 0.55, 0.45, 1);
+  }
+  86.267% {
+    transform: scaleY(1);
+  }
+}
+.mascot-eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mascot-blink 15s linear var(--mascot-blink-at, 0s) infinite;
+}
+/* While it vibes, eyes shut, it breathes: slowly (4 s, a resting breath), under 2 % taller from its base, a touch narrower. */
+@keyframes mascot-breath {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(0.994, 1.018);
+  }
+}
+.mascot-breath {
+  transform-origin: 20px 35px;
+  animation: mascot-breath 4s ease-in-out infinite;
+}
+/* A new pose lands instead of popping: a small squash from its base that wobbles out in under 0.4 s, once. */
+@keyframes mascot-settle {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  26% {
+    transform: scale(1.045, 0.955);
+  }
+  56% {
+    transform: scale(0.985, 1.02);
+  }
+  82% {
+    transform: scale(1.005, 0.995);
+  }
+}
+.mascot-settle {
+  transform-origin: 20px 35px;
+  animation: mascot-settle 0.38s ease-in-out;
+}
 /* As specific as the sound arcs' own rule (.mascot-sound path), whose animation shorthand would otherwise run them on. */
 .mascot-paused *,
 .mascot-paused .mascot-sound path {
@@ -1222,7 +1334,10 @@
   .mascot-working,
   .mascot-cup,
   .mascot-shy,
-  .mascot-blush {
+  .mascot-blush,
+  .mascot-eye,
+  .mascot-breath,
+  .mascot-settle {
     animation: none;
   }
 }
