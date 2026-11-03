@@ -931,7 +931,7 @@ export const OWNER_BOPS_OLD = "owner_bops_old";
  * member-acts.ts). Bops Cloud refuses them (OWNER_BOPS_OLD) for an owner whose last Mac is older (turns.ts macNewEnough).
  * Set to the release that carries them.
  */
-export const ADMIN_POWERS_MIN_VERSION = "0.0.38";
+export const ADMIN_POWERS_MIN_VERSION = "0.0.39";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
 export const NOT_WAITING = "not_waiting";
 /** 403: the caller is the workspace's owner, who acts in their own Bops. */
