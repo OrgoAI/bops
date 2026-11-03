@@ -154,7 +154,7 @@ const WATCH: Spec = {
  * someone given that bot sees what its thread waits on. Never the reply, which device asked, or what resumes its
  * run: answering is the owner's alone, from a Bops of their own.
  */
-const APPROVAL: Spec = { id: true, botId: true, chatId: true, threadId: true, routineId: true, action: true, resources: true, preview: true, kind: true, api: { label: true, method: true, path: true }, askedFor: true, at: true };
+const APPROVAL: Spec = { id: true, botId: true, chatId: true, threadId: true, routineId: true, action: true, resources: true, preview: true, kind: true, api: { label: true, method: true, path: true }, askedFor: true, reason: true, at: true };
 /** A message as a member reads it: what the chat shows, never where it came from on the owner's side (inbox, channel, phone ids) or a CRM file's copy. */
 const MESSAGE: Spec = {
   id: true,

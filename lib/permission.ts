@@ -33,6 +33,23 @@ export function alwaysRule(action: string, had: readonly PermissionRule[] = []):
 /** An action as it reads after "<bot> wants to": its first word lowercased ("Send Email in Gmail" reads "send Email in Gmail"). */
 export const toDo = (action: string) => action.replace(/^([A-Z])(?=[a-z])/, (c) => c.toLowerCase());
 
+/**
+ * A request's headline, on its card and in the sidebar: "<Bot> wants to: <reason>" in the bot's plain words when it gave
+ * one (AppApproval.reason), else "<Bot> wants to <action>" ("Max wants to call GitHub").
+ */
+export const askHeadline = (botName: string, a: Pick<AppApproval, "action" | "reason">) => (a.reason ? `${botName} wants to: ${a.reason}` : `${botName} wants to ${toDo(a.action)}`);
+
+/**
+ * What a call with one of the user's keys does, in Bops' own words from its service and method, never the bot's (its
+ * reason can be wrong, or planted by a page it read): "GitHub · adds or changes something", "Stripe · deletes something".
+ * A query sent as a POST (GraphQL) and a GET that asks (Slack's) can do anything, and say so.
+ */
+export function apiFacts(api: Pick<NonNullable<AppApproval["api"]>, "label" | "method" | "path">) {
+  const method = api.method.toUpperCase();
+  const what = method === "DELETE" ? "deletes something" : method === "GET" || /\/graphql(\/|$)/i.test(api.path) ? "may add, change or delete something" : "adds or changes something";
+  return `${api.label} · ${what}`;
+}
+
 /** What else Always allow covers of a request's kind, besides this call. */
 const ANY: Record<NonNullable<AppApproval["kind"]>, string> = {
   app: "whoever it's for and whatever it says",

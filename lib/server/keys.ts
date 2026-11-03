@@ -441,19 +441,38 @@ export function callApiTool(keys: KeyProvider[], { getOnly = false } = {}) {
     parameters: {
       type: "object",
       additionalProperties: false,
-      required: ["key", "method", "path", "query", "body"],
+      required: ["key", "method", "path", "query", "body", "reason"],
       properties: {
         key: { type: "string", enum: keys.map((k) => k.name) },
         method: { type: "string", enum: getOnly ? ["GET"] : [...KEY_METHODS] },
         path: { type: "string", description: "The path after the service's address, starting with /, e.g. \"/v1/customers\". No ?: the query goes in query." },
         query: { type: ["string", "null"], description: "The query as a JSON object in a string, e.g. \"{\\\"limit\\\": 10}\", or null." },
         body: { type: ["string", "null"], description: "The body as JSON in a string, or null (GET has none)." },
+        reason: {
+          type: ["string", "null"],
+          description: `For anything but GET: what ${owner} gets from it, in plain words under 80 characters, as ${owner} would say it, e.g. "Save the new button colour as a draft". No codes, paths, ids, methods or tool names. ${owner} sees it on the card that asks. Null for a GET.`,
+        },
       },
     },
   };
 }
 
-type CallApiArgs = { key?: unknown; method?: unknown; path?: unknown; query?: unknown; body?: unknown };
+type CallApiArgs = { key?: unknown; method?: unknown; path?: unknown; query?: unknown; body?: unknown; reason?: unknown };
+
+/** The most of a bot's reason the card shows (AppApproval.reason). */
+const REASON_CAP = 80;
+
+/**
+ * A bot's reason for a call, as its card's headline shows it: on one line, with any character that hides words or
+ * turns them around (control and format ones, as a page the bot read could plant) gone, at most REASON_CAP characters.
+ * Undefined when there's none: the card says the action, as before.
+ */
+export function plainReason(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const chars = [...v.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()];
+  if (!chars.length) return undefined;
+  return chars.length > REASON_CAP ? `${chars.slice(0, REASON_CAP - 1).join("").trimEnd()}…` : chars.join("");
+}
 
 /**
  * What call_api did, for the turn: words for the model, a line for the chat, and the provider's own text (for
@@ -540,7 +559,9 @@ export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, op
   if (detail.length > SHOW_CAP) return { text: `That's too long to show ${owner} for a yes (${detail.length} characters, at most ${SHOW_CAP}). Send a shorter query and body.` };
   // For a member (their turn, or a thread of theirs): it asks the owner, whose key it is, every time, named as theirs.
   const asker = forMember(where);
-  const ask: AskSpec = { action: `Call ${p.label}`, resources: [`${method} ${path}`], preview: detail, kind: "api", api: { key: name, label: p.label, method, path }, ...(asker ? { askedFor: asker } : {}) };
+  // The bot's reason heads the card; what Bops says of the call itself (lib/permission.ts apiFacts) and Details are the truth.
+  const reason = plainReason(a.reason);
+  const ask: AskSpec = { action: `Call ${p.label}`, resources: [`${method} ${path}`], preview: detail, kind: "api", api: { key: name, label: p.label, method, path }, ...(asker ? { askedFor: asker } : {}), ...(reason ? { reason } : {}) };
   if (!asker && allows(b, ask, { justDoIt: false })) return run("auto");
   used(action, "waiting");
   throw new NeedsOk(ask);

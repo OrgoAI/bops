@@ -2,7 +2,7 @@
 
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
-import { alwaysScope, toDo } from "@/lib/permission";
+import { alwaysScope, apiFacts, askHeadline } from "@/lib/permission";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { trackEvent } from "@/lib/analytics";
 import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, withRemoteTyping, workBot, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
@@ -3273,7 +3273,9 @@ const withoutBriefing = (text: string) =>
 const CHANNEL_NAME: Record<string, string> = { slack: "Slack", telegram: "Telegram", discord: "Discord" };
 
 /**
- * A request for your OK, like OpenCode's permission dock: "<Bot> wants to <action>", exactly what will happen, and
+ * A request for your OK, like OpenCode's permission dock: "<Bot> wants to <action>" (a call with a key: "<Bot> wants to:
+ * <its reason>" when it gave one, over Bops' own line for the service and the kind of change, the call under Details: keys.tsx
+ * ApiAsk), exactly what will happen, and
  * Deny (with "Tell the bot what to do instead", which it's told), Always allow (Claude Code's "don't ask again": a
  * rule for the bot and this action, whoever it's for and whatever it says, which the card says under the buttons:
  * lib/permission.ts alwaysScope) and Allow once. Shown on every Bops of yours, wherever its run
@@ -3319,7 +3321,13 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
       <div className="flex items-start gap-2.5">
         {b && <Mascot botId={b.id} color={b.color} size={26} />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="text-[13.5px] font-semibold leading-[18px]">{`${name} wants to ${toDo(a.action)}`}</span>
+          <span className="text-[13.5px] font-semibold leading-[18px] [overflow-wrap:anywhere]">{askHeadline(name, { action: a.action, reason: a.reason && undash(a.reason) })}</span>
+          {/* Bops' own words for the call, from its service and method: never the bot's reason, which can be wrong or planted. */}
+          {api && (
+            <span data-ask-facts className={`text-[12px] leading-4 [overflow-wrap:anywhere] ${api.method === "DELETE" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
+              {apiFacts(api)}
+            </span>
+          )}
           {(s ?? r) && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">For &ldquo;{(s ?? r)!.title}&rdquo;</span>}
           {/* Asked on a member's turn or thread: whose ask it was (only the owner answers one of their logins). */}
           {a.askedFor && <span data-asked-for className="truncate text-[12px] leading-4 text-[#6B6B6B]">{a.askedFor} asked for it</span>}
@@ -3351,7 +3359,7 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
           {answerer}
         </span>
       ) : (
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div data-ask-buttons className="flex flex-wrap items-center gap-1.5">
         {telling ? (
           <>
             <button disabled={busy} onClick={() => void decide("reject", instead)} className={`${btn} bg-ink text-white`}>

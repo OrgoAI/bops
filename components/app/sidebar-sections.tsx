@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { favoriteCount, favoriteLabel, movedFavorite, nudgedFavorite, toggledFavorite, type FavoriteKind } from "@/lib/favorites";
 import { categoriesOpen } from "@/lib/memory-categories";
-import { alwaysScope, toDo } from "@/lib/permission";
+import { alwaysScope, askHeadline } from "@/lib/permission";
 import { plainTitle } from "@/lib/plain-words";
 import { answersAsk, canAct, writesThread } from "@/lib/shared";
 import { askKind } from "@/lib/asks";
@@ -293,7 +293,8 @@ function AskCard({ ask: a, botName, where, shared, onOpen }: { ask: AppApproval;
     }
     await post("/api/apps/approvals", { id: a.id, reply });
   };
-  const title = `${botName} wants to ${toDo(undash(a.action))}`;
+  // The same headline as the chat's card: the bot's reason in plain words when it gave one (lib/permission.ts askHeadline).
+  const title = askHeadline(botName, { action: undash(a.action), reason: a.reason && undash(a.reason) });
   const scope = alwaysScope(botName, { ...a, action: undash(a.action) });
   const meta = [where ? `For ${undash(where)}` : shared ? "Waiting for an OK" : "Waiting for your OK", ago(a.at)].join(" · ");
   const said = sent && sent.state !== "failed" ? (sent.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open.") : null;
