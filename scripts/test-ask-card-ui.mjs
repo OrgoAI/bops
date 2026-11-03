@@ -180,6 +180,22 @@ await test("the sidebar's card has the same headline, and the old one without a 
   assert.equal(text(marked(del, "data-ask-facts") ?? ""), "GitHub · deletes something");
 });
 
+await test("a change to files in one go: the facts line counts the files and names the branch; Details lists each file, what happens to it and its size, and the short diff", () => {
+  const change = { repo: "acme/site", branch: "site/orange-buttons", base: "main", at: "4de5457", files: [{ path: "src/look.ts", op: "change", bytes: 59 }, { path: "src/notes.md", op: "add", bytes: 17 }, { path: "old.css", op: "delete" }] };
+  const preview = 'New branch site/orange-buttons, from main.\n\nsrc/look.ts: changed, 59 B\nat line 2\n-   accent: "#FFD400",\n+   accent: "#F15B3B",';
+  const html = chat([ask({ reason: "Make the buttons the logo's orange", api: { key: "GITHUB_TOKEN", label: "GitHub", method: "POST", path: "/repos/acme/site/git/commits", change }, preview, resources: change.files.map((f) => f.path) })]);
+  assert.match(text(html), /Boppy wants to: Make the buttons the logo's orange/);
+  const facts = html.match(/<span[^>]*data-ask-facts[^>]*>[\s\S]*?<\/span>/)[0];
+  assert.equal(text(facts), "GitHub · changes 2 files and deletes 1 in acme/site, on site/orange-buttons", "the repository too: Bops', never the reason's");
+  assert.match(facts, /text-\[#B42318\]/, "a delete in the colour for it");
+  const rows = [...html.matchAll(/<li[^>]*data-change-file[^>]*>([\s\S]*?)<\/li>/g)].map((m) => text(m[1]));
+  assert.deepEqual(rows, ["src/look.ts changed · 59 B", "src/notes.md added · 17 B", "old.css deleted"]);
+  const fold = html.slice(html.indexOf("data-ask-details"));
+  assert.match(fold, /inert=""[\s\S]*data-change-files/, "the files under Details, shut");
+  assert.ok(!fold.includes("/repos/acme/site/git/commits"), "no method and path for a change");
+  assert.match(text(fold), /- accent: "#FFD400", \+ accent: "#F15B3B"/);
+});
+
 /* ---------------- Opened ---------------- */
 
 const { parseHTML } = await import("linkedom");

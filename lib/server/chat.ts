@@ -7,6 +7,7 @@ import { fullAccessOn } from "./full-access";
 import { isSecret, learn, memoryBlock, memoryOn, recall, rememberMessage, saveToMemory, scopeOf, wsOf } from "./memory";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { callApi, callApiTool, usableKeys } from "./keys";
+import { changeFiles, changeFilesTool } from "./repo-change";
 import { askFor, declined, NeedsOk } from "./permission";
 import { appsNote, placesNote } from "./skills";
 import { workComputer } from "./screens";
@@ -812,6 +813,7 @@ const LOOKUPS = new Set([
   "find_app_actions",
   "use_app",
   "call_api",
+  "change_files",
   "remember",
   "recall",
   "watch",
@@ -1940,6 +1942,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // member's, the ones this bot has: they reach the owner's keys only through the bots they may tell, and anything
     // but a read asks the owner (keys.ts callApi, for the member).
     const keyed = opts.outside ? [] : await usableKeys(b);
+    // A change to files in a repository with its GitHub key, in one ask (repo-change.ts): the chat's only, never a task's.
+    const changeTool = changeFilesTool(keyed);
     // Where its app and key uses are logged as from (access-sync.ts): a routine's run, the user's call, or the chat; and
     // on a member's turn, for whom (their asks are the owner's to answer, named as theirs).
     const used = { chatId, ...(bg ? { via: "routine" as const, viaId: bg.routineId } : opts.call ? { via: "call" as const } : {}), ...(member ? { member: member.name } : {}) };
@@ -2114,6 +2118,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // channel or by email, nor for a member (it's the owner's account it goes from).
       ...(opts.outside || relayed || member ? [] : draftTools(b)),
       ...(opts.outside || !keyed.length ? [] : [callApiTool(keyed)]),
+      ...(changeTool ? [changeTool] : []),
       // The web, right in the chat: OpenAI's own search, and one page read here through Bops' checks. Not on a
       // turn someone else started: a page fetched for them could carry the user's data out in its address.
       ...(opts.outside
@@ -2436,6 +2441,9 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       followUps.length
         ? `This chat's tasks you can send a message on to (tell_task): ${followUps.map((s) => `"${s.title}" (${s.id}), ${live(s) ? "running" : "finished"} ${s.runsOn === "mac" ? `on ${owner}'s Mac` : "in the cloud"}${apps ? (s.app ? `, on the app ${s.app.name}` : ", on no app") : ""}`).join("; ")}.`
         : "",
+      changeTool
+        ? `To change files in a GitHub repository with your key (an edit, a new file, a delete), use change_files: ${owner} says yes once, on one card, for the whole change. Never call_api's contents or git calls for that. call_api stays for the rest (a pull request, a merge).`
+        : "",
       // The user's apps, for change_app (which a routine's run and someone else's turn don't have).
       bg || opts.outside || !apps ? "" : appsLine(b, answering?.lookingAt),
       // Its workspace's apps on the web and their addresses, for work_on_app and deploy_app (likewise only on the user's own turns).
@@ -2678,6 +2686,17 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
               notes.push(r.did);
               readFrom.add(`An API: ${r.did.replace(/^Called /, "")}`);
             }
+            return r.text;
+          })
+          .catch(failed);
+      // Files changed in a repository in one go (repo-change.ts): asked for once; on the yes (or an Always allow), each file
+      // is said in the chat as it went, as theirs, folded into one line there ("Boppy changed 2 files on GitHub").
+      if (name === "change_files")
+        return changeFiles(botId, a, used, { chat: true, approved, ...(approved && opts.resume?.api?.change ? { asked: opts.resume.api.change } : {}) })
+          .then((r) => {
+            for (const did of r.did ?? []) addMessage({ chatId, role: "system", text: `${b.name}: ${did}`, appResult: { action: did.replace(/^Called /, ""), ok: true, output: r.text } });
+            if (r.failed && approved) addMessage({ chatId, role: "system", text: `${b.name} couldn't call it: ${r.failed.why.slice(0, 160)}`, appResult: { action: r.failed.did.replace(/^Called /, ""), ok: false, output: r.text } });
+            called.push(...(r.did ?? []));
             return r.text;
           })
           .catch(failed);
