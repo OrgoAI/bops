@@ -133,6 +133,10 @@ export function Sidebar({
   // A bot's right-click menu (bot-menu.tsx): which bot, and where it was asked for.
   const [menu, setMenu] = useState<{ botId: string; x: number; y: number } | null>(null);
   const menuBot = menu ? state.bots.find((b) => b.id === menu.botId) : undefined;
+  // While the pointer or the keyboard's focus is in the list, the bots' threads hold where they are (sidebar-sections.tsx
+  // splitThreads). A click's focus doesn't hold: the pointer does while it's there, and once it's gone they settle.
+  const [pointerIn, setPointerIn] = useState(false);
+  const [focusIn, setFocusIn] = useState(false);
   /** A bot's chat opens its menu on right-click; a group's has none (the browser's own is kept off it too). */
   const openMenu = (c: Chat) => (e: React.MouseEvent) => {
     e.preventDefault();
@@ -163,7 +167,9 @@ export function Sidebar({
   // Each bot's threads, under its row (a quiet routine's run that found nothing for the user posted
   // nothing, so it isn't listed either). A search lists the ones that match, flat, under Threads.
   const byBot = threadsByBot(state);
-  const found = q ? threadsOf(state).filter((s) => s.title.toLowerCase().includes(q)).sort(threadOrder).slice(0, 6) : [];
+  // The threads Waiting for your OK: a request of theirs is unanswered (lib/types.ts waitsForOk), wherever they run.
+  const okWaits = new Set(waitingAsks(state).flatMap((a) => (a.threadId ? [a.threadId] : [])));
+  const found = q ? threadsOf(state).filter((s) => s.title.toLowerCase().includes(q)).sort(threadOrder(okWaits)).slice(0, 6) : [];
   const user = state.account?.user.id ?? "";
   // What waits on the user, under the bot it's from. Issues are read as Knowledge reads them (the same
   // copy as Favorites' Issues), while Knowledge is there. Neither the user's issues nor this Mac's setup
@@ -171,8 +177,6 @@ export function Sidebar({
   const { list: issues } = useIssues(ws, user, categoriesOpen(state) && !state.shared);
   useEffect(() => rememberShown((issues?.issues ?? []).map((i) => `issue:${i.id}`)), [issues]);
   const needs = needsByBot(state, issues?.issues ?? null, state.shared ? [] : setup);
-  // The threads Waiting for your OK: a request of theirs is unanswered (lib/types.ts waitsForOk), wherever they run.
-  const okWaits = new Set(waitingAsks(state).flatMap((a) => (a.threadId ? [a.threadId] : [])));
   const attention = attentionOf(state, needs);
   // Needs your attention opens every bot with something waiting (how many times it's been asked, and which bots).
   const [opened, setOpened] = useState<{ at: number; bots: Set<string> } | null>(null);
@@ -205,6 +209,7 @@ export function Sidebar({
         openAt={opened?.bots.has(b.id) ? opened.at : 0}
         selected={c.id === chatId}
         readOnly={!!state.shared}
+        still={pointerIn || focusIn}
         row={row}
         onOpenThread={onOpenThread}
         onOpenIssue={(i) => onOpenMemory({ category: "issues", focus: i.id })}
@@ -282,7 +287,13 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <div
+        onPointerEnter={() => setPointerIn(true)}
+        onPointerLeave={() => setPointerIn(false)}
+        onFocus={(e) => setFocusIn(e.target.matches(":focus-visible"))}
+        onBlur={(e) => !e.currentTarget.contains(e.relatedTarget) && setFocusIn(false)}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+      >
         {/* What needs you and what you pinned: over everything, and gone while you search. */}
         {!q && <FavoritesSection state={state} attention={attention.count} onAttention={openAttention} onOpenMemory={onOpenMemory} />}
         {/*

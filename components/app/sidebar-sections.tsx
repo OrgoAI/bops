@@ -23,9 +23,9 @@ import { ago, currentWorkspace, needsYou, NeedsYouDot, post, quietNothing, Statu
 /*
  * The sidebar's sections over the chats (sidebar.tsx): Favorites, with Needs your attention first while
  * anything waits on the user, then the Knowledge kinds the user pinned; and under each bot's own chat,
- * what waits on the user from it, as cards, then its threads. Every list shows a few rows and keeps the
- * rest behind "Show N more", so a flood never takes the sidebar over. What's folded is remembered on this
- * Mac (side-group.tsx), per account and workspace.
+ * what waits on the user from it, as cards, then its threads that wait on someone or work, and one line the
+ * rest fold under. Every list shows a few rows and keeps the rest behind "Show N more", so a flood never
+ * takes the sidebar over. What's folded is remembered on this Mac (side-group.tsx), per account and workspace.
  */
 
 /** Rows a list shows before "Show N more". */
@@ -62,13 +62,48 @@ export function threadsOf(state: AppState) {
   return state.sessions.filter((s) => workspaceOf(state.bots.find((b) => b.id === s.botId)) === ws && state.bots.some((b) => b.id === s.botId) && !s.replacedBy && !quietNothing(s));
 }
 
-/** Working or needing the user first, then the newest. */
-export const threadOrder = (a: Session, b: Session) => Number(live(b) || needsYou(b)) - Number(live(a) || needsYou(a)) || (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt);
+/**
+ * When a thread last changed hands, as its row says it: a working one, when its current run began (the user's
+ * newest reply, else when it was made); one that stopped, when it did.
+ */
+export function threadAt(s: Session) {
+  if (!live(s) && s.endedAt) return s.endedAt;
+  return Math.max(s.createdAt, s.replies.findLast((r) => r.role === "user")?.at ?? 0);
+}
+
+/** Where a thread sorts: waiting on someone first (`okWait`: on the user's OK), then working, then the rest. */
+const rank = (s: Session, okWait?: boolean) => (okWait || needsYou(s) ? 0 : live(s) ? 1 : 2);
+
+/**
+ * Waiting on someone first (with the threads Waiting for the user's OK, `okWaits`: lib/types.ts waitsForOk), then
+ * working, then the rest; the newest first in each.
+ */
+export const threadOrder = (okWaits?: ReadonlySet<string>) => (a: Session, b: Session) => rank(a, okWaits?.has(a.id)) - rank(b, okWaits?.has(b.id)) || threadAt(b) - threadAt(a);
+
+/** A bot's threads as its list stood when the pointer or the keyboard's focus came into the sidebar: those inline, then every one, in order. */
+export type HeldSplit = { inline: string[]; all: string[] };
+
+/**
+ * A bot's threads as its list shows them: inline, what waits on someone or works (threadOrder, the threads
+ * Waiting for the user's OK with the waiting ones); the rest, done or stopped, folded under one line. `held`:
+ * the split as it stood when the pointer or the keyboard's focus came into the sidebar, so nothing moves under them: a
+ * thread stays where it was (its row changes form in place), and one new since joins the inline ones at the end.
+ */
+export function splitThreads(threads: Session[], okWaits?: ReadonlySet<string>, held?: HeldSplit | null) {
+  const r = (s: Session) => rank(s, okWaits?.has(s.id));
+  const sorted = [...threads].sort(threadOrder(okWaits));
+  if (!held) return { inline: sorted.filter((s) => r(s) < 2), done: sorted.filter((s) => r(s) === 2) };
+  const byId = new Map(threads.map((s) => [s.id, s]));
+  const pick = (ids: string[]) => ids.flatMap((id) => byId.get(id) ?? []);
+  const known = new Set(held.all);
+  const inline = new Set(held.inline);
+  return { inline: [...pick(held.inline), ...sorted.filter((s) => !known.has(s.id))], done: pick(held.all.filter((id) => !inline.has(id))) };
+}
 
 /** Each bot's threads (threadsOf), in threadOrder. */
 export function threadsByBot(state: AppState) {
   const out = new Map<string, Session[]>();
-  for (const s of [...threadsOf(state)].sort(threadOrder)) out.set(s.botId, [...(out.get(s.botId) ?? []), s]);
+  for (const s of [...threadsOf(state)].sort(threadOrder())) out.set(s.botId, [...(out.get(s.botId) ?? []), s]);
   return out;
 }
 
@@ -92,8 +127,9 @@ export function railMark(threads: Session[], needs: BotNeeds | undefined, shared
   return { waiting: asking.length + cards, working: threads.some((s) => live(s) && !s.askWhere) };
 }
 
-/** One thread under its bot: in ink with its mark while it's working or needs you; × deletes it once it's stopped. */
 /**
+ * One thread under its bot: in ink with its mark while it's working or needs you, and when it last changed
+ * hands (threadAt); × deletes it once it's stopped, in the time's place while the row is hovered or focused.
  * `readOnly`: a shared workspace's thread, the owner's to delete (and what it asks, theirs to answer). `okWait`: a
  * request of its for the user's OK is unanswered (lib/types.ts waitsForOk): it waits on them, not working.
  */
@@ -103,6 +139,7 @@ export function ThreadRow({ session: s, onClick, readOnly, okWait }: { session: 
   // Its mark (as StatusIcon draws it) pops when it changes in place, as working turns to needs you.
   const mark = okWait ? "you" : live(s) && !(s.askWhere && needsYou(s)) ? "working" : needsYou(s) ? "you" : s.status;
   const pop = usePop(mark);
+  const deletable = !live(s) && !readOnly;
   return (
     <button
       onClick={onClick}
@@ -116,23 +153,59 @@ export function ThreadRow({ session: s, onClick, readOnly, okWait }: { session: 
           <StatusIcon session={s} owner={readOnly} okWait={okWait} />
         </span>
       )}
-      {!live(s) && !readOnly && (
-        <DeleteX label={`Delete ${plainTitle(s.title)}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100 group-focus-visible/thread:opacity-100" />
-      )}
+      <span className="relative flex w-7 shrink-0 items-center justify-end">
+        <span className={`text-[12px] leading-4 text-[#9A9A98] ${deletable ? "group-hover/thread:invisible group-focus-visible/thread:invisible group-has-[:focus-visible]/thread:invisible" : ""}`}>{ago(threadAt(s))}</span>
+        {deletable && (
+          <DeleteX
+            label={`Delete ${plainTitle(s.title)}`}
+            onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")}
+            className="absolute right-0 group-hover/thread:opacity-100 group-focus-visible/thread:opacity-100"
+          />
+        )}
+      </span>
     </button>
   );
 }
 
+/** A quiet line under a list that shows more of it: "Show N more", or a bot's done threads. */
+const QUIET_LINE =
+  "flex h-7 shrink-0 items-center rounded-[10px] px-2.5 text-left text-[13px] leading-4 text-[#9A9A98] outline-none hover:bg-black/[0.03] hover:text-[#6B6B6B] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
+
 /** "Show N more" under a list cut at SHOWN, "Show less" once it's all there. */
 function MoreButton({ hidden, open, onToggle, className = "" }: { hidden: number; open: boolean; onToggle: () => void; className?: string }) {
   return (
-    <button
-      onClick={onToggle}
-      aria-expanded={open}
-      className={`flex h-7 shrink-0 items-center rounded-[10px] px-2.5 text-left text-[13px] leading-4 text-[#9A9A98] outline-none hover:bg-black/[0.03] hover:text-[#6B6B6B] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${className}`}
-    >
+    <button onClick={onToggle} aria-expanded={open} className={`${QUIET_LINE} ${className}`}>
       {open ? "Show less" : `Show ${hidden} more`}
     </button>
+  );
+}
+
+/** When something was, after "last": "5m ago", "just now", or the day ("Mon"), as ago says it. */
+function since(t: number) {
+  const a = ago(t);
+  return a === "now" ? "just now" : /^\d/.test(a) ? `${a} ago` : a;
+}
+
+/**
+ * The line a bot's done threads fold under (the chat keeps each one's card in its history): how many, and when the
+ * newest stopped. It opens them under it, the line staying where it is.
+ */
+function DoneThreads({ rows, newest }: { rows: ReactNode[]; newest: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(!open)} aria-expanded={open} data-done-line className={`${QUIET_LINE} gap-1.5`}>
+        <Chevron open={open} />
+        <span className="min-w-0 truncate">
+          {rows.length} done · last {since(newest)}
+        </span>
+      </button>
+      <Fold open={open} lazy>
+        <div data-done-list>
+          <Capped rows={rows} />
+        </div>
+      </Fold>
+    </>
   );
 }
 
@@ -316,8 +389,9 @@ function needCards(n: BotNeeds, acts: NeedActs) {
  * A bot's chat row (`row`, given the space to keep for the chip at the end of its preview line) with
  * what's under it, folded until the user opens it (remembered per bot on this Mac; a new `openAt` opens
  * it, as Needs your attention does): first, as cards, what waits on the user from this bot (needsByBot),
- * then its threads, an indented list on a thin rule. Each part shows SHOWN and keeps the rest behind
- * "Show N more". A bot with nothing under it has just its row, without the chip.
+ * then its threads that wait on someone or work, an indented list on a thin rule, and the line its done
+ * ones fold under (splitThreads). Each part shows SHOWN and keeps the rest behind "Show N more". A bot
+ * with nothing under it has just its row, without the chip.
  */
 export function WithThreads({
   user,
@@ -330,6 +404,7 @@ export function WithThreads({
   openAt = 0,
   selected,
   readOnly,
+  still,
   row,
   onOpenThread,
   ...acts
@@ -346,6 +421,8 @@ export function WithThreads({
   selected?: boolean;
   /** A shared workspace's bot: its threads are the owner's to delete, and what they ask the owner's to answer. */
   readOnly?: boolean;
+  /** The pointer or the keyboard's focus is in the sidebar: its threads hold where they are (splitThreads). */
+  still?: boolean;
   row: (space: ReactNode) => ReactNode;
   onOpenThread: (s: Session) => void;
 } & NeedActs) {
@@ -355,6 +432,19 @@ export function WithThreads({
     // Only when asked again: the user folding it afterwards keeps it folded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openAt]);
+  // Held from the moment the pointer or the keyboard's focus comes in, let go once both have left.
+  const now = splitThreads(threads, okWaits);
+  const [held, setHeld] = useState<HeldSplit | null>(null);
+  if (still && !held) setHeld({ inline: now.inline.map((s) => s.id), all: [...now.inline, ...now.done].map((s) => s.id) });
+  if (!still && held) setHeld(null);
+  // One new since joins the held ones at the end, once: a later one, or a change of its state, doesn't move it.
+  if (still && held) {
+    const known = new Set(held.all);
+    const fresh = threads.filter((s) => !known.has(s.id)).sort(threadOrder(okWaits)).map((s) => s.id);
+    if (fresh.length) setHeld({ inline: [...held.inline, ...fresh], all: [...held.all, ...fresh] });
+  }
+  const { inline, done } = still && held ? splitThreads(threads, okWaits, held) : now;
+  const threadRow = (s: Session) => <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} readOnly={readOnly} okWait={okWaits?.has(s.id)} />;
   const cards = needs ? needCards(needs, acts) : [];
   const count = cards.length + threads.length;
   const any = count > 0;
@@ -392,7 +482,8 @@ export function WithThreads({
         <Fold open={open} lazy>
           <div key={botId} className="mb-1 ml-[52px] mr-0.5 flex flex-col border-l border-[#E6E6E3] pl-1.5">
             {cards.length > 0 && <Capped className="gap-1.5 pb-1.5 pt-0.5" rows={cards} />}
-            {threads.length > 0 && <Capped rows={threads.map((s) => <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} readOnly={readOnly} okWait={okWaits?.has(s.id)} />)} />}
+            {inline.length > 0 && <Capped rows={inline.map(threadRow)} />}
+            {done.length > 0 && <DoneThreads rows={done.map(threadRow)} newest={Math.max(...done.map(threadAt))} />}
           </div>
         </Fold>
       )}
