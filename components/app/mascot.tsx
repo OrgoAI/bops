@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, useSyncExternalStore } from "react";
 import { moodOf, moodSignals, NO_SIGNALS, type MoodSignals } from "@/lib/bot-mood";
-import { CODER_MIN_SIZE, isMoving, mascotMarkup, type Mood } from "@/lib/mascot";
+import { blinkPhase, CODER_MIN_SIZE, isMoving, mascotMarkup, type Mood } from "@/lib/mascot";
 import type { AppState } from "@/lib/types";
 import { useStateArrival } from "./state-arrival";
 import { useWindowVisible } from "./window-visible";
@@ -68,6 +68,11 @@ export function talkingStore() {
 export type TalkingStore = ReturnType<typeof talkingStore>;
 export const CallTalking = createContext<TalkingStore>(talkingStore());
 
+/** The smallest mascot (in px) that comes alive (Mascot's `life`): smaller, a blink is a flicker. */
+export const LIFE_MIN_SIZE = 36;
+/** The smallest that breathes: smaller, a breath is under a pixel and reads as a shimmer. */
+export const BREATH_MIN_SIZE = 56;
+
 export function Mascot({
   botId,
   color,
@@ -75,6 +80,7 @@ export function Mascot({
   antenna = true,
   live = false,
   chatId,
+  life = false,
 }: {
   botId: string;
   color: string;
@@ -89,6 +95,12 @@ export function Mascot({
   live?: boolean;
   /** The chat this mascot stands for: it thinks over a reply there, and only works while it writes one elsewhere. */
   chatId?: string;
+  /**
+   * A live mascot people face (the chat's header, an empty chat, a bot's profile), at LIFE_MIN_SIZE and up: it
+   * blinks, breathes while it vibes, and settles into each new pose (LivelyMascot). Never a list's rows: a column
+   * of them moving at the edge of the eye is noise.
+   */
+  life?: boolean;
 }) {
   const signals = useContext(BotMoods);
   const talk = useContext(CallTalking);
@@ -99,6 +111,7 @@ export function Mascot({
   const mood = moodOf(talking ? { ...signals, call: { botId, speaking: true } } : signals, botId, chatId);
   // The coder's mark, still and on top of any mood, only where it can be read.
   const coder = size >= CODER_MIN_SIZE && signals.coders.has(botId);
+  if (live && life && size >= LIFE_MIN_SIZE) return <LivelyMascot botId={botId} color={color} size={size} antenna={antenna} mood={mood} coder={coder} />;
   if (live && isMoving(mood)) return <MovingMascot botId={botId} color={color} size={size} antenna={antenna} mood={mood} coder={coder} />;
   return <MascotSvg botId={botId} color={color} size={size} antenna={antenna} mood={mood === "idle" ? "idle" : "awake"} coder={coder} />;
 }
@@ -109,14 +122,49 @@ function MovingMascot(props: { botId: string; color: string; size: number; anten
   return <MascotSvg {...props} paused={!visible} />;
 }
 
-function MascotSvg({ botId, color, size, antenna, mood, coder, paused }: { botId: string; color: string; size: number; antenna: boolean; mood: Mood; coder: boolean; paused?: boolean }) {
+/**
+ * A mascot people face (Mascot's `life`): its pose's own motion, and on top, each its own class in
+ * app/globals.css: it blinks now and then, each bot on its own beat (blinkPhase), while its eyes are open; it
+ * breathes while it vibes, at BREATH_MIN_SIZE and up; and a new pose settles in with a small squash from its base
+ * instead of popping (the first pose just shows). CSS on the page's one clock, no timers: it rests while the
+ * window is hidden and holds its pose with reduced motion.
+ */
+function LivelyMascot(props: { botId: string; color: string; size: number; antenna: boolean; mood: Mood; coder: boolean }) {
+  const visible = useWindowVisible();
+  // Settling only for a change of pose: another bot in the same spot (the header, on switching chats) just shows.
+  const [shown, setShown] = useState({ botId: props.botId, mood: props.mood, changed: false });
+  if (shown.botId !== props.botId || shown.mood !== props.mood) setShown({ botId: props.botId, mood: props.mood, changed: shown.botId === props.botId });
+  return <MascotSvg {...props} paused={!visible} life={{ breathe: props.mood === "idle" && props.size >= BREATH_MIN_SIZE, settle: shown.changed }} />;
+}
+
+function MascotSvg({
+  botId,
+  color,
+  size,
+  antenna,
+  mood,
+  coder,
+  paused,
+  life,
+}: {
+  botId: string;
+  color: string;
+  size: number;
+  antenna: boolean;
+  mood: Mood;
+  coder: boolean;
+  paused?: boolean;
+  life?: { breathe: boolean; settle: boolean };
+}) {
+  const style: React.CSSProperties & { "--mascot-blink-at"?: string } = { width: size, height: size, flexShrink: 0 };
+  if (life) style["--mascot-blink-at"] = blinkPhase(botId);
   // Markup comes from our own constant shapes and bot colors, never from user text.
   return (
     <svg
       viewBox="0 0 40 40"
       className={paused ? "mascot-paused" : undefined}
-      style={{ width: size, height: size, flexShrink: 0 }}
-      dangerouslySetInnerHTML={{ __html: mascotMarkup(botId, color, { mood, accent: antenna, coder }) }}
+      style={style}
+      dangerouslySetInnerHTML={{ __html: mascotMarkup(botId, color, { mood, accent: antenna, coder, ...(life ? { blink: true, ...life } : {}) }) }}
     />
   );
 }

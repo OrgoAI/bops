@@ -24,20 +24,40 @@ const HIGHLIGHTER = "#E9FF3B";
 /** A workspace's main bot (Boppy, or Sam on older installs): drawn in black, with highlighter headphones. */
 export const isMainBotId = (botId: string) => /^(boppy|sam)(-\d+)?$/.test(botId);
 
+/** A number fixed by a text (a bot's id): the same every time, spread across bots. */
+const hashOf = (text: string) => {
+  let h = 0;
+  for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h;
+};
+
 /** Each bot's own face when it's working, fixed by its id: open eyes, a smile, or a wink. */
 const FACES = ["open", "happy", "wink"] as const;
 export function faceOf(botId: string): (typeof FACES)[number] {
   if (isMainBotId(botId)) return "open";
-  let h = 0;
-  for (const ch of botId.replace(/-\d+$/, "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return FACES[h % FACES.length];
+  return FACES[hashOf(botId.replace(/-\d+$/, "")) % FACES.length];
 }
 
-const eyes = (face: "vibe" | (typeof FACES)[number], c: string) => {
+/**
+ * How long one round of blinks takes (app/globals.css mascot-blink: five blinks, one of them a double, at uneven
+ * gaps), and where in it a bot starts, fixed by its id: a sidebar or a group of mascots never blinks in step,
+ * and one bot blinks alike wherever it shows.
+ */
+export const BLINK_LOOP_S = 15;
+export const blinkPhase = (botId: string) => {
+  // Mixed (Knuth's multiplier, its high bits): ids alike in length and letters would otherwise share a beat.
+  const h = Math.imul(hashOf(botId), 2654435761) >>> 16;
+  return `-${(h % (BLINK_LOOP_S * 10)) / 10}s`;
+};
+
+/** An open eye's class when it blinks (`blink`, the app's mascots people face): the pictures' eyes have none. */
+const eyeClass = (blink: boolean) => (blink ? ` class="mascot-eye"` : "");
+
+const eyes = (face: "vibe" | (typeof FACES)[number], c: string, blink = false) => {
   const arc = (d: string) => `<path d="${d}" fill="none" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>`;
   if (face === "vibe") return arc("M13.6 22.2q1.9 1.8 3.8 0M22.6 22.2q1.9 1.8 3.8 0");
   if (face === "happy") return arc("M13.6 23.3q1.9-2.1 3.8 0M22.6 23.3q1.9-2.1 3.8 0");
-  const dot = (cx: number) => `<ellipse cx="${cx}" cy="22.3" rx="1.9" ry="2.6" fill="${c}"/>`;
+  const dot = (cx: number) => `<ellipse${eyeClass(blink)} cx="${cx}" cy="22.3" rx="1.9" ry="2.6" fill="${c}"/>`;
   if (face === "wink") return dot(15.5) + arc("M22.6 22.5q1.9 1.7 3.8 0");
   return dot(15.5) + dot(24.5);
 };
@@ -143,10 +163,10 @@ const SOUND =
 
 /** The main bot's head, round and flat black, as on the app icon. */
 const MAIN_HEAD = "M20 6c8.5 0 14 6 14 13.5S28.5 34 20 34 6 27 6 19.5 11.5 6 20 6z";
-/** Its eyes: plain white ovals, or shut (two short arcs, bold enough to read at 20px). */
-const mainEyes = (open: boolean) =>
+/** Its eyes: plain white ovals (blinking when `blink`), or shut (two short arcs, bold enough to read at 20px). */
+const mainEyes = (open: boolean, blink = false) =>
   open
-    ? `<ellipse cx="15.5" cy="20" rx="2.2" ry="2.9" fill="#fff"/><ellipse cx="24.5" cy="20" rx="2.2" ry="2.9" fill="#fff"/>`
+    ? `<ellipse${eyeClass(blink)} cx="15.5" cy="20" rx="2.2" ry="2.9" fill="#fff"/><ellipse${eyeClass(blink)} cx="24.5" cy="20" rx="2.2" ry="2.9" fill="#fff"/>`
     : `<path d="M13.3 20.4q2.2 2.2 4.4 0M22.3 20.4q2.2 2.2 4.4 0" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>`;
 /** The band: ink under a thinner stroke of the cups' color, arching clear of the head into the cups' tops. */
 const mainBand = (fill: string) => {
@@ -173,24 +193,25 @@ const MAIN_CHEEKS = `<g class="mascot-blush" fill="${BLUSH}"><ellipse cx="13.9" 
  * at work; speaking faces you, its round mouth opening and closing; shy leans away, looking down,
  * its cheeks pink.
  */
-function mainMarkup(mood: Mood, accent: boolean) {
+function mainMarkup(mood: Mood, accent: boolean, blink: boolean) {
   const fill = accent ? HIGHLIGHTER : "#3A3A38";
   const left = mainCup(4, fill);
   const right = mainCup(29, fill);
+  const open = mainEyes(true, blink);
   let face: string;
   let tilt = 0;
   if (mood === "idle") face = mainEyes(false);
   else if (mood === "writing" || mood === "coding") {
     tilt = -5;
-    face = `<g transform="translate(-.6 .9)">${mainEyes(true)}</g>`;
-  } else if (mood === "speaking") face = `${mainEyes(true)}<ellipse class="mascot-mouth" cx="20" cy="25.8" rx="1.6" ry="1.9" fill="#fff"/>`;
+    face = `<g transform="translate(-.6 .9)">${open}</g>`;
+  } else if (mood === "speaking") face = `${open}<ellipse class="mascot-mouth" cx="20" cy="25.8" rx="1.6" ry="1.9" fill="#fff"/>`;
   else if (mood === "shy") {
     tilt = 8;
-    face = `<g transform="translate(-.6 .9)">${mainEyes(true)}</g>${MAIN_CHEEKS}`;
+    face = `<g transform="translate(-.6 .9)">${open}</g>${MAIN_CHEEKS}`;
   } else {
     // Awake, thinking (its glance moving the eyes up and back) and working.
     tilt = -9;
-    face = `<g${mood === "thinking" ? ` class="mascot-glance"` : ""} transform="translate(.6 -1.4)">${mainEyes(true)}</g><ellipse cx="20.8" cy="26.6" rx="1.35" ry="1.65" fill="#fff"/>`;
+    face = `<g${mood === "thinking" ? ` class="mascot-glance"` : ""} transform="translate(.6 -1.4)">${open}</g><ellipse cx="20.8" cy="26.6" rx="1.35" ry="1.65" fill="#fff"/>`;
   }
   const cups = mood === "working" || mood === "coding" ? `<g class="mascot-cup">${left}</g><g class="mascot-cup mascot-cup-r">${right}</g>` : left + right;
   const head = `${mainBand(fill)}<path d="${MAIN_HEAD}" fill="#0A0A0A"/>${face}${cups}`;
@@ -209,20 +230,31 @@ function mainMarkup(mood: Mood, accent: boolean) {
  * mouth with sound off a cup, working bops along, its cups to the beat, and shy looks away with its
  * cheeks glowing pink. `coder` adds the coder's mark on top, whatever the mood (the app passes it for
  * a bot that works on an app, at CODER_MIN_SIZE and up; the pictures never have it).
+ *
+ * The mascots people face in the app (components/app/mascot.tsx, Mascot's `life`) ask for a little more, each
+ * a class app/globals.css moves, none of it on the pictures: `blink` marks each open eye (mascot-eye), `breathe`
+ * wraps the drawing to rise and fall slowly from its base (mascot-breath), and `settle` wraps it to land with a
+ * small squash (mascot-settle), for a pose that has just changed. The coder's mark stays still on top.
  */
-export function mascotMarkup(botId: string, color: string, opts: { mood?: Mood; accent?: boolean; coder?: boolean } = {}) {
-  const drawn = moodMarkup(botId, color, opts.mood ?? "idle", opts.accent !== false);
+export function mascotMarkup(
+  botId: string,
+  color: string,
+  opts: { mood?: Mood; accent?: boolean; coder?: boolean; blink?: boolean; breathe?: boolean; settle?: boolean } = {},
+) {
+  let drawn = moodMarkup(botId, color, opts.mood ?? "idle", opts.accent !== false, opts.blink === true);
+  if (opts.settle) drawn = `<g class="mascot-settle">${drawn}</g>`;
+  if (opts.breathe) drawn = `<g class="mascot-breath">${drawn}</g>`;
   return opts.coder ? drawn + CODER : drawn;
 }
 
-function moodMarkup(botId: string, color: string, mood: Mood, accent: boolean) {
-  if (isMainBotId(botId)) return mainMarkup(mood, accent);
+function moodMarkup(botId: string, color: string, mood: Mood, accent: boolean, blink: boolean) {
+  if (isMainBotId(botId)) return mainMarkup(mood, accent, blink);
   if (!isMoving(mood)) {
-    const f = figure(botId, color, (c) => eyes(mood === "idle" ? "vibe" : faceOf(botId), c));
+    const f = figure(botId, color, (c) => eyes(mood === "idle" ? "vibe" : faceOf(botId), c, blink));
     return body(f.inner) + headphones(f.band, f.pad);
   }
   const face = (c: string) => {
-    const open = eyes(faceOf(botId), c);
+    const open = eyes(faceOf(botId), c, blink);
     if (mood === "thinking") return `<g class="mascot-glance" transform="translate(.6 -1.4)">${open}</g>`;
     if (mood === "writing" || mood === "coding" || mood === "shy") return `<g transform="translate(-.6 .9)">${open}</g>`;
     if (mood === "speaking") return `${open}<path class="mascot-mouth" d="M17.8 26.6h4.4q0 2.8-2.2 2.8t-2.2-2.8z" fill="${c}"/>`;

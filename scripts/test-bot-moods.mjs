@@ -6,7 +6,10 @@
 // held still with reduced motion), when the call bar says the bot is talking (components/app/call-bar.tsx
 // botTalking), and the blush wearing off on its own (BotMoodsFrom). And coding bots: which bots are coders
 // (codersOf), the coder's mark on every mascot of theirs big enough to read it, and when a thread is coding
-// (codingThread: running on one of the workspace's apps, the user's own ask, where apps show).
+// (codingThread: running on one of the workspace's apps, the user's own ask, where apps show). Last, the mascots people
+// face (Mascot's life: the chat's header, an empty chat, a bot's profile): every drawing they start from as it was,
+// the blink's timing, the breath and the settle, held still with reduced motion, resting while the window is hidden,
+// and never on a list's rows.
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-bot-moods.mjs   (not with --conditions=react-server: these are client components)
@@ -51,9 +54,9 @@ globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} }
 globalThis.matchMedia = () => ({ matches: false });
 globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
 
-const { CODER_MIN_SIZE, mascotMarkup, mascotSvg, MOVING_MOODS } = await import(pathToFileURL(`${root}/lib/mascot.ts`).href);
+const { BLINK_LOOP_S, blinkPhase, CODER_MIN_SIZE, faceOf, mascotMarkup, mascotSvg, MOVING_MOODS, PICTURE_COLORS, PICTURE_SHAPES } = await import(pathToFileURL(`${root}/lib/mascot.ts`).href);
 const { codersOf, codingThread, isPraise, moodOf, moodSignals, NO_SIGNALS, SHY_MS } = await import(pathToFileURL(`${root}/lib/bot-mood.ts`).href);
-const { BotMoods, BotMoodsFrom, CallTalking, Mascot, talkingStore } = await import(pathToFileURL(`${root}/components/app/mascot.tsx`).href);
+const { BotMoods, BotMoodsFrom, BREATH_MIN_SIZE, CallTalking, LIFE_MIN_SIZE, Mascot, talkingStore } = await import(pathToFileURL(`${root}/components/app/mascot.tsx`).href);
 const { stateArrived } = await import(pathToFileURL(`${root}/components/app/state-arrival.ts`).href);
 const { ChatAvatar } = await import(pathToFileURL(`${root}/components/app/ui.tsx`).href);
 const { ChatView } = await import(pathToFileURL(`${root}/components/app/chat-view.tsx`).href);
@@ -502,6 +505,140 @@ await test("BotMoodsFrom: a coder at work on its app codes, mark and laptop, eve
   // Not live: awake, with its mark.
   const still = renderToStaticMarkup(h(BotMoodsFrom, { state: st, call: null }, h(Mascot, { botId: "max", color: "#FF9F43", size: 20 })));
   assert.ok(still.includes(mascotMarkup("max", "#FF9F43", { mood: "awake", coder: true })));
+});
+
+
+/* ---------------- The mascots people face ---------------- */
+
+const mainCss = readFileSync(`${root}/app/globals.css`, "utf8");
+/** A rule's body by its exact selector, and a keyframes block's frames (offset 0 to 1, its declarations). */
+const ruleOf = (sel) => mainCss.match(new RegExp(`\\n${sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`))?.[1] ?? "";
+const framesOf = (name) => {
+  const body = mainCss.match(new RegExp(`@keyframes ${name} \\{([\\s\\S]*?)\\n\\}`))?.[1] ?? "";
+  return [...body.matchAll(/((?:\s*[\d.]+%,?)+)\s*\{([^}]*)\}/g)].flatMap((m) => [...m[1].matchAll(/([\d.]+)%/g)].map((p) => ({ at: Number(p[1]) / 100, decl: m[2] })));
+};
+const scaleOf = (decl) => {
+  const m = decl.match(/transform: scale\(([\d.]+), ([\d.]+)\);/);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+};
+
+await test("every pose the app draws today is exactly what it was, for every picture color and shape: life only adds where it's asked", () => {
+  // Hashed from main before the mascots people face came in: idle, awake and each moving mood, the main bot in both
+  // headphones, a blob in each picture color, the seed bots' own shapes, and the coder's mark.
+  const moods = ["idle", "awake", ...MOVING_MOODS];
+  let all = "";
+  for (const mood of moods) {
+    for (const accent of [true, false]) all += mascotMarkup("boppy", "#0A0A0A", { mood, accent }) + "\n";
+    for (const c of PICTURE_COLORS) for (const id of ["bot", "max", "ivy-2"]) all += mascotMarkup(id, c, { mood }) + "\n";
+    for (const [id, c] of Object.entries(PICTURE_SHAPES)) all += mascotMarkup(id, c, { mood }) + "\n";
+    all += mascotMarkup("max", "#FF9F43", { mood, coder: true }) + "\n";
+  }
+  assert.equal(createHash("sha256").update(all).digest("hex"), "5a323960564d0ad4f31f2e42a17c7960d5c647a9c93aafec52083c44366c318d");
+  // Blinking only marks the open eyes: take the class away and it's the same drawing.
+  for (const id of ["boppy", "max", "penny", "otto", "rook", "ivy-2"])
+    for (const mood of moods) assert.equal(mascotMarkup(id, "#47C46B", { mood, blink: true }).replaceAll(' class="mascot-eye"', ""), mascotMarkup(id, "#47C46B", { mood }), `${id} ${mood}`);
+});
+
+await test("the mascots people face blink: every open eye, about 18 a minute at uneven gaps with one double, shut fast and open slower, each bot on its own beat", () => {
+  // Which eyes: both open ones, the winker's one, none on a smile (its eyes are arcs) or while it vibes (shut).
+  const open = (id) => (faceOf(id) === "happy" ? 0 : faceOf(id) === "wink" ? 1 : 2);
+  const ids = ["boppy", "max", "penny", "otto", "rook", "zed", "writer", "ivy"];
+  assert.deepEqual([...new Set(ids.map(faceOf))].sort(), ["happy", "open", "wink"], "every face among them");
+  for (const id of ids)
+    for (const mood of ["idle", "awake", ...MOVING_MOODS]) {
+      const eyes = mascotMarkup(id, "#2EC4B6", { mood, blink: true }).match(/<[a-z]+ class="mascot-eye"/g) ?? [];
+      assert.equal(eyes.length, mood === "idle" ? 0 : open(id), `${id} ${mood}`);
+      assert.ok(eyes.every((e) => e === '<ellipse class="mascot-eye"'), `${id} ${mood}: eyes only`);
+    }
+  // The round: its length is lib/mascot.ts's, each eye shrinking from its own middle, on the bot's own place in it.
+  const loop = Number(ruleOf(".mascot-eye").match(/animation: mascot-blink ([\d.]+)s linear var\(--mascot-blink-at, 0s\) infinite;/)?.[1]);
+  assert.equal(loop, BLINK_LOOP_S, "the round as lib/mascot.ts has it");
+  assert.match(ruleOf(".mascot-eye"), /transform-box: fill-box;\s*transform-origin: center;/);
+  const frames = framesOf("mascot-blink").map((f) => ({ at: f.at * loop, y: Number(f.decl.match(/scaleY\(([\d.]+)\)/)?.[1]), ease: f.decl.match(/cubic-bezier\(([^)]*)\)/)?.[1].split(",").map(Number) }));
+  frames.sort((a, b) => a.at - b.at);
+  assert.ok(frames.length && frames.every((f) => Number.isFinite(f.y)), "transform: scaleY only");
+  const blinks = [];
+  for (let i = 1; i < frames.length; i++)
+    if (frames[i].y <= 0.2 && frames[i - 1].y === 1) {
+      let j = i;
+      while (frames[j + 1].y <= 0.2) j++;
+      blinks.push({ start: frames[i - 1].at, close: frames[i].at - frames[i - 1].at, open: frames[j + 1].at - frames[j].at, end: frames[j + 1].at, closeEase: frames[i - 1].ease, openEase: frames[j].ease });
+    }
+  const perMinute = (blinks.length / loop) * 60;
+  assert.ok(perMinute >= 15 && perMinute <= 24, `about 18 a minute (${perMinute})`);
+  for (const b of blinks) {
+    assert.ok(b.end - b.start >= 0.2 && b.end - b.start <= 0.4, `a blink of 0.2 to 0.4 s (${(b.end - b.start).toFixed(2)})`);
+    assert.ok(b.close <= 0.12 && b.close < b.open, `shut fast (${b.close.toFixed(2)} s), open slower (${b.open.toFixed(2)} s)`);
+    // Speeding up as the lid falls, slowing as it lifts (a cubic-bezier's first handle under or over the line).
+    assert.ok(b.closeEase && b.closeEase[1] < b.closeEase[0], "shutting eases in");
+    assert.ok(b.openEase && b.openEase[1] > b.openEase[0], "opening eases out");
+  }
+  // Uneven gaps, start to start (around the round's end too): one double, the rest 2.5 to 5 s, no two the same.
+  const gaps = blinks.map((b, i) => +((blinks[i + 1]?.start ?? blinks[0].start + loop) - b.start).toFixed(2));
+  assert.equal(gaps.filter((g) => g < 0.6).length, 1, `one double blink (${gaps})`);
+  const rest = gaps.filter((g) => g >= 0.6);
+  assert.ok(rest.every((g) => g >= 2.5 && g <= 5), `gaps of 2.5 to 5 s (${gaps})`);
+  assert.equal(new Set(rest).size, rest.length, "no two gaps alike");
+  // Each bot's place in the round, from its id: inside the round, the same every time, spread across bots.
+  const phases = ids.map((id) => -parseFloat(blinkPhase(id)));
+  assert.ok(phases.every((p) => p >= 0 && p < BLINK_LOOP_S), `${phases}`);
+  assert.equal(blinkPhase("max"), blinkPhase("max"));
+  assert.ok(new Set(phases).size >= 7, "bots blink out of step");
+});
+
+await test("they breathe while they vibe and settle into each new pose: slow and small from the base, once and quick; still with reduced motion, resting while hidden", () => {
+  const breath = framesOf("mascot-breath");
+  const loop = Number(ruleOf(".mascot-breath").match(/animation: mascot-breath ([\d.]+)s ease-in-out infinite;/)?.[1]);
+  assert.ok(loop >= 3.3 && loop <= 5, `a resting breath (${loop} s)`);
+  const settle = framesOf("mascot-settle");
+  const once = Number(ruleOf(".mascot-settle").match(/animation: mascot-settle ([\d.]+)s ease-in-out;/)?.[1]);
+  assert.ok(once >= 0.25 && once <= 0.5, `quick, and once (${once} s)`);
+  for (const [name, frames, most] of [["breath", breath, 0.02], ["settle", settle, 0.05]]) {
+    assert.ok(frames.length >= 2 && frames.every((f) => scaleOf(f.decl) && /^\s*transform: [^;]+;\s*$/.test(f.decl)), `${name}: transform only`);
+    const reach = Math.max(...frames.flatMap((f) => scaleOf(f.decl).map((v) => Math.abs(v - 1))));
+    assert.ok(reach > 0 && reach <= most, `${name}: small (${reach})`);
+    assert.deepEqual(scaleOf(frames.find((f) => f.at === 1).decl), [1, 1], `${name}: ends where it started`);
+    assert.match(ruleOf(`.mascot-${name}`), /transform-origin: 20px 3[4-6]px;/, `${name}: from the base`);
+  }
+  // With reduced motion each holds its pose; while the window is hidden each rests: .mascot-paused * is as specific
+  // as their rules, so it has to come after them.
+  const reduced = mainCss.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\.mascot-glance,[\s\S]*?\{\s*animation: none;\s*\}/)?.[0] ?? "";
+  const paused = mainCss.indexOf("\n.mascot-paused *,");
+  for (const c of ["mascot-eye", "mascot-breath", "mascot-settle"]) {
+    assert.match(reduced, new RegExp(`\\.${c}[ ,{]`), `${c}: still with reduced motion`);
+    assert.ok(mainCss.indexOf(`\n.${c} {`) > 0 && mainCss.indexOf(`\n.${c} {`) < paused, `${c}: rests while hidden`);
+  }
+});
+
+await test("only the mascots people face come alive, big enough to see: blinking open-eyed, breathing idle at the larger sizes", () => {
+  const bots = [
+    { id: "max", name: "Max", color: "#FF9F43", role: "", status: "idle" },
+    { id: "ivy", name: "Ivy", color: "#60A5FA", role: "", status: "idle" },
+  ];
+  const sig = moodSignals(state([], [chat("chat-max", ["max"])]));
+  const face = (props) => withMoods(sig, h(Mascot, { live: true, life: true, ...props }));
+  // A profile (70 px), idle: breathing, eyes shut (nothing to blink), on its own beat; its first pose just shows.
+  const hero = face({ botId: "ivy", color: "#60A5FA", size: 70 });
+  assert.ok(hero.includes(mascotMarkup("ivy", "#60A5FA", { mood: "idle", blink: true, breathe: true })), "breathing");
+  assert.ok(hero.includes(`--mascot-blink-at:${blinkPhase("ivy")}`), "its own beat");
+  assert.doesNotMatch(hero, /mascot-settle/, "the first pose just shows");
+  // The chat's header (40 px): too small to breathe; thinking over its reply, it blinks.
+  assert.ok(BREATH_MIN_SIZE > 40 && BREATH_MIN_SIZE <= 64 && LIFE_MIN_SIZE <= 40);
+  assert.ok(face({ botId: "ivy", color: "#60A5FA", size: 40 }).includes(mascotMarkup("ivy", "#60A5FA", { mood: "idle", blink: true })), "no breath at 40");
+  assert.ok(face({ botId: "max", color: "#FF9F43", size: 40, chatId: "chat-max" }).includes(mascotMarkup("max", "#FF9F43", { mood: "thinking", blink: true })), "thinking, blinking");
+  // The sidebar's rows (live, 44 px) and a group's small mascots (27 px, under LIFE_MIN_SIZE) stay as they were.
+  const row = withMoods(sig, h(ChatAvatar, { chat: chat("chat-max", ["max"], ["max"]), bots, size: 44 }));
+  assert.ok(row.includes(mascotMarkup("max", "#FF9F43", { mood: "thinking" })) && !/mascot-eye|mascot-breath|--mascot-blink-at/.test(row), "a row: calm");
+  const group = withMoods(sig, h(ChatAvatar, { chat: chat("g1", ["max"], ["max", "ivy"]), bots, size: 40, life: true }));
+  assert.doesNotMatch(group, /mascot-eye|mascot-breath|--mascot-blink-at/, "a group's small mascots: calm");
+  // In the chat itself: the header (40 px) and the empty chat's mascot (64 px) come alive; the typing line's (24 px) doesn't.
+  const c = chat("chat-max", ["max"], ["max"]);
+  const st = { bots, brains: [], sessions: [], chats: [c], messages: [], host: "orgo" };
+  const noop = () => {};
+  const html = withMoods(moodSignals(st), h(ChatView, { state: st, chat: c, wide: false, onOpenThread: noop, onShowBot: noop, onShowMac: noop, onShowScreen: noop, call: null, onCall: noop, callSlot: noop }));
+  const svgs = [...html.matchAll(/<svg viewBox="0 0 40 40"[^>]*style="width:(\d+)px;height:\d+px;flex-shrink:0(;--mascot-blink-at:[^"]+)?"/g)].map((m) => [Number(m[1]), !!m[2]]);
+  assert.deepEqual(svgs.filter(([px]) => px === 40 || px === 64).map(([, alive]) => alive), [true, true], `header and empty chat (${JSON.stringify(svgs)})`);
+  assert.ok(svgs.some(([px, alive]) => px === 24 && !alive), "the typing line: calm");
 });
 
 console.log(`\n${passed} passed`);

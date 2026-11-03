@@ -185,7 +185,7 @@ export function BotSettingsPage({
         <div className="relative max-w-[900px] px-[34px] py-[22px]">
           <div className="mt-2 flex items-center gap-5">
             <span className="grid size-[112px] shrink-0 place-items-center rounded-full bg-white/75 shadow-[0_0_0_6px_#FFFFFF8C]">
-              <Mascot botId={b.id} color={b.color} size={84} />
+              <Mascot botId={b.id} color={b.color} size={84} live life />
             </span>
             <div className="flex min-w-0 flex-col">
               <h1 ref={heading} tabIndex={-1} className="truncate text-[30px] font-bold leading-9 tracking-[-0.015em] outline-none">
