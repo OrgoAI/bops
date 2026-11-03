@@ -256,3 +256,31 @@ export function askOwnersOnly(a: { kind?: unknown }, thread: { runsOn?: unknown 
 }
 /** Whether telling a thread more (a reply, Nothing to add, Compact) is the owner's alone: one on the owner's Mac (macThread). */
 export const threadOwnersOnly = (thread: { runsOn?: unknown } | undefined, admin: boolean) => thread?.runsOn === "mac" && !adminMay("macThread", admin);
+
+/** Whether two entries give the same: the bots, `others`, Your Apps and Use its computer (never when they were set). */
+export const sameAccess = (a: MemberAccess, b: MemberAccess) =>
+  a.others === b.others && a.apps === b.apps && a.computer === b.computer && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
+/**
+ * Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). Your Apps
+ * comes with a bot: with none, the person's window has nothing of the workspace to open, and a Bops from before deletes
+ * such an entry whenever it saves one (its showsAny knows only bots), so the People sheet asks for a bot first.
+ */
+export const showsAny = (a: MemberAccess) => a.others !== "none" || Object.keys(a.bots).length > 0;
+
+/**
+ * A workspace's entries (Workspace.memberAccess) with one person's set to `access` (or forgotten, null), as both writers
+ * keep it: the owner's Mac (lib/server/workspaces.ts setMemberAccess) and Bops Cloud for an Admin (cloud/people.ts), so
+ * they agree. Your Apps and Use its computer: what was sent, else what was kept. Access that shows no bot is no entry.
+ * `at` when it's set (now, unless `how.at`), `invite` when set with an invite. The same map back when nothing changes.
+ */
+export function withEntry(map: MemberAccessMap | undefined, key: string, access: MemberAccess | null, how: { invite?: boolean; at?: number } = {}, now = Date.now()): MemberAccessMap | undefined {
+  const clean = access && cleanAccess(access);
+  const kept = map && Object.hasOwn(map, key) ? map[key] : undefined;
+  const apps = isAccessLevel(clean?.apps) ? clean.apps : isAccessLevel(kept?.apps) ? kept.apps : undefined;
+  const computer = isComputerUse(clean?.computer) ? clean.computer : isComputerUse(kept?.computer) ? kept.computer : undefined;
+  const withApps: MemberAccess | null = clean && { others: clean.others, bots: clean.bots, ...(apps ? { apps } : {}), ...(computer ? { computer } : {}) };
+  const keep: MemberAccess | null = withApps && showsAny(withApps) ? { ...withApps, at: how.at ?? now, ...(how.invite ? { invite: true as const } : {}) } : null;
+  if (keep ? kept && sameAccess(keep, kept) && !!kept.invite === !!keep.invite && (how.at === undefined || kept.at === how.at) : !kept) return map;
+  if (keep) return { ...map, [key]: keep };
+  return Object.fromEntries(Object.entries(map ?? {}).filter(([k]) => k !== key));
+}
