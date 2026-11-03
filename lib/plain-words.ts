@@ -9,14 +9,46 @@
  */
 export const dropCitations = (text: string) => text.replace(/\s?[^]*/g, "");
 
+/**
+ * A Markdown table as the chat reads one (components/app/chat-view.tsx Prose) and plainText says it: a row between
+ * pipes, the |---| rule under its header row, and a row's cells.
+ */
+export const isTableRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
+export const isTableRule = (l: string) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
+export const tableCells = (l: string) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+
+/**
+ * Each table in `text` (isTableRow, isTableRule) as one line of words: its first row, each cell after its column's name
+ * ("Client: Acme · Status: Done"), an empty one left out; a table without rows, its column names.
+ */
+function tableWords(text: string) {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!isTableRow(lines[i]) || i + 1 >= lines.length || !isTableRule(lines[i + 1])) {
+      out.push(lines[i]);
+      continue;
+    }
+    const head = tableCells(lines[i]);
+    i += 2;
+    const row = i < lines.length && isTableRow(lines[i]) ? tableCells(lines[i]) : [];
+    const pairs = row.flatMap((c, j) => (c ? [head[j] ? `${head[j]}: ${c}` : c] : []));
+    out.push((pairs.length ? pairs : head.filter(Boolean)).join(" · "));
+    while (i < lines.length && isTableRow(lines[i])) i++;
+    i--;
+  }
+  return out.join("\n");
+}
+
 /** The marks Inline (components/app/chat-view.tsx) reads in a bot's text, by its own pattern: **bold**, [a link](its address), `code`. */
 const INLINE_MARKS = /(\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|`[^`\n]+`)/g;
 
 /**
  * A bot's message as plain text, the words the chat shows without their look (components/app/chat-view.tsx Rich, by
- * its own patterns): a code block's lines as they are, without the ``` around them; outside one, no # before a heading
- * or bullet before a list item, a link's words and not its address, bold without its ** and code without its backticks
- * (what's inside code as it is); no citation markers. For a one-line preview.
+ * its own patterns): a code block's lines as they are, without the ``` around them; outside one, a table's words (its
+ * first row after its columns' names: tableWords), no # before a heading or bullet before a list item, a link's words and not
+ * its address, bold without its ** and code without its backticks (what's inside code as it is); no citation markers.
+ * For a one-line preview.
  */
 export const plainText = (text: string) =>
   dropCitations(text)
@@ -24,7 +56,7 @@ export const plainText = (text: string) =>
     .map((part, i) =>
       i % 2
         ? part
-        : part
+        : tableWords(part)
             .replace(/^[ \t]*(?:#{1,4}|[-*+•])[ \t]+/gm, "")
             .split(INLINE_MARKS)
             .map((s, j) => (j % 2 === 0 ? s : s[0] === "[" ? s.slice(1, s.indexOf("](")) : s[0] === "`" ? s.slice(1, -1) : s.slice(2, -2)))

@@ -1,7 +1,7 @@
 // Tests for lib/plain-words.ts: what a bot's words and steps say to someone who isn't a developer.
 // Usage: node --experimental-strip-types scripts/test-plain-words.mjs
 import assert from "node:assert/strict";
-import { dropCitations, isLocalLink, localOnlyLine, plainStep, plainText, plainTitle } from "../lib/plain-words.ts";
+import { dropCitations, isLocalLink, isTableRow, isTableRule, localOnlyLine, plainStep, plainText, plainTitle, tableCells } from "../lib/plain-words.ts";
 
 let passed = 0;
 const check = (name, fn) => {
@@ -28,10 +28,28 @@ check("a bot's message as plain text: a link's words, no address, brackets, **, 
   for (const t of ["Live: https://trailguides.example.com/live", "-5 degrees", "a * b", "re-run it", "1. Book\n2. Pay", "C# and #tags"]) assert.equal(plainText(t), t, t);
 });
 
+check("a Markdown table says its first row's words, each after its column's name, as one line: no pipes, no |---| rule", () => {
+  const table = "| Client | Status | Due |\n|---|:---:|---|\n| Acme | **Done** | [Mon](https://trailguides.example.com/mon) |\n| Beta | Waiting | Tue |";
+  assert.equal(plainText(table), "Client: Acme · Status: Done · Due: Mon");
+  assert.equal(plainText(`Here's the week:\n${table}\nAll good.`), "Here's the week:\nClient: Acme · Status: Done · Due: Mon\nAll good.", "the words around it stay");
+  assert.equal(plainText("| Name | Note |\n| --- | --- |\n|  | x |"), "Note: x", "an empty cell says nothing");
+  assert.equal(plainText("|  | Mon |\n|---|---|\n| Sam | in |"), "Sam · Mon: in", "a column without a name: its word alone");
+  assert.equal(plainText("| Only | Header |\n|---|---|"), "Only · Header", "no rows: the header");
+  assert.equal(plainText("```\n| a | b |\n|---|---|\n```"), "| a | b |\n|---|---|\n", "in a code block, as it is");
+  // Not a table to the chat either (Rich shows these as they are): pipes in a sentence, a row without its rule.
+  for (const t of ["Pick a | b", "| a | b |\nno rule here"]) assert.equal(plainText(t), t, t);
+});
+
 check("code stays as the chat shows it: a code block's lines and `code` verbatim, only the ``` and backticks go", () => {
   assert.equal(plainText("```\ncode **x** [l](u)\n- y\n```"), "code **x** [l](u)\n- y\n");
   assert.equal(plainText("Match `src/**` or `lib/**` here."), "Match src/** or lib/** here.");
   assert.equal(plainText("Type `[a](b)` then **go**."), "Type [a](b) then go.");
+});
+
+check("a table is read by one pattern, the chat's and the sidebar's: a row between pipes, its rule, its cells", () => {
+  assert.ok(isTableRow("| a | b |") && isTableRow("  |a|  ") && !isTableRow("a | b"));
+  assert.ok(isTableRule("|---|:---:|") && isTableRule("--- | ---") && !isTableRule("| a | b |"));
+  assert.deepEqual(tableCells("| a | **b** |  |"), ["a", "**b**", ""]);
 });
 
 check("steps are said as a person would", () => {

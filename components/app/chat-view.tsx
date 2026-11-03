@@ -38,7 +38,7 @@ import { threadAgentWords, threadKind } from "./bot-ai";
 import { AgentChipPick, boxAgents, pickLine, useBotKeys } from "./new-thread";
 import { AskInPlace, ChatAvatar, chatName, clockTime, memberAnswers, needsYou, post, ReadOnlyLine, StatusIcon, teamOf, useNow } from "./ui";
 import { ReplyDrafts } from "./reply-drafts";
-import { dropCitations, isLocalLink, localOnlyLine, plainStep, plainTitle } from "@/lib/plain-words";
+import { dropCitations, isLocalLink, isTableRow as isRow, isTableRule as isRule, localOnlyLine, plainStep, plainTitle, tableCells as cells } from "@/lib/plain-words";
 import { SkillProposals } from "./skill-proposals";
 
 /** Light markdown for bot text: **bold** and [links](url). */
@@ -124,11 +124,7 @@ function AddressBreaks({ text }: { text: string }) {
   );
 }
 
-const isRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
-const isRule = (l: string) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
-const cells = (l: string) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
-
-/** Text between code blocks: Markdown tables become real tables, "# Headings" bold lines, the rest inline text. */
+/** Text between code blocks: Markdown tables become real tables (read as plainText reads them: lib/plain-words.ts), "# Headings" bold lines, the rest inline text. */
 function Prose({ text }: { text: string }) {
   const lines = text.split("\n");
   const out: React.ReactNode[] = [];
