@@ -1,3 +1,0 @@
-- Admins can add people and answer any ask in a workspace.
-- Admins can wake a shared bot's computer and rename the workspace.
-- Every ask card says who can answer it.
