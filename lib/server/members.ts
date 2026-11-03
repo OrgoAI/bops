@@ -60,9 +60,9 @@ import { setMemberAccess } from "./workspaces";
  */
 
 /** A route's answer: its status and JSON. */
-type Answer = { status: number; body: MembersInfo | MembersRefusal | InviteSent | { ok: true } | { count: number } | { state: string } };
+export type Answer = { status: number; body: MembersInfo | MembersRefusal | InviteSent | { ok: true } | { count: number } | { state: string } };
 type Ready = Extract<MembersInfo, { state: "ready" }>;
-type Got = { status: number; json: Record<string, unknown> } | null;
+export type Got = { status: number; json: Record<string, unknown> } | null;
 
 /** How many people have access, as the People button last read it (membersCount): this user's key's, for 30 seconds. */
 const g = globalThis as unknown as { bopsMembersCount?: { key: string; at: number; count: number } };
@@ -147,7 +147,7 @@ function counted(a: Answer) {
  * /invite, which (on an orgo-web before it kept its gate's status) answers 401 for every refusal of its
  * own gate, a view-only key or a database fault too: there only "Invalid API key" means signed out.
  */
-function refusalOf(got: Got, { invite = false, email }: { invite?: boolean; email?: string } = {}): Answer {
+export function refusalOf(got: Got, { invite = false, email }: { invite?: boolean; email?: string } = {}): Answer {
   if (!got) return no(502, "UNREACHABLE", WORDS.unreachable);
   const j = got.json && typeof got.json === "object" ? got.json : {};
   const code = str(j.code);
@@ -197,7 +197,7 @@ function seatsFromOrgo(raw: unknown): MemberSeats | undefined {
  * with seats_error when it couldn't read the plan); an answer with neither comes from an orgo-web before
  * its plan rule, and the app never stands in for that rule with a guess of its own.
  */
-function seatsOf(json: Record<string, unknown>): { seats: MemberSeats; seatsError?: undefined } | { seats: null; seatsError: SeatsError } {
+export function seatsOf(json: Record<string, unknown>): { seats: MemberSeats; seatsError?: undefined } | { seats: null; seatsError: SeatsError } {
   if (!("seats" in json) && !("seats_error" in json)) return { seats: null, seatsError: "ORGO_NOT_READY" };
   const seats = seatsFromOrgo(json.seats);
   return seats ? { seats } : { seats: null, seatsError: "PLAN_UNAVAILABLE" };
@@ -294,7 +294,7 @@ const levelsOf = (a: MemberAccess, { invite = false } = {}): MemberAccess => ({
  * each with their access to the bots as kept (`access`: none for someone not there), and a member's Use
  * its computer as orgo-web says it, when it does.
  */
-function listOf(json: Record<string, unknown>, workspace: string, access: MemberAccessMap | undefined) {
+export function listOf(json: Record<string, unknown>, workspace: string, access: MemberAccessMap | undefined) {
   const members = (Array.isArray(json.members) ? json.members : []).filter((m): m is OrgoMember => !!m && typeof m === "object");
   const owner = members.find((m) => m.role === "owner");
   const ownerEmail = str(owner?.email);
@@ -517,7 +517,7 @@ const botIdsOf = (wsId: string) => getState().bots.filter((b) => workspaceOf(b) 
  * that can't keep it yet (a database without its column, 503 COMPUTER_USE_UNAVAILABLE; an orgo-web before it, which
  * wants a role, 400; or an answer without the value) is "not yet"; "Member not found" is someone no longer there.
  */
-async function computerInOrgo(key: string, workspace: string, memberId: string, use: boolean): Promise<Answer | null> {
+export async function computerInOrgo(key: string, workspace: string, memberId: string, use: boolean): Promise<Answer | null> {
   const got = (await orgoMembers.setComputer(key, workspace, memberId, use)) as Got;
   const said = str(got?.json?.error) ?? "";
   const code = str(got?.json?.code);
