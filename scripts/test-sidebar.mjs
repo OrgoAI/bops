@@ -328,6 +328,11 @@ await test("A bot's reply on its row is the plain text the chat shows: a link's 
   assert.equal(line(render(world({ messages: [...reads, call("s1", 4, "/v1/customers", "Stripe")] }))), "Looked at something on Stripe", "the run it ends on, another service's");
   const failed = { id: "f1", chatId: "chat_boppy", role: "system", text: "Boppy couldn't call it: GitHub answered 404", appResult: { action: "GitHub GET /repos/acme/site/contents/x.tsx", ok: false, output: "" }, at: min(1) };
   assert.equal(line(render(world({ messages: [...reads, failed] }))), "Boppy couldn&#x27;t call it: GitHub answered 404", "a failed one says why, as its note does");
+  // A table: its first row's words after its columns' names, never its pipes; the chat's own bubble draws the table.
+  const table = "| Client | Status |\n|---|---|\n| Acme | **Done** |\n| Beta | Waiting |";
+  assert.equal(line(render(world({ messages: [reply(table)] }))), "Client: Acme · Status: Done");
+  const bubble = renderToStaticMarkup(h(Rich, { text: table, botId: "boppy" }));
+  assert.match(bubble, /<table[\s\S]*>Client<[\s\S]*>Status<[\s\S]*>Acme<[\s\S]*>Done<[\s\S]*>Beta</, "a real table in the chat, the same cells");
   // A person's message is shown as they wrote it, as the chat shows it.
   assert.equal(line(render(world({ messages: [{ id: "m2", chatId: "chat_boppy", role: "user", text: "Use **bold** [here](https://trailguides.example.com)", at: min(4) }] }))), "You: Use **bold** [here](https://trailguides.example.com)");
   // So is a text or an email someone sent, and a note: the chat shows them raw (TextCard, EmailCard, SystemNote), not as a bot's words.
