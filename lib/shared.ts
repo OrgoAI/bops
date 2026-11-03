@@ -9,7 +9,7 @@ import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
  * the server's memory alone (never in the user's state, never synced, never on disk), and it's shown in
  * place of the user's own workspace while it's open.
  */
-import { ownerOnlyAsk } from "@/lib/member-access";
+import { askOwnersOnly, threadOwnersOnly } from "@/lib/member-access";
 
 /** The roles in a workspace: the owner everything; an Admin every bot, its computer and its apps, all but deleting it; a Member what the owner picks. */
 export type SharedRole = "owner" | "admin" | "member";
@@ -47,6 +47,13 @@ export type SharedOpen = SharedWorkspace & {
    * stays in the server's copy: the window asks /api/workspaces/shared/screen by bot.
    */
   screens?: string[];
+  /**
+   * The owner's Bops takes an Admin's acts (cloud/ws-slice.ts sharedSlice, SharedWsSlice.adminActs): an Admin answers the
+   * owner's own asks and picks where a thread runs; a Member's cards say an Admin can. `ownerOld`: for an Admin, it can't
+   * yet (the owner's Bops needs an update). Neither: a Bops Cloud from before Admin powers.
+   */
+  adminActs?: true;
+  ownerOld?: true;
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
 };
@@ -127,27 +134,113 @@ export function saidName(m: { role: string; member?: { userId: string; name: str
   return who === null ? null : who === "you" ? "You" : who === "owner" ? "Owner" : who.name;
 }
 
-/**
- * Whether the viewer may tell a thread something here (reply, Nothing to add, answer its asks): theirs in their own
- * workspace; in a shared one, with Write on its bot, and never one on the owner's Mac (Bops Cloud refuses it: a
- * member's words never reach work there).
- */
-export const writesThread = (state: Viewing, s: { botId: string; runsOn?: string }) => !readOnly(state, [s.botId]) && !(state.shared && s.runsOn === "mac");
+/** Whether the viewer is an Admin of the shared workspace open whose acts the owner's Bops takes (SharedOpen.adminActs). */
+export const adminActs = (state: Viewing) => state.shared?.role === "admin" && state.shared.adminActs === true;
 
 /**
- * Whether the viewer may answer an ask (lib/types.ts AppApproval) here: theirs in their own workspace; in a shared one,
- * with Write on its bot, never one to use the owner's Connected apps or keys (cloud/member-access.ts ownerOnlyAsk), and
- * never one of a thread on the owner's Mac (writesThread).
+ * Whether the viewer may tell a thread something here (reply, Nothing to add): theirs in their own workspace; in a
+ * shared one, with Write on its bot, and never one on the owner's Mac (Bops Cloud refuses it: a member's words, an
+ * Admin's too, never reach work there: cloud/member-access.ts threadOwnersOnly).
  */
-export function answersAsk(state: Viewing & { sessions?: readonly { id: string; botId: string; runsOn?: string }[] }, a: { botId: string; kind?: string; threadId?: string }): boolean {
-  if (!state.shared) return true;
-  if (readOnly(state, [a.botId]) || ownerOnlyAsk(a.kind)) return false;
-  const t = a.threadId ? state.sessions?.find((x) => x.id === a.threadId) : undefined;
-  return !t || writesThread(state, t);
-}
+export const writesThread = (state: Viewing, s: { botId: string; runsOn?: string }) => !readOnly(state, [s.botId]) && !(state.shared && threadOwnersOnly(s, adminActs(state)));
+
+/** Whether what the viewer tells a thread reaches its bot's computer: in a shared one, only with Use its computer (or on none). */
+const reachesComputer = (state: Viewing, s: { runsOn?: string }) => !state.shared || !!state.shared.computer || s.runsOn === "mac";
+
+/**
+ * Whether the viewer may say they're done with a thread (Dismiss, Never mind, Stop on a card): as telling it more takes
+ * (writesThread), and its computer theirs to use (Bops Cloud refuses it otherwise).
+ */
+export const tellsThread = (state: Viewing, s: { botId: string; runsOn?: string }) => writesThread(state, s) && reachesComputer(state, s);
 
 /** The line on something in a shared workspace only the owner can answer or do, for a viewer who can't. */
 export const OWNER_ONLY_LINE = "Only the owner can answer this.";
+/** The same, once an Admin can answer it too (SharedOpen.adminActs). */
+export const OWNER_OR_ADMIN_LINE = "Only the owner or an Admin can answer this.";
+/** For an Admin, while the owner's Bops is too old to take their answer (SharedOpen.ownerOld). */
+export const OWNER_UPDATE_LINE = "The owner's Bops needs an update before you can answer this.";
+/** An OK to give on the owner's own phone. */
+export const OWNER_PHONE_LINE = "Only the owner can approve this on their phone.";
+/** A payment at the screen: it spends the owner's money. */
+export const OWNER_PAY_LINE = "Only the owner can pay.";
+/** A thread on the owner's Mac (threadOwnersOnly). */
+export const ON_MAC_LINE = "This runs on the owner's Mac. Only the owner can tell it more.";
+/** Work on a bot's computer, for someone the owner hasn't let use it (Use its computer). */
+export const NO_COMPUTER_LINE = "This runs on the bot's computer, and the owner hasn't let you use it.";
+/** What only an Admin does (cloud/protocol.ts ADMIN_ONLY). */
+export const ADMIN_LINE = "Only the owner or an Admin can do this.";
+/** Under an answer on its way while the owner's Bops is shut: it goes when it opens (as long as the ask waits). */
+export const ANSWER_WAITS_LINE = "The owner's Bops is closed. Your answer goes when it opens.";
+
+/** "you" when the viewer answers a card, else the one line shown in place of its buttons (never buttons that do nothing). */
+export type Answerer = "you" | (string & {});
+
+/** Who answers what only the owner, or an Admin the owner's Bops takes acts from, may: the line for this viewer. */
+function ownersLine(state: Viewing): string {
+  const sh = state.shared!;
+  if (sh.role === "admin") return sh.ownerOld ? OWNER_UPDATE_LINE : OWNER_ONLY_LINE;
+  return sh.adminActs ? OWNER_OR_ADMIN_LINE : OWNER_ONLY_LINE;
+}
+
+/**
+ * Who answers an ask (lib/types.ts AppApproval: Deny, Always allow, Allow once) here: "you", or the line to show in
+ * place of its buttons. Theirs in their own workspace; in a shared one, with Write on its bot, and one to use the
+ * owner's Connected apps or keys, or of a thread on the owner's Mac, only for an Admin the owner's Bops takes acts from
+ * (cloud/member-access.ts askOwnersOnly); work on a bot's computer only with Use its computer. Bops Cloud, the owner's
+ * Mac and the viewer's Mac (lib/server/shared-core.ts refusal) go by the same rules.
+ */
+export function askAnswerer(state: Viewing & { sessions?: readonly { id: string; botId: string; runsOn?: string }[] }, a: { botId: string; kind?: string; threadId?: string }): Answerer {
+  if (!state.shared) return "you";
+  if (readOnly(state, [a.botId])) return readOnlyLine([a.botId], state.shared.levels);
+  const t = a.threadId ? state.sessions?.find((x) => x.id === a.threadId) : undefined;
+  if (askOwnersOnly(a, t, adminActs(state))) return ownersLine(state);
+  if (t && !reachesComputer(state, t)) return NO_COMPUTER_LINE;
+  return "you";
+}
+
+/** Whether the viewer may answer an ask here (askAnswerer): what the sidebar's Needs you counts. */
+export const answersAsk = (state: Parameters<typeof askAnswerer>[0], a: Parameters<typeof askAnswerer>[1]) => askAnswerer(state, a) === "you";
+
+/**
+ * Whether the viewer does a screen ask themselves: the owner always; an Admin of a shared workspace for a sign in, a code,
+ * a captcha or a page error, when they have Write on the bot and its computer's screen is theirs to see and control
+ * (computer.tsx SharedScreen). A payment stays the owner's: it spends the owner's money.
+ */
+export function screenAskMine(state: Viewing & { bots: readonly { id: string; runsOn?: string }[] }, botId: string, blocker: string): boolean {
+  if (!state.shared) return true;
+  if (state.shared.role !== "admin" || blocker === "payment" || !canAct(state, [botId])) return false;
+  const bot = state.bots.find((x) => x.id === botId);
+  return !!bot && bot.runsOn !== "mac" && !!state.shared.screens?.includes(botId);
+}
+
+/**
+ * Who answers what a thread waits on (lib/asks.ts askKind: a sign in or check at its screen, its brain's sign in, a
+ * failure, an OK on a phone, a safety OK, or its question), as askAnswerer: "you", or the line in place of its buttons.
+ * A payment and an OK on the owner's phone are the owner's alone; a brain's sign in too (its key or plan is theirs); a
+ * thread on the owner's Mac takes nobody else's words; a check at the screen is an Admin's at the shared screen
+ * (screenAskMine); the rest is a reply, for anyone with Write on its bot (and Use its computer where it runs on one).
+ */
+export function threadAnswerer(state: Viewing & { bots: readonly { id: string; runsOn?: string }[] }, s: { botId: string; runsOn?: string; blocker?: string }, kind?: string): Answerer {
+  if (!state.shared) return "you";
+  if (s.blocker === "payment") return OWNER_PAY_LINE;
+  if (kind === "elsewhere") return OWNER_PHONE_LINE;
+  if (readOnly(state, [s.botId])) return readOnlyLine([s.botId], state.shared.levels);
+  if (threadOwnersOnly(s, adminActs(state))) return ON_MAC_LINE;
+  if (kind === "brain") return OWNER_ONLY_LINE;
+  if (s.blocker) return screenAskMine(state, s.botId, s.blocker) ? "you" : state.shared.role === "admin" ? OWNER_ONLY_LINE : ownersLine(state);
+  if (!reachesComputer(state, s)) return NO_COMPUTER_LINE;
+  return "you";
+}
+
+/**
+ * Who picks where an undecided thread runs (Session.askWhere): "you" in their own workspace, and an Admin the owner's
+ * Bops takes acts from (the bot's computer only: never the owner's Mac); else the line.
+ */
+export function whereAnswerer(state: Viewing, s: { botId: string }): Answerer {
+  if (!state.shared) return "you";
+  if (state.shared.role === "admin") return adminActs(state) && canAct(state, [s.botId]) ? "you" : state.shared.ownerOld ? OWNER_UPDATE_LINE : "It starts as soon as the owner picks.";
+  return state.shared.adminActs ? "It starts as soon as the owner or an Admin picks." : "It starts as soon as the owner picks.";
+}
 
 /** The role as the switcher says it, plainly (lib/members.ts ROLE_NAMES). */
 export const roleLabel = (role: SharedRole) => (role === "member" ? "Member" : role === "admin" ? "Admin" : "Owner");
