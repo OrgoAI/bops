@@ -1004,6 +1004,13 @@ export const ADMIN_PUBLISH_MIN_VERSION = "0.0.40";
  */
 export const KEYS_MIN_VERSION = "0.0.41";
 /**
+ * The first Bops whose Mac keeps an Admin's change to a bot's "How I work" that Bops Cloud wrote while that Mac was away
+ * (cloud/members.ts personaHere) when it merges a later write of its own to the same bot (lib/server/state-merge.ts
+ * keepHowIWork): an older one would put the owner's words back over it, so for an owner whose last Mac is older, Bops
+ * Cloud never writes it and the act waits for that Mac as before. Set to the release that carries it.
+ */
+export const CLOUD_PERSONA_MIN_VERSION = "0.0.42";
+/**
  * 403 MEMBER_OWNER_ONLY for a "key" act turning on one of the owner's own keys (SharedKey scope "all", or `from`): their
  * personal or company keys, which only the owner lets bots use. Turning one off still goes.
  */

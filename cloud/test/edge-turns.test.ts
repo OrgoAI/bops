@@ -447,11 +447,11 @@ test("an Admin with no entry: their message is owed to the computer and claimed 
   box.close();
 });
 
-/** A Bops new enough to take an Admin's How I work (ADMIN_PUBLISH_MIN_VERSION), as the owner's Mac says it on each call. */
-const NEW_MAC = "0.0.41";
-/** The owner's last Mac said NEW_MAC, as their account keeps it (cloud/app-version.ts; /v1/session makes the row, which these owners never called). */
-const macSaid = (owner: string) =>
-  query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET app_version = EXCLUDED.app_version", [owner, NEW_MAC]);
+/** A Bops whose own writes keep an Admin's How I work that Bops Cloud kept (CLOUD_PERSONA_MIN_VERSION), as the owner's Mac says it on each call. */
+const NEW_MAC = "0.0.42";
+/** The owner's last Mac said `version` (NEW_MAC), as their account keeps it (cloud/app-version.ts; /v1/session makes the row, which these owners never called). */
+const macSaid = (owner: string, version = NEW_MAC) =>
+  query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET app_version = EXCLUDED.app_version", [owner, version]);
 /** The owner's state as their Mac reads it from Bops Cloud (persist-cloud.ts load). */
 const ownersState = async (owner: string) => (await (await fetch(`${cloud.url}/v1/state`, { headers: own(owner, "mac-o", NEW_MAC) })).json()) as { version: number; state: { bots: Record<string, unknown>[] } };
 const botOf = (state: { bots: Record<string, unknown>[] }, id: string) => state.bots.find((b) => b.id === id)!;
@@ -492,6 +492,21 @@ test("an Admin's How I work with the owner's Mac shut: Bops Cloud keeps it at on
   const v = (await ownersState(s.owner)).version;
   assert.equal((await act(admin, s.project, "key-persona-01", { act: "persona", botId: "max", text: "Keep replies short.", was: "Sign off as Tara." })).status, 202);
   assert.equal((await ownersState(s.owner)).version, v);
+});
+
+test("an Admin's How I work for an owner whose last Mac is older than CLOUD_PERSONA_MIN_VERSION waits for that Mac as before, even with it shut: Bops Cloud never writes it, so that Mac's next save can't put the owner's words back over it", async () => {
+  const s = await setup();
+  const admin = user("admin");
+  roles[`${admin} ${s.project}`] = { role: "admin", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme" };
+  // 0.0.41 takes an Admin's How I work (ADMIN_PUBLISH_MIN_VERSION), but merges its own later write of the bot without keeping one Bops Cloud kept.
+  await macSaid(s.owner, "0.0.41");
+  const r = await act(admin, s.project, "key-oldmac-01", { act: "persona", botId: "max", text: "Keep replies short.", was: "" });
+  assert.equal(r.status, 202, await r.clone().text());
+  assert.deepEqual(await r.json(), { ok: true, macOn: false }, "queued for the owner's Mac, as before");
+  assert.equal((await query("SELECT 1 FROM bops.cloud_pending WHERE user_id = $1", [s.owner])).rowCount, 1, "one act waiting for it");
+  const kept = (await query<{ state: { bots: Record<string, unknown>[] } }>("SELECT state FROM bops.app_state WHERE user_id = $1", [s.owner])).rows[0].state;
+  assert.equal(botOf(kept, "max").persona, undefined, "never written by Bops Cloud");
+  assert.equal((await messages(s.owner)).some((m) => m.id === `msg_persona_${admin}_key-oldmac-01`), false, "nor said in the chat");
 });
 
 test("an Admin's later How I work wins over an earlier one, one begun from older words is refused, and a Member or a demoted Admin never changes it, with the owner's Mac shut", async () => {
