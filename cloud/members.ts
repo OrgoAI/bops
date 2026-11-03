@@ -1002,7 +1002,6 @@ async function personaHere(o: { target: LiveTarget; viewer: SliceViewer; actor: 
     const slice = sliceOf(blob, target.ws, o.viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     botsTouched(blob, slice, act, o.actor);
-    if (!o.still()) throw new HttpError(404, "No such workspace");
     const all = list(blob.bots);
     const b = all.find((x) => x.id === act.botId);
     if (!b) throw new HttpError(404, "No such bot");
@@ -1014,6 +1013,8 @@ async function personaHere(o: { target: LiveTarget; viewer: SliceViewer; actor: 
     else delete changed.persona;
     const written = { ...blob, bots: all.map((x) => (x === b ? changed : x)) };
     await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+    // After the write, before it's kept: an orgo-web notice for them that landed meanwhile (even during it) takes it back.
+    if (!o.still()) throw new HttpError(404, "No such workspace");
     return { written, bot: typeof b.name === "string" && b.name.trim() ? b.name.trim() : "the bot" };
   });
   if (!out) return;
