@@ -36,7 +36,10 @@ function refused(got: Got, o: { invite?: boolean; email?: string } = {}): Answer
   return body.code === "NOT_OWNER" ? no(403, "NOT_OWNER", ADMIN_SHEET_WORDS.notOwnerOnly) : a;
 }
 
-/** The bots each Member has, as Bops Cloud keeps them for an Admin to read (GET /v1/ws/<id>/people), or null. */
+/**
+ * The bots each Member has, as Bops Cloud keeps them for an Admin to read (GET /v1/ws/<id>/people), or null. An Admin's
+ * (and an Admin invite's) is what they had as a Member, which they get back when made one again.
+ */
 async function entriesOf(o: Open): Promise<MemberAccessMap | null> {
   const got = await o.cloud("GET", "people");
   if (!got || got.status !== 200 || !got.json.entries || typeof got.json.entries !== "object") return null;
@@ -163,7 +166,10 @@ export async function changeShared(body: { memberId?: unknown; invite?: unknown;
       const got = (await orgoMembers.setInviteRole(o.key, o.projectId, email, role)) as Got;
       if (!done(got)) return refused(got, { invite: true, email });
     }
-    const next = access ?? (role === "viewer" && waiting.role === "admin" ? inviteDefault(o.botIds) : undefined);
+    // An Admin's invite made a Member with no bots sent: what was kept for it (Bops Cloud gives it), else Read on every
+    // bot, as a new invite starts (the owner's sheet does the same: lib/server/members.ts).
+    const had = Object.hasOwn(s.entries, email);
+    const next = access ?? (role === "viewer" && waiting.role === "admin" && !had ? inviteDefault(o.botIds) : undefined);
     if (next && (role ?? waiting.role) === "viewer") {
       const fail = await keepBots(o, { invite: email }, { ...next, ...(next.computer === "use" ? { computer: "none" as const } : {}) });
       if (fail) return after(o, fail);
@@ -173,10 +179,14 @@ export async function changeShared(body: { memberId?: unknown; invite?: unknown;
   const memberId = memberIdIn(body.memberId);
   if (!memberId) return no(400, "BAD_REQUEST", WORDS.whatToSend);
   if (memberId === s.info.you.id) return no(400, "SELF", ADMIN_SHEET_WORDS.ownerRow);
+  // Their own row: Leave only. Made a Member by themselves, the bots and Use its computer after it would be written with a
+  // Member's key, which neither orgo-web nor Bops Cloud takes.
+  if (memberId === o.you) return no(400, "SELF", ADMIN_SHEET_WORDS.ownRole);
   const person = s.info.people.find((p) => p.id === memberId);
   if (!person) return no(404, "GONE", WORDS.gone);
   const key = accessKey(person);
-  const had: MemberAccess | undefined = key ? accessOf(s.entries, person) : undefined;
+  // What Bops Cloud keeps for them (under the sheet's key: lib/server/members.ts listOf): for an Admin, what they had as a Member.
+  const had: MemberAccess | undefined = key && Object.hasOwn(s.entries, key) ? accessOf(s.entries, person) : undefined;
   if (role) {
     if (access !== undefined) return no(400, "BAD_REQUEST", WORDS.whatToSend);
     const got = (await orgoMembers.setRole(o.key, o.projectId, memberId, role === "viewer" ? "member" : "admin")) as Got;
@@ -184,7 +194,7 @@ export async function changeShared(body: { memberId?: unknown; invite?: unknown;
     // An Admin made a Member: exactly what they had as one (their entry), else Read on every bot, as an invite starts;
     // Use its computer off in orgo-web unless that entry had it (it said yes while they were an Admin).
     if (role === "viewer" && person.role === "admin") {
-      const kept = had && (had.others !== "none" || Object.keys(had.bots).length) ? had : { ...inviteDefault(o.botIds), computer: "none" as const };
+      const kept = had ?? { ...inviteDefault(o.botIds), computer: "none" as const };
       if (!usesComputer(kept)) {
         const off = await computerInOrgo(o.key, o.projectId, memberId, false);
         if (off) console.warn(`[shared-people] made a member, Use its computer stays as orgo-web had it: ${"code" in off.body ? off.body.code : off.status}`);

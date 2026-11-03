@@ -14,6 +14,7 @@ import {
   COMPUTER_WORDS,
   emailOf,
   ROLE_LINES,
+  ROLE_LINES_SHARED,
   ROLE_NAMES,
   WORDS,
   type Invite,
@@ -870,21 +871,26 @@ function InviteForm({
   );
 }
 
+/** The role words for this sheet: the owner's, or an Admin's of a workspace shared with them (SheetScope), where the apps and the workspace are the owner's. */
+const useRoleLines = () => (useContext(SheetScope) ? ROLE_LINES_SHARED : ROLE_LINES);
+
 /** What the picked role means. An Admin's is the one warning before it's sent, marked like what needs the user. */
 function RoleLine({ role }: { role: MemberRole }) {
+  const lines = useRoleLines();
   return role === "admin" ? (
     <span className="flex items-start gap-1.5 pt-0.5 text-[12.5px] leading-[18px] text-[#3A3A38]">
       <NeedsYouDot className="mt-px" />
-      {ROLE_LINES.admin}
+      {lines.admin}
     </span>
   ) : (
-    <span className="pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">{ROLE_LINES.viewer}</span>
+    <span className="pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">{lines.viewer}</span>
   );
 }
 
 /** Member or Admin, as a segmented control named Role: one choice makes someone an Admin (only once Bops Cloud gives people their role: AppsScope.roles). */
 function AccessPicker({ value, onChange, disabled }: { value: MemberRole; onChange: (role: MemberRole) => void; disabled?: boolean }) {
   const { roles } = useContext(AppsScope);
+  const lines = useRoleLines();
   return (
     <div className="flex shrink-0 items-center gap-1.5">
       <span className="text-[12px] text-[#9A9A98]">Role</span>
@@ -900,7 +906,7 @@ function AccessPicker({ value, onChange, disabled }: { value: MemberRole; onChan
               role="radio"
               aria-checked={on}
               disabled={disabled || held}
-              data-tip={held ? WORDS.fullAccessNotYet : r === "admin" ? ROLE_LINES.admin : ROLE_LINES.viewer}
+              data-tip={held ? WORDS.fullAccessNotYet : r === "admin" ? lines.admin : lines.viewer}
               onClick={() => !on && onChange(r)}
               className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : held ? "text-[#B5B5B3]" : "text-[#6B6B6B] hover:text-ink"}`}
             >
@@ -1088,7 +1094,8 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
             )}
           </SubLine>
         </div>
-        {locked ? <span className="shrink-0 text-[12.5px] text-[#9A9A98]">{ROLE_NAMES[p.role]}</span> : <AccessPicker value={p.role} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />}
+        {/* Their own row on an Admin's sheet: Leave only (shared-people.ts refuses a change to their own role). */}
+        {locked || me ? <span className="shrink-0 text-[12.5px] text-[#9A9A98]">{ROLE_NAMES[p.role]}</span> : <AccessPicker value={p.role} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />}
         {/* Asked in place: while it asks, its question under the row stands for it. */}
         {asking !== "remove" && (!locked || me) && (
           <button onClick={() => setAsking("remove")} className={`${rowAction} shrink-0 text-[#B42318] hover:bg-[#FEF3F2]`}>
@@ -1108,7 +1115,7 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
       )}
       {copied && p.role === "viewer" && (
         <span role="status" className="pl-12 pt-1.5 text-[12px] leading-4 text-[#6B6B6B]">
-          {`${ADMIN_WORDS.toMemberTip} ${WORDS.copiedPassword}`}
+          {`${sheet ? ADMIN_WORDS.toMemberTipShared : ADMIN_WORDS.toMemberTip} ${WORDS.copiedPassword}`}
         </span>
       )}
       {asking === "remove" && (

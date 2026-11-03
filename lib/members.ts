@@ -130,6 +130,11 @@ export const ROLE_LINES: Record<MemberRole, string> = {
   viewer: "Sees and does only what you pick for them.",
   admin: "Every bot, its computer and your apps, and adding people. Only you can delete this workspace.",
 };
+/** The same, on an Admin's sheet of a workspace shared with them: the apps and the workspace are the owner's. */
+export const ROLE_LINES_SHARED: Record<MemberRole, string> = {
+  viewer: "Sees and does only what's picked for them.",
+  admin: "Every bot, its computer and the apps, and adding people. Only the owner can delete this workspace.",
+};
 
 /** The People sheet's words for an Admin (lib/server/members.ts, components/app/members.tsx). */
 export const ADMIN_WORDS = {
@@ -142,6 +147,7 @@ export const ADMIN_WORDS = {
   confirm: "Make Admin",
   toMember: "Make Member",
   toMemberTip: "They keep only the bots you picked for them before.",
+  toMemberTipShared: "They keep only the bots picked for them before.",
   older: "One of your Macs runs an older Bops. Until it updates, it goes by the bots you picked for them.",
   inviteRoleNotReady: "Orgo can't change a waiting invite yet. Resend it to change the role.",
 };
@@ -157,6 +163,7 @@ export const ADMIN_SHEET_WORDS = {
   notOwnerOnly: "Only the owner can add or change people for now.",
   ownersEmail: "That's the owner.",
   ownerRow: "The owner has every bot.",
+  ownRole: "You can't change your own role. Leave, or ask the owner.",
   bots: "Invited, but their bots didn't save. Pick them again.",
 };
 

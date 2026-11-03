@@ -473,7 +473,7 @@ await test("inviting an Admin hides the bots and sends none; an invite's role ch
 
 await test("no dashes, and the sheet says the bots you pick, never the saved logins or keys", async () => {
   const noDashes = (text) => assert.ok(!/[–—]/.test(text), `no dashes: ${text}`);
-  for (const v of [...Object.values(M.ACCESS_TIPS), ...Object.values(M.ROLE_LINES), M.WORDS.sharedOpen, ...Object.values(A.ACCESS_LABELS)]) noDashes(v);
+  for (const v of [...Object.values(M.ACCESS_TIPS), ...Object.values(M.ROLE_LINES), ...Object.values(M.ROLE_LINES_SHARED), M.ADMIN_WORDS.toMemberTipShared, M.ADMIN_SHEET_WORDS.ownRole, M.WORDS.sharedOpen, ...Object.values(A.ACCESS_LABELS)]) noDashes(v);
   // What Write lets a member do, and the line a member reads in place of what they can't (lib/shared.ts readOnlyLine): plain words, Knowledge never Orbit.
   const { readOnlyLine } = await import(`${root}/lib/shared.ts`);
   const lines = [readOnlyLine(), readOnlyLine(["boppy"], { boppy: "read" }), readOnlyLine(["boppy", "sam"], { boppy: "write", sam: "read" })];
@@ -772,8 +772,13 @@ await test("an Admin's sheet: the owner's row has no controls and says what stay
   const me = rowOf(box, "Ada Admin");
   assert.match(me.textContent, /You/);
   assert.ok(buttonOf(me, "Leave") && !buttonOf(me, "Remove"));
+  assert.ok(!buttonOf(me, "Member") && !buttonOf(me, "Admin"), "their own role isn't theirs to change: Leave only");
   const jamie = rowOf(box, "Jamie Lee");
   assert.ok(buttonOf(jamie, "Member") && buttonOf(jamie, "Admin") && !buttonOf(jamie, "Owner"));
+  // The role words in an Admin's: the owner's apps and workspace, never "your" or "only you".
+  assert.equal(buttonOf(jamie, "Admin").getAttribute("data-tip"), M.ROLE_LINES_SHARED.admin);
+  assert.equal(buttonOf(jamie, "Member").getAttribute("data-tip"), M.ROLE_LINES_SHARED.viewer);
+  assert.ok(!box.textContent.includes(M.ROLE_LINES.admin) && !/\byou pick|Only you\b|your apps/.test(Object.values(M.ROLE_LINES_SHARED).join(" ") + M.ADMIN_WORDS.toMemberTipShared));
   assert.ok(buttonOf(jamie, "Bots"), "a Member's bots to pick");
   assert.ok(buttonOf(jamie, "Remove"));
   assert.ok(box.textContent.includes(M.ADMIN_SHEET_WORDS.seats), "the plan is the owner's");

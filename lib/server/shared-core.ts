@@ -1,7 +1,7 @@
 import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
 import { askOwnersOnly, threadOwnersOnly } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
-import { ADMIN_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
+import { ADMIN_LINE, APP_WORK_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
 import { COMPACTED, pairChatId, workBot, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
 import type { RemoteMood } from "./live-core";
 
@@ -248,7 +248,7 @@ export class SharedCopy {
     this.pending.set(key, { ...p, state });
     this.changed();
     // Still waiting by then, it says it didn't go (acts): the window's state changes then too.
-    const t = setTimeout(() => this.pending.get(key)?.state === "waiting" && this.changed(), MEMBER_ACT_MS + 1000);
+    const t = setTimeout(() => this.pending.get(key)?.state === "waiting" && this.changed(), (p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS) + 1000);
     (t as { unref?: () => void }).unref?.();
   }
 
@@ -301,6 +301,9 @@ export class SharedCopy {
     // What only the owner does, whatever the level (cloud/members.ts botsTouched says the same).
     const thread = (id: unknown) => (typeof id === "string" ? c.data.state.sessions.find((x) => x.id === id) : undefined);
     if ((act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act)) && threadOwnersOnly(thread(act.sessionId), admin)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    // The owner's app work: Your Apps at Write too (cloud/members.ts appWorkRefused).
+    const appThread = act.act === "answer" ? thread(c.data.state.approvals?.find((x) => x.id === act.askId)?.threadId) : act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act) ? thread(act.sessionId) : undefined;
+    if (appThread && "app" in appThread && !!appThread.app && c.data.state.apps?.level !== "write") return { status: 403, error: APP_WORK_LINE, code: MEMBER_APPS_READ_ONLY };
     if (act.act === "where") {
       if (act.to === "mac") return { status: 403, error: "Only the owner can run this on their Mac.", code: MEMBER_OWNER_ONLY };
       const t = thread(act.sessionId);

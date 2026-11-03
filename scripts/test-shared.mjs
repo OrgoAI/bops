@@ -2125,5 +2125,32 @@ await check("an answer waits as long as its ask: a Member's or an Admin's is sti
   assert.match(html, /The owner's Bops is closed\. Your answer goes when it opens\./);
 });
 
+await check("the owner's app work: an app thread's ask or question is answered only with Your Apps at Write (an Admin has it), else one line; refused here first; a reply waiting says only that it waits", async () => {
+  const L = await import(`${root}/lib/shared.ts`);
+  const t = { id: "t-app", botId: "boppy", app: { name: "site" } };
+  const st = (shared) => ({ shared: { projectId: "p", name: "W", owner: "", wsId: WS, levels: { boppy: "write" }, computer: true, ...shared }, sessions: [t], bots: [{ id: "boppy" }] });
+  const ask = { botId: "boppy", kind: "email", threadId: "t-app" };
+  assert.equal(L.askAnswerer(st({ role: "member" }), ask), L.APP_WORK_LINE, "no Your Apps");
+  assert.equal(L.askAnswerer(st({ role: "member", apps: { level: "read", list: [] } }), ask), L.APP_WORK_LINE, "Your Apps at Read");
+  assert.equal(L.askAnswerer(st({ role: "member", apps: { level: "write", list: [] } }), ask), "you");
+  assert.equal(L.askAnswerer(st({ role: "admin", adminActs: true, apps: { level: "write", list: [] } }), ask), "you", "an Admin");
+  assert.equal(L.threadAnswerer(st({ role: "member" }), t, "question"), L.APP_WORK_LINE);
+  assert.equal(L.writesThread(st({ role: "member" }), t), false);
+  assert.equal(L.askAnswerer(st({ role: "member" }), { ...ask, threadId: "t-other" }), "you", "only an app thread");
+  // The viewer's Mac says no first, as Bops Cloud and the owner's Mac do.
+  const c = cloudState("running");
+  c.state = { ...c.state, levels: { boppy: "write" }, computer: "use", sessions: [{ ...c.state.sessions[0], id: "t-app", app: { name: "site" } }], approvals: [{ id: "apr-app", botId: "boppy", chatId: "bot:boppy", threadId: "t-app", kind: "email", action: "Send an email", resources: [], at: 4 }] };
+  const copy = new SharedCopy(fakeRead({ status: 200, body: c }).read);
+  await copy.open(listed);
+  assert.deepEqual(copy.refusal({ act: "answer", askId: "apr-app", reply: "once" }), { status: 403, error: L.APP_WORK_LINE, code: "member_apps_read_only" });
+  assert.equal(copy.refusal({ act: "reply", sessionId: "t-app", text: "x" }).code, "member_apps_read_only");
+  // A reply or Dismiss on its way waits only a while: its card never makes the answer's promise.
+  const src = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
+  const from = src.indexOf("function NeedsYouCard(");
+  const card = src.slice(from, src.indexOf("\nfunction ", from + 1));
+  assert.ok(card.includes("REPLY_WAITS_LINE") && !card.includes("ANSWER_WAITS_LINE"));
+  assert.equal(L.REPLY_WAITS_LINE, "Waiting for the owner's Bops to open.");
+});
+
 console.log(`${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

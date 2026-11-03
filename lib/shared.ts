@@ -142,7 +142,7 @@ export const adminActs = (state: Viewing) => state.shared?.role === "admin" && s
  * shared one, with Write on its bot, and never one on the owner's Mac (Bops Cloud refuses it: a member's words, an
  * Admin's too, never reach work there: cloud/member-access.ts threadOwnersOnly).
  */
-export const writesThread = (state: Viewing, s: { botId: string; runsOn?: string }) => !readOnly(state, [s.botId]) && !(state.shared && threadOwnersOnly(s, adminActs(state)));
+export const writesThread = (state: Viewing, s: { botId: string; runsOn?: string; app?: unknown }) => !readOnly(state, [s.botId]) && !(state.shared && threadOwnersOnly(s, adminActs(state))) && !appWorkBlocked(state, s);
 
 /** Whether what the viewer tells a thread reaches its bot's computer: in a shared one, only with Use its computer (or on none). */
 const reachesComputer = (state: Viewing, s: { runsOn?: string }) => !state.shared || !!state.shared.computer || s.runsOn === "mac";
@@ -171,6 +171,16 @@ export const NO_COMPUTER_LINE = "This runs on the bot's computer, and the owner 
 export const ADMIN_LINE = "Only the owner or an Admin can do this.";
 /** Under an answer on its way while the owner's Bops is shut: it goes when it opens (as long as the ask waits). */
 export const ANSWER_WAITS_LINE = "The owner's Bops is closed. Your answer goes when it opens.";
+/** Under a reply or Dismiss on its way while it's shut: those wait only a while (cloud/protocol.ts MEMBER_ACT_MS), then say they didn't go. */
+export const REPLY_WAITS_LINE = "Waiting for the owner's Bops to open.";
+/** The owner's app work (a thread on an app), for someone without Your Apps at Write (cloud/members.ts APP_WORK). */
+export const APP_WORK_LINE = "This is app work. Ask the owner for Write on Your Apps to answer it.";
+
+/**
+ * Whether a thread is the owner's app work the viewer may not tell or answer: one on an app (Session.app, only ever in the
+ * view of someone shown it), without Your Apps at Write here (an Admin always has it). Bops Cloud and the owner's Mac say no.
+ */
+export const appWorkBlocked = (state: Viewing, t: { app?: unknown } | undefined) => !!state.shared && !!t?.app && state.shared.apps?.level !== "write";
 
 /** "you" when the viewer answers a card, else the one line shown in place of its buttons (never buttons that do nothing). */
 export type Answerer = "you" | (string & {});
@@ -189,11 +199,12 @@ function ownersLine(state: Viewing): string {
  * (cloud/member-access.ts askOwnersOnly); work on a bot's computer only with Use its computer. Bops Cloud, the owner's
  * Mac and the viewer's Mac (lib/server/shared-core.ts refusal) go by the same rules.
  */
-export function askAnswerer(state: Viewing & { sessions?: readonly { id: string; botId: string; runsOn?: string }[] }, a: { botId: string; kind?: string; threadId?: string }): Answerer {
+export function askAnswerer(state: Viewing & { sessions?: readonly { id: string; botId: string; runsOn?: string; app?: unknown }[] }, a: { botId: string; kind?: string; threadId?: string }): Answerer {
   if (!state.shared) return "you";
   if (readOnly(state, [a.botId])) return readOnlyLine([a.botId], state.shared.levels);
   const t = a.threadId ? state.sessions?.find((x) => x.id === a.threadId) : undefined;
   if (askOwnersOnly(a, t, adminActs(state))) return ownersLine(state);
+  if (appWorkBlocked(state, t)) return APP_WORK_LINE;
   if (t && !reachesComputer(state, t)) return NO_COMPUTER_LINE;
   return "you";
 }
@@ -220,13 +231,14 @@ export function screenAskMine(state: Viewing & { bots: readonly { id: string; ru
  * thread on the owner's Mac takes nobody else's words; a check at the screen is an Admin's at the shared screen
  * (screenAskMine); the rest is a reply, for anyone with Write on its bot (and Use its computer where it runs on one).
  */
-export function threadAnswerer(state: Viewing & { bots: readonly { id: string; runsOn?: string }[] }, s: { botId: string; runsOn?: string; blocker?: string }, kind?: string): Answerer {
+export function threadAnswerer(state: Viewing & { bots: readonly { id: string; runsOn?: string }[] }, s: { botId: string; runsOn?: string; blocker?: string; app?: unknown }, kind?: string): Answerer {
   if (!state.shared) return "you";
   if (s.blocker === "payment") return OWNER_PAY_LINE;
   if (kind === "elsewhere") return OWNER_PHONE_LINE;
   if (readOnly(state, [s.botId])) return readOnlyLine([s.botId], state.shared.levels);
   if (threadOwnersOnly(s, adminActs(state))) return ON_MAC_LINE;
   if (kind === "brain") return OWNER_ONLY_LINE;
+  if (appWorkBlocked(state, s)) return APP_WORK_LINE;
   if (s.blocker) return screenAskMine(state, s.botId, s.blocker) ? "you" : state.shared.role === "admin" ? OWNER_ONLY_LINE : ownersLine(state);
   if (!reachesComputer(state, s)) return NO_COMPUTER_LINE;
   return "you";

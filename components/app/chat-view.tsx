@@ -13,7 +13,7 @@ import { appCoders } from "@/lib/hosted-apps";
 import { appsShown } from "@/lib/apps-access";
 import { appsOwnShown } from "@/lib/apps-access";
 import { crmOpen } from "@/lib/crm-access";
-import { ANSWER_WAITS_LINE, askAnswerer, canAct, computerLine, isViewerOwn, ownerWho, readOnly, saidBy, saidName, screenAskMine, tellsThread, threadAnswerer, whereAnswerer, writesThread } from "@/lib/shared";
+import { ANSWER_WAITS_LINE, REPLY_WAITS_LINE, askAnswerer, canAct, computerLine, isViewerOwn, ownerWho, readOnly, saidBy, saidName, screenAskMine, tellsThread, threadAnswerer, whereAnswerer, writesThread } from "@/lib/shared";
 import { memberAct } from "./shared-act";
 import { MEMBER_STOP_MAX } from "@/cloud/protocol";
 import { CrmNote } from "./crm";
@@ -3133,7 +3133,8 @@ function NeedsYouCard({
         )}
       </div>
       )}
-      {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
+      {/* A reply or Dismiss waits only a while for the owner's Bops (then says it didn't go): never the answer line's promise. */}
+      {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : REPLY_WAITS_LINE}</span>}
       {shownError && (
         <span role="alert" className="pl-1 text-[12px] leading-4 text-[#B42318]">
           {shownError}

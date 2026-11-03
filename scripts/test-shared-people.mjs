@@ -204,6 +204,21 @@ await check("inviting a Member: orgo-web first, on the owner's seats, then the b
 });
 
 await check("an Admin made a Member gets back their Member entry (else Read on every bot), Use its computer off in orgo-web first; making someone an Admin keeps nothing", async () => {
+  // Bops Cloud keeps Bo's entry from before they were an Admin (one bot at Read): that's what goes back, unchanged.
+  fresh();
+  cloudReplies["GET people"] = () => ({ status: 200, json: { entries: { "bo@example.com": { others: "none", bots: { ivy: "read" }, at: 1_700_000_000_000 } } } });
+  const back = await people("PATCH", { memberId: "u-bo", role: "viewer" });
+  assert.equal(back.status, 200, JSON.stringify(back.body));
+  assert.deepEqual(shape().slice(2), [`orgo PATCH ${membersPath}`, `orgo PATCH ${membersPath}`, "cloud POST people"]);
+  assert.deepEqual(calls[3].body, { memberId: "u-bo", bopsComputerUse: false });
+  assert.deepEqual(calls[4].body, { who: { memberId: "u-bo" }, access: { others: "none", bots: { ivy: "read" }, computer: "none" } }, "their own entry, not Read on every bot");
+  // An entry with Use its computer keeps it on in orgo-web.
+  fresh();
+  cloudReplies["GET people"] = () => ({ status: 200, json: { entries: { "bo@example.com": { others: "none", bots: { max: "write" }, computer: "use" } } } });
+  await people("PATCH", { memberId: "u-bo", role: "viewer" });
+  assert.deepEqual(shape().slice(2), [`orgo PATCH ${membersPath}`, "cloud POST people"]);
+  assert.deepEqual(calls[3].body.access, { others: "none", bots: { max: "write" }, computer: "use" });
+  // None kept for them: Read on every bot, as an invite starts.
   fresh();
   cloudReplies["GET people"] = () => ({ status: 200, json: { entries: {} } });
   const r = await people("PATCH", { memberId: "u-bo", role: "viewer" });
@@ -219,6 +234,23 @@ await check("an Admin made a Member gets back their Member entry (else Read on e
   fresh();
   assert.equal((await people("PATCH", { memberId: "u-owner", role: "viewer" })).status, 400);
   assert.ok(!calls.some((c) => c.method === "PATCH"));
+  // Their own role: never (after it their key could set neither their bots nor Use its computer). Leave stays theirs.
+  fresh();
+  const self = await people("PATCH", { memberId: "u-ada", role: "viewer" });
+  assert.deepEqual([self.status, self.body.error], [400, M.ADMIN_SHEET_WORDS.ownRole]);
+  assert.ok(!calls.some((c) => c.method === "PATCH" || c.method === "POST"));
+  // An Admin's invite made a Member: what's kept for it, else Read on every bot.
+  fresh();
+  replies[`GET ${membersPath}`] = () => json(200, { members: MEMBERS, invites: [{ ...INVITES[0], email: "fay@example.com", role: "admin" }], seats: SEATS, can: { managePeople: true } });
+  cloudReplies["GET people"] = () => ({ status: 200, json: { entries: { "fay@example.com": { others: "none", bots: { max: "read" }, invite: true } } } });
+  await people("PATCH", { invite: "fay@example.com", role: "viewer" });
+  assert.deepEqual(shape().slice(2), [`orgo PATCH ${invitePath}`], "their kept entry stands: nothing written over it");
+  fresh();
+  replies[`GET ${membersPath}`] = () => json(200, { members: MEMBERS, invites: [{ ...INVITES[0], email: "fay@example.com", role: "admin" }], seats: SEATS, can: { managePeople: true } });
+  cloudReplies["GET people"] = () => ({ status: 200, json: { entries: {} } });
+  await people("PATCH", { invite: "fay@example.com", role: "viewer" });
+  assert.deepEqual(shape().slice(2), [`orgo PATCH ${invitePath}`, "cloud POST people"]);
+  assert.deepEqual(calls.at(-1).body.access.bots, { max: "read", ivy: "read" });
 });
 
 await check("a Member's bots and Use its computer: orgo-web first for Use its computer, then the bots on Bops Cloud; an Admin's bots aren't picked", async () => {
