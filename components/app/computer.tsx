@@ -1399,7 +1399,8 @@ export function ComputerSummary({ state, bot: b, className = "", onOpen }: { sta
                     : "Its own, set up on its first task"}
         </span>
       </div>
-      {info?.computer && <span className="shrink-0 font-mono text-[12px] leading-4 text-[#6B6B6B]">{`${info.computer.status === "suspended" ? "asleep" : info.computer.status} · ${info.computer.cpu} CPU`}</span>}
+      {/* Its state and size in the window's own type: words, not code. */}
+      {info?.computer && <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">{`${info.computer.status === "suspended" ? "asleep" : info.computer.status} · ${info.computer.cpu} CPU`}</span>}
       {onOpen && (
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0 text-[#9A9A98] transition-transform group-hover/pc:translate-x-0.5 group-hover/pc:text-ink">
           <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
