@@ -7,8 +7,10 @@ import { closeDb, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
+import type { MemberActPayload } from "../protocol.ts";
+import { howIWork } from "../style.ts";
 import { closeRunners, resetTurns, sweepTurns, turnById, turnTiming } from "../turns.ts";
-import { dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
+import { connectMac, dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
  * Chat through Bops Cloud (cloud/turns.ts, members.ts): in a workspace switched to it, a member's message in a one bot
@@ -32,6 +34,8 @@ const orgoSays = (member: string, project: string, more: Record<string, unknown>
 /** What the fake orgo-web answers a wake with, by desktop (default: running), and each wake it was asked for. */
 const wakeAnswers = new Map<string, (n: number) => Promise<Record<string, unknown>> | Record<string, unknown>>();
 const wakes: { userId: string; desktopId: string; allowHourly: boolean; signed: boolean }[] = [];
+/** A bops-role answer held until the test lets it go, by "<user> <project>": what orgo-web said before a notice, back after it. */
+const held = new Map<string, { until: Promise<void>; reached: boolean }>();
 
 const json = (res: ServerResponse, status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 const readAll = async (req: IncomingMessage) => {
@@ -56,6 +60,11 @@ async function fakeOrgo(): Promise<Listening> {
       }
       const project = /^\/api\/projects\/([^/]+)\/bops-role$/.exec(req.url ?? "")?.[1];
       let m: RegExpExecArray | null;
+      const hold = project && (m = /^key-(.+)$/.exec(key)) ? held.get(`${m[1]} ${project}`) : undefined;
+      if (hold) {
+        hold.reached = true;
+        await hold.until;
+      }
       if (project && (m = /^key-(.+)$/.exec(key))) return roles[`${m[1]} ${project}`] ? json(res, 200, roles[`${m[1]} ${project}`]) : json(res, 404, {});
       if (req.url !== "/api/user/profile") return json(res, 404, {});
       if ((m = /^key-(.+)$/.exec(key))) return json(res, 200, { id: m[1], email: `${m[1]}@example.com`, name: m[1].startsWith("edge-writer") ? "Wren" : undefined });
@@ -84,6 +93,7 @@ after(async () => {
   await orgo.close();
   await query("DELETE FROM bops.cloud_limits WHERE key LIKE 'member:act:edge-%'");
   await query("DELETE FROM bops.cloud_pending WHERE user_id = ANY($1::text[])", [users]);
+  await query("DELETE FROM bops.cloud_accounts WHERE user_id = ANY($1::text[])", [users]);
   await dropUsers(users);
   await closeDb();
 });
@@ -435,6 +445,120 @@ test("an Admin with no entry: their message is owed to the computer and claimed 
   await until(() => box.of("turn-cancel").some((e) => e.data.id === r.turn), "the runner told");
   assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${r.turn}/beat`, { phase: "model" })).status, 409);
   box.close();
+});
+
+/** A Bops new enough to take an Admin's How I work (ADMIN_PUBLISH_MIN_VERSION), as the owner's Mac says it on each call. */
+const NEW_MAC = "0.0.41";
+/** The owner's last Mac said NEW_MAC, as their account keeps it (cloud/app-version.ts; /v1/session makes the row, which these owners never called). */
+const macSaid = (owner: string) =>
+  query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET app_version = EXCLUDED.app_version", [owner, NEW_MAC]);
+/** The owner's state as their Mac reads it from Bops Cloud (persist-cloud.ts load). */
+const ownersState = async (owner: string) => (await (await fetch(`${cloud.url}/v1/state`, { headers: own(owner, "mac-o", NEW_MAC) })).json()) as { version: number; state: { bots: Record<string, unknown>[] } };
+const botOf = (state: { bots: Record<string, unknown>[] }, id: string) => state.bots.find((b) => b.id === id)!;
+
+test("an Admin's How I work with the owner's Mac shut: Bops Cloud keeps it at once, the bot's next turn on its computer has it, nothing waits ten minutes, and the owner's Mac reads it as it opens", async (t) => {
+  const s = await setup();
+  const admin = user("admin");
+  roles[`${admin} ${s.project}`] = { role: "admin", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme" };
+  // The owner's own words on Max, and their last Mac new enough to take an Admin's How I work (ADMIN_PUBLISH_MIN_VERSION): shut now (no tunnel).
+  const head = await ownersState(s.owner);
+  botOf(head.state, "max").persona = "Sign off as Tara.";
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: own(s.owner, "mac-o", NEW_MAC), body: JSON.stringify({ base: head.version, state: head.state }) })).status, 200);
+  await macSaid(s.owner);
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  t.after(() => box.close());
+
+  const r = await act(admin, s.project, "key-persona-01", { act: "persona", botId: "max", text: "Keep replies short.", was: "Sign off as Tara." });
+  assert.equal(r.status, 202, await r.clone().text());
+  assert.deepEqual(await r.json(), { ok: true, macOn: true, stored: true }, "kept now: their window says Saved once its copy has it");
+  // Nothing waits for the owner's Mac, so nothing is dropped at MEMBER_ACT_MS.
+  assert.equal((await query("SELECT 1 FROM bops.cloud_pending WHERE user_id = $1", [s.owner])).rowCount, 0);
+
+  // The bot's next turn on its computer: the runner claims it and reads the bot as it makes the turn's instructions (lib/server/chat.ts persona: personaOf, howIWork).
+  const chat = (await (await act(admin, s.project, "key-persona-chat", { act: "chat", chatId: "bot:max", text: "Plan the launch" })).json()) as { turn?: string };
+  assert.ok(chat.turn, "owed to the computer");
+  await until(() => box.of("turn").some((e) => e.data.id === chat.turn), "the runner's turn event");
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${chat.turn}/claim`, {})).status, 200);
+  const onComputer = botOf(((await (await runner(s.owner, s.desktop, "/v1/state")).json()) as { state: { bots: Record<string, unknown>[] } }).state, "max");
+  const by = onComputer.personaBy as { name: string; ownerText?: string };
+  assert.deepEqual([onComputer.persona, by.name, by.ownerText], ["Keep replies short.", admin, "Sign off as Tara."], "the Admin's words, named as theirs; the owner's own kept for work on their Mac");
+  assert.match(howIWork("Tara", onComputer.persona as string, false, by.name), new RegExp(`How ${admin}, an Admin of Tara's workspace, wants you to work[\\s\\S]*Keep replies short\\.`));
+
+  // The owner's Mac opens: the state it loads has the Admin's words, and the chat says who changed them.
+  const opened = botOf((await ownersState(s.owner)).state, "max");
+  assert.deepEqual([opened.persona, (opened.personaBy as { name: string }).name], ["Keep replies short.", admin]);
+  assert.equal(await noteOf(s.owner, `msg_persona_${admin}_key-persona-01`), `${admin} changed how Max works`);
+  // Sent again (a lost answer): nothing changes, no second note.
+  const v = (await ownersState(s.owner)).version;
+  assert.equal((await act(admin, s.project, "key-persona-01", { act: "persona", botId: "max", text: "Keep replies short.", was: "Sign off as Tara." })).status, 202);
+  assert.equal((await ownersState(s.owner)).version, v);
+});
+
+test("an Admin's later How I work wins over an earlier one, one begun from older words is refused, and a Member or a demoted Admin never changes it, with the owner's Mac shut", async () => {
+  const s = await setup();
+  const admin = user("admin");
+  roles[`${admin} ${s.project}`] = { role: "admin", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme" };
+  await macSaid(s.owner);
+  const persona = (key: string, text: string, was: string, who = admin) => act(who, s.project, key, { act: "persona", botId: "max", text, was });
+  assert.equal((await persona("key-later-01", "Keep replies short.", "")).status, 202);
+  assert.equal((await persona("key-later-02", "Answer in French.", "Keep replies short.")).status, 202);
+  // Begun from the words before the first: someone saved since, so it's refused and the newer words stay.
+  const stale = await persona("key-later-03", "Use bullet points.", "");
+  assert.deepEqual([stale.status, ((await stale.json()) as { error: string }).error], [409, "Changed by someone else. Here's the latest."]);
+  const max = botOf((await ownersState(s.owner)).state, "max");
+  assert.deepEqual([max.persona, (max.personaBy as { ownerText?: string }).ownerText], ["Answer in French.", undefined], "the later edit; the owner had no words of their own");
+  // A Member with Write on Max: an Admin's alone.
+  const m = await persona("key-later-04", "Mine", "Answer in French.", s.writer);
+  assert.deepEqual([m.status, ((await m.json()) as { code: string }).code], [403, "admin_only"]);
+  // Made a Member on orgo.ai since (asked afresh as it's taken), or removed: refused, nothing written.
+  roles[`${admin} ${s.project}`] = { role: "member", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme" };
+  clearAuthCache();
+  assert.equal((await persona("key-later-05", "Demoted", "Answer in French.")).status, 403);
+  delete roles[`${admin} ${s.project}`];
+  assert.equal((await persona("key-later-06", "Removed", "Answer in French.")).status, 404);
+  assert.equal(botOf((await ownersState(s.owner)).state, "max").persona, "Answer in French.");
+  assert.equal((await query("SELECT 1 FROM bops.cloud_pending WHERE user_id = $1", [s.owner])).rowCount, 0, "nothing queued for the Mac either");
+});
+
+test("an Admin removed while their How I work is on its way: orgo-web's notice that lands before it's written refuses it, and nothing is kept", async () => {
+  const s = await setup();
+  const admin = user("admin");
+  roles[`${admin} ${s.project}`] = { role: "admin", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme" };
+  await macSaid(s.owner);
+  let release = () => {};
+  const hold = { until: new Promise<void>((r) => (release = r)), reached: false };
+  held.set(`${admin} ${s.project}`, hold);
+  const sent = act(admin, s.project, "key-race-01", { act: "persona", botId: "max", text: "Too late", was: "" });
+  await until(() => hold.reached, "orgo-web asked");
+  assert.equal((await membersChanged(s.project, admin)).status, 204);
+  held.delete(`${admin} ${s.project}`);
+  release();
+  // orgo-web's answer from before the notice still says Admin (and so does asking again): the notice refuses it all the same.
+  assert.equal((await sent).status, 404);
+  assert.equal(botOf((await ownersState(s.owner)).state, "max").persona, undefined);
+  assert.equal((await messages(s.owner)).some((m) => m.id === `msg_persona_${admin}_key-race-01`), false);
+});
+
+test("an Admin's How I work with the owner's Mac on, or in a workspace whose chat stays on the Mac, waits for that Mac as before", async (c) => {
+  const s = await setup();
+  const admin = user("admin");
+  roles[`${admin} ${s.project}`] = { role: "admin", ownerUserId: s.owner, bopsWsId: "ws_acme", name: "Acme" };
+  await macSaid(s.owner);
+  const mac = await connectMac(cloud.url, s.owner, { headers: { "x-bops-version": NEW_MAC } });
+  c.after(() => mac.ws.close());
+  const on = await act(admin, s.project, "key-macon-01", { act: "persona", botId: "max", text: "Keep replies short.", was: "" });
+  assert.deepEqual((await on.json()) as Record<string, unknown>, { ok: true, macOn: true }, "handed to the owner's Mac, which saves it as its own Save does");
+  await until(() => mac.frames.some((f) => f.t === "event" && (f.payload as MemberActPayload).key === "key-macon-01"), "the Mac's event");
+  assert.equal(botOf((await ownersState(s.owner)).state, "max").persona, undefined, "never written by Bops Cloud while the Mac is on");
+  mac.ws.close();
+  await mac.closed;
+  await until(async () => (await query("SELECT 1 FROM bops.cloud_pending WHERE user_id = $1 AND delivered_at IS NULL", [s.owner])).rowCount === 0, "the Mac's ack");
+  const t = await setup({ cloud: false });
+  roles[`${admin} ${t.project}`] = { role: "admin", ownerUserId: t.owner, bopsWsId: "ws_acme", name: "Acme" };
+  await macSaid(t.owner);
+  const off = await act(admin, t.project, "key-macoff-01", { act: "persona", botId: "max", text: "Keep replies short.", was: "" });
+  assert.deepEqual((await off.json()) as Record<string, unknown>, { ok: true, macOn: false });
+  assert.equal((await query("SELECT 1 FROM bops.cloud_pending WHERE user_id = $1", [t.owner])).rowCount, 1);
 });
 
 test("Use its computer turned off in orgo-web: its notice ends what's owed and running for them, and what they say next stays with a note", async () => {
