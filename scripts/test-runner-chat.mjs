@@ -148,16 +148,19 @@ await check("a turn is claimed, answered in its context on Bops Cloud's clock, a
   assert.equal(TC.turnsRunning(), false);
 });
 
-await check("a reply being answered is marked on its computer (so an upgrade waits for it), and the mark goes when it ends, failed or not", async () => {
-  const { mkdtempSync, readdirSync } = await import("node:fs");
+await check("a reply is marked on its computer from before its claim until its end is said to Bops Cloud, failed or not; an upgrade's hold stops a new one before its claim, unless it's stale", async () => {
+  const { mkdtempSync, readdirSync, writeFileSync, utimesSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
-  const dir = `${mkdtempSync(`${tmpdir()}/bops-turns-`)}/turns`;
+  const base = mkdtempSync(`${tmpdir()}/bops-turns-`);
+  const dir = `${base}/turns`;
+  const hold = `${base}/upgrading`;
   for (const [id, fails] of [["t_mark", false], ["t_mark_fail", true]]) {
     reset();
     const T = Date.now();
     state.messages.push({ id: `m_${id}`, chatId: "bot:max", role: "user", text: "hi", at: T });
-    answers.set("claim", claimed(id, `m_${id}`, T));
-    let during;
+    let atClaim, during, atDone;
+    answers.set("claim", () => ((atClaim = readdirSync(dir)), claimed(id, `m_${id}`, T)));
+    answers.set("done", () => ((atDone = readdirSync(dir)), { status: 200, body: { ok: true } }));
     R.runnerChatForTests({
       identity: async () => "same",
       turnsDir: dir,
@@ -168,9 +171,24 @@ await check("a reply being answered is marked on its computer (so an upgrade wai
       },
     });
     await R.answerTurn(ev(id, `m_${id}`));
-    assert.deepEqual(during, [id], "marked while it runs");
-    assert.deepEqual(readdirSync(dir), [], "gone once it ends");
+    assert.deepEqual([atClaim, during, atDone], [[id], [id], [id]], `${id}: marked at its claim, while it runs, and as its end is said`);
+    assert.deepEqual(readdirSync(dir), [], `${id}: gone after`);
   }
+  // An upgrade holds the runner: a new reply isn't claimed (Bops Cloud gives it again), and leaves no mark.
+  reset();
+  writeFileSync(hold, "");
+  let ran = 0;
+  answers.set("claim", claimed("t_held", "m_held", Date.now()));
+  state.messages.push({ id: "m_held", chatId: "bot:max", role: "user", text: "hi", at: Date.now() });
+  R.runnerChatForTests({ identity: async () => "same", turnsDir: dir, answer: async () => (ran++, { text: "hi" }) });
+  await R.answerTurn(ev("t_held", "m_held"));
+  assert.deepEqual([paths(), ran, readdirSync(dir)], [[], 0, []], "held: nothing claimed, run or left marked");
+  // A hold from an upgrade that died (over 5 minutes old) holds nothing.
+  const old = new Date(Date.now() - 6 * 60_000);
+  utimesSync(hold, old, old);
+  await R.answerTurn(ev("t_held", "m_held"));
+  assert.deepEqual([paths(), ran], [["claim", "done"], 1]);
+  R.runnerChatForTests({});
 });
 
 await check("an Admin's turn (TurnMember.role, as Bops Cloud found it taking their words) is answered as an Admin's: the role goes down to the turn", async () => {

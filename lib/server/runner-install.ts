@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { RUNNER_TURNS_DIR } from "@/cloud/protocol";
+import { RUNNER_HOLD, RUNNER_TURNS_DIR } from "@/cloud/protocol";
 import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, workspaceOf, type AppState, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { forgetGoneMembers, othersCanUse } from "./members";
@@ -294,8 +294,7 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
     `mkdir -p "$d/incoming" /var/log/bops /etc/supervisor/conf.d`,
     `exec 9>"$d/.lock"`,
     "flock -w 120 9",
-    // A reply its runner is answering now: nothing is touched (restarting it would cut the reply off); tried again later.
-    `if [ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ]; then echo __BOPS_BUSY__; exit 0; fi`,
+
     `cd "$d/incoming"`,
     `if [ -f ${q(b.name)} ]; then`,
     `  printf '%s  %s\\n' ${q(b.sha256)} ${q(b.name)} | sha256sum -c --status`,
@@ -310,6 +309,10 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
     "  echo __BOPS_NO_FILES__",
     "  exit 3",
     "fi",
+    // The runner is held (RUNNER_HOLD: it starts no new reply), then a reply it's answering stops the upgrade before any
+    // file of the runner is swapped (restarting it would cut the reply off); tried again later. The hold goes at the end.
+    `mkdir -p ${RUNNER_TURNS_DIR} && touch ${RUNNER_HOLD} && trap 'rm -f ${RUNNER_HOLD}' EXIT`,
+    `if [ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ]; then echo __BOPS_BUSY__; exit 0; fi`,
     `ln -sfn ${q(dirName)} "$d/current.next"`,
     `mv -Tf "$d/current.next" "$d/current"`,
     `for v in "$d"/*/; do v="\${v%/}"; case "\${v##*/}" in incoming|current|${dirName}) ;; *) rm -rf "$v" ;; esac; done`,

@@ -755,6 +755,13 @@ await check("one that's up isn't set up again while it answers a reply (a restar
   }
   const probe = I.probeScript("0.0.29-buildA1");
   assert.ok(probe.includes("find /var/run/bops/turns -type f -mmin -2") && probe.includes("echo busy=yes || echo busy=no"), "the probe reads the runner's marks");
+  // In the install script: unpacking first (it takes a while), then the hold, then the marks, then the swap and restart.
+  const script = I.installScript({ name: "bops-server.tgz", sha256: "0".repeat(64), version: "0.0.29", buildId: "buildA1" }, "#!/bin/sh\n");
+  const at = (x) => script.indexOf(x);
+  assert.ok(at("tar -xzf") < at("touch /var/run/bops/upgrading"), "held only after unpacking");
+  assert.ok(at("touch /var/run/bops/upgrading") < at("find /var/run/bops/turns -type f -mmin -2"), "the marks read after the hold");
+  assert.ok(at("find /var/run/bops/turns") < at('ln -sfn') && at("find /var/run/bops/turns") < at("supervisorctl restart"), "both before any file is swapped");
+  assert.ok(script.includes("trap 'rm -f /var/run/bops/upgrading' EXIT"), "the hold goes when the script ends, whatever happens");
 });
 
 await check("a runner kept on for a run paused for the owner's OK (routines moved to the Mac) whose workspace is then shared: that run ends for good with it, as no runner is left to read the answer; so does one of a runner that failed with no key of Bops' to take back", async () => {
