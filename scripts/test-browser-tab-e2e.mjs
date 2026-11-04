@@ -267,9 +267,9 @@ const owner = await person("owner");
 const sam = await person("sam");
 const shot = (p, name) => p.screenshot({ path: join(OUT, "shots", `${name}.png`) });
 
-/** What a person's Browser tab shows: the address bar, the state (its look, line and the line's background), the frame (its canvas as a JPEG, once drawn). */
-const view = (p) =>
-  p.evaluate(() => {
+/** What a person's Browser tab shows: the address bar, the state (its look, line and the line's background), the frame (once drawn: true, or with `withFrame` its canvas as a JPEG). */
+const view = (p, withFrame = false) =>
+  p.evaluate((withFrame) => {
     const box = document.querySelector('[data-bot-browser]');
     if (!box) return null;
     const line = box.querySelector("[data-browser-line]");
@@ -279,12 +279,13 @@ const view = (p) =>
       look: box.getAttribute("data-browser-look"),
       line: line?.textContent ?? null,
       lineBg: line ? getComputedStyle(line).backgroundColor : null,
-      frame: (() => {
+      // Encoded only when asked: a JPEG of the canvas on every poll would load the page being timed.
+      frame: withFrame ? (() => {
         const c = box.querySelector("canvas[data-browser-frame]");
         return c && c.dataset.drawn !== undefined ? c.toDataURL("image/jpeg", 0.95) : null;
-      })(),
+      })() : box.querySelector("canvas[data-browser-frame][data-drawn]") ? true : null,
     };
-  });
+  }, withFrame);
 const HIGHLIGHTER = "rgb(233, 255, 59)";
 /**
  * B2.5: a state of the tab, shot as it is and with every colour taken out (the delete-the-colour test). A CDP shot of
@@ -407,7 +408,7 @@ async function seesNavigation(p, who) {
   const direct = await directShot();
   // The frame that matches it: the first one at or after the address, within the 2 s.
   const matched = await until(async () => {
-    const v = await view(p);
+    const v = await view(p, true);
     const d = v?.frame ? await diff(p, v.frame, direct) : 255;
     return d < MATCH && { v, d, at: Date.now() };
   }, `${who}'s frame to show ${nav.word}`, 5000);
@@ -875,7 +876,7 @@ try {
     await clickOnFrame(sam.page, "#note");
     await sam.page.keyboard.type("hello from Sam", typing());
     await until(async () => (await onPage("document.getElementById('echo').textContent")) === "hello from Sam", "the field to take sam's typing");
-    await until(async () => (await diff(sam.page, (await view(sam.page)).frame, await directShot())) < MATCH, "sam's frame to show it");
+    await until(async () => (await diff(sam.page, (await view(sam.page, true)).frame, await directShot())) < MATCH, "sam's frame to show it");
     await shot(sam.page, "sam-in-control-typed");
     await still(sam, "sam in control, typed");
     // A method outside the allowlist: refused before it reaches the bot's computer.

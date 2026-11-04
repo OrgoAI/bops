@@ -195,6 +195,8 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     });
     return () => {
       es.close();
+      // A frame still decoding is stale now: it frees itself when it's done.
+      frames.current++;
       clearTimeout(held.current.timer);
       held.current = {};
       setControl({ by: null, you: false });
