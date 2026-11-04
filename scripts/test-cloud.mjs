@@ -1015,7 +1015,10 @@ assert.deepEqual(PI.peopleShort({ plan: "usage", limit: 0, used: 0, caps: { pro_
   upgrade: null,
 });
 const SH = await import(`${root}/lib/shared.ts`);
-assert.equal(SH.ownerCredit(Cl.outOfCreditWords()), "I'm out of Orgo credit, so I've stopped.");
+// A teammate reads whose credit it is and who can add more, never "Add credit in Settings" (their Settings can't).
+assert.equal(SH.ownerCredit(Cl.outOfCreditWords()), "I'm out of Orgo credit, so I've stopped. It's the owner's credit: only they can add more.");
+assert.equal(SH.ownerCredit("I'm out of AI credit, so I've stopped. Upgrade in Settings to keep me going."), "I'm out of AI credit, so I've stopped. It's the owner's credit: only they can add more.");
+assert.equal(SH.ownerCredit("Anything else, as it is."), "Anything else, as it is.");
 // The card bops.bot and the sheet show, with orgo-web's prices when it said them; no dashes, no Bops plan named.
 assert.deepEqual(PI.usageCard({ hourlyCents: 12, numberCents: 350 }).lines.map((l) => l.text).slice(0, 3), ["Your computer: $0.12 an hour while it works, free while it sleeps", "AI at Orgo's rate", "New Orgo accounts start with $5 of credit"]);
 for (const line of [PI.USAGE_CARD.name, PI.USAGE_CARD.computers.detail, ...PI.USAGE_CARD.lines.map((l) => l.text), B.OUT_OF_CREDIT_WAKE, B.extensionLine(Date.now())])
