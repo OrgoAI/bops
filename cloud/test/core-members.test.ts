@@ -7,7 +7,8 @@ import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritte
 import { accessSummary, adminMay, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, sameAccess, withEntry, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
 import { accessFor, adminGate, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange, THIS_WS } from "../change-routes.ts";
-import { ADMIN_POWERS_MIN_VERSION, KEYS_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
+import type { WakeRefusal } from "../turns.ts";
+import { ADMIN_POWERS_MIN_VERSION, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
 /**
@@ -1300,7 +1301,10 @@ const actOwner: Record<string, unknown> = {
 /** What each act route test queued, as the owner's Mac would get it, and what was dropped. */
 const queued: { owner: string; kind: string; payload: MemberActPayload; dedupe: string; expires: Date }[] = [];
 const dropped: string[] = [];
-function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean; edits?: boolean; keysGate?: boolean; changesGate?: boolean } = {}) {
+/** Each wake a files route test asked for (members.ts filesIn), and what the next one answers. */
+const wakes: { account: string; desktop: string; ws: string; names: { owner: string; bot: string } }[] = [];
+let wakeSays: { ok: boolean; state: string; why?: string; note?: WakeRefusal } = { ok: true, state: "running" };
+function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean; edits?: boolean; keysGate?: boolean; changesGate?: boolean; filesGate?: boolean } = {}) {
   queued.length = 0;
   dropped.length = 0;
   resetMembers({
@@ -1313,9 +1317,21 @@ function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEm
     // a bot's "How I work" (a newer Bops than the other acts need), as `adminGate` unless the test says.
     // `keysGate`: whether it takes a "key" act (KEYS_MIN_VERSION), no unless the test says.
     // `changesGate`: whether it takes a "change" act and Members' switches (CHANGES_MIN_VERSION), no unless the test says.
+    // `filesGate`: whether it takes a member's message with files (MEMBER_FILES_MIN_VERSION), no unless the test says.
     adminGate: async (_owner, min) =>
-      min === ADMIN_POWERS_MIN_VERSION ? (opts.adminGate ?? false) : min === KEYS_MIN_VERSION ? (opts.keysGate ?? false) : min === CHANGES_MIN_VERSION ? (opts.changesGate ?? false) : (opts.edits ?? opts.adminGate ?? false),
+      min === ADMIN_POWERS_MIN_VERSION
+        ? (opts.adminGate ?? false)
+        : min === KEYS_MIN_VERSION
+          ? (opts.keysGate ?? false)
+          : min === CHANGES_MIN_VERSION
+            ? (opts.changesGate ?? false)
+            : min === MEMBER_FILES_MIN_VERSION
+              ? (opts.filesGate ?? false)
+              : (opts.edits ?? opts.adminGate ?? false),
+    wake: async (account, desktop, ws, names) => (wakes.push({ account, desktop, ws, names }), wakeSays),
   });
+  wakes.length = 0;
+  wakeSays = { ok: true, state: "running" };
   roles["act-sam proj-act"] = { role: "member", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts", joinedAt: 1_700_000_000_000 };
   roles["act-tom proj-act"] = { role: "admin", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
   roles["act-owner proj-act"] = { role: "owner", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
@@ -1409,6 +1425,108 @@ test("over HTTP: the owner, a project with no workspace of its own, a bad body, 
   assert.deepEqual([runner.status, runner.json.code], [403, "computer_not_allowed"], "a computer's runner never acts for a member");
   assert.equal((await fetch(`${base}/v1/ws/proj-act/other`, { method: "POST", headers: { authorization: "Bearer key-act-sam" }, body: "{}" })).status, 404);
   assert.equal(queued.length, 0);
+});
+
+/* ---------------- Files, for a member with Write and Use its computer ---------------- */
+
+/** The owner whose bots have computers: Max his own, Rex on Max's (the main bot's), Ivy at Read for Sam, Mia on the owner's Mac; Lee without Use its computer. */
+const filesOwner: Record<string, unknown> = {
+  ...actOwner,
+  owner: { name: "Alex" },
+  workspaces: [
+    {
+      id: "ws_act",
+      name: "Acts",
+      memberAccess: {
+        "sam@example.com": { others: "none", bots: { max: "write", rex: "write", ivy: "read", mia: "write" }, at: 1_700_000_001_000, computer: "use" },
+        "lee@example.com": { others: "none", bots: { max: "write" }, at: 1_700_000_001_000 },
+      },
+    },
+  ],
+  bots: [
+    { id: "max", name: "Max", workspaceId: "ws_act", isMain: true, computerId: "pc_max" },
+    { id: "rex", name: "Rex", workspaceId: "ws_act", computer: "shared" },
+    { id: "ivy", name: "Ivy", workspaceId: "ws_act", computerId: "pc_ivy" },
+    { id: "mia", name: "Mia", workspaceId: "ws_act", runsOn: "mac", computerId: "pc_mia" },
+  ],
+  chats: [
+    { id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_act" },
+    { id: "bot:rex", kind: "bot", botIds: ["rex"], workspaceId: "ws_act" },
+    { id: "bot:ivy", kind: "bot", botIds: ["ivy"], workspaceId: "ws_act" },
+  ],
+};
+function filesFakes(opts: { filesGate?: boolean } = {}) {
+  actFakes({ owner: filesOwner, filesGate: opts.filesGate ?? true });
+  roles["act-lee proj-act"] = { role: "member", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts", joinedAt: 1_700_000_000_000 };
+  emails["act-lee"] = "lee@example.com";
+}
+const filesAt = (user: string, body: unknown) =>
+  fetch(`${base}/v1/ws/proj-act/files`, { method: "POST", headers: { authorization: `Bearer key-${user}`, "content-type": "application/json" }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, json: (await r.json().catch(() => ({}))) as Record<string, unknown> }));
+const aFile = (o: Record<string, unknown> = {}) => ({ id: "file_1", name: "Q3 report.pdf", size: 2048, path: "~/Desktop/Q3 report.pdf", botId: "max", hostId: "max", hostName: "Max", ...o });
+
+test("over HTTP: files: a Member with Write and Use its computer, or an Admin, is named the owner's computer, woken as a message would wake it", async () => {
+  filesFakes();
+  const sam = await filesAt("act-sam", { botId: "max" });
+  assert.deepEqual([sam.status, sam.json], [200, { computerId: "pc_max", botId: "max", hostId: "max", hostName: "Max" }]);
+  assert.deepEqual(wakes, [{ account: "act-owner", desktop: "pc_max", ws: "ws_act", names: { owner: "Alex", bot: "Max" } }], "the owner's say on an hourly computer");
+  // A bot on the main bot's computer: that one, named as Max's.
+  assert.deepEqual((await filesAt("act-sam", { botId: "rex" })).json, { computerId: "pc_max", botId: "rex", hostId: "max", hostName: "Max" });
+  // An Admin: every bot, and a drop on a screen they see (Mia's computer, though she works on the owner's Mac).
+  assert.equal((await filesAt("act-tom", { botId: "ivy" })).status, 200);
+  assert.deepEqual((await filesAt("act-tom", { botId: "mia", screen: true })).json, { computerId: "pc_mia", botId: "mia", hostId: "mia", hostName: "Mia" });
+});
+
+test("over HTTP: files: no Write, no Use its computer, a screen drop by a Member, a bot on the owner's Mac, an old owner's Bops, or a computer that won't wake are refused in words", async () => {
+  filesFakes();
+  const refused = async (user: string, body: unknown, status: number, code?: string, words?: RegExp) => {
+    const r = await filesAt(user, body);
+    assert.deepEqual([r.status, r.json.code], [status, code], JSON.stringify(body));
+    if (words) assert.match(String(r.json.error), words);
+  };
+  await refused("act-sam", { botId: "ivy" }, 403, "member_read_only", /not add files for it\. Ask the owner for Write/);
+  await refused("act-lee", { botId: "max" }, 403, "member_no_computer", /^The owner hasn't let you use this bot's computer, so you can't add files for it\.$/);
+  await refused("act-sam", { botId: "max", screen: true }, 403, "admin_only");
+  await refused("act-sam", { botId: "mia" }, 409, "not_waiting", /^Mia works on Alex's Mac, where added files can't be opened yet\.$/);
+  await refused("act-sam", { botId: "zed" }, 404);
+  await refused("act-owner", { botId: "max" }, 403, "own_workspace");
+  await refused("act-stranger", { botId: "max" }, 404);
+  await refused("act-sam", { botId: 5 }, 400);
+  wakeSays = { ok: false, state: "hourly", note: "hourly" };
+  await refused("act-sam", { botId: "max" }, 409, "not_waiting", /^Max's computer is paid by the hour, and Alex hasn't let messages wake it, so files can't go on it now\.$/);
+  wakeSays = { ok: false, state: "refused", note: "noCredit" };
+  await refused("act-sam", { botId: "max" }, 402, "not_waiting", /Alex is out of Orgo credit/);
+  // Waking not set up on this Bops Cloud: Orgo wakes it for the file's first step.
+  wakeSays = { ok: false, state: "unset", why: "Waking computers isn't set up here." };
+  assert.equal((await filesAt("act-sam", { botId: "max" })).status, 200);
+  filesFakes({ filesGate: false });
+  await refused("act-sam", { botId: "max" }, 409, "owner_bops_old", /needs an update before you can add files/);
+  assert.equal(wakes.length, 0, "nothing woken for a refusal");
+});
+
+test("over HTTP: a member's message with files carries them to the owner's Mac; files alone go; each must be the chat's bot's, on its computer, theirs to use", async () => {
+  filesFakes();
+  const r = await act("act-sam", { key: "k_files_001", act: { act: "chat", chatId: "bot:max", text: "Read this", files: [aFile()] } });
+  assert.equal(r.status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "chat", chatId: "bot:max", text: "Read this", files: [aFile()] });
+  assert.equal((await act("act-sam", { key: "k_files_002", act: { act: "chat", chatId: "bot:max", text: "", files: [aFile()] } })).status, 202, "files alone");
+  assert.equal((await act("act-sam", { key: "k_files_003", act: { act: "chat", chatId: "bot:rex", text: "x", files: [aFile({ botId: "rex" })] } })).status, 202, "Rex's, on Max's computer");
+  const refused = async (body: unknown, status: number, code?: string, user = "act-sam") => {
+    const x = await act(user, body);
+    assert.deepEqual([x.status, x.json.code], [status, code], JSON.stringify(body));
+  };
+  const n = queued.length;
+  await refused({ key: "k_files_004", act: { act: "chat", chatId: "bot:max", text: "x", files: [aFile({ botId: "ivy", hostId: "ivy" })] } }, 409, "not_waiting");
+  await refused({ key: "k_files_005", act: { act: "chat", chatId: "bot:max", text: "x", files: [aFile({ hostId: "ivy" })] } }, 409, "not_waiting");
+  await refused({ key: "k_files_006", act: { act: "chat", chatId: "bot:max", text: "x", files: [aFile({ name: "../x", path: "~/Desktop/../x" })] } }, 400);
+  await refused({ key: "k_files_007", act: { act: "chat", chatId: "bot:max", text: "x", files: Array.from({ length: 11 }, (_, i) => aFile({ id: `file_${i}` })) } }, 400);
+  await refused({ key: "k_files_008", act: { act: "chat", chatId: "bot:max", text: "", files: [] } }, 400);
+  await refused({ key: "k_files_009", act: { act: "chat", chatId: "bot:max", text: "x", files: [aFile()] } }, 403, "member_no_computer", "act-lee");
+  assert.equal(queued.length, n, "nothing refused was queued");
+  filesFakes({ filesGate: false });
+  await refused({ key: "k_files_010", act: { act: "chat", chatId: "bot:max", text: "x", files: [aFile()] } }, 409, "owner_bops_old");
+  assert.equal(queued.length, 0);
+  // Words alone still go, whatever the owner's Bops.
+  assert.equal((await act("act-sam", chatAct("bot:max", "k_files_011"))).status, 202);
 });
 
 test("over HTTP: a message as long as MEMBER_MAX_TEXT allows goes, in any script: the body's limit is never under it", async () => {

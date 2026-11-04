@@ -1,0 +1,1 @@
+- Teammates can add files in a shared workspace's chats.

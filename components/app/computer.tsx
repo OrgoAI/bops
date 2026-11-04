@@ -1347,6 +1347,9 @@ function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
   const [failed, setFailed] = useState(false);
   const [control, setControl] = useState(false);
   const orgoUrl = state.shared?.orgoUrl;
+  // Files dropped on it go on that computer's Desktop, for whoever is shown it and may take control (an Admin: Bops Cloud
+  // checks it again, cloud/members.ts filesIn), with their own Orgo key (lib/server/bot-files.ts).
+  const screenDrop = useScreenDrop(b.id);
   if (failed)
     return (
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 py-2 text-[14px] leading-5 text-[#6B6B6B]">
@@ -1360,8 +1363,9 @@ function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
     );
   return (
     <div data-shared-screen className="flex flex-col gap-2">
-      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-[20px] bg-black" style={{ backgroundImage: botWash(b) }}>
+      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-[20px] bg-black" style={{ backgroundImage: botWash(b) }} {...screenDrop.dropProps}>
         <LiveDesktop botId={b.id} display={99} interactive={control} planUrl={`/api/workspaces/shared/screen?bot=${encodeURIComponent(b.id)}`} bot={b} busy={control} onFail={() => setFailed(true)} className="h-full w-full" />
+        <ScreenDrops over={screenDrop.over} drops={screenDrop.drops} onClose={screenDrop.close} host={workBot(b, state.bots).name} />
       </div>
       <div className="flex flex-wrap items-center gap-2 px-1">
         <button type="button" onClick={() => setControl((x) => !x)} className={`rounded-full px-3 py-1 text-[13px] font-medium leading-4 ${control ? "bg-ink text-white" : "text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-black/[0.04]"}`}>

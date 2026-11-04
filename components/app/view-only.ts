@@ -20,8 +20,8 @@ import { changeRouteOf } from "@/cloud/change-routes";
 /**
  * The calls that still go while it's open: the switcher (leaving, switching, its names, and an Admin's live screen of a
  * bot there, /api/workspaces/shared/screen, which takes the computer from the shared copy), signing in and out,
- * notices, usage events, what's on screen, the user's own vault, account and name, and the shared bot's browser
- * (/api/browser: Bops Cloud decides who may watch it).
+ * notices, usage events, what's on screen, the user's own vault, account and name, the shared bot's browser
+ * (/api/browser: Bops Cloud decides who may watch it), and a file added for a shared bot (/api/bots/files: the same).
  */
 const ALLOWED = [
   /^\/api\/workspaces(\/|\?|$)/,
@@ -39,6 +39,10 @@ const ALLOWED = [
   // that workspace's own keys alone (lib/server/shared-keys.ts: orgo-web with the user's own Orgo key, which checks they
   // have Keys there; a bot's switch is an act through Bops Cloud), never the user's own vault or bots.
   /^\/api\/keys(\/|\?|$)/,
+  // A file added in a chat or dropped on a bot's screen (attachments.tsx sendFile): while a shared workspace is open it goes
+  // on the owner's computer Bops Cloud names for that bot (lib/server/shared.ts sharedFileTarget), for someone with Write
+  // and Use its computer, with the user's own Orgo key; never on the user's own bot of that id.
+  /^\/api\/bots\/files(\?|$)/,
 ];
 
 /** The reads that don't go while it's open: answered from the user's own bot or workspace of that id, never the shared one's. */

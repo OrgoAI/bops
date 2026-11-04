@@ -147,7 +147,8 @@ globalThis.__fake = {
     answerMessage: async (chatId, messageId, member) => void did.push(["answer", chatId, messageId, member]),
     handleMessage: async (chatId, text, replyTo, ...rest) => {
       const member = rest[6];
-      did.push(["chat", chatId, text, replyTo, member]);
+      // (The files with it, when it has any: chat.ts handleMessage's last.)
+      did.push(["chat", chatId, text, replyTo, member, ...(rest[10] ? [rest[10]] : [])]);
       state.messages.push({ id: `m${state.messages.length}`, chatId, role: "user", text, at: Date.now(), member });
     },
   },
@@ -251,6 +252,25 @@ await check("a chat to a bot they have at Write is the member's message, once pe
   // The tunnel sends it again (an ack lost): their words are there, nothing more.
   await memberEvent(event({ act: "chat", chatId: "bot:max", text: "Book the 9am train" }), "e1");
   assert.equal(did.length, 1);
+});
+
+await check("a member's files with their message are kept on it, so the bot is told where; files alone go too; one for another bot or computer never", async () => {
+  fresh();
+  const file = { id: "file_1", name: "Q3 report.pdf", size: 2048, path: "~/Desktop/Q3 report.pdf", botId: "max", hostId: "max", hostName: "Max" };
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "Read this", files: [file] }), "e_files");
+  assert.deepEqual(did, [["chat", "bot:max", "Read this", undefined, { ...SAM, ref: "key_00000001" }, [file]]]);
+  // Only files, no words (the owner's own box sends one so too).
+  fresh();
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "", files: [file] }), "e_files_only");
+  assert.deepEqual(did, [["chat", "bot:max", "", undefined, { ...SAM, ref: "key_00000001" }, [file]]]);
+  // A file for Ivy (not in this chat), or on a computer Max doesn't work on now, is left out; a bad one drops the act.
+  fresh();
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "Both", files: [file, { ...file, id: "file_2", botId: "ivy", hostId: "ivy" }, { ...file, id: "file_3", hostId: "boppy" }] }), "e_files_odd");
+  assert.deepEqual(did, [["chat", "bot:max", "Both", undefined, { ...SAM, ref: "key_00000001" }, [file]]]);
+  fresh();
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "", files: [] }), "e_empty");
+  await memberEvent(event({ act: "chat", chatId: "bot:max", text: "x", files: [{ ...file, name: "../etc/passwd", path: "~/Desktop/../etc/passwd" }] }), "e_bad_file");
+  assert.deepEqual(did, [], "no words and no files, or a file that isn't one: not a member's act");
 });
 
 await check("without Use its computer their words stay, with a note that the bot won't answer, and no turn runs for them", async () => {

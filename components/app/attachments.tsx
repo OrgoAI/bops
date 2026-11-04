@@ -105,19 +105,23 @@ async function prepare(file: File): Promise<{ dataUrl: string; type: string; w: 
 /**
  * The images and files about to be sent with a message: each starts uploading as soon as it's added (a file to
  * where `target()` works: the chat's bot, or the group's main bot). A file is for its bot's chats only (ChatView
- * shows and sends only those); taking one out (×) stops its upload. Each image's preview is an object URL, which
+ * shows and sends only those); taking one out (×) stops its upload. `asFiles()`: every one goes as a file, a picture
+ * too (a workspace shared with the user: a picture for the model would stay on this Mac, a file goes to the owner's
+ * computer), and none is added without a bot to put it with. Each image's preview is an object URL, which
  * holds on to its image (a pasted one's in Bops' main process) until it's let go: on taking one out, on leaving
  * with them still there, and (ChatView.send) once its message no longer shows it.
  */
-export function useAttachments(target?: () => string | undefined) {
+export function useAttachments(target?: () => string | undefined, { asFiles }: { asFiles?: () => boolean } = {}) {
   const [items, setItems] = useState<Attachment[]>([]);
   const live = useRef(items);
   const to = useRef(target);
+  const filesOnly = useRef(asFiles);
   // Each file's upload, to stop it when it's taken out (or the box goes).
   const stops = useRef(new Map<string, AbortController>());
   useEffect(() => {
     live.current = items;
     to.current = target;
+    filesOnly.current = asFiles;
   });
   useEffect(() => {
     const going = stops.current;
@@ -131,15 +135,16 @@ export function useAttachments(target?: () => string | undefined) {
   /** Adds them (ten in all at most; files only when there's a bot to put them with); answers the keys of the ones added. */
   const add = useCallback((files: Iterable<File>) => {
     const botId = to.current?.();
+    const onlyFiles = !!filesOnly.current?.();
     // Ten at most: one past that is not added, or uploaded.
-    const fresh = [...files].filter((f) => isPicture(f.type) || f.type.startsWith("image/") || !!botId).slice(0, Math.max(0, ATTACH_MAX - live.current.length));
+    const fresh = [...files].filter((f) => (!onlyFiles && (isPicture(f.type) || f.type.startsWith("image/"))) || !!botId).slice(0, Math.max(0, ATTACH_MAX - live.current.length));
     const keys: string[] = [];
     const set = (key: string, patch: Partial<Attachment>) => setItems((xs) => xs.map((x) => (x.key === key ? { ...x, ...patch } : x)));
     for (const file of fresh) {
       const key = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       keys.push(key);
       // A picture the model can look at goes as one; any other file (a PDF, a sheet, a HEIC photo) where the bot works.
-      const picture = isPicture(file.type) || (file.type.startsWith("image/") && !botId);
+      const picture = !onlyFiles && (isPicture(file.type) || (file.type.startsWith("image/") && !botId));
       const preview = picture ? URL.createObjectURL(file) : undefined;
       const stop = picture ? undefined : new AbortController();
       if (stop) stops.current.set(key, stop);

@@ -4,6 +4,9 @@
 // into place), refused with words for the user (too big, empty, a bot on the Mac, no computer, no hours or credit,
 // Orgo turning it down, the computer not waking, fewer or more bytes than it said) with the claimed name let go,
 // and named safely (bytes, not characters). Also what the bot is told about them (filesNote) and how sizes read.
+// In a workspace shared with the user: the owner's computer Bops Cloud names (sharedTarget), never the user's own
+// bot's, with the user's own key; Bops Cloud's refusals in its words; Orgo's said plainly (only the owner and
+// Admins add files, a computer the owner keeps them off, a locked one, a key for another workspace).
 //
 // The store, Orgo and storage are fakes (below). The people and ids are made up.
 // Usage: node --conditions=react-server scripts/test-bot-files.mjs
@@ -80,10 +83,11 @@ let calls = [];
 let puts = [];
 const world = {};
 const NO_HOURS = new Error("402 bops_free_hours");
+let creditAsked = 0;
 globalThis.__fake = {
   store: { getState: () => ({ host: world.host, bots: Object.values(BOTS) }), id: (p) => `${p}_${++n}` },
   screens: { workComputer: (b) => (b.id === "rex" ? BOTS.max : b) },
-  free_hours: { freeHoursUsed: (e) => (e === NO_HOURS ? "Max's computer used its 10 hours this month." : undefined), computerOutOfCredit: () => undefined },
+  free_hours: { freeHoursUsed: (e) => (e === NO_HOURS ? "Max's computer used its 10 hours this month." : undefined), computerOutOfCredit: () => void creditAsked++ },
   orgo: {
     apiKey: async () => "sk_test",
     callOrgo: async (key, path, opts) => {
@@ -112,7 +116,7 @@ globalThis.__bopsFilePut = async (url, body, size) => {
 const realNow = Date.now;
 Date.now = () => (world.now ?? realNow());
 
-const { addFile, addedFile, AddFileError, filesGoTo, claimScript } = await import(`${root}/lib/server/bot-files.ts`);
+const { addFile, addFileTo, addedFile, AddFileError, filesGoTo, claimScript, sharedTarget } = await import(`${root}/lib/server/bot-files.ts`);
 const { cleanFileName, fileSize, filesNote, isPicture } = await import(`${root}/lib/added-files.ts`);
 
 const body = (text) => new Blob([text]).stream();
@@ -310,6 +314,78 @@ await check("what the bot is told: on its own computer, to open them there; on a
   assert.equal(filesNote(pc, "Alex", "mac"), "[Alex added 2 files to Max's computer's Desktop: ~/Desktop/a.pdf (2 KB), ~/Desktop/b.csv (10 bytes). They're on that computer, not this one.]", "a task on the Mac");
   assert.match(filesNote(pc, "Alex"), /to Max's computer's Desktop/, "not knowing who reads it: named");
   assert.equal(filesNote([], "Alex"), "");
+});
+
+/* ---------------- A workspace shared with the user ---------------- */
+
+// Bops Cloud's answer for an Admin, or a Member with Write and Use its computer (cloud/members.ts filesIn): the owner's computer.
+const OWNERS = { status: 200, json: { computerId: "pc_owner", botId: "boppy", hostId: "boppy", hostName: "Boppy" } };
+const shared = (got) => async () => sharedTarget(got);
+/** An error as lib/server/orgo.ts throws it: its status and code. */
+const orgoError = (status, code) => Object.assign(new Error(`Orgo POST /computers/pc_owner/bash → ${status}`), { status, ...(code ? { code } : {}) });
+
+await check("in a shared workspace, a member who may use the bot's computer adds a file on the owner's computer, with their own key", async () => {
+  reset();
+  // Their own Bops runs on their Mac (and has a Boppy of its own): never asked.
+  world.host = "mac";
+  const f = await addFileTo("brief.pdf", 5, body("hello"), shared(OWNERS), { shared: true });
+  assert.deepEqual({ ...f, id: undefined }, { id: undefined, name: "brief.pdf", size: 5, path: "~/Desktop/brief.pdf", botId: "boppy", hostId: "boppy", hostName: "Boppy" });
+  assert.deepEqual(calls.find((c) => c.path === "bash").id, "pc_owner", "the owner's computer, named by Bops Cloud");
+  const start = calls.find((c) => c.path === "/api/files/uploads");
+  assert.deepEqual([start.key, start.body.desktopId], ["sk_test", "pc_owner"], "the user's own Orgo key, which Orgo checks too");
+  assert.equal(calls.find((c) => c.path === "/api/files/uploads/complete").body.desktopId, "pc_owner");
+  assert.deepEqual(addedFile(f.id), f, "kept for the message, like the owner's");
+});
+
+await check("in a shared workspace, someone Bops Cloud doesn't let add files is told why before anything goes", async () => {
+  reset();
+  const no = (status, error, code) => ({ status, json: { error, ...(code ? { code } : {}) } });
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(no(403, "The owner hasn't let you use this bot's computer, so you can't add files for it.", "member_no_computer")), { shared: true }), 403, /hasn't let you use this bot's computer/);
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(no(403, "You can watch this bot, not add files for it. Ask the owner for Write.", "member_read_only")), { shared: true }), 403, /not add files for it\. Ask the owner for Write/);
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(no(403, "Only the owner or an Admin can drop files on this computer's screen.", "admin_only")), { shared: true }), 403, /Only the owner or an Admin/);
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(no(409, "The owner's Bops needs an update before you can add files here.", "owner_bops_old")), { shared: true }), 409, /needs an update/);
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(no(402, "Alex is out of Orgo credit, so Boppy's computer can't wake up for files.")), { shared: true }), 402, /out of Orgo credit/);
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(no(404, "Not found")), { shared: true }), 409, /until Bops Cloud updates/, "a Bops Cloud from before");
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(no(404, "No such bot")), { shared: true }), 404, /isn't in this workspace anymore/);
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(null), { shared: true }), 502, /Couldn't reach Bops Cloud/);
+  await refusal(addFileTo("a.txt", 1, body("x"), shared({ status: 200, json: { computerId: "../x" } }), { shared: true }), 502, /couldn't be added/);
+  assert.equal(calls.length, 0, "nothing to Orgo");
+  // Too big or empty: said before Bops Cloud is even asked.
+  let asked = 0;
+  await refusal(addFileTo("huge.iso", 3 * 1024 ** 3, body("x"), async () => (asked++, sharedTarget(OWNERS)), { shared: true }), 413);
+  assert.equal(asked, 0);
+});
+
+await check("in a shared workspace, Orgo turning it down is a plain sentence, and the claimed name is let go", async () => {
+  const turnedDown = async (json, status, words, statusOut) => {
+    reset();
+    world.start = { status, json };
+    await refusal(addFileTo("a.txt", 1, body("x"), shared(OWNERS), { shared: true }), statusOut, words);
+    assert.equal(puts.length, 0);
+    assert.deepEqual(onDesktop(), [], "no empty file left");
+  };
+  // A Member (Orgo's "member" can't write to the project): only the owner and Admins add files there.
+  await turnedDown({ error: "Access denied" }, 403, /^Orgo lets only the owner and Admins of this workspace add files to its computers\.$/, 403);
+  await turnedDown({ error: "The owner hasn’t let you use this computer. Use its bots from Bops.", code: "bops_owner_only" }, 403, /^The owner hasn't let you use this computer, so files can't go on it\.$/, 403);
+  await turnedDown({ error: "This API key is scoped to workspace w1. It cannot access workspace w2.", code: "workspace_scope_mismatch" }, 403, /^Your Orgo key only works in another workspace\. Sign in to Orgo again in Bops\.$/, 403);
+  await turnedDown({ error: "Choose a plan to continue.", code: "COMPUTER_LOCKED" }, 402, /^Boppy's computer is locked on Orgo right now, so files can't go on it\. The owner can unlock it on Orgo\.$/, 402);
+  // The same at the last step.
+  reset();
+  world.complete = { status: 403, json: { error: "Access denied" } };
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(OWNERS), { shared: true }), 403, /Orgo lets only the owner and Admins/);
+  // And on the computer's first step: Orgo keeping them off it, or the owner's computer locked. The owner's credit is
+  // never taken as the user's own (their Bops isn't told its credit ran out).
+  reset();
+  creditAsked = 0;
+  world.wake = orgoError(403, "bops_owner_only");
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(OWNERS), { shared: true }), 403, /hasn't let you use this computer/);
+  world.wake = orgoError(402, "insufficient_credits");
+  await refusal(addFileTo("a.txt", 1, body("x"), shared(OWNERS), { shared: true }), 402, /Boppy's computer is locked on Orgo/);
+  assert.equal(creditAsked, 0);
+  // The user's own workspace keeps Orgo's own words for what isn't one of these.
+  reset();
+  world.start = { status: 403, json: { error: "Access denied" } };
+  await refusal(addFile(BOTS.max, "a.txt", 1, body("x")), 502, /^Orgo didn't take the file\. Orgo said: Access denied$/);
 });
 
 rmSync(home, { recursive: true, force: true });

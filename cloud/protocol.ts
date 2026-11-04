@@ -575,6 +575,8 @@ export type PhoneMessage = {
   via?: "text" | "email" | "slack" | "telegram" | "discord";
   options?: string[];
   photos?: number;
+  /** The names of files added with it, on a bot's computer's Desktop (not on the phone). A phone from before shows the text alone. */
+  files?: string[];
   taskId?: string;
   answers?: string;
 };
@@ -905,7 +907,9 @@ export const MESSAGES_PER_CHAT = 200;
  * owner's, as the member's copy has them.
  */
 export type MemberAct =
-  | { act: "chat"; chatId: string; text: string; replyTo?: string }
+  // `files`: put on the Desktop of the computer a bot of the chat works on first (MemberFile), with the owner's Bops at
+  // MEMBER_FILES_MIN_VERSION (OWNER_BOPS_OLD) and Use its computer (MEMBER_NO_COMPUTER). With files, `text` may be empty.
+  | { act: "chat"; chatId: string; text: string; replyTo?: string; files?: MemberFile[] }
   | { act: "reply"; sessionId: string; text: string }
   | { act: "compact"; chatId: string }
   | { act: "compact"; sessionId: string }
@@ -1057,6 +1061,58 @@ export const MEMBER_MAX_PERSONA = 1500;
 export const PERSONA_CHANGED = "Changed by someone else. Here's the latest.";
 /** The most threads one Stop may name ("Stop all"). */
 export const MEMBER_STOP_MAX = 20;
+
+/**
+ * A file a member added for a bot with their message (lib/added-files.ts AddedFile, the same fields): already on the
+ * Desktop of the computer that bot works on, put there by their own Bops with their own Orgo key, at the computer Bops
+ * Cloud named for it (POST /v1/ws/<projectId>/files: MemberFileTarget). The owner's Mac and the bot's computer tell the
+ * bot where it is (lib/added-files.ts filesNote), as for the owner's own.
+ */
+export type MemberFile = { id: string; name: string; size: number; path: string; botId: string; hostId: string; hostName: string };
+/** The most files one message may carry (lib/added-files.ts ATTACH_MAX). */
+export const MEMBER_FILES_MAX = 10;
+/** The biggest file Orgo's uploads take (lib/added-files.ts FILE_MAX). */
+const MEMBER_FILE_BYTES = 2 * 1024 ** 3;
+/** A short id of the owner's or Bops' (a file's, a bot's). */
+const fileId = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 120;
+/**
+ * Whether `name` is a plain file name on a Desktop, as lib/added-files.ts cleanFileName and the name claimed there
+ * leave one: no folder, no hidden file, no control character, no space at either end, at most 250 bytes ("report (2).pdf").
+ */
+const plainFileName = (name: string) =>
+  name.length > 0 && name.trim() === name && !name.startsWith(".") && !/[\\/\u0000-\u001f\u007f]/.test(name) && new TextEncoder().encode(name).length <= 250;
+/**
+ * A message's files as a member's Bops sent them (MemberAct chat `files`), each whole and checked: a plain name on the
+ * Desktop (`path` exactly ~/Desktop/<name>), a size Orgo takes, its ids, every id once, MEMBER_FILES_MAX at most. None
+ * sent: []. Null when any isn't one. Which bots they're for is checked against the owner's state (cloud/members.ts).
+ */
+export function cleanMemberFiles(v: unknown): MemberFile[] | null {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v) || v.length > MEMBER_FILES_MAX) return null;
+  const out: MemberFile[] = [];
+  for (const f of v) {
+    if (!f || typeof f !== "object" || Array.isArray(f)) return null;
+    const x = f as Record<string, unknown>;
+    if (!fileId(x.id) || !fileId(x.botId) || !fileId(x.hostId) || !fileId(x.hostName)) return null;
+    if (typeof x.name !== "string" || !plainFileName(x.name) || x.path !== `~/Desktop/${x.name}`) return null;
+    if (typeof x.size !== "number" || !Number.isSafeInteger(x.size) || x.size < 1 || x.size > MEMBER_FILE_BYTES) return null;
+    out.push({ id: x.id, name: x.name, size: x.size, path: `~/Desktop/${x.name}`, botId: x.botId, hostId: x.hostId, hostName: x.hostName });
+  }
+  return new Set(out.map((f) => f.id)).size === out.length ? out : null;
+}
+/**
+ * 200 from POST /v1/ws/<projectId>/files {botId, screen?} (cloud/members.ts filesIn): the Orgo computer a file someone
+ * adds for that bot goes on (its own, or the main bot's it shares), woken as a message to the bot would wake it, and
+ * the bot whose computer that is. Their own Bops puts the file there with their own Orgo key (lib/server/bot-files.ts).
+ */
+export type MemberFileTarget = { computerId: string; botId: string; hostId: string; hostName: string };
+/**
+ * The first Bops whose Mac takes a member's message with files (lib/server/member-acts.ts: the bot told where they are,
+ * a message of files alone): an older one would drop the files, or the whole message when it has no words, so Bops Cloud
+ * refuses files (OWNER_BOPS_OLD, before any is put on the computer) for an owner whose last Mac is older. Set to the
+ * release that carries it.
+ */
+export const MEMBER_FILES_MIN_VERSION = "0.0.48";
 /** How long an act waits for the owner's Bops to open: an older one is dropped, never done late. */
 export const MEMBER_ACT_MS = 10 * 60_000;
 /** How long a message Bops Cloud wrote already, or an answer (MemberActPayload.stored), waits for the owner's Mac to take it. */

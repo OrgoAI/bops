@@ -3,7 +3,9 @@
 // why when it can't (too big before anything goes, the server's own words, Bops not answering); the message box's
 // tile for a file says its name, its size or how far it is, and why it failed; a sent message's files say their name,
 // size and where they are. The chat's box takes any file (not only images), and the message names the files it
-// added by id. The .tsx files are compiled with the TypeScript in node_modules as they load and rendered to HTML.
+// added by id. In a workspace shared with the user: files (a picture too) for someone with Write and Use its computer,
+// on the owner's computer, sent with their message; why not, for anyone else; a drop on the screen an Admin sees.
+// The .tsx files are compiled with the TypeScript in node_modules as they load and rendered to HTML.
 // Usage: node scripts/test-attachments-ui.mjs   (not with --conditions=react-server: client components)
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -194,7 +196,7 @@ await check("the chat's box takes any file, and the message names the files it a
   assert.doesNotMatch(chat, /accept="image\/\*"/, "the + takes any file");
   assert.match(chat, /aria-label="Add images or files"/);
   assert.match(chat, /files: files\.length \? files : undefined/, "the message names them by id");
-  assert.match(chat, /useAttachments\(\(\) => \(state\.shared \? undefined : fileBot\?\.id\)\)/, "never in a shared workspace");
+  assert.match(chat, /useAttachments\(\(\) => \(filesWhy \? undefined : fileBot\?\.id\), \{ asFiles: \(\) => !!state\.shared \}\)/, "in a shared workspace, files only, and only when they may");
   assert.match(chat, /const tray = attach\.items\.filter\(\(a\) => a\.kind === "image" \|\| \(!!a\.botId && c\.botIds\.includes\(a\.botId\)\)\)/, "a file shows and goes only in its bot's chats");
   assert.match(chat, /<AttachmentTray items=\{tray\}/);
   assert.match(chat, /attach\.release\(tray\.map/, "sending lets go only this chat's");
@@ -202,6 +204,22 @@ await check("the chat's box takes any file, and the message names the files it a
   assert.match(chat, /const mineGoes = before\.catch\(\(\) => \{\}\)\.then\(go\)/, "each message after the one before");
   const computer = readFileSync(`${root}/components/app/computer.tsx`, "utf8");
   assert.match(computer, /useScreenDrop\(hasComputer && !mac \? b\.id : undefined\)/, "a cloud computer's screen only");
+});
+
+await check("a shared workspace: files for someone with Write and Use its computer, sent with their message; why not for anyone else", async () => {
+  const chat = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
+  assert.match(chat, /!canAct\(state, c\.botIds\)\s*\? "You can watch these bots, not add files for them\."/);
+  assert.match(chat, /state\.shared\.computer !== true\s*\? "The owner hasn't let you use this bot's computer, so you can't add files for it\."/);
+  assert.match(chat, /onClick=\{\(\) => \(filesWhy \? setMicError\(filesWhy\) : filePicker\.current\?\.click\(\)\)\}/, "the + says why instead");
+  assert.match(chat, /if \(filesWhy\) return setMicError\(filesWhy\);\s*const files = filesOf\(e\.dataTransfer\)/, "so does a drop on the chat");
+  assert.match(chat, /memberAct\(\{ act: "chat", chatId, text, \.\.\.\(replyTo \? \{ replyTo \} : \{\}\), \.\.\.\(files\.length \? \{ files \} : \{\}\) \}\)/, "the message carries its files");
+  assert.match(chat, /retry=\{\(key\) => void memberAct\(\{ act: "chat"[^\n]*\.\.\.\(m\.files\?\.length \? \{ files: m\.files \} : \{\}\) \}, key\)\}/, "Try again sends them again");
+  assert.doesNotMatch(chat, /\{!state\.shared && \(\s*<button\s+type="button"\s+onClick=\{\(\) => \(filesWhy/, "the + shows there too");
+  const computer = readFileSync(`${root}/components/app/computer.tsx`, "utf8");
+  assert.match(computer, /function SharedScreen[\s\S]*?const screenDrop = useScreenDrop\(b\.id\);[\s\S]*?\{\.\.\.screenDrop\.dropProps\}/, "a drop on the screen an Admin sees");
+  const { callAllowed } = await import(`${root}/components/app/view-only.ts`);
+  assert.ok(callAllowed("POST", "/api/bots/files?botId=max&name=a.pdf"), "the window's guard lets it through: the route asks Bops Cloud");
+  assert.ok(!callAllowed("POST", "/api/uploads"), "a picture for the model still stays on this Mac");
 });
 
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
