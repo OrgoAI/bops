@@ -86,6 +86,10 @@ await test("only the nine methods, each with its parameters checked, and only ht
   assert.deepEqual(cleanInput("Target.activateTarget", { targetId: "A1B2C3D4E5F6", extra: 1 }), { targetId: "A1B2C3D4E5F6" });
   assert.deepEqual(cleanInput("Target.closeTarget", { targetId: "A1B2C3D4E5F6" }), { targetId: "A1B2C3D4E5F6" });
   for (const targetId of ["", "../json/close/x", "a b", 7, "F".repeat(65)]) assert.equal(cleanInput("Target.activateTarget", { targetId }), null, `${JSON.stringify(targetId)} is no tab id`);
+  // Never a page on this computer's own DevTools, Bops' or the relay's port (they'd act on the browser past these rules).
+  for (const url of ["http://127.0.0.1:9300/json/close/AB12", "http://localhost:9222/json/list", "http://[::1]:9399/", "http://0.0.0.0:8897/", "http://127.0.0.1:3210/api/state"])
+    for (const m of ["Page.navigate", "Target.createTarget"]) assert.equal(cleanInput(m, { url }), null, `${m} ${url} is refused`);
+  assert.deepEqual(cleanInput("Target.createTarget", { url: "http://127.0.0.1:3000/" }), { url: "http://127.0.0.1:3000/" }, "an app on the computer still opens");
 });
 
 await test("a pointer the page's world said is checked: a kind it knows, numbers, on the page", () => {
@@ -325,19 +329,38 @@ try {
     assert.deepEqual(lastTabs().tabs.map((t) => t.id), [botTab, second], "nothing moved");
     say({ t: "input", bot: "boppy", who: sam, method: "Target.activateTarget", params: { targetId: second } });
     await until(() => lastTabs().front === second, "Sam's tab in front");
-    // Hand back: the bot's own tab (in front when Sam took over) comes back to the front; Sam's tab stays open.
+    // Hand back: the bot's own tab (in front when Sam took over) comes back to the front before a waiting bot step goes
+    // on; Sam's tab stays open.
+    const frontNow = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).filter((t) => t.type === "page")[0]?.id;
+    const resumed = relay.whenFree(100).then(frontNow);
     say({ t: "release", bot: "boppy", who: sam });
+    assert.equal(await resumed, botTab, "the bot goes on only once its own tab is in front");
     await until(() => !relay.heldBy(100) && lastTabs().front === botTab, "the bot's tab in front after hand back");
     assert.equal(lastTabs().tabs.length, 2);
     // A viewer who comes now hears the tabs at once.
     got.length = 0;
     say({ t: "watch", bot: "boppy", viewers: [sam, tess, { id: "u-new", name: "New" }] });
     await until(() => tabsSaid().length, "the tabs for a viewer who just came");
-    // Sam takes it again, closes the extra tab, and keeps control for the next test.
+    // Sam takes it again. A tab closed, then another opened: the order stays oldest first, whatever comes to the front.
     say({ t: "take", bot: "boppy", who: sam });
     await until(() => relay.heldBy(100)?.id === "u-sam", "Sam to have control again");
-    say({ t: "input", bot: "boppy", who: sam, method: "Target.closeTarget", params: { targetId: second } });
-    await until(() => lastTabs()?.tabs.length === 1 && lastTabs().front === botTab, "one tab again");
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.closeTarget", params: { targetId: botTab } });
+    await until(() => lastTabs()?.tabs.length === 1, "the first tab closed");
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.createTarget", params: { url: `${page}?tab=3` } });
+    const third = (await until(() => lastTabs()?.tabs.length === 2 && lastTabs().front !== second && lastTabs(), "a third tab")).front;
+    assert.deepEqual(lastTabs().tabs.map((t) => t.id), [second, third], "oldest first");
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.activateTarget", params: { targetId: second } });
+    await until(() => lastTabs().front === second, "the older one in front");
+    assert.deepEqual(lastTabs().tabs.map((t) => t.id), [second, third], "still oldest first");
+    // At most 20 tabs: a new one past that is refused.
+    for (let i = 0; i < 18; i++) await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" });
+    const refusedBefore = to("u-sam").length;
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.createTarget", params: { url: `${page}?tab=21` } });
+    await until(() => to("u-sam").length === refusedBefore + 1, "the 21st tab refused");
+    assert.match(to("u-sam").at(-1), /20 tabs are open/);
+    for (const t of (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).filter((t) => t.type === "page" && t.id !== second)) await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`);
+    await until(() => lastTabs()?.tabs.length === 1, "one tab again");
+    await until(() => got.some((g) => g.m.t === "page" && g.m.url.startsWith(`${page}?tab=2`)), "the capture on the tab that's left");
     say({ t: "watch", bot: "boppy", viewers: [sam, tess] });
   });
 

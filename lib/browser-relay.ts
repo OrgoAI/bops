@@ -187,7 +187,11 @@ export function cleanInput(method: string, params: unknown): Record<string, unkn
       } catch {
         return null;
       }
-      return u.protocol === "http:" || u.protocol === "https:" ? { url: u.href } : null;
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      // Never this computer's own DevTools, Bops' or the relay's port: a page there acts on the browser past these rules.
+      const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
+      if (LOOPBACK.has(u.hostname) && (port === 3210 || port === 8897 || (port >= 9200 && port <= 9399))) return null;
+      return { url: u.href };
     }
     case "Page.reload":
       return {};
@@ -219,8 +223,10 @@ async function tabsOf(port: number): Promise<Target[]> {
   return ((await res.json()) as Target[]).filter(isTab);
 }
 
-/** The tabs a viewer is told of, at most. */
-const TABS_SAID = 20;
+/** The tabs a screen's browser may have for a person to open another, and that a viewer is told of: at most this many. */
+const TABS_MAX = 20;
+/** This computer, by any name a page address can give it. */
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "0.0.0.0"]);
 
 /** One of Chrome's DevTools address calls on a screen (a new tab, a switch, a close): it said yes, or why not. */
 async function devtools(port: number, path: string, method: "GET" | "PUT" = "GET"): Promise<void> {
@@ -297,8 +303,9 @@ class Screen {
   doing: { bot: string; step: BrowserActivity["step"]; signIn: string | null; waiting: boolean } | null = null;
   private said = "";
   last: { frame?: { data: string; meta: BrowserFrameMeta }; page?: { url: string; title: string; back: number | null }; tabs?: { tabs: BrowserTab[]; front: string | null } } = {};
-  /** The order tabs were first seen in (a viewer's strip never reorders as the front changes). */
+  /** The order tabs were first seen in (a viewer's strip never reorders as the front changes), numbered as they come. */
   private seen = new Map<string, number>();
+  private seenNext = 0;
   /** The tab in front when someone took control: in front again once they hand back. */
   private botTab: string | null = null;
   framesSent = 0;
@@ -456,14 +463,16 @@ class Screen {
     const was = this.controller;
     this.controller = next;
     if (next && !was) this.botTab = this.last.tabs?.front ?? this.tab;
-    if (!next && was) void this.backToBotTab();
     if (this.watchers().length) this.relay.send({ t: "control", bots: this.watchers(), by: next?.who ?? null });
     if (next) this.relay.onControl(next.bot, this.display, next.who, was?.who ?? null);
-    else if (was) {
-      this.relay.onControl(was.bot, this.display, null, was.who);
-      for (const w of this.waiters.splice(0)) w();
-      this.sayDoing();
-    }
+    else if (was)
+      // Handed back: the bot's own tab in front again first, then the bot goes on (its thread, and any step waiting).
+      void this.backToBotTab().finally(() => {
+        if (this.controller) return;
+        this.relay.onControl(was.bot, this.display, null, was.who);
+        for (const w of this.waiters.splice(0)) w();
+        this.sayDoing();
+      });
   }
 
   whenFree(): Promise<void> {
@@ -489,12 +498,12 @@ class Screen {
     return this.cdp.send(method, params);
   }
 
-  /** The browser's tabs, to its viewers when they change: oldest first (as first seen), at most TABS_SAID, and the one in front. */
+  /** The browser's tabs, to its viewers when they change: oldest first (as first seen), at most TABS_MAX, and the one in front. */
   private sayTabs(tabs: Target[]) {
-    for (const t of tabs) if (!this.seen.has(t.id)) this.seen.set(t.id, this.seen.size);
+    for (const t of tabs) if (!this.seen.has(t.id)) this.seen.set(t.id, this.seenNext++);
     const open = new Set(tabs.map((t) => t.id));
     for (const id of this.seen.keys()) if (!open.has(id)) this.seen.delete(id);
-    const listed = [...tabs].sort((a, b) => this.seen.get(a.id)! - this.seen.get(b.id)!).slice(0, TABS_SAID);
+    const listed = [...tabs].sort((a, b) => this.seen.get(a.id)! - this.seen.get(b.id)!).slice(0, TABS_MAX);
     const next = { tabs: listed.map((t) => ({ id: t.id, title: t.title.slice(0, 200), url: t.url.slice(0, 2048) })), front: tabs[0]?.id ?? null };
     if (JSON.stringify(next) === JSON.stringify(this.last.tabs)) return;
     this.last.tabs = next;
@@ -505,7 +514,10 @@ class Screen {
   private async tabAct(method: string, params: Record<string, unknown>) {
     const port = this.port();
     if (port === null) throw new Error("The page isn't there right now.");
-    if (method === "Target.createTarget") await devtools(port, `/json/new?${encodeURIComponent(String(params.url))}`, "PUT");
+    if (method === "Target.createTarget") {
+      if ((await tabsOf(port)).length >= TABS_MAX) throw new Error(`${TABS_MAX} tabs are open. Close one first.`);
+      await devtools(port, `/json/new?${encodeURIComponent(String(params.url))}`, "PUT");
+    }
     else {
       const id = String(params.targetId);
       if (!(await tabsOf(port)).some((t) => t.id === id)) throw new Error("That tab isn't open.");
