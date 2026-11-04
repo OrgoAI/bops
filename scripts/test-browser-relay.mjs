@@ -334,10 +334,16 @@ try {
     // on; Sam's tab stays open.
     const frontNow = async () => (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).filter((t) => t.type === "page")[0]?.id;
     const resumed = relay.whenFree(100).then(frontNow);
+    // Two new tabs asked for just before handing back: they open first, and the bot's tab still ends in front.
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.createTarget", params: { url: `${page}?tab=4` } });
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.createTarget", params: { url: `${page}?tab=5` } });
     say({ t: "release", bot: "boppy", who: sam });
     assert.equal(await resumed, botTab, "the bot goes on only once its own tab is in front");
-    await until(() => !relay.heldBy(100) && lastTabs().front === botTab, "the bot's tab in front after hand back");
-    assert.equal(lastTabs().tabs.length, 2);
+    await until(() => !relay.heldBy(100) && lastTabs()?.tabs.length === 4 && lastTabs().front === botTab, "the bot's tab in front after hand back, the two new tabs open");
+    await sleep(500);
+    assert.equal(await frontNow(), botTab, "and it stays in front");
+    for (const t of lastTabs().tabs.filter((t) => t.url.includes("tab=4") || t.url.includes("tab=5"))) await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`);
+    await until(() => lastTabs()?.tabs.length === 2, "the two extra tabs closed");
     // A viewer who comes now hears the tabs at once.
     got.length = 0;
     say({ t: "watch", bot: "boppy", viewers: [sam, tess, { id: "u-new", name: "New" }] });

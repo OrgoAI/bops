@@ -471,8 +471,10 @@ class Screen {
     if (this.watchers().length) this.relay.send({ t: "control", bots: this.watchers(), by: next?.who ?? null });
     if (next) this.relay.onControl(next.bot, this.display, next.who, was?.who ?? null);
     else if (was) {
-      // Handed back: the bot's own tab in front again first, then the bot goes on (its thread, and any step waiting).
-      const restoring = this.backToBotTab()
+      // Handed back: what they'd asked of the tabs done, the bot's own tab in front again, then the bot goes on (its
+      // thread, and any step waiting).
+      const restoring = this.acting
+        .then(() => this.backToBotTab())
         .catch(() => {})
         .finally(() => {
           if (this.restoring === restoring) this.restoring = null;
