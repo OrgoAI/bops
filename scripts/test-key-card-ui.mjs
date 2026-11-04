@@ -167,9 +167,10 @@ async function mount(state, a = ask(), answerer = "you") {
   const box = doc.createElement("div");
   doc.body.appendChild(box);
   const r = createRoot(box);
-  await act(async () => (r.render(h(K.KeyAskCard, { state, approval: a, answerer, busy: false, onAnswer: (reply) => answers.push(reply) })), await settle()));
+  const draw = (s) => act(async () => (r.render(h(K.KeyAskCard, { state: s, approval: a, answerer, busy: false, onAnswer: (reply) => answers.push(reply) })), await settle()));
+  await draw(state);
   await act(settle);
-  return { box, answers, done: () => act(async () => r.unmount()).then(() => box.remove()) };
+  return { box, answers, draw, done: () => act(async () => r.unmount()).then(() => box.remove()) };
 }
 
 await test("closed: the Logins form for the service the bot named, the value in an empty password field, Save off until something is typed, the bot picked, and Bops' own line for what it is", async () => {
@@ -272,6 +273,63 @@ await test("someone without Keys reads it with one line saying who can add it, a
     assert.ok(!m.box.querySelector("input"));
   } finally {
     await m.done();
+  }
+});
+
+await test("Done waits for a write of the key's row (a bot's switch) to finish, so the bot goes on with what was set", async () => {
+  bops.keys = [{ ...PROVIDERS[0], updatedAt: null, scope: "all", bots: [] }];
+  const real = globalThis.fetch;
+  let finish = null;
+  globalThis.fetch = (url, init = {}) => (init.method === "PATCH" ? new Promise((resolve) => (finish = () => resolve(Response.json({ ok: true })))) : real(url, init));
+  globalThis.innerWidth = 1024;
+  const m = await mount(stateWith([ask()]));
+  try {
+    const card = m.box.querySelector("[data-key-card]");
+    await click(button(card, "+1"));
+    await click([...doc.querySelectorAll("[role=menuitem]")].find((x) => x.textContent.trim() === "Boppy"));
+    assert.equal(typeof finish, "function", "the switch is on its way");
+    assert.equal(button(card, "Done").disabled, true, "Done waits");
+    await click(button(card, "Done"));
+    assert.deepEqual(m.answers, []);
+    await act(async () => (finish(), await settle()));
+    assert.equal(button(card, "Done").disabled, false);
+    await click(button(card, "Done"));
+    assert.deepEqual(m.answers, ["once"]);
+  } finally {
+    globalThis.fetch = real;
+    bops.keys = [];
+    await m.done();
+  }
+});
+
+await test("a shared workspace's save answers the card once the bot's switch has landed (the owner's Bops does it), saying so meanwhile; Go on without it answers anyway", async () => {
+  bops.shared = { keys: true, acts: true };
+  const shared = { projectId: "p1", name: "Acme", owner: "Dee", role: "admin", wsId: "ws_main", keys: true, keyActs: true };
+  const state = stateWith([ask()], { shared });
+  const m = await mount(state);
+  try {
+    const card = m.box.querySelector("[data-key-card]");
+    await input(card.querySelector('input[aria-label="Key"]'), VALUE);
+    await submit(card.querySelector("form"));
+    assert.deepEqual(sent.findLast((x) => x.url === "/api/keys" && x.method === "POST").body, { name: "NOTION_API_KEY", value: VALUE, botIds: ["boppy"], scope: "workspace" });
+    assert.deepEqual(m.answers, [], "not before the switch lands");
+    assert.match(card.querySelector("[data-key-waits]").textContent, /^Saved\. Boppy can use it once the workspace's Bops lets it\./);
+    // The owner's Bops did it: the bot's keys say so, and the card answers.
+    await m.draw({ ...state, bots: state.bots.map((b) => ({ ...b, keys: ["NOTION_API_KEY"] })) });
+    assert.deepEqual(m.answers, ["once"]);
+  } finally {
+    await m.done();
+  }
+  const n = await mount(state);
+  try {
+    const card = n.box.querySelector("[data-key-card]");
+    await input(card.querySelector('input[aria-label="Key"]'), VALUE);
+    await submit(card.querySelector("form"));
+    await click(button(card, "Go on without it"));
+    assert.deepEqual(n.answers, ["once"]);
+  } finally {
+    bops.shared = undefined;
+    await n.done();
   }
 });
 

@@ -507,6 +507,7 @@ function KeyLine({
   anchorRef,
   switchesOff,
   onRemoved,
+  onBusy,
 }: {
   k: KeyRow;
   state: AppState;
@@ -526,11 +527,14 @@ function KeyLine({
   switchesOff?: boolean;
   /** Told once it's removed (a key card in the chat goes on then). */
   onRemoved?: () => void;
+  /** Told while one of its writes (a bot's switch, a remove) is on its way: a key card's Done waits for it. */
+  onBusy?: (busy: boolean) => void;
 }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const v = useKeyValue(k.name, k.scope, setError);
+  useEffect(() => onBusy?.(busy), [busy, onBusy]);
   const toggle = async (b: Bot, allowed: boolean) => {
     setBusy(true);
     setError(await grant(k.name, b.id, allowed));
@@ -910,8 +914,29 @@ export function KeyAskCard({
 }) {
   const { info, failed, retry } = useKeys(state.workspace ?? MAIN_WORKSPACE);
   const [replacing, setReplacing] = useState<string | null>(null);
+  // A write of its key row on its way (a bot's switch, a remove): Done waits for it, so the bot goes on with what was set.
+  const [rowBusy, setRowBusy] = useState(false);
   const name = a.resources[0] ?? "";
   const b = state.bots.find((x) => x.id === a.botId);
+  // Saved in a shared workspace: the bot's switch is an act the owner's Bops does (shared-keys.ts sharedSave), so the card
+  // answers once the bot's keys say it landed, never before, as the bot would go on without it. Meanwhile it says so, and
+  // Done goes on anyway (the switch not gone, or the owner's Bops shut).
+  const [waitTick, setWaitTick] = useState(false);
+  const ticked = !!b?.keys?.includes(name);
+  const answered = useRef(false);
+  useEffect(() => {
+    if (!waitTick || !ticked || answered.current) return;
+    answered.current = true;
+    onAnswer("once");
+  }, [waitTick, ticked, onAnswer]);
+  const [note, setNote] = useState<string | null>(null);
+  const saved = (_: string, said?: string) => {
+    if (!state.shared || !b || ticked) return onAnswer("once");
+    setNote(said ?? null);
+    setWaitTick(true);
+  };
+  const sends = state.shared?.keySends?.filter((x) => x.name === name && x.botId === a.botId) ?? [];
+  const sendFailed = sends.at(-1)?.state === "failed" ? sends.at(-1) : undefined;
   const botName = b?.name ?? "The bot";
   const shared = !!state.shared;
   const p = info?.providers.find((x) => x.name === name);
@@ -937,6 +962,22 @@ export function KeyAskCard({
   else if (!info.signedIn) body = <span className={line}>{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
   else if (!p) body = <span className={line}>Bops can&apos;t call that service yet.</span>;
   else if (!mine) body = <span data-who-answers className={line}>{NO_KEYS_LINE}</span>;
+  else if (waitTick)
+    body = (
+      <div className="flex flex-col gap-2">
+        <span data-key-waits className={line}>
+          Saved. {botName} can use it once the workspace&apos;s Bops lets it. {sends.some((x) => x.state === "waiting") ? REPLY_WAITS_LINE : ""}
+        </span>
+        {(note ?? sendFailed?.error) && (
+          <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+            {undash(note ?? sendFailed!.error!)}
+          </span>
+        )}
+        <button type="button" disabled={busy} onClick={() => onAnswer("once")} className={`${btn} self-start bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          Go on without it
+        </button>
+      </div>
+    );
   else if (rows.length)
     body = (
       <div className="flex flex-col">
@@ -951,13 +992,14 @@ export function KeyAskCard({
               anchorRef={() => {}}
               switchesOff={shared && !info.shared?.acts}
               onRemoved={() => onAnswer("once")}
+              onBusy={setRowBusy}
             />
             {replacing === keyId(k) && <AddKey info={info} team={team} replace={k} scope={k.scope} shared={shared} bots={[]} first={false} onSaved={() => onAnswer("once")} onCancel={() => setReplacing(null)} />}
           </Fragment>
         ))}
         {!replacing && (
           <div className="flex flex-wrap items-center gap-2 pt-1">
-            <button type="button" disabled={busy} onClick={() => onAnswer("once")} className={`${btn} bg-ink text-white`}>
+            <button type="button" disabled={busy || rowBusy} onClick={() => onAnswer("once")} className={`${btn} bg-ink text-white`}>
               Done
             </button>
             <button type="button" disabled={busy} onClick={() => onAnswer("reject")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
@@ -968,7 +1010,7 @@ export function KeyAskCard({
       </div>
     );
   else
-    body = <AddKey info={info} team={team} scope={scope} shared={shared} bots={b ? [b.id] : []} first service={name} cancelLabel="Not now" onSaved={() => onAnswer("once")} onCancel={() => onAnswer("reject")} />;
+    body = <AddKey info={info} team={team} scope={scope} shared={shared} bots={b ? [b.id] : []} first service={name} cancelLabel="Not now" onSaved={saved} onCancel={() => onAnswer("reject")} />;
   return (
     <div data-key-card={name} className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${className}`}>
       <div className="flex items-start gap-2.5">
