@@ -761,6 +761,7 @@ await check("one that's up isn't set up again while it answers a reply (a restar
   assert.ok(at("tar -xzf") < at("touch /var/run/bops/upgrading"), "held only after unpacking");
   assert.ok(at("touch /var/run/bops/upgrading") < at("find /var/run/bops/turns -type f -mmin -2"), "the marks read after the hold");
   assert.ok(at("find /var/run/bops/turns") < at('ln -sfn') && at("find /var/run/bops/turns") < at("supervisorctl restart"), "both before any file is swapped");
+  assert.ok(at("supervisorctl restart") < at('rm -rf "$v"'), "the builds before go only after the restart");
   assert.ok(script.includes("trap 'rm -f /var/run/bops/upgrading' EXIT"), "the hold goes when the script ends, whatever happens");
 });
 

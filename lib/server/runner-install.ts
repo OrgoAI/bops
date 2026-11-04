@@ -224,6 +224,8 @@ const authIn = (output: string): RunnerState["auth"] => (/^auth=(identity|key|no
  * (a line that sets ORGO_API_KEY in one of the files Orgo writes it in: grep alone, never printed), whether
  * this build is there, and supervisord; in phase 2 (`ident`) what its identity answers too (IDENT_LINE).
  */
+/** In the install script: a reply the runner marks (RUNNER_TURNS_DIR, touched in the last 2 minutes) ends it as busy. */
+const BUSY_EXIT = `if [ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ]; then echo __BOPS_BUSY__; exit 0; fi`;
 /** busy=yes while the runner there marks a reply it's answering (RUNNER_TURNS_DIR, touched in the last 2 minutes). */
 export const BUSY_LINE = `[ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ] && echo busy=yes || echo busy=no`;
 export const probeScript = (dirName: string, { ident = false }: { ident?: boolean } = {}) =>
@@ -309,13 +311,13 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
     "  echo __BOPS_NO_FILES__",
     "  exit 3",
     "fi",
-    // The runner is held (RUNNER_HOLD: it starts no new reply), then a reply it's answering stops the upgrade before any
-    // file of the runner is swapped (restarting it would cut the reply off); tried again later. The hold goes at the end.
+    // The runner is held (RUNNER_HOLD: it starts no new reply; a resume waits), then a reply it's answering stops the
+    // upgrade before any file of the runner is swapped (restarting it would cut the reply off); tried again later. From
+    // here to the restart is only the swap and the program's files, kept short. The hold goes when the script ends.
     `mkdir -p ${RUNNER_TURNS_DIR} && touch ${RUNNER_HOLD} && trap 'rm -f ${RUNNER_HOLD}' EXIT`,
-    `if [ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ]; then echo __BOPS_BUSY__; exit 0; fi`,
+    BUSY_EXIT,
     `ln -sfn ${q(dirName)} "$d/current.next"`,
     `mv -Tf "$d/current.next" "$d/current"`,
-    `for v in "$d"/*/; do v="\${v%/}"; case "\${v##*/}" in incoming|current|${dirName}) ;; *) rm -rf "$v" ;; esac; done`,
     `cat > ${RUNNER_WRAPPER} <<'BOPS_EOF'\n${wrapper}BOPS_EOF`,
     `chmod 700 ${RUNNER_WRAPPER}`,
     `cat > ${RUNNER_CONF} <<'BOPS_EOF'\n${SUPERVISOR_CONF}BOPS_EOF`,
@@ -325,6 +327,8 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
     "supervisorctl reread >/dev/null 2>&1 || true",
     "supervisorctl update >/dev/null 2>&1 || true",
     "supervisorctl restart bops-runner >/dev/null 2>&1 || true",
+    // The builds before this one go only once it runs: the one restarted may have read its own files till then.
+    `for v in "$d"/*/; do v="\${v%/}"; case "\${v##*/}" in incoming|current|${dirName}) ;; *) rm -rf "$v" ;; esac; done`,
     "echo __BOPS_INSTALLED__",
   ].join("\n");
 }

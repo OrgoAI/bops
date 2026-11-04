@@ -54,6 +54,10 @@ type Box = {
   retryMs?: number[];
   /** Tests: where this runner marks the replies it's answering (RUNNER_TURNS_DIR); an upgrade's hold is beside it. */
   turnsDir?: string;
+  /** How many runs hold each reply's mark (the same turn delivered twice at once shares one): removed by the last. */
+  marks?: Map<string, number>;
+  /** Tests: how often a resume looks again at an upgrade's hold. */
+  holdPollMs?: number;
 };
 const g = globalThis as unknown as { __bopsRunnerChat?: Box };
 const box: Box = (g.__bopsRunnerChat ??= { running: new Map() });
@@ -194,14 +198,25 @@ const HOLD_STALE_MS = 5 * 60_000;
  */
 async function whileMarked<T>(id: string, run: () => Promise<T>, held?: () => T): Promise<T> {
   const mark = markOf(id);
-  await mkdir(turnsDir(), { recursive: true }).then(() => writeFile(mark, ""), () => {});
+  const marks = (box.marks ??= new Map());
+  marks.set(mark, (marks.get(mark) ?? 0) + 1);
   try {
-    if (held && (await stat(holdOf()).then((h) => Date.now() - h.mtimeMs < HOLD_STALE_MS, () => false))) return held();
+    await mkdir(turnsDir(), { recursive: true }).then(() => writeFile(mark, ""), () => {});
+    if (held && (await holding())) return held();
+    // A resume (its OK already taken out, so it can't be given again later) waits for the hold to go: its mark stops
+    // an upgrade that hasn't swapped yet, and one that has restarts this runner (Bops Cloud keeps the turn paused).
+    if (!held) for (const end = Date.now() + HOLD_STALE_MS; (await holding()) && Date.now() < end; ) await new Promise((r) => setTimeout(r, box.holdPollMs ?? 1_000));
     return await run();
   } finally {
-    await unlink(mark).catch(() => {});
+    const left = (marks.get(mark) ?? 1) - 1;
+    if (left > 0) marks.set(mark, left);
+    else {
+      marks.delete(mark);
+      await unlink(mark).catch(() => {});
+    }
   }
 }
+const holding = () => stat(holdOf()).then((h) => Date.now() - h.mtimeMs < HOLD_STALE_MS, () => false);
 
 /** The turn's beats while `run` runs, then its end: done (with its tapback), paused for an OK, or nothing (taken back). */
 async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }) {
@@ -306,11 +321,12 @@ async function resumeMarked<T extends { paused?: boolean }>(a: AppApproval, id: 
 }
 
 /** For tests: how the turn is run and how this runner makes sure it's on its own computer (unset: the real ones), and the beat. */
-export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[]; turnsDir?: string }) {
+export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[]; turnsDir?: string; holdPollMs?: number }) {
   box.answer = opts.answer;
   box.identity = opts.identity;
   box.beatMs = opts.beatMs;
   box.turnsDir = opts.turnsDir;
+  box.holdPollMs = opts.holdPollMs;
   box.retryMs = opts.retryMs;
   box.running.clear();
 }
