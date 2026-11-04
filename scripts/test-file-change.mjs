@@ -94,7 +94,9 @@ function freshRepo() {
 /** A folder of root tree `root` (`prefix` "" or "src/"), as GitHub lists one (GET /git/trees/<sha>): its own sha here. */
 function folderSha(root, prefix) {
   if (!prefix) return root;
-  const sha = sha1(`${root}:${prefix}`);
+  // By what's in it, as git's are: the same folder in two commits has one sha.
+  const under = Object.entries(gh.trees.get(root)).filter(([p]) => p.startsWith(prefix)).sort(([a], [b]) => (a < b ? -1 : 1));
+  const sha = sha1(`${prefix}${JSON.stringify(under.map(([p, e]) => [p.slice(prefix.length), e.sha, e.mode]))}`);
   gh.folders.set(sha, { root, prefix });
   return sha;
 }
@@ -428,7 +430,7 @@ await check("a draft on a branch the repository lists, from main, is saved at on
   assert.equal(isDraft(on("Main"), "main", ["M", "Main/"], [{ path: "a.md" }]), false, "the default branch in any case asks");
   assert.equal(isDraft(on("site/x"), "main", ["site/"], [{ path: ".github/workflows/ci.yml" }]), false, "GitHub's automation asks");
   assert.equal(isDraft(on("site/x"), "", ["site/"], [{ path: "a.md" }]), false, "no default branch known: it asks");
-  assert.deepEqual(draftPrefixes('{"drafts":["site/","x","/root/","a/../b/",7,"preview/"]}'), ["site/", "preview/"], "each ends in /, nothing odd");
+  assert.deepEqual(draftPrefixes('{"drafts":["site/","x","/root/","a/../b/",7,"refs/","heads/x/","preview/"]}'), ["site/", "preview/"], "each ends in /, nothing odd");
   assert.deepEqual([draftPrefixes(null), draftPrefixes("not json"), draftPrefixes('{"drafts":"site/"}')], [[], [], []]);
   for (const [who, where, opts] of [["owner", { chatId }, { chat: true }], ["member", { chatId, member: "Dee" }, { chat: true }], ["task", { sessionId: "ses_draft" }, { task: true }]]) {
     freshRepo();
@@ -459,7 +461,16 @@ await check("anything else asks, a task's too, nothing written before the yes: n
   await asks(change({ branch: "site/ci", files: [{ path: ".github/workflows/preview.yml", text: "on: push\n", delete: null }] }));
   await asks(change({ branch: "site/ci", files: [{ path: ".github/bops.json", text: '{"drafts":["feature/"]}', delete: null }] }), { chat: true }, { chatId });
   await asks(change());
+  // A listed branch a person gave automation of its own: its push would run that, so it asks.
+  gh.refs.set("site/own", gh.refs.get("main"));
+  theirCommit("site/own", ".github/workflows/own.yml", "on: push\n");
+  await asks(change({ branch: "site/own" }));
   assert.deepEqual(writes(), []);
+  // One with the default branch's automation, other changes of its own: a draft.
+  gh.refs.set("site/same", gh.refs.get("main"));
+  theirCommit("site/same", "README.md", "# Site, edited\n");
+  const done = await changeFiles("boppy", change({ branch: "site/same" }), { sessionId: "ses_same" }, { task: true });
+  assert.match(done.text, /^Saved: 2 files on site\/same in acme\/site \(commit/);
 });
 
 await check("a task stopped while its draft is saving writes nothing more, and its branch never moves", async () => {

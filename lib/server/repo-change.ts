@@ -198,13 +198,14 @@ export function diffOf(was: string | null, next: string): string[] {
 export const DRAFTS_FILE = ".github/bops.json";
 
 /**
- * The draft branch prefixes a repository lists in DRAFTS_FILE: each ends in "/", with no "..". None for a file that isn't
+ * The draft branch prefixes a repository lists in DRAFTS_FILE: each ends in "/", with no "..", never "refs/" or "heads/"
+ * (a branch of that name reads as another to git's tools). None for a file that isn't
  * there, can't be read or says anything else: then every change asks.
  */
 export function draftPrefixes(text: string | null): string[] {
   try {
     const d = text ? (JSON.parse(text) as { drafts?: unknown }).drafts : undefined;
-    return Array.isArray(d) ? d.filter((x): x is string => typeof x === "string" && x.length > 1 && x.length <= 100 && x.endsWith("/") && !x.includes("..") && !x.startsWith("/")) : [];
+    return Array.isArray(d) ? d.filter((x): x is string => typeof x === "string" && x.length > 1 && x.length <= 100 && x.endsWith("/") && !x.includes("..") && !/^(\/|refs\/|heads\/)/.test(x)) : [];
   } catch {
     return [];
   }
@@ -215,7 +216,8 @@ export function draftPrefixes(text: string | null): string[] {
  * its people know what a push there runs: Four Corners' site/ branches reach only its dev copy, under a login of their
  * own); a change on one of them, never the default branch (`live`, in any case), a new one started from the default
  * branch alone (another may run other automation), touching nothing under .github/ (GitHub's automation, which runs on
- * a push with the repository's secrets; DRAFTS_FILE is there too). Anything else asks; so does a repository that lists none.
+ * a push with the repository's secrets; DRAFTS_FILE is there too). Anything else asks; so does a repository that lists
+ * none. changeFiles also asks for a branch whose .github/ isn't the default branch's (one a person gave its own).
  */
 export function isDraft(c: { branch: string; base: string | null }, live: string, prefixes: readonly string[], files: readonly { path: string }[]): boolean {
   if (!live || c.branch.toLowerCase() === live.toLowerCase() || (c.base !== null && c.base !== live)) return false;
@@ -349,12 +351,6 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
   const diffs: string[] = [];
   try {
     s = await start();
-    const main = await live();
-    // The repository's draft branches, from its default branch (a draft can't change them: they're under .github/).
-    const listed = await gh("GET", `/repos/${repo}/contents/${segments(DRAFTS_FILE)}`, undefined, { ref: main });
-    const j = listed.status === 200 ? jsonOf(listed) : null;
-    const text = j && typeof j.content === "string" && j.encoding === "base64" ? Buffer.from(j.content, "base64").toString("utf8") : null;
-    draft = isDraft({ branch, base: s.head ? null : s.base }, main, draftPrefixes(text), files);
     /** One folder's entries, as git's trees list it (not recursive), each read once. */
     const folders = new Map<string, Promise<{ path: string; mode: string; type: string; sha: string }[]>>();
     const folder = (sha: string) => {
@@ -366,6 +362,20 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
       return folders.get(sha)!;
     };
     const root = await treeOf(s.from);
+    // A draft (isDraft): its branch is one the repository lists, read at its default branch's commit (a draft can't change
+    // the list: it's under .github/), and the change starts from the same automation (.github/) the default branch has,
+    // so its push runs nothing a person didn't put on the default branch.
+    const main = await live();
+    const mainAt = main ? await at(main) : null;
+    if (mainAt) {
+      const listed = await gh("GET", `/repos/${repo}/contents/${segments(DRAFTS_FILE)}`, undefined, { ref: mainAt });
+      const j = listed.status === 200 ? jsonOf(listed) : null;
+      const text = j && typeof j.content === "string" && j.encoding === "base64" ? Buffer.from(j.content, "base64").toString("utf8") : null;
+      if (isDraft({ branch, base: s.head ? null : s.base }, main, draftPrefixes(text), files)) {
+        const automation = async (tree: string) => (await folder(tree)).find((e) => e.path === ".github")?.sha ?? null;
+        draft = (await automation(root)) === (await automation(await treeOf(mainAt)));
+      }
+    }
     /** What's at `path`: its entry, or the first one on its way that isn't a folder (`at` says where), or null for nothing there. */
     const entryAt = async (path: string) => {
       const parts = path.split("/");
