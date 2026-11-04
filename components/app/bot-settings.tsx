@@ -151,7 +151,7 @@ export function BotSettingsPage({
             {wsName && <span className="truncate text-[11.5px] leading-4 text-[#6B6B6B]">{wsName}</span>}
           </span>
         </div>
-        <span className="px-2.5 pb-1.5 pt-2.5 text-[11px] uppercase leading-4 tracking-[0.02em] text-[#9A9A97]">{W.group}</span>
+        <span className="px-2.5 pb-1.5 pt-2.5 text-[12px] font-semibold leading-4 text-[#9A9A97]">{W.group}</span>
         {SETTINGS_SECTIONS.map((s) => (
           <button
             key={s}

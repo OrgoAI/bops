@@ -2146,11 +2146,10 @@ export function Settings({
       {x.value !== undefined && <span className="shrink-0 text-[11.5px] font-normal tabular-nums text-[#8A8A88]">{x.value}</span>}
     </button>
   );
-  const group = (label: string, why: string | null, items: NavItem[], heading?: React.ReactNode) => (
+  const group = (label: string, items: NavItem[], heading?: React.ReactNode) => (
     <div className="flex flex-col gap-px pt-4">
-      <span className="px-2.5 text-[10.5px] font-semibold uppercase tracking-[0.05em] text-[#8A8A88]">{label}</span>
+      <span className="px-2.5 pb-0.5 text-[12px] font-semibold leading-4 text-[#8A8A88]">{label}</span>
       {heading}
-      {why && <span className="px-2.5 pb-1 text-[11px] leading-4 text-[#A3A3A0]">{why}</span>}
       {items.map(navRow)}
     </div>
   );
@@ -2185,42 +2184,42 @@ export function Settings({
   if (pane === "profile")
     body = (
       <>
-        <PaneHead title="Profile" sub="Who your bots work for, in every workspace." />
+        <PaneHead title="Profile" />
         <OwnerSettings owner={state.owner} />
       </>
     );
   else if (pane === "plan")
     body = (
       <>
-        <PaneHead title="Plan and credit" sub="What you pay for Bops, your credit, and your bots' inboxes and numbers." />
+        <PaneHead title="Plan and credit" />
         <PlanAndCredit state={state} />
       </>
     );
   else if (pane === "usage")
     body = (
       <>
-        <PaneHead title="Usage" sub="What your bots used, in every workspace." />
+        <PaneHead title="Usage" />
         <UsageSection />
       </>
     );
   else if (pane === "reach")
     body = (
       <>
-        <PaneHead title="How bots reach you" sub="Your numbers and emails: how your bots know it's you." />
+        <PaneHead title="How bots reach you" />
         <ReachSettings />
       </>
     );
   else if (pane === "ai" && BRAINS_ON)
     body = (
       <>
-        <PaneHead title="AI plans" sub="Your own AI plans and agent sign ins, for your bots' work." />
+        <PaneHead title="AI plans" />
         <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />
       </>
     );
   else if (pane === "privacy")
     body = (
       <>
-        <PaneHead title="Privacy" sub="What Bops keeps, for how long, and what it shares." />
+        <PaneHead title="Privacy" />
         {!selfHosted && <UsageData />}
         {/* Where the user's things are kept and for how long: their own, never a shared workspace's owner's. */}
         {!selfHosted && !shared && <YourData />}
@@ -2229,7 +2228,7 @@ export function Settings({
   else if (pane === "mac")
     body = (
       <>
-        <PaneHead title="This Mac" sub="Permissions here, where your bots work, and their computers." />
+        <PaneHead title="This Mac" />
         <ThisMacSettings state={state} />
         <WhereBotsWork state={state} />
         {/* Bots in browsers on this Mac have no computer to run routines on; a self-hosted Bops has no Bops Cloud for a runner to share the state through. */}
@@ -2259,7 +2258,7 @@ export function Settings({
   else if (pane === "bots")
     body = (
       <>
-        <PaneHead title="Bots" sub={shared ? `${wsName}'s bots. Only the owner changes their settings.` : `${wsName}'s bots. Each has a settings page of its own.`} />
+        <PaneHead title="Bots" sub={shared ? `${wsName}'s bots. Only the owner changes their settings.` : undefined} />
         <WorkspaceBots state={state} onOpenBot={shared ? undefined : onOpenBot} />
       </>
     );
@@ -2267,7 +2266,7 @@ export function Settings({
   else if (pane === "email")
     body = (
       <>
-        <PaneHead title="Email and phone" sub={`How people reach ${wsName}'s bots.`} />
+        <PaneHead title="Email and phone" />
         <WorkspaceReach state={state} />
       </>
     );
@@ -2298,9 +2297,9 @@ export function Settings({
             <span className="truncate text-[11.5px] leading-4 text-[#8A8A88]">{user?.email ?? "Not signed in"}</span>
           </span>
         </div>
-        {group("Account", "Yours, in every workspace", account)}
-        {group("Workspace", shared ? "Shared with you" : "Shared with its people", workspace, switcher)}
-        {team_.length > 0 && group("Orgo team only", null, team_)}
+        {group("Account", account)}
+        {group("Workspace", workspace, switcher)}
+        {team_.length > 0 && group("Orgo team only", team_)}
       </nav>
       <main data-settings-pane={pane} className={`flex min-h-0 min-w-0 flex-1 flex-col ${framed ? "" : "overflow-y-auto pb-8"}`}>
         {body}

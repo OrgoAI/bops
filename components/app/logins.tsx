@@ -207,18 +207,12 @@ export function LoginsPage({
         <div className="flex w-full flex-col gap-3.5">
           <div className="flex items-start gap-4">
             <div className="flex min-w-0 flex-1 flex-col">
-              <span className="inline-flex items-center gap-1.5 self-start rounded-full bg-[#F6F6F4] py-[3px] pl-1 pr-2.5 text-[11.5px] leading-4 text-[#6B6B6B] shadow-[0_0_0_1px_#E8E8E5]">
-                <span className="flex size-4 items-center justify-center rounded-[5px] bg-[#1F5F4A] text-[9.5px] font-semibold uppercase text-white">{wsName[0]}</span>
-                Workspace · {wsName}
-              </span>
-              <span className="mt-2 text-[22px] font-bold leading-7 tracking-[-0.02em]">Logins</span>
+              <span className="text-[22px] font-bold leading-7 tracking-[-0.02em]">Logins</span>
               <span className="mt-0.5 text-[13px] leading-[19px] text-[#6B6B6B]">
-                {shared
-                  ? "Your own apps and site logins. They're yours, not this workspace's bots'. Keys here are this workspace's."
-                  : `Apps, keys and site logins for ${wsName}'s bots. Each bot gets only the access you give it. Passwords stay in your Mac's Keychain, and no AI sees them.`}
+                {shared ? "Your own apps and site logins. They're yours, not this workspace's bots'. Keys here are this workspace's." : "Passwords stay in your Mac's Keychain, and no AI sees them."}
               </span>
             </div>
-            <div className="relative mt-[30px] shrink-0">
+            <div className="relative shrink-0">
               <button onClick={() => setAdding(!adding)} aria-expanded={adding} className="flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
                   <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -663,7 +657,7 @@ function Toggle({ label, on, locked, onFlip }: { label: string; on: boolean; loc
   );
 }
 
-const sectionTitle = "pb-2 text-[11px] font-semibold uppercase leading-4 tracking-[0.05em] text-[#8A8A88]";
+const sectionTitle = "pb-2 text-[12px] font-semibold leading-4 text-[#8A8A88]";
 const card = "flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]";
 const day = (t: number) => new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
@@ -804,12 +798,8 @@ function LoginPanel({
             <span className="truncate text-[13.5px] font-semibold leading-[18px]">{owner === "You" ? "You" : `${owner} (you)`}</span>
             <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{[email, a ? day(a.at) : l ? day(l.addedAt) : null].filter(Boolean).join(" · ")}</span>
           </div>
-          {a && (
-            <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-[11.5px] font-medium ${expired ? "bg-[#FEF0C7] text-[#93370D]" : "bg-[#ECFDF3] text-[#1E8A55]"}`}>
-              <span className={`size-1.5 rounded-full ${expired ? "bg-[#F79009]" : "bg-[#2BB673]"}`} />
-              {expired ? "Signed out" : "Working"}
-            </span>
-          )}
+          {/* Only the state that needs someone is said: a sign in that works says nothing. */}
+          {expired && <span className="shrink-0 text-[12px] font-medium leading-4 text-[#93370D]">Signed out</span>}
         </div>
         {expired && (
           <button onClick={() => onSignIn({ app: a!.app, replaces: a!.id })} className="mt-2 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-semibold leading-4 text-white">

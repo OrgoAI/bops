@@ -59,7 +59,7 @@ export function Toggle({ label, on, onFlip, disabled, tip }: { label: string; on
 export function InnerLabel({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <div className="mb-2 mt-2.5 flex items-center justify-between gap-2">
-      <span className="text-[11px] font-semibold uppercase leading-4 tracking-[0.02em] text-[#9A9A97]">{children}</span>
+      <span className="text-[12px] font-semibold leading-4 text-[#9A9A97]">{children}</span>
       {action}
     </div>
   );
