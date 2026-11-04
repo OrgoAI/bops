@@ -295,7 +295,7 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
     const listed = new Map(s.listed.map((x) => [x.path, x]));
     const going = files.filter((f) => listed.has(f.path));
     const n = going.length;
-    /** A task stopped meanwhile (`signal`): nothing more is written, the branch never moves. */
+    /** A task stopped meanwhile (`signal`): checked before each write, so nothing more is written and the branch never moves. */
     const stopped = () => {
       if (opts.signal?.aborted) throw new StepFailed("stopped", "the task was stopped first");
     };
@@ -307,9 +307,14 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
         // An executable stays one, as it was on the card's commit (read before the ask); anything else is 100644.
         const mode = listed.get(f.path)?.mode ?? "100644";
         if ("delete" in f) entries.push({ path: f.path, mode, type: "blob", sha: null });
-        else entries.push({ path: f.path, mode, type: "blob", sha: String((await need(`saving ${f.path}`, gh("POST", `/repos/${repo}/git/blobs`, { content: f.text, encoding: "utf-8" }))).sha) });
+        else {
+          stopped();
+          entries.push({ path: f.path, mode, type: "blob", sha: String((await need(`saving ${f.path}`, gh("POST", `/repos/${repo}/git/blobs`, { content: f.text, encoding: "utf-8" }))).sha) });
+        }
       }
+      stopped();
       const made = await need("saving the files together", gh("POST", `/repos/${repo}/git/trees`, { base_tree: tree, tree: entries }));
+      stopped();
       const commit = await need("making the commit", gh("POST", `/repos/${repo}/git/commits`, { message, tree: made.sha, parents: [s.from] }));
       const sha = String(commit.sha);
       stopped();

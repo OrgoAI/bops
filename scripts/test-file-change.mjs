@@ -104,6 +104,7 @@ freshRepo();
 /** What the stand-in GitHub answers one call (as the broker passes it on): status and JSON. */
 function github(method, path, query, body) {
   gh.calls.push({ method, path, query, body });
+  gh.onCall?.(method, path);
   const ok = (b, status = 200) => ({ status, body: b });
   const no = (status, message) => ({ status, body: { message } });
   if (gh.fail && gh.fail.method === method && gh.fail.path.test(path)) return no(gh.fail.status, gh.fail.message);
@@ -484,6 +485,19 @@ await check("a task stopped while its draft is saving writes nothing more, and i
   assert.deepEqual(writes(), []);
   assert.equal(gh.refs.has("site/stopped"), false);
   assert.match(readFileSync(`${root}/lib/server/computer-task.ts`, "utf8"), /changeFiles\([^)]*signal: t\.signal/, "a task passes its Stop");
+  // Stopped during the last read before saving (the third commit read: the change's start, the default branch's, then
+  // the save's own): nothing is written after it.
+  freshRepo();
+  listDrafts();
+  const late = new AbortController();
+  let reads = 0;
+  gh.onCall = (method, path) => method === "GET" && path.includes("/git/commits/") && ++reads === 3 && late.abort();
+  const r2 = await changeFiles("boppy", change({ branch: "site/stopped" }), { sessionId: "ses_stop" }, { task: true, signal: late.signal });
+  gh.onCall = undefined;
+  assert.equal(late.signal.aborted, true, "stopped during a read");
+  assert.match(r2.text, /^Not saved: stopped/);
+  assert.deepEqual(writes(), [], "nothing written after the Stop");
+  assert.equal(gh.refs.has("site/stopped"), false);
 });
 
 /* ---------------- The card's diff ---------------- */
