@@ -64,6 +64,51 @@ export const plainText = (text: string) =>
     )
     .join("");
 
+/** A query or fragment name whose value can let someone in: tokens, keys, signatures, passwords, sign-in codes. */
+const SECRET_NAME = /token|secret|passw|pwd|signature|credential|api[-_]?key|apikey|^key$|^sig$|^code$|^auth|session|jwt|otp/i;
+/** A long opaque value (letters and digits, 24 or more): most likely a token, whatever its name. */
+const OPAQUE = /^(?=[^]*[A-Za-z])(?=[^]*\d)[A-Za-z0-9._~+/=%-]{24,}$/;
+const nameOf = (raw: string) => {
+  try {
+    return decodeURIComponent(raw.replace(/\+/g, " "));
+  } catch {
+    return raw;
+  }
+};
+/** "a=1&token=x" with each secret-looking value as •••, and a query inside a value ("next=/cb?code=…") the same way. */
+function hidePairs(pairs: string): string {
+  return pairs
+    .split("&")
+    .map((pair) => {
+      const at = pair.indexOf("=");
+      if (at < 0) return pair;
+      const value = pair.slice(at + 1);
+      if (value && (SECRET_NAME.test(nameOf(pair.slice(0, at))) || OPAQUE.test(value))) return `${pair.slice(0, at)}=•••`;
+      const q = value.indexOf("?");
+      return q >= 0 ? `${pair.slice(0, at + 1)}${value.slice(0, q + 1)}${hidePairs(value.slice(q + 1))}` : pair;
+    })
+    .join("&");
+}
+
+/**
+ * A web address as a row in the chat or a thread says it (a page a bot read, one a task opened): never a user name or
+ * password in it, and a value that could let someone in (a token, key, signature, sign-in code, or any long opaque
+ * value) as •••. The rest stays as written. Rows are kept and shared with whoever sees the chat.
+ */
+export function shownAddress(address: string): string {
+  // The user part runs to the authority's last @ (a password can hold one).
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#\s]*@)?([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(address);
+  if (!m) return address.replace(/([?&#])([^=&#?\s]*)=([^&#\s]*)/g, (all, sep: string, name: string, value: string) => (value && (SECRET_NAME.test(nameOf(name)) || OPAQUE.test(value)) ? `${sep}${name}=•••` : all));
+  const [, scheme, rest, query, hash] = m;
+  // A fragment is pairs itself ("#access_token=…", a ? in a value or not) or a route with a query after it ("#/cb?code=…").
+  const fragment = (h: string) => {
+    const q = h.indexOf("?");
+    if (q >= 0 && !h.slice(0, q).includes("=")) return `${h.slice(0, q + 1)}${hidePairs(h.slice(q + 1))}`;
+    return h.includes("=") ? hidePairs(h) : h;
+  };
+  return `${scheme}${rest}${query ? `?${hidePairs(query.slice(1))}` : ""}${hash ? `#${fragment(hash.slice(1))}` : ""}`;
+}
+
 /** A link to a page on the computer it runs on (localhost, 127.0.0.1): it opens there and nowhere else. */
 export const isLocalLink = (href: string) => /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#]|$)/i.test(href);
 

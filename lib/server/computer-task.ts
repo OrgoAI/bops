@@ -6,7 +6,8 @@ import { openaiClient } from "./openai-client";
 import { sleptSince } from "./awake";
 import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
-import { askFor, declined, NeedsOk, Paused, type AskSpec } from "./permission";
+import { askFor, declined, declinedStep, NeedsOk, Paused, type AskSpec } from "./permission";
+import { shownAddress } from "@/lib/plain-words";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
@@ -297,7 +298,7 @@ async function answerPaused(t: ComputerTurn, a: AppApproval, call: { name: strin
       if (owed) owed.output = output;
     });
   if (a.reply?.reply === "reject") {
-    t.step("note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    t.step("note", declinedStep(a));
     keep(declined(a));
     return { type: "function_call_output", call_id: callId, output: declined(a) };
   }
@@ -342,7 +343,7 @@ function record(t: ComputerTurn, o: OutputItem, more: boolean) {
     if (text) t.step("note", text);
   } else if (o.type === "web_search_call") {
     const a = o.action as { type?: string; query?: string; url?: string } | undefined;
-    t.step("search", a?.type === "open_page" && a.url ? `read ${a.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
+    t.step("search", a?.type === "open_page" && a.url ? `read ${shownAddress(a.url).replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
   }
 }
 
@@ -531,7 +532,7 @@ const PAGE_TOOL = {
   type: "function",
   name: "page_script",
   description:
-    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
+    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. context.pages() lists the tabs (the receipt lists them once there are two or more): to work in another, call bringToFront() on it and use it (the next script's `page` is the tab in front); context.newPage() opens one. Close tabs you opened once you're done with them. A file the page downloads is saved to ~/Downloads, and the receipt gives its path; when a click starts a download, wait for it in the same script: const [d] = await Promise.all([page.waitForEvent('download'), <the click>]). To put a file into a page, give the page's file input that path with page.setInputFiles('input[type=file]', path) (or page.waitForEvent('filechooser'), then setFiles), never the system's file picker on the screen. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -592,7 +593,32 @@ const VAULT_TOOL = {
 const clip = (s: string, max = 12_000) => (s.length > max ? `${s.slice(0, max / 2)}\n… (cut) …\n${s.slice(-max / 2)}` : s);
 
 /** What a page script's runner sends back (vm/page-script.cjs): its answer, the page it ended on, and its receipt. */
-type PageRun = { ok?: boolean; value?: string; error?: string; url?: string; changed?: boolean; dialogs?: string[]; downloads?: string[]; opened?: number; look?: boolean };
+type PageRun = {
+  ok?: boolean;
+  value?: string;
+  error?: string;
+  url?: string;
+  changed?: boolean;
+  dialogs?: string[];
+  /** Where each download was saved (an older runner said only its name). */
+  downloads?: string[];
+  /** Downloads that weren't saved, each with why. */
+  unsaved?: string[];
+  opened?: number;
+  /** The browser's tabs, once there are two or more. */
+  tabs?: { title?: string; url?: string; front?: boolean }[];
+  look?: boolean;
+};
+
+/** "Tabs open: "Pricing" https://… (in front), "Canva" https://…." for a receipt, each part cut short. */
+function tabsLine(tabs: NonNullable<PageRun["tabs"]>): string {
+  const cut = (v: unknown, max: number) => {
+    const one = String(v ?? "").replace(/\s+/g, " ").trim();
+    return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+  };
+  const each = tabs.map((t) => `"${cut(t.title, 80) || "(no title)"}" ${cut(t.url, 200)}${t.front ? " (in front)" : ""}`);
+  return `Tabs open: ${each.join(", ")}.`;
+}
 
 /**
  * A page script, run on the computer by its runner against the Chrome of the task's screen (its CDP
@@ -625,8 +651,10 @@ async function pageScript(t: ComputerTurn, script: string, seconds: number): Pro
   }
   const receipt = [
     ...(out.dialogs ?? []).map((d) => `The page showed a dialog (${d}); it was dismissed. To answer it, handle it in the script before the step that opens it: page.once("dialog", (d) => d.accept()).`),
-    ...(out.downloads ?? []).map((f) => `Downloaded ${f}.`),
+    ...(out.downloads ?? []).map((f) => (f.startsWith("/") ? `Saved a download to ${f}.` : `Downloaded ${f}.`)),
+    ...(out.unsaved ?? []).map((f) => `A download wasn't saved (${clip(f, 400)}).`),
     ...(out.opened ? [`It opened ${out.opened === 1 ? "a new tab" : `${out.opened} new tabs`}, now in front.`] : []),
+    ...(out.tabs && out.tabs.length > 1 ? [tabsLine(out.tabs)] : []),
   ];
   const on = out.url ? `\n\n(Now on ${out.url.slice(0, 300)})` : "";
   const said = out.ok ? clip(out.value ?? "") : `Failed: ${out.error ?? "the script stopped"}`;
