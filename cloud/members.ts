@@ -14,6 +14,8 @@ import {
   cleanAccess,
   cleanName,
   currentFor,
+  hasPower,
+  POWER_WORDS,
   fitComputer,
   holdsKeys,
   levelOf,
@@ -24,6 +26,7 @@ import {
   writesChat,
   type AdminPower,
   type MemberAccess,
+  type Power,
   type MemberAccessMap,
   type MemberWho,
 } from "./member-access.ts";
@@ -39,6 +42,7 @@ import {
   KEY_NAME,
   KEYS_MIN_VERSION,
   MEMBER_NO_KEYS,
+  MEMBER_NO_POWER,
   OWNERS_KEY_LINE,
   OWNER_BOPS_OLD,
   MEMBER_ACT_MS,
@@ -73,7 +77,8 @@ import {
 } from "./protocol.ts";
 import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, toJson, writeMessages, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
-import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, keyNamesOf, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
+import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, keyNamesOf, list, seesEveryBot, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
+import { CHANGES_MIN_VERSION, checkChange, cleanChange } from "./change-routes.ts";
 import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckTurns, routedWorkspaces, routingOf, setRouting, takeMessage, wakeComputer } from "./turns.ts";
 
 /**
@@ -231,9 +236,10 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
  * ws-slice.ts viewerAccess), their email (their access is kept by it), user id (a guest's is), when their membership
  * began (access set before isn't theirs), their Use its computer and Keys as orgo-web says them, and the owner's email (apps).
  * `adminActs` and `adminPublish`: the owner's Bops takes an Admin's acts, and publishes for them (adminGate). `keyActs`: it
- * takes the "key" act (KEYS_MIN_VERSION), said to someone with Keys.
+ * takes the "key" act (KEYS_MIN_VERSION), said to someone with Keys. `changes`: it takes the "change" act (change-routes.ts
+ * CHANGES_MIN_VERSION), said to anyone but the owner.
  */
-export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false, keyActs = false): SliceViewer => ({
+export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false, keyActs = false, changes = false): SliceViewer => ({
   role: access.role,
   ...(adminActs && access.role !== "owner" ? { adminActs: true } : {}),
   ...(adminPublish && access.role === "admin" ? { adminPublish: true } : {}),
@@ -244,6 +250,7 @@ export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, a
   ...(access.ownerEmail !== undefined ? { ownerEmail: access.ownerEmail } : {}),
   ...(access.keys !== undefined ? { keys: access.keys } : {}),
   ...(keyActs && access.role !== "owner" && holdsKeys(access.role, access.keys) ? { keyActs: true } : {}),
+  ...(changes && access.role !== "owner" ? { changes: true } : {}),
 });
 
 /** Whether the caller, someone other than the owner, has Keys (member-access.ts holdsKeys: as orgo-web says, an Admin when it doesn't). */
@@ -307,9 +314,12 @@ export async function adminGate(owner: string, min = ADMIN_POWERS_MIN_VERSION): 
  * Who acts, as the checks below take it: orgo-web's role (asked afresh) and whether the owner's Bops takes an Admin's acts
  * (`adminEdits`: a change to a bot's "How I work", asked only for an Admin's "persona" act).
  */
-type Actor = { role: WsRole; adminActs: boolean; adminEdits?: boolean; keys?: boolean; keyActs?: boolean };
-/** Whether an Admin with the owner's Bops new enough may do `power` (member-access.ts ADMIN_POWERS). */
-const mayAdmin = (who: Actor, power: AdminPower) => adminMay(power, who.role === "admin" && who.adminActs);
+type Actor = { role: WsRole; adminActs: boolean; adminEdits?: boolean; keys?: boolean; keyActs?: boolean; can?: Partial<Record<Power, true>> };
+/**
+ * Whether an Admin with the owner's Bops new enough may do `power` (member-access.ts ADMIN_POWERS), or a Member with its
+ * switch on (`can`: set only when the owner's Bops takes switches, CHANGES_MIN_VERSION).
+ */
+const mayAdmin = (who: Actor, power: AdminPower) => adminMay(power, { admin: who.role === "admin" && who.adminActs, ...(who.can ? { can: who.can } : {}) });
 /** For an act only an Admin does: 403 ADMIN_ONLY for anyone else, 409 OWNER_BOPS_OLD while the owner's Bops can't take it (`taken`). */
 function adminOnly(who: Actor, taken = who.adminActs) {
   if (who.role !== "admin") throw new HttpError(403, ADMIN_LINE, { code: ADMIN_ONLY });
@@ -440,6 +450,8 @@ const readState: Route = {
       access.role === "admin" && (await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION)),
       // Someone with Keys: whether the owner's Bops takes their "key" act (asked only for them).
       keysHeld(access) && (await adminGate(target.account, KEYS_MIN_VERSION)),
+      // Whether it takes a "change" act (change-routes.ts), said to anyone but the owner.
+      access.role !== "owner" && (await adminGate(target.account, CHANGES_MIN_VERSION)),
     );
     const slice = sharedSlice(blob, target.ws, viewer);
     const bots = viewer.role === "owner" ? undefined : botsOf(slice);
@@ -543,6 +555,11 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
     case "compact":
       if (anId(x.chatId) === anId(x.sessionId)) return null;
       return anId(x.chatId) ? { key, act: { act: "compact", chatId: x.chatId } } : { key, act: { act: "compact", sessionId: x.sessionId as string } };
+    // A change as the owner's window makes it (change-routes.ts): its route and what it names are checked in actIn.
+    case "change": {
+      const call = cleanChange(x);
+      return call ? { key, act: { act: "change", ...call } } : null;
+    }
     case "deploy":
     case "rollback":
     case "settings":
@@ -668,6 +685,34 @@ function computerAct(blob: Record<string, unknown>, slice: ReturnType<typeof sli
   return false;
 }
 
+/**
+ * A Member's switches in Team (member-access.ts MemberAccess.can) as the owner's state keeps them for their membership now,
+ * when the owner's Bops takes them (CHANGES_MIN_VERSION): an older one doesn't know them, so none count. As `{ can }`, or nothing.
+ */
+async function switchesOf(blob: Record<string, unknown>, target: LiveTarget, user: CloudUser, role: WsAccess): Promise<{ can?: Partial<Record<Power, true>> }> {
+  if (!(await adminGate(target.account, CHANGES_MIN_VERSION))) return {};
+  const ws = list(blob.workspaces).find((w) => w.id === target.ws) ?? null;
+  const can = viewerAccess(ws, viewerOf(user, role)).can;
+  return can && Object.keys(can).length ? { can } : {};
+}
+
+/**
+ * A "change" act checked against the caller's own view (change-routes.ts checkChange): a bot it names one they have at
+ * Write, an app its path names one of the workspace's with Your Apps at Write, the org chart only for someone who sees
+ * every bot, and every power it needs theirs (member-access.ts hasPower: an Admin has every one). Throws why not.
+ */
+export function changeTouched(blob: Record<string, unknown>, ws: string, slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: Extract<MemberAct, { act: "change" }>) {
+  const bots = new Set(slice.bots.flatMap((b) => (typeof b.id === "string" && permits(levelOf(access, b.id), "write") ? [b.id] : [])));
+  const hosted = slice.workspace?.hostedApps;
+  const apps = new Set(appsLevelOf(access) === "write" && hosted && typeof hosted === "object" && !Array.isArray(hosted) ? Object.keys(hosted) : []);
+  const r = checkChange(act, { bots, apps });
+  if ("why" in r) throw new HttpError(403, r.why, { code: MEMBER_OWNER_ONLY });
+  const missing = r.powers.find((p) => !hasPower(p, viewer.role, access.can));
+  if (missing) throw new HttpError(403, `The owner or an Admin can let you change ${POWER_WORDS[missing].name} in Team.`, { code: MEMBER_NO_POWER });
+  if (r.powers.includes("chart") && !seesEveryBot(access, list(blob.bots).flatMap((b) => (typeof b.id === "string" && wsOfBot(b) === ws ? [b.id] : []))))
+    throw new HttpError(403, "To change the org chart, you need to see every bot.", { code: MEMBER_NO_POWER });
+}
+
 function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sliceOf>, act: MemberAct, who: Actor = { role: "member", adminActs: false }): string[] {
   const thread = (id: string) => slice.sessions.find((x) => x.id === id);
   const botOf = (x: Record<string, unknown> | undefined) => (typeof x?.botId === "string" ? [x.botId] : []);
@@ -690,7 +735,7 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       return botOf(t);
     }
     case "where": {
-      adminOnly(who);
+      if (!mayAdmin(who, "where")) adminOnly(who);
       const t = thread(act.sessionId);
       if (!t) throw new HttpError(404, "No such thread");
       // The owner's own Mac, with their browsers and logins: theirs to pick.
@@ -707,9 +752,12 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       if (!slice.bots.some((x) => x.id === act.botId)) throw new HttpError(404, "No such bot");
       return [act.botId];
     }
+    // Checked on its own (changeTouched): it touches no bot's chat or thread.
+    case "change":
+      return [];
     case "persona": {
-      // An Admin's (ADMIN_POWERS.instructions), once the owner's Bops takes it (ADMIN_PUBLISH_MIN_VERSION).
-      adminOnly(who, adminMay("instructions", who.adminEdits === true));
+      // An Admin's (ADMIN_POWERS.instructions), once the owner's Bops takes it (ADMIN_PUBLISH_MIN_VERSION); a Member's with Bot settings on.
+      if (!who.can?.bots) adminOnly(who, adminMay("instructions", who.adminEdits === true));
       const b = slice.bots.find((x) => x.id === act.botId);
       if (!b) throw new HttpError(404, "No such bot");
       // Changed since the edit began (the owner's Mac checks again as it saves), unless to these very words (the same act again).
@@ -722,7 +770,7 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
       if (a) {
         // The owner's own (their logins, a thread on their Mac): an Admin's too, once the owner's Bops takes it.
         const t = typeof a.threadId === "string" ? thread(a.threadId) : undefined;
-        const why = askOwnersOnly(a, t, who.role === "admin" && who.adminActs);
+        const why = askOwnersOnly(a, t, { admin: who.role === "admin" && who.adminActs, ...(who.can ? { can: who.can } : {}) });
         // An Admin's to answer, once the owner's Bops takes it: until then it would be dropped there.
         if (why && who.role === "admin" && !who.adminActs && !askOwnersOnly(a, t, true)) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
         if (why === "logins") throw new HttpError(403, THEIR_LOGINS, { code: MEMBER_OWNER_ONLY });
@@ -854,15 +902,24 @@ const actIn: Route = {
       ...(role.role === "admin" && body.act.act === "persona" ? { adminEdits: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) } : {}),
       // Keys: theirs as orgo-web said it just now, and the owner's Bops new enough to take a "key" act (asked only for one).
       ...(body.act.act === "key" ? { keys: keysHeld(role), keyActs: keysHeld(role) && (await adminGate(target.account, KEYS_MIN_VERSION)) } : {}),
+      // A Member's switches in Team (member-access.ts MemberAccess.can), once the owner's Bops takes them.
+      ...(role.role === "member" ? await switchesOf(blob, target, user!, role) : {}),
     };
     // Publish from Your Apps (env "prod"): an Admin's, with the owner's Bops new enough (an older one would put it on the Preview).
-    if ((body.act.act === "deploy" || body.act.act === "rollback") && body.act.env === "prod") adminOnly({ role: role.role, adminActs: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) });
+    // A Member's with App secrets on (actor.can: the owner's Bops takes switches, so it's new enough to publish for them).
+    if ((body.act.act === "deploy" || body.act.act === "rollback") && body.act.env === "prod" && !actor.can?.appSecrets) adminOnly({ role: role.role, adminActs: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) });
     const viewer = viewerOf(user!, role, actor.adminActs);
     // Their own view, every item whole and with the owner's ids: what they may act on is only what they're shown.
     const slice = sliceOf(blob, target.ws, viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
     if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
+    // A change as the owner's window makes it: the power it needs (an Admin has every one), and only this workspace's
+    // bots (at Write) and apps (Your Apps at Write), once the owner's Bops takes it (changeTouched).
+    else if (body.act.act === "change") {
+      if (!(await adminGate(target.account, CHANGES_MIN_VERSION))) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
+      changeTouched(blob, target.ws, slice, viewer, access, body.act);
+    }
     // A bot's keys: Keys, a bot they see (botsTouched). Not Write: Keys is a scope of its own. On, the workspace's own keys
     // alone: one of the owner's own is theirs to give (ownersOwnKey). Off goes for any.
     else if (body.act.act === "key") {
@@ -1353,7 +1410,7 @@ const wakeIn: Route = {
  * PATCH /v1/ws/<project>/routing {mode: "mac" | "cloud" | "auto"}: where the workspace's chat is answered, chosen by an
  * Admin as the owner's switch does (turns.ts setRouting), kept as an Admin's choice ("admin": never moved by itself).
  * "cloud" waits for the owner's own Mac to be new enough (never the Admin's Bops). Whether a message may wake a computer
- * billed by the hour stays the owner's (it spends their money): 403.
+ * billed by the hour (`allowHourly`) is an Admin's to say too (an Admin may do everything but delete the workspace).
  */
 const routingIn: Route = {
   method: "PATCH",
@@ -1363,21 +1420,20 @@ const routingIn: Route = {
     const projectId = ROUTING_PATH.exec(url.pathname)?.[1];
     if (!projectId) throw new HttpError(404, "Not found");
     const b = await readJson<{ mode?: unknown; allowHourly?: unknown }>(req, 4096).catch(() => null);
-    if (b && b.allowHourly !== undefined) throw new HttpError(403, "Only the owner can let messages wake a computer billed by the hour.", { code: OWNER_ALWAYS_CODE });
-    if (!b || (b.mode !== "mac" && b.mode !== "cloud" && b.mode !== "auto")) throw new HttpError(400, 'Send {mode: "mac" | "cloud" | "auto"}');
+    const mode = b?.mode === "mac" || b?.mode === "cloud" || b?.mode === "auto" ? b.mode : undefined;
+    if (!b || (b.mode !== undefined && !mode) || (b.allowHourly !== undefined && typeof b.allowHourly !== "boolean") || (mode === undefined && b.allowHourly === undefined))
+      throw new HttpError(400, 'Send {mode?: "mac" | "cloud" | "auto", allowHourly?: boolean}');
     await count(user!.id);
     const { target } = await asAdmin(req, user!, projectId);
-    const out = await setRouting(target.account, target.ws, { mode: b.mode }, "admin").catch((e: unknown) => {
+    const out = await setRouting(target.account, target.ws, { ...(mode ? { mode } : {}), ...(typeof b.allowHourly === "boolean" ? { allowHourly: b.allowHourly } : {}) }, "admin").catch((e: unknown) => {
       // The owner's words ("your Mac") said to an Admin: the owner's Mac.
       if (e instanceof HttpError && e.extra?.code === CHAT_AUTO_OFF) throw new HttpError(e.status, "Bops Cloud can't answer this workspace by itself yet, so the owner's Mac keeps answering it.", e.extra);
       throw e;
     });
-    console.log(`[members] an Admin (${user!.id}) set ${projectId}'s chat to ${String(b.mode)}`);
+    console.log(`[members] an Admin (${user!.id}) set ${projectId}'s chat${mode ? ` to ${mode}` : ""}${typeof b.allowHourly === "boolean" ? `, hourly wake ${b.allowHourly ? "on" : "off"}` : ""}`);
     sendJson(res, 200, { ok: true, ...out });
   },
 };
-/** 403: what stays the owner's whatever (member-access.ts OWNER_ALWAYS): their money. */
-const OWNER_ALWAYS_CODE = "owner_only_always";
 
 export const routes: Route[] = [readState, actIn, changed, routingIn];
 

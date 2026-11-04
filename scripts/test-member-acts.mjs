@@ -46,6 +46,9 @@ registerHooks({
     }
   },
   load(url, context, next) {
+    // The owner's routes a change goes through (lib/server/change-acts.ts): fakes that say what they were asked.
+    const route = url.match(/\/app\/api\/(workspaces|bots)\/route\.ts$/)?.[1];
+    if (route) return { format: "module", shortCircuit: true, source: `export const PATCH = (...a) => globalThis.__fake.routes.${route}(...a);` };
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !FAKES[name]) return next(url, context);
     return { format: "module", shortCircuit: true, source: fill(name, url, FAKES[name]) };
@@ -616,15 +619,19 @@ await check("an Admin with no entry chats with every bot, replies, answers and u
   assert.deepEqual(did.map((d) => d[0]), ["chat", "reply", "answer", "chat"], "Use its computer too, whatever Bops Cloud's flag says");
   assert.equal(did[3][4].role, "admin", "a group's turn too");
   assert.equal(did[1][5].role, undefined, "a reply in a thread is kept without the role");
-  // The owner's own logins and the asks of a thread on their Mac: an Admin's to answer too (member-access.ts ADMIN_POWERS).
-  // Telling a thread on the owner's Mac more stays the owner's: it has their browsers and logins.
+  // The owner's own logins and the asks of a thread on their Mac, and telling that thread more: an Admin's too
+  // (member-access.ts ADMIN_POWERS: an Admin may do everything but delete the workspace).
   did.length = 0;
   await memberEvent(event({ act: "answer", askId: "ask-gmail", reply: "always" }, { member: ADA, role: "admin", key: "key_admin_005" }), "e_ad5");
   await memberEvent(event({ act: "answer", askId: "ask-key", reply: "once" }, { member: ADA, role: "admin", key: "key_admin_005b" }), "e_ad5b");
   await memberEvent(event({ act: "answer", askId: "ask-onmac", reply: "reject" }, { member: ADA, role: "admin", key: "key_admin_005c" }), "e_ad5c");
   await memberEvent(event({ act: "reply", sessionId: "t-onmac", text: "go" }, { member: ADA, role: "admin", key: "key_admin_006" }), "e_ad6");
   await memberEvent(event({ act: "dismiss", sessionId: "t-onmac" }, { member: ADA, role: "admin", key: "key_admin_006b" }), "e_ad6b");
-  assert.deepEqual(did.map((d) => d.slice(0, 3)), [["answer", "ask-gmail", "always"], ["answer", "ask-key", "once"], ["answer", "ask-onmac", "reject"]], "answered as theirs; the Mac thread told nothing");
+  assert.deepEqual(
+    did.map((d) => d.slice(0, 3)),
+    [["answer", "ask-gmail", "always"], ["answer", "ask-key", "once"], ["answer", "ask-onmac", "reject"], ["reply", "t-onmac", "go"], ["dismiss", "t-onmac", "Dismissed by Ada"]],
+    "answered as theirs; the Mac thread told too",
+  );
   assert.deepEqual(did[0][4], ADA, "named as the Admin's answer");
   // No role: their entry (none) counts, as for anyone.
   fresh();
@@ -858,6 +865,81 @@ await check("a bot's key, switched by someone with Keys: on, only one of the wor
     assert.ok(warned.some((w) => w.includes(`e_kn${i}`) && w.includes(why)), why);
   }
   vault = [];
+});
+
+/* ---------------- A change made as the owner's window makes it (the "change" act: lib/server/change-acts.ts) ---------------- */
+
+/** What each owner's route a change went to was asked, and how it answers. */
+const routed = [];
+let routeAnswer = () => Response.json({ ok: true });
+globalThis.__fake.routes = Object.fromEntries(
+  ["workspaces", "bots"].map((r) => [
+    r,
+    async (request) => {
+      routed.push({ route: r, method: request.method, body: await request.json(), window: request.headers.get("x-bops-window") });
+      return routeAnswer();
+    },
+  ]),
+);
+const { groupKeyOf } = await import(pathToFileURL(`${root}/cloud/group-key.ts`).href);
+const change = (body, path = "/api/workspaces") => ({ act: "change", method: "PATCH", path, body });
+/** Every pending change this Mac started (doChange runs on its own): waited for. */
+const settled = () => new Promise((r) => setTimeout(r, 20));
+const doneOf = (key) => state.workspaces.find((w) => w.id === "ws_acme").changesDone?.find((d) => d.key === key);
+
+await check("an Admin's change goes through the owner's own route as their window would, for this workspace alone; kept as done and said as theirs", async () => {
+  fresh();
+  routed.length = 0;
+  routeAnswer = () => Response.json({ ok: true });
+  process.env.BOPS_UI_TOKEN = "tok_window";
+  await memberEvent(event(change({ id: "@ws", chain: { bots: { ivy: { lead: "max" } } } }), { member: ADA, role: "admin", key: "key_chg_01" }), "e_chg1");
+  await settled();
+  assert.deepEqual(routed, [{ route: "workspaces", method: "PATCH", body: { id: "ws_acme", chain: { bots: { ivy: { lead: "max" } } } }, window: "tok_window" }], "this workspace's own id, the window's token");
+  assert.deepEqual(doneOf("key_chg_01"), { key: "key_chg_01", by: "user_ada", ok: true, at: doneOf("key_chg_01").at });
+  // The same key again (an ack that was lost): not done twice.
+  await memberEvent(event(change({ id: "@ws", chain: {} }), { member: ADA, role: "admin", key: "key_chg_01" }), "e_chg1b");
+  await settled();
+  assert.equal(routed.length, 1);
+  // A bot's settings: said in its chat as theirs.
+  await memberEvent(event(change({ botId: "zed", autoApprove: true }, "/api/bots"), { member: ADA, role: "admin", key: "key_chg_02" }), "e_chg2");
+  await settled();
+  assert.deepEqual(routed[1], { route: "bots", method: "PATCH", body: { botId: "zed", autoApprove: true }, window: "tok_window" });
+  assert.ok(state.messages.some((m) => m.chatId === "bot:zed" && m.text === "Ada changed Zed's settings"));
+  // A group renamed by the key Bops Cloud sent it by: the computer's own id, as this Mac names it.
+  await memberEvent(event(change({ id: "@ws", computerName: { computer: groupKeyOf("ws_acme", "c1"), name: "Shop" } }), { member: ADA, role: "admin", key: "key_chg_03" }), "e_chg3");
+  await settled();
+  assert.deepEqual(routed[2].body, { id: "ws_acme", computerName: { computer: "c1", name: "Shop" } });
+  // A route that says no: kept as why, for their window.
+  routeAnswer = () => Response.json({ error: "Pick one of the nine voices." }, { status: 400 });
+  await memberEvent(event(change({ botId: "max", callVoice: "nope" }, "/api/bots"), { member: ADA, role: "admin", key: "key_chg_04" }), "e_chg4");
+  await settled();
+  assert.deepEqual([doneOf("key_chg_04").ok, doneOf("key_chg_04").error], [false, "Pick one of the nine voices."]);
+  delete process.env.BOPS_UI_TOKEN;
+});
+
+await check("a Member's change needs its switch in Team and a bot they have at Write; never another workspace; refusals are kept as why", async () => {
+  fresh();
+  routed.length = 0;
+  routeAnswer = () => Response.json({ ok: true });
+  // No switch: not done, and their window is told who can give it.
+  await memberEvent(event(change({ botId: "max", autoApprove: true }, "/api/bots"), { key: "key_mchg_01" }), "e_mchg1");
+  await settled();
+  assert.equal(routed.length, 0);
+  assert.match(doneOf("key_mchg_01").error, /Bot settings in Team/);
+  // Bot settings on: Max (Write) goes, Ivy (Read) doesn't, Spending isn't theirs.
+  state.workspaces.find((w) => w.id === "ws_acme").memberAccess["sam@example.com"].can = { bots: true };
+  await memberEvent(event(change({ botId: "max", autoApprove: true }, "/api/bots"), { key: "key_mchg_02" }), "e_mchg2");
+  await memberEvent(event(change({ botId: "ivy", autoApprove: true }, "/api/bots"), { key: "key_mchg_03" }), "e_mchg3");
+  await memberEvent(event(change({ botId: "max", computer: "own" }, "/api/bots"), { key: "key_mchg_04" }), "e_mchg4");
+  await settled();
+  assert.deepEqual(routed.map((r) => r.body), [{ botId: "max", autoApprove: true }]);
+  assert.equal(doneOf("key_mchg_03").ok, false);
+  assert.match(doneOf("key_mchg_04").error, /Spending in Team/);
+  // Another workspace's id: never.
+  await memberEvent(event(change({ id: "ws_main", name: "Mine" }), { member: ADA, role: "admin", key: "key_mchg_05" }), "e_mchg5");
+  await settled();
+  assert.equal(routed.length, 1);
+  assert.equal(doneOf("key_mchg_05").ok, false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

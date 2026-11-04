@@ -166,7 +166,7 @@ export function BotGroupBlock({
   );
 }
 
-/** Save a computer's name from the owner's window (app/api/workspaces computerName). */
+/** Save a group's name from the owner's window (app/api/workspaces computerName): its computer's, or one app's bots' on it (BotGroup.nameKey). */
 export async function renameComputer(ws: string, computerId: string, name: string): Promise<boolean> {
   const res = await post("/api/workspaces", { id: ws, computerName: { computer: computerId, name } }, "PATCH").catch(() => null);
   return !!res?.ok;

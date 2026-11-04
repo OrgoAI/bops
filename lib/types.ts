@@ -338,10 +338,17 @@ export type Workspace = {
   /**
    * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
    * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
-   * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain); like
-   * memberAccess it never goes to a member (cloud/ws-slice.ts).
+   * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain), for
+   * them or for someone with the Org chart switch (a "change" act: lib/server/change-acts.ts); it goes to someone
+   * with that switch who sees every bot (cloud/ws-slice.ts sharedSlice), never to anyone else.
    */
   chain?: Chain;
+  /**
+   * What the owner's Mac did with the last changes people made from their own windows (the "change" act:
+   * lib/server/change-acts.ts), newest last, at most CHANGES_KEPT: each by their act's key and who made it (their
+   * Orgo user id), done or why not. Bops Cloud shows each person their own (cloud/ws-slice.ts changedFor).
+   */
+  changesDone?: { key: string; by: string; ok: boolean; error?: string; at: number }[];
   /**
    * When this Mac gave everyone already here Your Apps at Read (workspaces.ts giveAppsRead): once, so an entry an older
    * Bops rewrote later is never given Read again by that.

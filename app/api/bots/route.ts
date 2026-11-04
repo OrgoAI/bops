@@ -1,4 +1,5 @@
 import { createBot, renameBot, setComputer } from "@/lib/server/bots";
+import { relayChange } from "@/lib/server/change-relay";
 import { deleteBot } from "@/lib/server/remove";
 import { requestInbox } from "@/lib/server/mail";
 import { isCallVoice, keptPersona, type AppAccess, type Effort } from "@/lib/types";
@@ -42,6 +43,9 @@ export async function POST(request: Request) {
 export async function PATCH(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
+  // A change in a workspace shared with the user: done by its owner's Mac, for someone allowed to (change-relay.ts).
+  const relayed = await relayChange(request);
+  if (relayed) return relayed;
   const body = (await request.json()) as {
     botId?: string;
     /** Access to one of the user's app accounts: read, act, none, or null for the default (levelOf). */

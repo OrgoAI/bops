@@ -57,7 +57,7 @@ import { RestartButton, RestartIcon, useCanRestart } from "./restart";
 import { RunsOnSettings } from "./runs-on";
 import { chatInWorkspace, currentWorkspace, option, post, radio, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
 import { viewOnly } from "./view-only";
-import { panelAfterSwitch, panelEmpty, readOnlyLine, seesBrowser, type PanelHeld } from "@/lib/shared";
+import { mayChange, panelAfterSwitch, panelEmpty, readOnlyLine, seesBrowser, type PanelHeld } from "@/lib/shared";
 import { duePings } from "@/lib/pings";
 import { UsageData, useAnalytics } from "./usage-data";
 import { YourData } from "./your-data";
@@ -2081,9 +2081,10 @@ export function Settings({
   // The workspace's domains (bought through Orgo): only where apps are shown (an @orgo.ai account, its own workspace).
   const domains = appsOwnShown(state);
   const apps = appsShown(state);
-  // An Admin of a shared workspace has its Team too (who's in: lib/server/shared-people.ts); never its chart or email.
+  // An Admin of a shared workspace has its Team too (who's in: lib/server/shared-people.ts), and the Org chart whoever has
+  // its switch (an Admin always: cloud/member-access.ts Power); never its email.
   const adminHere = state.shared?.role === "admin";
-  const fits = (p?: SettingsPane) => !!p && (p !== "domains" || domains) && (p !== "apps" || apps) && (!state.shared || ((p !== "team" || adminHere) && p !== "chart" && p !== "email"));
+  const fits = (p?: SettingsPane) => !!p && (p !== "domains" || domains) && (p !== "apps" || apps) && (!state.shared || ((p !== "team" || adminHere) && (p !== "chart" || mayChange(state, "chart", { soon: true })) && p !== "email"));
   const [pane, setPane] = useState<SettingsPane>(fits(at) ? at! : "profile");
   const [was, setWas] = useState(`${at}:${atAt}`);
   if (was !== `${at}:${atAt}`) {
@@ -2125,7 +2126,8 @@ export function Settings({
   const workspace: NavItem[] = [
     item("general", "General"),
     ...(!shared || adminHere ? [item("team", "Team", { value: people || undefined })] : []),
-    ...(!shared ? [item("chart", "Org chart")] : []),
+    // The Org chart: in a workspace shared with the user, with its switch in Team (an Admin always: cloud/member-access.ts Power).
+    ...(mayChange(state, "chart", { soon: true }) ? [item("chart", "Org chart")] : []),
     item("bots", "Bots", { value: team.length || undefined }),
     item("logins", "Logins", { value: logins || undefined }),
     ...(!shared ? [item("email", "Email and phone")] : []),
@@ -2251,7 +2253,7 @@ export function Settings({
   else if (pane === "team" && adminHere)
     // An Admin's: the shared workspace's people, on the owner's seats (its plan stays the owner's: no upgrade from here).
     body = <Members key={state.shared?.projectId} state={state} source="/api/workspaces/shared/people" onUpgrade={() => {}} />;
-  else if (pane === "chart" && !shared)
+  else if (pane === "chart" && mayChange(state, "chart", { soon: true }))
     body = <TeamChart key={`${chartBot ?? ""}:${atAt ?? ""}`} state={state} focus={chartBot} onMakeBot={onMakeBot} onOpenPeople={() => go("team")} />;
   else if (pane === "apps" && apps) body = <MadeAppsHome state={state} ws={ws} />;
   else if (pane === "bots")

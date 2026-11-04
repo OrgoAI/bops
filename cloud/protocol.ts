@@ -806,6 +806,23 @@ export type SharedWsSlice = {
   keyNames?: SharedKey[];
   /** With `keys`: the owner's Bops takes the "key" act (KEYS_MIN_VERSION), so bots' keys switch from here. Part of the fingerprint. */
   keyActs?: true;
+  /**
+   * What they may change (cloud/member-access.ts Power: an Admin every one, a Member the ones turned on for them in Team), for
+   * anyone but the owner, so their window opens what each lets them change. Part of the fingerprint. None: nothing.
+   */
+  can?: string[];
+  /** With `can`: the owner's Bops takes the "change" act (CHANGES_MIN_VERSION). Part of the fingerprint. */
+  changes?: true;
+  /**
+   * With `can`: what the owner's Mac did with their last changes (Workspace.changesDone): each by their key, done or why
+   * not, so their window says one that didn't go. Only their own.
+   */
+  changed?: { key: string; ok: boolean; error?: string }[];
+  /**
+   * With "chart" in `can`: the workspace's org chart (lib/chain.ts Chain, Workspace.chain) as the owner's state keeps it,
+   * its people's entries (by their access key) included, so the Org chart draws and changes it.
+   */
+  chain?: Record<string, unknown>;
 };
 /**
  * A key the workspace's bots see (SharedWsSlice.keyNames), by its vault name (STRIPE_SECRET_KEY): "workspace" its own
@@ -907,6 +924,12 @@ export type MemberAct =
   // On is for the workspace's own keys alone: one it sees only as the owner's (scope "all", or `from`) is refused
   // (MEMBER_OWNER_ONLY, OWNERS_KEY_LINE); off goes for any.
   | { act: "key"; botId: string; name: string; on: boolean }
+  // A change made as the owner's own window makes it (cloud/change-routes.ts CHANGE_ROUTES: which route, which power it
+  // needs), by someone with that power (cloud/member-access.ts Power: an Admin has every one, a Member the ones turned on for them in
+  // Team), with the owner's Bops at CHANGES_MIN_VERSION (OWNER_BOPS_OLD). The workspace's own id is "@ws" (THIS_WS) in it.
+  // Done by the owner's Mac through that route (lib/server/change-acts.ts); how it went comes back on the workspace
+  // (SharedWsSlice.changed).
+  | { act: "change"; method: "POST" | "PATCH" | "PUT" | "DELETE"; path: string; query?: Record<string, string>; body: Record<string, unknown> }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
 /**
@@ -1017,6 +1040,8 @@ export const CLOUD_PERSONA_MIN_VERSION = "0.0.42";
 export const OWNERS_KEY_LINE = "Only the owner can let bots use the owner's own keys.";
 /** 403: the act is a Keys holder's (SharedWsSlice.keys), and the caller hasn't been given Keys. */
 export const MEMBER_NO_KEYS = "member_no_keys";
+/** 403: a "change" act needs a power (cloud/member-access.ts Power) the caller hasn't been given in Team. */
+export const MEMBER_NO_POWER = "member_no_power";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
 export const NOT_WAITING = "not_waiting";
 /** 403: the caller is the workspace's owner, who acts in their own Bops. */

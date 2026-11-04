@@ -11,6 +11,7 @@ import { onExit } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
 import { actWith, SharedCopy, switchedKeys, viewState, type ActResult, type ReadResult } from "./shared-core";
 import { getState, getVersion, stateUser, touchState } from "./store";
+import { changeBy } from "./change-replay";
 
 /**
  * Workspaces shared with the user (lib/shared.ts; the parts without the server are shared-core.ts), watched,
@@ -145,8 +146,12 @@ function openNow(): (Open & { at: SharedOpen; data: SharedWsState }) | null {
   return at && data ? { ...open, at, data } : null;
 }
 
-/** Whether a workspace shared with the user is open now: the window shows its owner's state, where nothing is the user's to do (a Send among them). */
-export const sharedOpen = () => !!openNow();
+/**
+ * Whether a workspace shared with the user is open now: the window shows its owner's state, where nothing is the user's to
+ * do (a Send among them). Never while this Mac does someone's change in one of its own workspaces through its own route
+ * (change-replay.ts): that's the owner's workspace, whatever the window has open.
+ */
+export const sharedOpen = () => !changeBy() && !!openNow();
 
 /** The Orgo id of the shared workspace open now (its bots' browsers are asked for by it: lib/server/browser-view.ts), else null. */
 export const sharedProjectId = () => openNow()?.at.projectId ?? null;
@@ -226,6 +231,23 @@ export function sharedKeysOpen(): {
     keyNames: s.keys && Array.isArray(s.keyNames) ? s.keyNames : [],
     bots: s.bots.flatMap((b) => (typeof b.id === "string" ? [{ id: b.id, keys: s.keys ? switchedKeys(b, acts) : [] }] : [])),
     refresh: () => open.copy.refresh(),
+  };
+}
+
+/**
+ * The shared workspace open now, for a change made there from this window (change-relay.ts): the id the window has for it,
+ * its bots, what the user may change there (SharedWsSlice.can) and whether the owner's Bops takes it (SharedWsSlice.changes). Null
+ * when none is open for the signed-in user.
+ */
+export function sharedChangesOpen(): { wsId: string; botIds: string[]; can: string[]; changes: boolean } | null {
+  const open = openNow();
+  if (!open) return null;
+  const s = open.data.state;
+  return {
+    wsId: open.at.wsId,
+    botIds: s.bots.flatMap((b) => (typeof b.id === "string" ? [b.id] : [])),
+    can: Array.isArray(s.can) ? s.can.filter((x): x is string => typeof x === "string") : [],
+    changes: s.changes === true,
   };
 }
 

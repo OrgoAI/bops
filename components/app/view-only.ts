@@ -1,5 +1,7 @@
 "use client";
 
+import { changeRouteOf } from "@/cloud/change-routes";
+
 /**
  * While a workspace shared with the user is open (AppState.shared, lib/shared.ts), nothing in the window
  * changes anything through the app's own routes: every call that would (anything but a GET) to the app's own
@@ -84,12 +86,17 @@ function ownPath(url: string): string | null {
   }
 }
 
-/** Whether a call goes while a shared workspace is open: a read (but not one of OWN_READS), a call elsewhere, or one of ALLOWED. */
+/**
+ * Whether a call goes while a shared workspace is open: a read (but not one of OWN_READS), a call elsewhere, one of
+ * ALLOWED, or a change the owner's own window makes (cloud/change-routes.ts): its route sends it to the owner's Mac for
+ * someone allowed to make it, and refuses anything else there, never acting on the user's own bot of that id
+ * (lib/server/change-relay.ts).
+ */
 export function callAllowed(method: string | undefined, url: string): boolean {
   const path = ownPath(url);
   if (path === null) return true;
   if (!method || ["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase())) return !OWN_READS.some((r) => r.test(path));
-  return !path.startsWith("/api/") || ALLOWED.some((r) => r.test(path));
+  return !path.startsWith("/api/") || ALLOWED.some((r) => r.test(path)) || !!changeRouteOf(method.toUpperCase(), path);
 }
 
 const g = globalThis as unknown as { bopsViewOnly?: { line: string | null; fetch?: typeof fetch } };

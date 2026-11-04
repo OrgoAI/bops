@@ -23,7 +23,7 @@ import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
-import { numberPausedUntil, readOnly, REPLY_WAITS_LINE, you, your, Your, yourMac, type SharedOpen } from "@/lib/shared";
+import { mayChange, numberPausedUntil, readOnly, REPLY_WAITS_LINE, you, your, Your, yourMac, type SharedOpen } from "@/lib/shared";
 import { memberAct } from "./shared-act";
 import { BOOK_A_CALL } from "@/lib/links";
 import { aiKinds, aiLine, SETTINGS_WORDS, teamLine, type SettingsSection } from "@/lib/bot-settings";
@@ -367,7 +367,7 @@ function Details({
       )}
 
       {/* Keyed by bot: another bot's profile in this tab starts from that bot's own words. A Member is never sent them. */}
-      {(!state.shared || state.shared.role === "admin") && <HowIWork key={b.id} bot={b} className={glass} shared={state.shared} />}
+      {(!state.shared || state.shared.role === "admin" || mayChange(state, "bots")) && <HowIWork key={b.id} bot={b} className={glass} shared={state.shared} />}
 
       {/* Never in a workspace shared with the user: it changes the owner's bot, and the viewer's own host and plan aren't the owner's. */}
       {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && !readOnly(state) && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
