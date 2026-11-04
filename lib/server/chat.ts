@@ -2530,10 +2530,11 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       );
     let response: Awaited<ReturnType<typeof create>>;
     // App lookups come back to the model before it answers (a few rounds at most; more with keys: a site change reads
-    // a few files, then writes). Other tools called along the way (start_task…) are kept and handled with the final
+    // the files it touches and the ones around them, then writes; 12 ran out mid-change on a client's three-file asks,
+    // BrandLord 2026-11-04). Other tools called along the way (start_task…) are kept and handled with the final
     // answer's. Out of rounds, the model answers with no more calls, told so (outOfSteps): what it called then never
     // goes unanswered while Bops says "Done." for it.
-    const rounds = keyed.length ? 12 : 6;
+    const rounds = keyed.length ? 24 : 6;
     let outOfSteps = false;
     const earlier: typeof response.output = [];
     // Teammates asked along the way, shown over the reply.
