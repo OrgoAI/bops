@@ -416,6 +416,22 @@ await check("what Select picked, in the owner's words: the bot reads where each 
   assert.equal(messages().findLast((x) => x.role === "user").picks, undefined, "only with appNote (the owner's, from their window)");
 });
 
+/* ---------------- Out of steps ---------------- */
+
+await check("a reply that ran out of steps offers Go on as a button; a reply that finished doesn't", async () => {
+  const look = () => calling(toolCall("read_skill", { name: "nothing-here", file: null }));
+  answers.push(look(), look(), look(), look(), look(), look(), reply("I checked the setup but haven't changed it yet. Left: add the address."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, "set it up for me");
+  assert.match(JSON.stringify(asked.slice(n).at(-1).input), /out of steps for this reply/, "it ran out of steps");
+  const said = messages().findLast((m) => m.role === "bot");
+  assert.equal(said.text, "I checked the setup but haven't changed it yet. Left: add the address.");
+  assert.deepEqual(said.options, ["Go on"]);
+  answers.push(reply("You're welcome."));
+  await Chat.handleMessage(chatId, "thanks");
+  assert.equal(messages().findLast((m) => m.role === "bot").options, undefined, "a finished reply has none");
+});
+
 /* ---------------- web_fetch ---------------- */
 
 await check("web_fetch reads a page, marked as information, and refuses private addresses", async () => {
@@ -434,6 +450,14 @@ await check("web_fetch reads a page, marked as information, and refuses private 
   assert.equal(messages().filter((m) => m.text.startsWith("Read ")).length, 1, "only pages that were read");
   assert.ok(t.first.tools.some((x) => x.type === "web_search"), "hosted search is there");
   assert.deepEqual(t.first.include, ["web_search_call.action.sources"], "search results come back with their addresses");
+});
+
+await check("a page read with a token in its address is said in the chat without the token", async () => {
+  // A made-up token, as a file host's temporary download link carries one.
+  const withToken = `${site}/article?token=MADEUPtoken0000000000000002&raw=true`;
+  await turnWith(`what does this say? ${withToken}`, [toolCall("web_fetch", { url: withToken })], "It costs $19.99.");
+  assert.equal(last().text, `Read ${site}/article?token=•••&raw=true`);
+  assert.ok(!JSON.stringify(messages().filter((m) => m.role === "system")).includes("MADEUPtoken0000000000000002"), "in none of Bops' own rows (what the person typed is theirs)");
 });
 
 /** web_fetch's refusal of an address that isn't written down, on the user's own turn. */

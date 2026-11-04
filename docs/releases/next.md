@@ -1,1 +1,5 @@
 - Publish can push an app to its GitHub repo, which deploys it.
+- Files a bot downloads keep their own names in its Downloads.
+- When a bot runs out of steps, Go on carries it on.
+- Settings, Logins and bot profiles are quieter and easier to read.
+- Change cards count only changed lines, and a no names who said it.

@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
 import { BLOCKER_LABEL, botChatId, BRAINS_ON, CLI_NAMES, COMPACTED, computerStaysDown, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, memberOf, memberThread, othersThread, outsideThread, ownerSent, pausedForOk, personaOf, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitsForOk, workBot, workspaceOf, type AppApproval, type Bot, type CliKind, type MemberSaid, type Routine, type Session, type Takeover, type TaskRoute, type ThreadReply } from "@/lib/types";
 import type { MemberWho } from "@/lib/member-access";
+import { shownAddress } from "@/lib/plain-words";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, outOfCreditWords, outOfCreditError, shortOfCredit } from "./cloud";
 import { browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -30,7 +31,7 @@ import { applyDesktop } from "./desktop";
 import { computerBriefing } from "./briefing";
 import { ASKING, tidyAnswer, withBriefing, WRITING } from "./style";
 import { accountsOf, APP_TOOLS, appsKeyFor, bopsAddress, composioOn, findAppActions, runAppAction } from "./composio";
-import { askFor, declined, NeedsOk, Paused, stopAsks, takeAnswer, type AskSpec } from "./permission";
+import { askFor, declined, declinedStep, NeedsOk, Paused, stopAsks, takeAnswer, type AskSpec } from "./permission";
 import { appsNote, placesNote } from "./skills";
 import { copySkillsToComputer, countUse, findSkill, skillsFor, skillsIndexNote, skillsNote, skillText } from "./workspace-skills";
 import { appMcp, appsComputerGone, askDeploy, changeCardAfterTask, deployAfterTask, previewAfterTask, readyAppForTask } from "./hosted-apps";
@@ -3628,7 +3629,7 @@ async function answerPausedCall(sessionId: string, agentSessionId: string, a: Ap
   const r = a.resume;
   const call = { call_id: r.callId, turn_id: r.turnId };
   if (a.reply?.reply === "reject") {
-    step(sessionId, "note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    step(sessionId, "note", declinedStep(a));
     return void (await toolResult(agentSessionId, call, declined(a)));
   }
   const output = await agentTool(sessionId, a.botId, r.call.name, argsOf(r.call), { approved: true }).catch((e: Error) => `Failed: ${e.message}`);
@@ -4028,7 +4029,7 @@ async function finalAnswer(agentSessionId: string) {
 }
 
 function describeSearch(a?: Item["action"]) {
-  if (a?.type === "open_page" && a.url) return `read ${a.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}`;
+  if (a?.type === "open_page" && a.url) return `read ${shownAddress(a.url).replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}`;
   if (a?.type === "find_in_page") return `looked for "${String(a.pattern ?? "").slice(0, 40)}" in the page`;
   const q = a?.query ?? a?.queries?.join(", ");
   return q ? `searched "${q.slice(0, 70)}"` : "searched the web";
@@ -4046,7 +4047,7 @@ function describe(tool?: string, args?: Record<string, unknown>) {
   if (tool === "key") return `pressed ${args.keys}`;
   if (tool === "click") return `clicked (${args.x}, ${args.y})`;
   if (tool === "scroll") return `scrolled ${args.direction}`;
-  if (tool === "browser_navigate") return `opened ${args.url}`;
+  if (tool === "browser_navigate") return `opened ${shownAddress(String(args.url))}`;
   if (tool === "browser_click") return `clicked ${args.element ?? args.ref}`;
   if (tool === "browser_type") return `typed "${String(args.text).slice(0, 60)}"`;
   if (tool === "browser_press_key") return `pressed ${args.key}`;
