@@ -429,7 +429,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
                   {i.bot ? (
                     <>
                       <Mascot botId={i.bot.id} color={i.bot.color} size={14} antenna={false} />
-                      <span className="shrink-0 font-semibold">{i.bot.name}</span>
+                      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{i.bot.name}</span>
                       <span className={`truncate ${inView ? "text-ink" : "text-[#6B6B6B]"}`}>{i.label}</span>
                     </>
                   ) : i.watch ? (
@@ -558,7 +558,7 @@ function WhoPill({ item: i }: { item: Item }) {
   return (
     <span className="pointer-events-none absolute bottom-2 left-2 z-20 flex max-w-[85%] items-center gap-1 rounded-full bg-white/95 py-[2px] pl-1 pr-2 text-[11px] leading-[14px] shadow-[0_0_0_1px_#0000000F]">
       {i.bot && <Mascot botId={i.bot.id} color={i.bot.color} size={13} antenna={false} />}
-      <span className="shrink-0 font-semibold">{i.bot?.name ?? "A bot"}</span>
+      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{i.bot?.name ?? "A bot"}</span>
       <span className="truncate text-[#3A3A38]">
         {i.label} · {plainTitle(i.session.title)}
       </span>

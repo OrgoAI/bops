@@ -481,7 +481,7 @@ export function ComputerView({
                   {s ? (
                     <>
                       <Mascot botId={botOn(d).id} color={botOn(d).color} size={13} antenna={false} />
-                      <span className="shrink-0 font-semibold">{whoOn(d)}</span>
+                      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{whoOn(d)}</span>
                       <span className="truncate text-[#3A3A38]">{doingOn(d)}</span>
                     </>
                   ) : (
@@ -939,13 +939,13 @@ export function ComputerView({
                   {tasks.includes(d) ? (
                     <>
                       <Mascot botId={yours(d) ? b.id : botOn(d).id} color={yours(d) ? b.color : botOn(d).color} size={14} antenna={false} />
-                      <span className="shrink-0 font-semibold">{whoOn(d)}</span>
+                      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{whoOn(d)}</span>
                       <span className={`truncate ${inView ? "text-ink" : "text-[#6B6B6B]"}`}>{doingOn(d)}</span>
                     </>
                   ) : w ? (
                     <>
                       <EyeIcon />
-                      <span className="shrink-0 font-semibold">{w.site}</span>
+                      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{w.site}</span>
                       {alert && <span className="truncate rounded-[4px] bg-highlighter px-1 text-ink">{w.alert!.text}</span>}
                     </>
                   ) : infoOn(d)?.kind === "held" ? (
@@ -1539,7 +1539,7 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
               <div className="flex min-w-0 items-center gap-[5px] text-[11px] leading-[14px]">
                 <StatusDot kind={t.kind} pulse={t.kind === "needsYou"} shared={!!state.shared} />
                 {who && <Mascot botId={who.id} color={who.color} size={14} antenna={false} />}
-                <span className="shrink-0 font-semibold">{who?.name ?? "A bot"}</span>
+                <span className="min-w-0 shrink-[0.01] truncate font-semibold">{who?.name ?? "A bot"}</span>
                 <span className="shrink-0 tabular-nums text-[#9A9A98]">{t.no}</span>
                 <span className="truncate text-[#6B6B6B]">{words}</span>
               </div>
