@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { RUNNER_TURNS_DIR } from "@/cloud/protocol";
 import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, workspaceOf, type AppState, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { forgetGoneMembers, othersCanUse } from "./members";
@@ -223,6 +224,8 @@ const authIn = (output: string): RunnerState["auth"] => (/^auth=(identity|key|no
  * (a line that sets ORGO_API_KEY in one of the files Orgo writes it in: grep alone, never printed), whether
  * this build is there, and supervisord; in phase 2 (`ident`) what its identity answers too (IDENT_LINE).
  */
+/** busy=yes while the runner there marks a reply it's answering (RUNNER_TURNS_DIR, touched in the last 2 minutes). */
+export const BUSY_LINE = `[ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ] && echo busy=yes || echo busy=no`;
 export const probeScript = (dirName: string, { ident = false }: { ident?: boolean } = {}) =>
   [
     `c=$(readlink ${ROOT}/current 2>/dev/null | sed 's#.*/##')`,
@@ -231,6 +234,7 @@ export const probeScript = (dirName: string, { ident = false }: { ident?: boolea
     ...(ident ? [IDENT_LINE] : []),
     `[ -f ${ROOT}/${dirName}/server.js ] && echo have=yes || echo have=no`,
     `command -v supervisorctl >/dev/null 2>&1 && echo sup=yes || echo sup=no`,
+    BUSY_LINE,
   ].join("; ");
 
 /**
@@ -290,6 +294,8 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
     `mkdir -p "$d/incoming" /var/log/bops /etc/supervisor/conf.d`,
     `exec 9>"$d/.lock"`,
     "flock -w 120 9",
+    // A reply its runner is answering now: nothing is touched (restarting it would cut the reply off); tried again later.
+    `if [ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ]; then echo __BOPS_BUSY__; exit 0; fi`,
     `cd "$d/incoming"`,
     `if [ -f ${q(b.name)} ]; then`,
     `  printf '%s  %s\\n' ${q(b.sha256)} ${q(b.name)} | sha256sum -c --status`,
@@ -426,6 +432,7 @@ function later(id: string) {
   box.retry.set(id, { at: Date.now() + wait, wait });
 }
 /** A runner that's up, set up again without getting as far as its computer's files: left up as it was, and tried again later. */
+const BUSY = "it was answering a reply; set up again once that's over";
 function keptAsIs(id: string, error: string) {
   const x = runnerOf(id);
   if (x?.status === "running") mark(id, { ...x, upgrading: undefined });
@@ -721,6 +728,8 @@ async function install(id: string, bundle: Bundle, key: string, me: string, shar
   if (!probe) return fail("its computer didn't answer");
   const said = (k: string) => new RegExp(`^${k}=(.*)$`, "m").exec(probe.output)?.[1]?.trim() ?? "";
   if (said("sup") !== "yes") return fail("its computer can't keep a runner going (no supervisord)");
+  // A reply its runner is answering now: set up again once it's over (a restart now would cut it off).
+  if (upgrade && said("busy") === "yes") return keptAsIs(id, BUSY);
   // A newer one is there already (another Mac's): never replaced by this older one.
   const there = /^(\d+\.\d+\.\d+)-([A-Za-z0-9_-]+)$/.exec(said("current"));
   if (there && compareVersions(there[1], bundle.version) > 0) {
@@ -756,6 +765,7 @@ async function install(id: string, bundle: Bundle, key: string, me: string, shar
   const wrapper = wrapperScript({ computerId: id, timeZone: ZONE.test(s.owner?.timeZone ?? "") ? s.owner?.timeZone : undefined, orgo: orgoAt, cloud: cloudAt });
   touched = true;
   const put = await orgo.bash(id, installScript(bundle, wrapper), 240).catch(() => null);
+  if (upgrade && put?.output.includes("__BOPS_BUSY__")) return keptAsIs(id, BUSY);
   if (!put?.output.includes("__BOPS_INSTALLED__")) return fail(put?.output.includes("__BOPS_NO_FILES__") ? "its files weren't on its computer" : "its files couldn't be put in place");
   const up = await health(id);
   // Phase 2, given no key for its identity: it must say it runs on it, or it's as unhealthy as any other.

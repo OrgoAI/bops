@@ -1131,6 +1131,13 @@ export type RunnerResume = { ok: true; now: number; humanAt: number };
 export const TURN_LEASE_MS = 90_000;
 /** How often a runner beats. */
 export const TURN_BEAT_MS = 30_000;
+/**
+ * Where a runner marks each reply it's answering: a file named for the turn, made when it starts, touched at each beat
+ * and removed when it ends (lib/server/runner-chat.ts). An upgrade of that runner (lib/server/runner-install.ts) waits
+ * while one was touched in the last 2 minutes: restarting it would cut the reply off ("stopped partway"). One a runner
+ * left behind when it died goes stale in 2 minutes.
+ */
+export const RUNNER_TURNS_DIR = "/var/run/bops/turns";
 
 /* ---------------- The bot's browser (cloud/browser.ts, lib/browser-relay.ts) ---------------- */
 

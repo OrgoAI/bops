@@ -1,5 +1,6 @@
 import "server-only";
-import { TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnMember } from "@/cloud/protocol";
+import { mkdir, unlink, utimes, writeFile } from "node:fs/promises";
+import { RUNNER_TURNS_DIR, TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnMember } from "@/cloud/protocol";
 import type { AppApproval, MemberTurn } from "@/lib/types";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
@@ -50,6 +51,8 @@ type Box = {
   identity?: () => Promise<"same" | "copy" | "unknown">;
   beatMs?: number;
   retryMs?: number[];
+  /** Tests: where this runner marks the replies it's answering (RUNNER_TURNS_DIR). */
+  turnsDir?: string;
 };
 const g = globalThis as unknown as { __bopsRunnerChat?: Box };
 const box: Box = (g.__bopsRunnerChat ??= { running: new Map() });
@@ -189,7 +192,13 @@ async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } 
     void p.finally(() => beats.delete(p));
   };
   ctx.onActing = beat;
-  const every = setInterval(beat, box.beatMs ?? TURN_BEAT_MS);
+  // Marked on its computer while it runs, so an upgrade of this runner waits for it (RUNNER_TURNS_DIR). Best effort:
+  // a mark that can't be made never stops the reply.
+  const dir = box.turnsDir ?? RUNNER_TURNS_DIR;
+  const marked = `${dir}/${ctx.id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+  await mkdir(dir, { recursive: true }).then(() => writeFile(marked, ""), () => {});
+  const touch = () => void utimes(marked, new Date(), new Date()).catch(() => {});
+  const every = setInterval(() => (beat(), touch()), box.beatMs ?? TURN_BEAT_MS);
   every.unref?.();
   // Its computer is in use while it answers (free-hours.ts counts a turn running).
   void import("./free-hours").then((m) => m.sayInUse(), () => {});
@@ -201,6 +210,7 @@ async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } 
   } finally {
     clearInterval(every);
     if (box.running.get(ctx.id) === ctx) box.running.delete(ctx.id);
+    await unlink(marked).catch(() => {});
   }
   ctx.onActing = undefined;
   await Promise.all([...beats]);
@@ -269,10 +279,11 @@ export async function resumeAsTurn<T extends { paused?: boolean }>(a: AppApprova
 }
 
 /** For tests: how the turn is run and how this runner makes sure it's on its own computer (unset: the real ones), and the beat. */
-export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[] }) {
+export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[]; turnsDir?: string }) {
   box.answer = opts.answer;
   box.identity = opts.identity;
   box.beatMs = opts.beatMs;
+  box.turnsDir = opts.turnsDir;
   box.retryMs = opts.retryMs;
   box.running.clear();
 }

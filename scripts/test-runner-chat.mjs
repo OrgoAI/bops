@@ -148,6 +148,31 @@ await check("a turn is claimed, answered in its context on Bops Cloud's clock, a
   assert.equal(TC.turnsRunning(), false);
 });
 
+await check("a reply being answered is marked on its computer (so an upgrade waits for it), and the mark goes when it ends, failed or not", async () => {
+  const { mkdtempSync, readdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = `${mkdtempSync(`${tmpdir()}/bops-turns-`)}/turns`;
+  for (const [id, fails] of [["t_mark", false], ["t_mark_fail", true]]) {
+    reset();
+    const T = Date.now();
+    state.messages.push({ id: `m_${id}`, chatId: "bot:max", role: "user", text: "hi", at: T });
+    answers.set("claim", claimed(id, `m_${id}`, T));
+    let during;
+    R.runnerChatForTests({
+      identity: async () => "same",
+      turnsDir: dir,
+      answer: async () => {
+        during = readdirSync(dir);
+        if (fails) throw new Error("the model call failed");
+        return { text: "hello" };
+      },
+    });
+    await R.answerTurn(ev(id, `m_${id}`));
+    assert.deepEqual(during, [id], "marked while it runs");
+    assert.deepEqual(readdirSync(dir), [], "gone once it ends");
+  }
+});
+
 await check("an Admin's turn (TurnMember.role, as Bops Cloud found it taking their words) is answered as an Admin's: the role goes down to the turn", async () => {
   reset();
   const T = Date.now();
