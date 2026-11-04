@@ -2473,7 +2473,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         ? `This chat's tasks you can send a message on to (tell_task): ${followUps.map((s) => `"${s.title}" (${s.id}), ${live(s) ? "running" : "finished"} ${s.runsOn === "mac" ? `on ${owner}'s Mac` : "in the cloud"}${apps ? (s.app ? `, on the app ${s.app.name}` : ", on no app") : ""}`).join("; ")}.`
         : "",
       changeTool
-        ? `To change files in a GitHub repository with your key (an edit, a new file, a delete), use change_files: ${owner} says yes once, on one card, for the whole change. Never call_api's contents or git calls for that. call_api stays for the rest (a pull request, a merge).`
+        ? `To change files in a GitHub repository with your key (an edit, a new file, a delete), use change_files: on a draft branch (not the repository's default one) it's saved at once; on the default branch, or touching .github/, ${owner} says yes once, on one card, for the whole change. Make the change on a draft branch, then going live is one merge with call_api, which asks. Never call_api's contents or git calls for that. call_api stays for the rest (a pull request, a merge).`
         : "",
       // The user's apps, for change_app (which a routine's run and someone else's turn don't have).
       bg || opts.outside || !apps ? "" : appsLine(b, answering?.lookingAt),
