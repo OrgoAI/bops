@@ -89,7 +89,7 @@ import {
 } from "./cloudflare";
 import { onRunner, selfHosted } from "./persist";
 import { isLabelOf, labelGiven, newLabel } from "./app-labels";
-import { linkMirror, MirrorError, mirrorPublish } from "./github-mirror";
+import { linkMirror, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
 import { appFolder, authorOf, byBots, changesTo, dropToken, ensureIngotCli, folderChanges, hasToken, ingot, INGOT_BIN, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotChange, type IngotChangeset, type IngotRepo } from "./ingot";
 import { addMessage, bot, flushState, getState, ownerName, sameState, session, update } from "./store";
 import { tailnetUp } from "./tailnet";
@@ -346,7 +346,8 @@ function movedTo(h: AppHosting | undefined, name: string, botId: string, compute
   if (h && !h.lost && !stays)
     for (const s of sitesOf(h, name)) if (s.projectId) left.push({ site: s.site, computerId: h.computerId, projectId: s.projectId });
   const behind = left.filter((x, i) => x.computerId !== computerId && left.findIndex((y) => y.projectId === x.projectId) === i);
-  const more = behind.length ? { behind } : {};
+  // Where its production is on GitHub (and its point) is Ingot's and GitHub's, never a computer's: it always comes along.
+  const more = { ...(behind.length ? { behind } : {}), ...(h?.github ? { github: h.github } : {}) };
   if (stays) return { botId, computerId, ...keptOf(h), ...localKept(h), ...(h.sites?.length ? { sites: h.sites } : {}), ...(h.copies?.length ? { copies: h.copies } : {}), ...more };
   return {
     botId,
@@ -1776,7 +1777,11 @@ function domainReady(p: OrgoDeployProject | undefined, all: OrgoCustomDomain[]):
  * Preview serving another one since is refused (PREVIEW_MOVED), nothing sent. Its sign in variables are set to
  * its domain when it has none of them (never one the user set).
  */
-export async function promoteApp(wsId: string, name: string, opts: { site?: unknown; at?: unknown; ours?: () => boolean } = {}): Promise<{ app: HostedApp; promoted: { site: string; at: string; domain: string | null }[]; said?: string }> {
+export async function promoteApp(
+  wsId: string,
+  name: string,
+  opts: { site?: unknown; at?: unknown; ours?: () => boolean } = {},
+): Promise<{ app: HostedApp; promoted: { site: string; at: string; domain: string | null }[]; said?: string; github?: { repo: string; branch: string } }> {
   const ours = opts.ours ?? sameState();
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
@@ -1791,7 +1796,7 @@ export async function promoteApp(wsId: string, name: string, opts: { site?: unkn
     held(ours);
     if (why) throw new HostedAppError(why, 403);
     // Production on GitHub (AppHosting.github): what the Preview serves goes there (github-mirror.ts), not to Orgo.
-    if (now.github) return publishToGithub(wsId, name, now, opts.at, ours);
+    if (now.github) return publishToGithub(wsId, name, now, opts.at, opts.site, ours);
     const sites = opts.site !== undefined ? [siteIn(now, name, opts.site).site] : sitesOf(now, name).map((x) => x.site);
     const read = await previewsOf(wsId, name, now, (c) => projectsNow(c, ours).catch(() => null), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours);
     held(ours);
@@ -1838,71 +1843,97 @@ export async function promoteApp(wsId: string, name: string, opts: { site?: unkn
   });
 }
 
+/** A Mirror's refusal as the app's own (its words, status and code). */
+const asAppError = (e: unknown) => (e instanceof MirrorError ? new HostedAppError(e.message, e.status, e.extra) : e);
+
+/** The GitHub setting as `cfg` ran with is still the app's (nothing changed or linked it meanwhile): only then is its point kept. */
+const sameMirror = (h: AppHosting | undefined, cfg: NonNullable<AppHosting["github"]>) =>
+  !!h?.github && h.github.repo === cfg.repo && h.github.branch === cfg.branch && h.github.path === cfg.path && h.github.last?.sha === cfg.last?.sha && h.github.last?.ingot === cfg.last?.ingot;
+
 /**
- * Publish an app whose production is on GitHub: the changeset its own Preview serves, carried to GitHub
- * (github-mirror.ts mirrorPublish), and where the two are the same now kept for the next one.
+ * Publish an app whose production is on GitHub: the changeset its Preview serves, carried to GitHub
+ * (github-mirror.ts mirrorPublish), and where the two are the same now kept for the next one. One folder for the
+ * app: an app with more sites has none (setGithubMirror), so a site named is the app's own or refused.
  */
-async function publishToGithub(wsId: string, name: string, now: AppHosting, at: unknown, ours: () => boolean) {
+async function publishToGithub(wsId: string, name: string, now: AppHosting, at: unknown, site: unknown, ours: () => boolean) {
   const cfg = now.github!;
+  if (site !== undefined && site !== name) throw new HostedAppError(`${name} publishes to GitHub as one app: publish it, not one of its sites.`, 409);
   const read = await previewsOf(wsId, name, now, (c) => projectsNow(c, ours).catch(() => null), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours);
   held(ours);
   if (!read) throw new HostedAppError("Couldn't read its preview just now. Try again in a minute.", 502);
   const serving = read.previews.get(name)?.serving ?? null;
   if (!serving) throw new HostedAppError("The preview isn't live yet. Deploy a preview first.", 409, { code: "NO_PREVIEW" });
   if (typeof at === "string" && at !== serving) throw new HostedAppError("The preview changed since you looked. Look again.", 409, { code: "PREVIEW_MOVED" });
-  let done;
-  try {
-    done = await mirrorPublish(wsId, name, serving, cfg, authorOf(undefined));
-  } catch (e) {
-    if (e instanceof MirrorError) throw new HostedAppError(e.message, e.status, e.extra);
-    throw e;
-  }
+  const done = await mirrorPublish(wsId, name, serving, cfg, authorOf(undefined)).catch((e) => {
+    throw asAppError(e);
+  });
   held(ours);
-  keepHosting(wsId, name, (h) => (h?.github ? { ...h, github: { ...h.github, last: done.last } } : h));
-  return { app: await appNow(wsId, name, ours), promoted: [{ site: name, at: serving, domain: null }], said: done.said };
+  keepHosting(wsId, name, (h) => (h?.github && sameMirror(h, cfg) ? { ...h, github: { ...h.github, last: done.last } } : h));
+  return { app: await appNow(wsId, name, ours), promoted: [{ site: name, at: serving, domain: null }], said: done.said, github: { repo: cfg.repo, branch: cfg.branch } };
 }
 
 /**
- * Set where an app's production is on GitHub (null: back to Publish on Orgo). Only the owner, from the Bops window.
- * A new repo, branch or folder needs linking again (its `last` goes); the same ones keep theirs.
+ * Set where an app's production is on GitHub (null: back to Publish on Orgo). Only the owner, from the Bops window,
+ * never while it's being published. A new repo, branch or folder needs linking again (its point goes); the same
+ * ones keep it. Not for an app with more sites (one folder is one app).
  */
 export async function setGithubMirror(wsId: string, name: string, v: unknown): Promise<{ app: HostedApp }> {
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
-  if (v === null)
-    keepHosting(wsId, name, (x) => {
-      if (!x) return x;
-      const rest = { ...x };
-      delete rest.github;
-      return rest;
-    });
-  else {
-    const c = cleanGithubMirror(v);
-    if ("why" in c) throw new HostedAppError(c.why, 400);
-    keepHosting(wsId, name, (x) => {
-      if (!x) return x;
-      const was = x.github;
-      const same = was && was.repo === c.ok.repo && was.branch === c.ok.branch && was.path === c.ok.path;
-      return { ...x, github: { ...c.ok, ...(same && was?.last ? { last: was.last } : {}) } };
-    });
-  }
-  return { app: await appNow(wsId, name, sameState()) };
+  const ours = sameState();
+  return withApp(wsId, name, "deploy", async () => {
+    if (v === null)
+      keepHosting(wsId, name, (x) => {
+        if (!x) return x;
+        const rest = { ...x };
+        delete rest.github;
+        return rest;
+      });
+    else {
+      const c = cleanGithubMirror(v);
+      if ("why" in c) throw new HostedAppError(c.why, 400);
+      if (hostingOf(wsId, name)?.sites?.length) throw new HostedAppError(`${name} runs more than one site, and one GitHub folder is one app. Publish it on Orgo.`, 409);
+      keepHosting(wsId, name, (x) => {
+        if (!x) return x;
+        const was = x.github;
+        const same = was && was.repo === c.ok.repo && was.branch === c.ok.branch && was.path === c.ok.path;
+        return { ...x, github: { ...c.ok, ...(same && was?.last ? { last: was.last } : {}) } };
+      });
+    }
+    return { app: await appNow(wsId, name, ours) };
+  });
 }
 
-/** Link an app to its GitHub folder as they are now (github-mirror.ts linkMirror): from here on, only changes go across. */
+/** Link an app to its GitHub folder as both are now (github-mirror.ts linkMirror: only when they have the same files). */
 export async function linkGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp }> {
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
-  if (!h.github) throw new HostedAppError("Set where it lives on GitHub first.", 409);
-  let last;
-  try {
-    last = await linkMirror(wsId, name, h.github);
-  } catch (e) {
-    if (e instanceof MirrorError) throw new HostedAppError(e.message, e.status, e.extra);
-    throw e;
-  }
-  keepHosting(wsId, name, (x) => (x?.github ? { ...x, github: { ...x.github, last } } : x));
-  return { app: await appNow(wsId, name, sameState()) };
+  const ours = sameState();
+  return withApp(wsId, name, "deploy", async () => {
+    const cfg = hostingOf(wsId, name)?.github;
+    if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409);
+    const last = await linkMirror(wsId, name, cfg).catch((e) => {
+      throw asAppError(e);
+    });
+    keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last } } : x));
+    return { app: await appNow(wsId, name, ours) };
+  });
+}
+
+/** Bring in GitHub's changes (github-mirror.ts mirrorPull), GitHub's version winning where both changed a file: the owner's word, from the Bops window. */
+export async function pullGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp; said: string }> {
+  const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
+  if (!h) throw new HostedAppError(NO_APP, 404);
+  const ours = sameState();
+  return withApp(wsId, name, "deploy", async () => {
+    const cfg = hostingOf(wsId, name)?.github;
+    if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409);
+    const done = await mirrorPull(wsId, name, cfg, authorOf(undefined)).catch((e) => {
+      throw asAppError(e);
+    });
+    keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last: done.last } } : x));
+    return { app: await appNow(wsId, name, ours), said: done.said };
+  });
 }
 
 /** A site's Published address: https://<the first active domain on its port>, or null. */
@@ -3606,6 +3637,7 @@ export async function addSite(wsId: string, name: string, site: unknown): Promis
   if (STAGING_LIKE.test(typed)) throw new HostedAppError("A site's name can't end in staging. Pick another name.", 400, { field: "site" });
   if (typed === name || h.sites?.some((x) => x.name === typed)) throw new HostedAppError(`${name} has a site called ${typed} already. Pick another name.`, 409, { field: "site" });
   if (1 + (h.sites?.length ?? 0) >= MAX_SITES) throw new HostedAppError(`An app can have ${MAX_SITES} sites at most, as many as one computer runs.`, 409, { field: "site" });
+  if (h.github) throw new HostedAppError(`${name} publishes to one GitHub folder, so it has one site. Publish it on Orgo first to add more.`, 409, { field: "site" });
   notRemoving(wsId, name);
   keepHosting(wsId, name, (x) => x && { ...x, sites: [...(x.sites ?? []).filter((y) => y.name !== typed), { name: typed }] });
   return { app: await appNow(wsId, name, ours) };
@@ -4917,7 +4949,9 @@ export async function deployForBot(botId: string, app: string, at: string | null
           ? `Not published: Publish puts what its preview serves (${short(serving)}). Deploy ${short(id)} to its preview first, look at it, then publish.`
           : `Not published: its preview isn't live yet. Deploy ${short(id)} to its preview first, look at it, then publish.`;
     }
-    const promoted = await promoteApp(wsId, name, { ours, ...(site ? { site } : {}) });
+    const promoted = await promoteApp(wsId, name, { ours, ...(site && !hostingOf(wsId, name)?.github ? { site } : {}), ...(id ? { at: id } : {}) });
+    // Production on GitHub: what the mirror did, in its words (no domain: GitHub's workflow puts it live).
+    if (promoted.github) return `${name} at ${short(promoted.promoted[0]?.at ?? "")}, what its preview serves, to GitHub ${promoted.github.repo} ${promoted.github.branch}: ${promoted.said ?? ""}`.trim();
     const what = promoted.promoted.map((x) => `${x.site === name ? name : x.site} at ${short(x.at)}`).join(", ");
     const on = promoted.promoted.flatMap((x) => (x.domain ? [x.domain.replace(/^https:\/\//, "")] : []));
     return `Publishing ${what}, what its preview serves${on.length ? `, on ${on.join(" and ")}. It's live there in a minute or two.` : ". It's live on its domain once its DNS points at Orgo."}${promoted.said ? ` ${promoted.said}` : ""}`;

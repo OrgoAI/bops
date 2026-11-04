@@ -87,10 +87,11 @@ export type AppHosting = {
 
 /**
  * Where an app's production lives on GitHub (AppHosting.github). `path`: the folder of the repo the app's files are
- * ("" the whole repo). `keep`: the app's files that stay in Ingot alone (a path, or a folder ending in /), never sent
- * to GitHub or taken from it. `dispatch`: a workflow to run after a push, for one that doesn't start on a push.
- * `last`: where the two sides were the same as far as the mirror knows (the Ingot changeset and the GitHub commit
- * of the last push or link): only what changed on each side since then goes across.
+ * ("" the whole repo). `keep`: paths left alone either way (a path, or a folder ending in /): never sent to GitHub,
+ * never taken from it (a preview's own password file; another app's client in a shared folder). `dispatch`: a workflow
+ * to run after a push, for one that doesn't start on a push. `last`: where the two were last the same (Link, Publish,
+ * or Bring in): `sha`, the GitHub commit; `ingot`, the Ingot changeset that matches it, which a preview must be at
+ * or after to publish (lib/server/github-mirror.ts).
  */
 export type GithubMirror = {
   repo: string;
@@ -98,7 +99,7 @@ export type GithubMirror = {
   path: string;
   keep?: string[];
   dispatch?: { workflow: string; inputs?: Record<string, string> };
-  last?: { at: string; sha: string; when: number };
+  last?: { sha: string; ingot: string; when: number };
 };
 
 const GH_REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
@@ -416,7 +417,8 @@ export type HostedAppAction =
   | { ws: string; action: "preview"; site?: string; label?: string }
   | { ws: string; action: "restore"; to: string }
   | { ws: string; action: "github"; github: Omit<GithubMirror, "last"> | null }
-  | { ws: string; action: "githubLink" };
+  | { ws: string; action: "githubLink" }
+  | { ws: string; action: "githubPull" };
 
 /**
  * GET /api/hosted-apps/[name]?ws=&restore=<to> (the owner's alone), for Restore's question before it's sent: every

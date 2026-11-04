@@ -3261,10 +3261,10 @@ await test("production on GitHub (AppHosting.github): Published says where on Gi
   assert.ok(unlinked.includes('data-app-env-state="Not linked"'));
   assert.deepEqual(deployIn(unlinked, "Publish to GitHub"), { tip: "Link it to GitHub first, in the menu beside Publish.", disabled: true });
   assert.ok(!unlinked.includes("Connect a domain"), "no domain asked for: GitHub deploys it");
-  const linked = envLine(envsOf({ app: on(gh({ at: id("c1"), sha: "a".repeat(40), when: min(5) })) }), "prod");
+  const linked = envLine(envsOf({ app: on(gh({ ingot: id("c1"), sha: "a".repeat(40), when: min(5) })) }), "prod");
   assert.ok(linked.includes("GitHub OrgoAI/orgo-brandlord main, formula/, at aaaaaaa") && linked.includes('data-app-env-state="On GitHub"'), "where, and the commit it last pushed");
   assert.deepEqual(deployIn(linked, "Publish to GitHub"), { tip: null, disabled: false }, "the preview is newer: it goes");
-  const same = envLine(envsOf({ app: on(gh({ at: id("e5"), sha: "b".repeat(40), when: min(5) })) }), "prod");
+  const same = envLine(envsOf({ app: on(gh({ ingot: id("e5"), sha: "b".repeat(40), when: min(5) })) }), "prod");
   assert.deepEqual(deployIn(same, "Publish to GitHub"), { tip: "GitHub has this preview already.", disabled: true });
   // The form as the route takes it.
   assert.deepEqual(E.ghMirrorOf({ repo: " OrgoAI/orgo-brandlord ", branch: "", path: "formula", keep: "proxy.ts, notes/ ,", workflow: "deploy-formula.yml", inputs: "client=cclc, bad" }), {

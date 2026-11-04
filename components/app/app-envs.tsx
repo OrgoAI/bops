@@ -161,7 +161,7 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
   if (gh) {
     if (!a.preview?.serving) return "The preview isn't live yet. Deploy a preview first.";
     if (!gh.last) return "Link it to GitHub first, in the menu beside Publish.";
-    if (gh.last.at === a.preview.serving) return "GitHub has this preview already.";
+    if (gh.last.ingot === a.preview.serving) return "GitHub has this preview already.";
     return undefined;
   }
   if (sites.some((x) => deploying(x))) return "It's publishing. Wait for it to finish.";
@@ -222,7 +222,7 @@ function GithubForm({ form, onChange, busy, onSave, onCancel, compact }: { form:
           {field("branch", "Branch", "main")}
           {field("path", "Folder in it", "formula (empty: the whole repo)")}
         </div>
-        {field("keep", "Files that stay in Ingot only", "proxy.ts, notes/")}
+        {field("keep", "Left alone both ways (files, or folders ending in /)", "proxy.ts, clients/other/")}
         <div className="grid grid-cols-1 gap-2 @[420px]:grid-cols-2">
           {field("workflow", "Workflow to run after a push (optional)", "deploy.yml")}
           {field("inputs", "Its inputs", "client=cclc")}
@@ -370,6 +370,11 @@ export function AppEnvs({
       return r.app ? { ...r, said: v ? "Saved. Link it to GitHub next, in the menu beside Publish." : "Publish deploys on Orgo again." } : r;
     });
   };
+  // GitHub's changes into Ingot, GitHub's version winning where both changed a file (what Publish's conflict says to do).
+  const githubPull = () => {
+    setMenu(false);
+    return run("github", () => act(app.name, { ws, action: "githubPull" }));
+  };
   const githubLink = () => {
     setMenu(false);
     return run("github", async () => {
@@ -460,7 +465,7 @@ export function AppEnvs({
       env: "prod",
       state: prodState,
       where: gh ? quiet(ghWhere) : domain ? <UrlLink url={domain} /> : pending ? quiet(`${pending.domain}, waiting for DNS`) : quiet(noDomain && !neverLive ? "Live, no domain yet" : "No domain yet"),
-      at: gh ? (gh.last?.at ?? null) : app.serving,
+      at: gh ? (gh.last?.ingot ?? null) : app.serving,
     },
   ];
   const actions = (env: AppEnv, bot?: string) => {
@@ -498,6 +503,11 @@ export function AppEnvs({
               <button data-gh-link role="menuitem" onClick={() => void githubLink()} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
                 {gh.last ? "Link to GitHub again, as it is now" : "Link to GitHub, as it is now"}
               </button>
+              {gh.last && (
+                <button data-gh-pull role="menuitem" onClick={() => void githubPull()} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+                  Bring in GitHub&apos;s changes
+                </button>
+              )}
               <button data-gh-edit role="menuitem" onClick={() => (setMenu(false), setGhForm({ repo: gh.repo, branch: gh.branch, path: gh.path, keep: (gh.keep ?? []).join(", "), workflow: gh.dispatch?.workflow ?? "", inputs: Object.entries(gh.dispatch?.inputs ?? {}).map(([k, v]) => `${k}=${v}`).join(", ") }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
                 GitHub settings
               </button>

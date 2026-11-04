@@ -1,8 +1,11 @@
-// Tests for an app whose production is on GitHub (lib/server/github-mirror.ts): Publish carries what changed in Ingot
-// since the last point to one commit on top of the branch, inside the app's folder only (never what's outside it, the
-// app's `keep` files, or GitHub's symbolic links), after bringing what changed on GitHub since then into Ingot; a file
-// both changed to other bytes, or one too big to send, stops it with nothing written; someone pushing meanwhile stops
-// it too; a named workflow runs after a push; and linking takes both sides as they are.
+// Tests for an app whose production is on GitHub (lib/server/github-mirror.ts), everything compared by what's in the
+// files against GitHub's folder at the point: Publish carries the preview's differences to one commit on top of the
+// branch, inside the app's folder only (never what's outside it, its `keep` paths, GitHub's symbolic links), after
+// bringing GitHub's changes into Ingot; what came from GitHub is never pushed back undone (a preview older than the
+// point is refused) and never trips a later Publish; a file both changed, or newer work in Ingot on a file GitHub
+// changed, stops it with nothing written, until Bring in takes GitHub's version; a file too big to send stops it,
+// but only one that would be sent; a folder gone or mostly deleted stops it; someone pushing meanwhile stops it; a
+// named workflow runs after a push; Link only takes two sides with the same files; each Ingot file is read once.
 //
 // Ingot and GitHub (through Orgo's key broker) are fakes in memory below. The repo and its files are made up.
 // Usage: node --conditions=react-server scripts/test-github-mirror.mjs
@@ -13,7 +16,7 @@ import { pathToFileURL } from "node:url";
 import { unfaked } from "./fake-exports.mjs";
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const FAKES = { ingot: ["ingot"], keys: ["callKey", "KeysError", "keyProjectFor", "listKeys"] };
+const FAKES = { ingot: ["ingot"], keys: ["callKey", "KeysError", "keyProjectFor", "listKeys"], store: ["userDir"] };
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "server-only") return { url: "data:text/javascript,", shortCircuit: true };
@@ -41,6 +44,7 @@ registerHooks({
           `export const callKey = (...a) => globalThis.__fake.callKey(...a);\nexport const keyProjectFor = () => undefined;\nexport const listKeys = async () => [];` +
           unfaked(name, url, FAKES.keys),
       };
+    if (name === "store") return { format: "module", shortCircuit: true, source: `export const userDir = () => globalThis.__fake.userDir;` + unfaked(name, url, FAKES.store) };
     return next(url, context);
   },
 });
@@ -126,10 +130,11 @@ function makeGithub(files) {
       return ok({ tree: listDir(t.files, t.dir, query?.recursive === "1"), truncated: false });
     }
     if (method === "GET" && (m = /\/git\/blobs\/([0-9a-f]+)$/.exec(path))) return ok({ content: gh.blobs.get(m[1]).toString("base64"), encoding: "base64" });
-    if (method === "GET" && (m = /\/contents\/(.+)$/.exec(path))) {
-      const full = decodeURIComponent(m[1]);
-      const f = gh.commits.get(query.ref).files.get(full);
-      return ok({ download_url: `https://raw.fake.example/${f.sha}?token=short-lived` });
+    if (method === "GET" && (m = /\/contents\/?(.*)$/.exec(path))) {
+      const dir = m[1].split("/").map(decodeURIComponent).join("/");
+      const pre = dir ? `${dir}/` : "";
+      const entries = [...gh.commits.get(query.ref).files].filter(([p]) => p.startsWith(pre) && !p.slice(pre.length).includes("/"));
+      return ok(entries.map(([p, f]) => ({ name: p.slice(pre.length), path: p, sha: f.sha, size: gh.blobs.get(f.sha).length, type: "file", download_url: `https://raw.fake.example/${f.sha}?token=short-lived` })));
     }
     if (method === "POST" && path.endsWith("/git/blobs")) return ok({ sha: blob(Buffer.from(body.content, "base64")) }, 201);
     if (method === "POST" && path.endsWith("/git/trees")) {
@@ -165,11 +170,12 @@ function makeGithub(files) {
 
 /* ---------- A fake Ingot: changesets of whole file maps; commit on top of main, stale when main moved ---------- */
 function makeIngot(files) {
-  const ig = { sets: new Map(), head: "", commits: [] };
+  const ig = { sets: new Map(), head: "", commits: [], order: [], reads: 0 };
   const make = (map) => {
     const id = sha1(`i${ig.sets.size}${Math.random()}`).slice(0, 32);
     ig.sets.set(id, map);
     ig.head = id;
+    ig.order.push(id);
     return id;
   };
   ig.change = (changes) => {
@@ -184,8 +190,14 @@ function makeIngot(files) {
   make(new Map(Object.entries(files).map(([p, t]) => [p, { b: B(t), x: false }])));
   ig.api = {
     head: async () => ig.head,
+    log: async (_ws, _n, { limit = 50, before } = {}) => {
+      const newest = [...ig.order].reverse();
+      const from = before ? newest.indexOf(before) + 1 : 0;
+      const page = newest.slice(from, from + limit);
+      return { changesets: page.map((id) => ({ id })), next: from + limit < newest.length ? page.at(-1) : null };
+    },
     tree: async (_ws, _n, at) => (ig.sets.has(at) ? [...ig.sets.get(at)].map(([path, f]) => ({ path, blob: sha256(f.b), size: f.b.length, executable: f.x })) : null),
-    manifest: async (_ws, _n, at) => [...ig.sets.get(at)].map(([path, f]) => ({ path, blob: sha256(f.b), size: f.b.length, executable: f.x, url: `data:application/octet-stream;base64,${f.b.toString("base64")}` })),
+    manifest: async (_ws, _n, at) => [...ig.sets.get(at)].map(([path, f]) => ({ path, blob: sha256(f.b), size: f.b.length, executable: f.x, url: `https://ingot.fake.example/${at}/${encodeURIComponent(path)}` })),
     commit: async (_ws, _n, c, author) => {
       ig.commits.push({ ...c, author });
       if (c.base !== ig.head) return { stale: ig.head };
@@ -201,20 +213,30 @@ function makeIngot(files) {
 }
 
 let gh, ig;
-// GitHub's own download links (raw.fake.example) are served from the fake's blobs; anything else (Ingot's data: links) as ever.
+// GitHub's own download links (raw.fake.example) from its blobs; Ingot's presigned ones (ingot.fake.example) from its changesets, counted.
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
-  const m = /^https:\/\/raw\.fake\.example\/([0-9a-f]+)/.exec(String(url));
+  const u = String(url);
+  let m = /^https:\/\/raw\.fake\.example\/([0-9a-f]+)/.exec(u);
   if (m) return new Response(gh.blobs.get(m[1]));
+  m = /^https:\/\/ingot\.fake\.example\/([0-9a-f]+)\/(.+)$/.exec(u);
+  if (m) {
+    ig.reads++;
+    return new Response(ig.sets.get(m[1]).get(decodeURIComponent(m[2])).b);
+  }
   return realFetch(url, init);
 };
+const { mkdtempSync, rmSync } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const { join } = await import("node:path");
+const home = mkdtempSync(join(tmpdir(), "bops-mirror-"));
 const reset = (ghFiles, igFiles) => {
   gh = makeGithub(ghFiles);
   ig = makeIngot(igFiles);
-  globalThis.__fake = { ingot: ig.api, callKey: (c) => gh.call(c) };
+  globalThis.__fake = { ingot: ig.api, callKey: (c) => gh.call(c), userDir: home };
 };
 reset({ a: "1" }, { a: "1" });
-const { mirrorPublish, linkMirror, keptPath, gitSha: ourGitSha, MirrorError, BLOB_MAX } = await import(`${root}/lib/server/github-mirror.ts`);
+const { mirrorPublish, mirrorPull, linkMirror, keptPath, gitSha: ourGitSha, MirrorError, BLOB_MAX } = await import(`${root}/lib/server/github-mirror.ts`);
 const { cleanGithubMirror } = await import(`${root}/lib/hosted-apps.ts`);
 
 // The BrandLord shape: the app is the formula/ folder; the rest of the repo is the server's and its secrets'.
@@ -225,8 +247,10 @@ const GH0 = {
   "formula/CLAUDE.md": { link: "AGENTS.md" },
   "formula/lib/look.ts": "orange",
   "formula/clients/fourcorners/client.json": '{"autoDeploy":true}',
+  "formula/clients/cclc/deck.ts": "cclc deck",
   "formula/old.ts": "old",
 };
+// Four Corners' Ingot: formula/ without CCLC's client, with its own preview password and .ingotignore.
 const IG0 = {
   ".ingotignore": "node_modules",
   "AGENTS.md": "agents v1",
@@ -236,164 +260,269 @@ const IG0 = {
   "clients/fourcorners/client.json": '{"autoDeploy":true}',
   "old.ts": "old",
 };
-const CFG = (last, more = {}) => ({ repo: "OrgoAI/orgo-brandlord", branch: "main", path: "formula", keep: ["proxy.ts"], ...more, ...(last ? { last } : {}) });
-const linkNow = async (cfg = CFG()) => linkMirror("ws_1", "fourcorners", cfg);
+const KEEP = ["proxy.ts", "clients/cclc/"];
+const CFG = (last, more = {}) => ({ repo: "OrgoAI/orgo-brandlord", branch: "main", path: "formula", keep: KEEP, ...more, ...(last ? { last } : {}) });
+const link = async (cfg = CFG()) => linkMirror("ws_1", "fourcorners", cfg);
+const publish = (at, last, more) => mirrorPublish("ws_1", "fourcorners", at, CFG(last, more), "bops; Bops");
 const writes = () => gh.calls.filter((c) => !c.startsWith("GET"));
+const code = (c) => (e) => e instanceof MirrorError && e.extra?.code === c;
 
 await check("not linked yet: nothing happens, and it says to link it", async () => {
   reset(GH0, IG0);
-  await assert.rejects(mirrorPublish("ws_1", "fourcorners", ig.head, CFG(), "bops; Bops"), (e) => e instanceof MirrorError && e.extra?.code === "NOT_LINKED");
+  await assert.rejects(publish(ig.head), code("NOT_LINKED"));
   assert.deepEqual(gh.calls, []);
 });
 
-await check("linking takes both sides as they are now", async () => {
+await check("Link: only two sides with the same files (but kept paths, GitHub's links, .ingotignore), at both newest", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
-  assert.equal(last.at, ig.head);
-  assert.equal(last.sha, gh.head);
+  const last = await link();
+  assert.deepEqual({ ...last, when: 0 }, { sha: gh.head, ingot: ig.head, when: 0 });
   assert.deepEqual(writes(), []);
+  reset(GH0, { ...IG0, "lib/look.ts": "teal", "extra.ts": "x" });
+  await assert.rejects(link(), (e) => code("LINK_DIFFERS")(e) && e.extra.paths.join() === "extra.ts,lib/look.ts" && /Ingot and GitHub differ in extra\.ts, lib\/look\.ts/.test(e.message));
+  // Not on GitHub yet: an empty folder, so the first Publish puts it all there.
+  reset({ "README.md": "x" }, IG0);
+  const l2 = await link();
+  await publish(ig.head, l2);
+  assert.equal(gh.files().get("formula/lib/look.ts"), "orange");
+  assert.ok(!gh.files().has("formula/proxy.ts"));
+  assert.equal(gh.files().get("README.md"), "x");
 });
 
-await check("Ingot's changes go to GitHub: one commit on top of the branch, its folder only; kept files and links stay", async () => {
+await check("Ingot's changes go to GitHub: one commit on top of the branch, its folder only; kept paths, links and the rest stay", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
+  const last = await link();
   const before = gh.head;
   const at = ig.change({ "lib/look.ts": "logo orange", "clients/fourcorners/brochure.ts": { text: "new", x: true }, "old.ts": null, "proxy.ts": "other password", "CLAUDE.md": "changed copy" });
-  const done = await mirrorPublish("ws_1", "fourcorners", at, CFG(last), "bops; Bops");
+  const done = await publish(at, last);
   const files = gh.files();
   assert.equal(files.get("formula/lib/look.ts"), "logo orange");
   assert.equal(files.get("formula/clients/fourcorners/brochure.ts"), "new");
   assert.equal(gh.commits.get(gh.head).files.get("formula/clients/fourcorners/brochure.ts").mode, "100755", "executable stays executable");
   assert.ok(!files.has("formula/old.ts"), "a file deleted in Ingot is deleted there");
-  assert.ok(!files.has("formula/proxy.ts"), "a kept file never goes");
+  assert.ok(!files.has("formula/proxy.ts"), "a kept path never goes");
+  assert.equal(files.get("formula/clients/cclc/deck.ts"), "cclc deck", "another app's client (kept) stays, though Ingot has none");
   assert.deepEqual(files.get("formula/CLAUDE.md"), { link: true }, "GitHub's link stays a link");
   assert.equal(files.get("envs/prod/web-secrets.env"), "ENC[...]", "outside the folder: untouched");
   assert.equal(files.get(".github/workflows/deploy-formula.yml"), "on: push");
   assert.ok(!files.has("formula/.ingotignore"));
   assert.equal(gh.commits.get(gh.head).parent, before, "on top of the branch, never forced");
   assert.match(gh.commits.get(gh.head).message, new RegExp(`Ingot-Changeset: ${at}`));
-  assert.deepEqual(done.last, { at, sha: gh.head, when: done.last.when });
+  assert.deepEqual({ ...done.last, when: 0 }, { sha: gh.head, ingot: at, when: 0 });
   assert.equal(done.pushed.files, 3);
-  assert.equal(done.brought, 0);
   assert.match(done.said, /Pushed 3 files to OrgoAI\/orgo-brandlord main .*GitHub deploys it/);
   assert.equal(ig.commits.length, 0, "nothing written to Ingot");
+  // The same preview again: nothing to push.
+  const again = await publish(at, done.last);
+  assert.equal(again.pushed, null);
 });
 
 await check("GitHub's changes come into Ingot first; with nothing new in Ingot, nothing is pushed", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
-  gh.push({ "formula/lib/look.ts": "teal", "formula/clients/cclc/deck.ts": "deck", "formula/old.ts": null, "README.md": "outside" });
+  const last = await link();
+  gh.push({ "formula/lib/look.ts": "teal", "formula/clients/fourcorners/new.ts": "added there", "formula/old.ts": null, "formula/clients/cclc/deck.ts": "cclc v2", "README.md": "outside" });
   const head = gh.head;
-  const done = await mirrorPublish("ws_1", "fourcorners", last.at, CFG(last), "bops; Bops");
+  const done = await publish(last.ingot, last);
   const files = ig.files();
   assert.equal(files.get("lib/look.ts"), "teal");
-  assert.equal(files.get("clients/cclc/deck.ts"), "deck");
+  assert.equal(files.get("clients/fourcorners/new.ts"), "added there");
   assert.ok(!files.has("old.ts"));
+  assert.ok(!files.has("clients/cclc/deck.ts"), "a kept path never comes in");
   assert.ok(!files.has("README.md"), "outside the folder isn't the app's");
-  assert.equal(files.get("proxy.ts"), "preview password", "a kept file stays as Ingot has it");
+  assert.equal(files.get("proxy.ts"), "preview password");
   assert.equal(ig.commits.length, 1);
   assert.match(ig.commits[0].message, /^From GitHub: 3 files changed on OrgoAI\/orgo-brandlord main/);
   assert.equal(gh.head, head, "no commit on GitHub");
   assert.equal(done.pushed, null);
   assert.equal(done.brought, 3);
-  assert.equal(done.last.at, ig.head, "Ingot's point is the changeset with GitHub's changes in");
-  assert.equal(done.last.sha, head);
-  assert.match(done.said, /Brought 3 changes from GitHub into Ingot first\. GitHub already has everything/);
+  assert.deepEqual({ ...done.last, when: 0 }, { sha: head, ingot: ig.head, when: 0 }, "the point: GitHub's newest, and Ingot's changeset with its changes in");
+  assert.match(done.said, /Brought 3 changes from GitHub into Ingot first\. GitHub already has everything.*Deploy the newest to the preview/);
 });
 
-await check("both at once: GitHub's in first, Ingot's out after, and the next one doesn't trip on what came in", async () => {
+await check("the same old preview again after GitHub's changes came in: refused, never pushing them back undone", async () => {
   reset(GH0, IG0);
-  let last = await linkNow();
-  gh.push({ "formula/clients/cclc/deck.ts": "deck" });
-  const at = ig.change({ "lib/look.ts": "logo orange" });
-  let done = await mirrorPublish("ws_1", "fourcorners", at, CFG(last), "bops; Bops");
-  assert.equal(gh.files().get("formula/lib/look.ts"), "logo orange");
-  assert.equal(gh.files().get("formula/clients/cclc/deck.ts"), "deck");
-  assert.equal(ig.files().get("clients/cclc/deck.ts"), "deck");
-  last = done.last;
-  // GitHub changes the file that came in again; Ingot changes something else.
-  gh.push({ "formula/clients/cclc/deck.ts": "deck v2" });
-  const at2 = ig.change({ "AGENTS.md": "agents v2" });
-  done = await mirrorPublish("ws_1", "fourcorners", at2, CFG(last), "bops; Bops");
+  const last = await link();
+  const at = ig.change({ "AGENTS.md": "agents v2" });
+  gh.push({ "formula/lib/look.ts": "teal", "formula/clients/fourcorners/new.ts": "added there" });
+  const first = await publish(at, last);
+  assert.equal(first.brought, 2);
   assert.equal(gh.files().get("formula/AGENTS.md"), "agents v2");
-  assert.equal(ig.files().get("clients/cclc/deck.ts"), "deck v2");
+  const ghNow = gh.head;
+  await assert.rejects(publish(at, first.last), (e) => code("PREVIEW_BEHIND")(e) && /Deploy the newest to the preview first/.test(e.message));
+  assert.equal(gh.head, ghNow, "GitHub as it was: teal stays");
+  assert.equal(gh.files().get("formula/lib/look.ts"), "teal");
+  // The newest preview (with GitHub's changes in) publishes only what's new, and nothing that came in.
+  const at2 = ig.change({ "clients/fourcorners/brochure.ts": "brochure" });
+  const second = await publish(at2, first.last);
+  assert.equal(second.pushed.files, 1);
+  assert.equal(gh.files().get("formula/lib/look.ts"), "teal");
+  assert.equal(gh.files().get("formula/clients/fourcorners/new.ts"), "added there");
+  // GitHub changes a file that came in from it again: no false conflict, it just comes in.
+  gh.push({ "formula/clients/fourcorners/new.ts": "changed again there" });
+  const third = await publish(ig.change({ "AGENTS.md": "agents v3" }), second.last);
+  assert.equal(third.brought, 1);
+  assert.equal(ig.files().get("clients/fourcorners/new.ts"), "changed again there");
+  assert.equal(gh.files().get("formula/AGENTS.md"), "agents v3");
 });
 
-await check("a file both changed to other bytes stops it, with nothing written on either side", async () => {
+await check("a file both changed to other bytes stops it, with nothing written on either side; same bytes and mode is no conflict", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
+  const last = await link();
   gh.push({ "formula/lib/look.ts": "teal" });
   const ghHead = gh.head;
   const at = ig.change({ "lib/look.ts": "logo orange" });
-  await assert.rejects(mirrorPublish("ws_1", "fourcorners", at, CFG(last), "bops; Bops"), (e) => e.extra?.code === "BOTH_CHANGED" && e.extra.paths.join() === "lib/look.ts" && /Both Ingot and GitHub changed lib\/look\.ts/.test(e.message));
+  await assert.rejects(publish(at, last), (e) => code("BOTH_CHANGED")(e) && e.extra.paths.join() === "lib/look.ts" && /Bring in GitHub's changes/.test(e.message));
   assert.equal(gh.head, ghHead);
   assert.deepEqual(writes(), []);
   assert.equal(ig.commits.length, 0);
-  // Changed to the same bytes on both: nothing to carry, no stop.
   reset(GH0, IG0);
-  const l2 = await linkNow();
+  const l2 = await link();
   gh.push({ "formula/lib/look.ts": "same" });
-  const at2 = ig.change({ "lib/look.ts": "same" });
-  const done = await mirrorPublish("ws_1", "fourcorners", at2, CFG(l2), "bops; Bops");
+  const done = await publish(ig.change({ "lib/look.ts": "same" }), l2);
   assert.equal(done.pushed, null);
   assert.equal(done.brought, 0);
-  // Deleted on one side, changed on the other: a stop too.
   reset(GH0, IG0);
-  const l3 = await linkNow();
+  const l3 = await link();
   gh.push({ "formula/old.ts": "changed there" });
-  const at3 = ig.change({ "old.ts": null });
-  await assert.rejects(mirrorPublish("ws_1", "fourcorners", at3, CFG(l3), "bops; Bops"), (e) => e.extra?.code === "BOTH_CHANGED");
+  await assert.rejects(publish(ig.change({ "old.ts": null }), l3), code("BOTH_CHANGED"));
 });
 
-await check("a file too big to send stops it before anything is written", async () => {
+await check("newer work in Ingot (main past the preview) on a file GitHub changed: stops, never written over", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
-  const at = ig.change({ "clients/cclc/photo.jpeg": "x".repeat(BLOB_MAX + 1), "lib/look.ts": "logo orange" });
-  await assert.rejects(mirrorPublish("ws_1", "fourcorners", at, CFG(last), "bops; Bops"), (e) => e.extra?.code === "TOO_BIG" && /photo\.jpeg/.test(e.message) && /Nothing was published/.test(e.message));
+  const last = await link();
+  const at = ig.change({ "AGENTS.md": "agents v2" });
+  ig.change({ "lib/look.ts": "red, not published yet" });
+  gh.push({ "formula/lib/look.ts": "teal" });
+  await assert.rejects(publish(at, last), (e) => code("BOTH_CHANGED")(e) && e.extra.paths.join() === "lib/look.ts");
+  assert.equal(ig.files().get("lib/look.ts"), "red, not published yet");
   assert.deepEqual(writes(), []);
+  // Newer work on another file is fine: GitHub's change comes in on top of it.
+  reset(GH0, IG0);
+  const l2 = await link();
+  const at2 = ig.change({ "AGENTS.md": "agents v2" });
+  ig.change({ "clients/fourcorners/client.json": "newer" });
+  gh.push({ "formula/lib/look.ts": "teal" });
+  const done = await publish(at2, l2);
+  assert.equal(ig.files().get("clients/fourcorners/client.json"), "newer");
+  assert.equal(ig.files().get("lib/look.ts"), "teal");
+  assert.equal(gh.files().get("formula/clients/fourcorners/client.json"), '{"autoDeploy":true}', "the newer work isn't published: it isn't in the preview");
+  assert.equal(done.last.ingot, ig.head);
 });
 
-await check("a big file GitHub changed comes down by GitHub's own link, checked", async () => {
+await check("Bring in GitHub's changes: GitHub's version wins where both changed, the point moves, and Ingot's change then publishes", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
-  gh.push({ "formula/clients/cclc/sample.pdf": "p".repeat(400_000) });
-  const done = await mirrorPublish("ws_1", "fourcorners", last.at, CFG(last), "bops; Bops");
-  assert.equal(ig.files().get("clients/cclc/sample.pdf").length, 400_000);
-  assert.ok(gh.calls.some((c) => c.startsWith("GET /contents/formula/clients/cclc/sample.pdf")));
-  assert.equal(done.brought, 1);
+  const last = await link();
+  gh.push({ "formula/lib/look.ts": "teal", "formula/clients/fourcorners/new.ts": "x" });
+  ig.change({ "lib/look.ts": "logo orange", "AGENTS.md": "agents v2" });
+  const pulled = await mirrorPull("ws_1", "fourcorners", CFG(last), "bops; Bops");
+  assert.deepEqual(pulled.took, ["lib/look.ts"]);
+  assert.match(pulled.said, /Took GitHub's version of lib\/look\.ts/);
+  assert.equal(ig.files().get("lib/look.ts"), "teal");
+  assert.equal(ig.files().get("AGENTS.md"), "agents v2", "what only Ingot changed stays");
+  assert.equal(pulled.last.sha, gh.head);
+  const at = ig.change({ "lib/look.ts": "logo orange, again" });
+  const done = await publish(at, pulled.last);
+  assert.equal(gh.files().get("formula/lib/look.ts"), "logo orange, again");
+  assert.equal(gh.files().get("formula/AGENTS.md"), "agents v2");
+  assert.equal(done.pushed.files, 2);
+});
+
+await check("too big to send stops it before anything is written, but only a file that would be sent", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  const at = ig.change({ "clients/fourcorners/photo.jpeg": "x".repeat(BLOB_MAX + 1), "lib/look.ts": "logo orange" });
+  await assert.rejects(publish(at, last), (e) => code("TOO_BIG")(e) && /photo\.jpeg/.test(e.message) && /Nothing was published/.test(e.message));
+  assert.deepEqual(writes(), []);
+  // A big file GitHub has already (it came from there): never in the way.
+  const big = "p".repeat(BLOB_MAX + 5);
+  reset({ ...GH0, "formula/clients/fourcorners/big.pdf": big }, { ...IG0, "clients/fourcorners/big.pdf": big });
+  const l2 = await link();
+  const done = await publish(ig.change({ "lib/look.ts": "logo orange" }), l2);
+  assert.equal(done.pushed.files, 1);
+});
+
+await check("GitHub's files of any size come down, checked: small ones inline, bigger ones by their folder's listing", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  gh.push({ "formula/clients/fourcorners/mid.pdf": "m".repeat(400_000), "formula/clients/fourcorners/big.pdf": "b".repeat(1_200_000) });
+  const done = await publish(last.ingot, last);
+  assert.equal(ig.files().get("clients/fourcorners/mid.pdf").length, 400_000);
+  assert.equal(ig.files().get("clients/fourcorners/big.pdf").length, 1_200_000);
+  assert.ok(gh.calls.some((c) => c.startsWith("GET /contents/formula/clients/fourcorners")));
+  assert.equal(done.brought, 2);
+});
+
+await check("the executable bit is a change of its own, either way", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  const done = await publish(ig.change({ "lib/look.ts": { text: "orange", x: true } }), last);
+  assert.equal(done.pushed.files, 1);
+  assert.equal(gh.commits.get(gh.head).files.get("formula/lib/look.ts").mode, "100755");
+});
+
+await check("a folder gone from GitHub, or most of it deleted on either side, stops it with nothing written", async () => {
+  const many = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`formula/f${i}.ts`, `${i}`]));
+  const manyIg = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`f${i}.ts`, `${i}`]));
+  reset(many, manyIg);
+  let last = await link(CFG(undefined, { keep: [] }));
+  gh.push(Object.fromEntries(Object.keys(many).map((p) => [p, null])));
+  await assert.rejects(publish(ig.head, last, { keep: [] }), code("FOLDER_GONE"));
+  reset(many, manyIg);
+  last = await link(CFG(undefined, { keep: [] }));
+  gh.push(Object.fromEntries(Object.keys(many).slice(0, 25).map((p) => [p, null])));
+  await assert.rejects(publish(ig.head, last, { keep: [] }), (e) => code("MASS_DELETE")(e) && /^GitHub deleted 25 of the folder's 30 files/.test(e.message));
+  reset(many, manyIg);
+  last = await link(CFG(undefined, { keep: [] }));
+  await assert.rejects(publish(ig.change(Object.fromEntries(Object.keys(manyIg).slice(0, 22).map((p) => [p, null]))), last, { keep: [] }), (e) => code("MASS_DELETE")(e) && /^Ingot deleted 22/.test(e.message));
+  assert.equal(ig.commits.length, 0);
+  assert.deepEqual(writes(), []);
 });
 
 await check("someone pushing to the branch meanwhile stops it, saying to publish again", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
+  const last = await link();
   const at = ig.change({ "lib/look.ts": "logo orange" });
   gh.moveFails = true;
-  await assert.rejects(mirrorPublish("ws_1", "fourcorners", at, CFG(last), "bops; Bops"), (e) => e.extra?.code === "GITHUB_MOVED" && /Publish again/.test(e.message));
+  await assert.rejects(publish(at, last), (e) => code("GITHUB_MOVED")(e) && /Publish again/.test(e.message));
 });
 
 await check("a named workflow runs after a push (a client that doesn't deploy on a push), never without one", async () => {
   reset(GH0, IG0);
-  const last = await linkNow();
-  const cfg = CFG(last, { dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc" } } });
-  let done = await mirrorPublish("ws_1", "cclc", last.at, cfg, "bops; Bops");
+  const last = await link();
+  const more = { dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc" } } };
+  let done = await publish(last.ingot, last, more);
   assert.equal(gh.dispatched.length, 0, "nothing pushed, nothing run");
-  const at = ig.change({ "clients/fourcorners/client.json": '{"autoDeploy":false}' });
-  done = await mirrorPublish("ws_1", "cclc", at, { ...cfg, last: done.last }, "bops; Bops");
+  done = await publish(ig.change({ "AGENTS.md": "agents v2" }), done.last, more);
   assert.equal(gh.dispatched.length, 1);
   assert.deepEqual(gh.dispatched[0].body, { ref: "main", inputs: { client: "cclc" } });
   assert.match(done.said, /Started deploy-formula\.yml on GitHub\./);
 });
 
+await check("each Ingot file is read once: later publishes read only what's new (and the table outlives the process)", async () => {
+  reset(GH0, IG0);
+  delete globalThis.__bopsGitIds;
+  rmSync(join(home, "github-mirror-ids.json"), { force: true });
+  const last = await link();
+  const afterLink = ig.reads;
+  assert.equal(afterLink, 4, "each file read once to link (AGENTS.md and CLAUDE.md are the same bytes: once; kept ones never)");
+  const done = await publish(ig.change({ "lib/look.ts": "logo orange" }), last);
+  assert.ok(ig.reads - afterLink <= 2, `only the changed file read again (${ig.reads - afterLink})`);
+  const before = ig.reads;
+  await publish(done.last.ingot, done.last);
+  assert.equal(ig.reads, before, "nothing new, nothing read");
+  delete globalThis.__bopsGitIds;
+  await publish(done.last.ingot, done.last);
+  assert.equal(ig.reads, before, "read back from the user's folder after a restart");
+});
+
 await check("the whole repo as the folder, a nested folder, and a branch with a slash", async () => {
   reset({ "x.ts": "1", "deep/a/b.ts": "2" }, { "x.ts": "1", "deep/a/b.ts": "2" });
-  const last = await linkNow(CFG(undefined, { path: "" }));
-  const at = ig.change({ "x.ts": "changed" });
-  await mirrorPublish("ws_1", "app", at, CFG(last, { path: "" }), "bops; Bops");
+  const last = await link(CFG(undefined, { path: "", keep: [] }));
+  await publish(ig.change({ "x.ts": "changed" }), last, { path: "", keep: [] });
   assert.equal(gh.files().get("x.ts"), "changed");
   reset({ "deep/a/b.ts": "2", "deep/z.ts": "3" }, { "b.ts": "2" });
-  const l2 = await linkNow(CFG(undefined, { path: "deep/a" }));
-  const at2 = ig.change({ "b.ts": "changed" });
-  await mirrorPublish("ws_1", "app", at2, CFG(l2, { path: "deep/a" }), "bops; Bops");
+  const l2 = await link(CFG(undefined, { path: "deep/a", keep: [] }));
+  await publish(ig.change({ "b.ts": "changed" }), l2, { path: "deep/a", keep: [] });
   assert.equal(gh.files().get("deep/a/b.ts"), "changed");
   assert.equal(gh.files().get("deep/z.ts"), "3");
   await assert.rejects(linkMirror("ws_1", "app", CFG(undefined, { branch: "release/1" })), /no branch release\/1/);
@@ -416,8 +545,9 @@ await check("the setting as the window sends it: cleaned, or why not", () => {
   assert.match(cleanGithubMirror({ repo: "a/b", branch: "../x" }).why, /branch/);
   assert.match(cleanGithubMirror({ repo: "a/b", path: "../etc" }).why, /folder/);
   assert.match(cleanGithubMirror({ repo: "a/b", dispatch: { workflow: "rm -rf" } }).why, /workflow/);
-  assert.ok(!("last" in cleanGithubMirror({ repo: "a/b", last: { at: "x", sha: "y" } }).ok), "the window never sets last");
+  assert.ok(!("last" in cleanGithubMirror({ repo: "a/b", last: { sha: "x", ingot: "y" } }).ok), "the window never sets the point");
 });
 
+rmSync(home, { recursive: true, force: true });
 console.log(`github mirror: ${passed} passed, ${failures} failed`);
 if (failures) process.exit(1);
