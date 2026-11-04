@@ -20,7 +20,7 @@ import { CrmNote } from "./crm";
 import { AppChangeCard } from "./app-change";
 import { LookingAt, MadeAppLine } from "./made-apps";
 import { MacIcon } from "./mac-tab";
-import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
+import { AttachmentTray, MessageFiles, MessageImages, useAttachments } from "./attachments";
 import { useComposerListen, withLine, type ComposerReceiver } from "./composer-bridge";
 import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
@@ -545,11 +545,13 @@ export function ChatView({
   }, [c.id, c.readAt, lastAt]);
 
   // What the user just sent shows at once, before the server has it (then the real message takes its place).
-  const [pending, setPending] = useState<{ id: string; chatId: string; text: string; at: number; previews?: string[] }[]>([]);
+  const [pending, setPending] = useState<{ id: string; chatId: string; text: string; at: number; previews?: string[]; files?: { name: string; size: number }[] }[]>([]);
   // When each of the last few messages went, so the real copy can carry on its pending one's motion (arrivalOf).
   const [sent, setSent] = useState<{ chatId: string; text: string; at: number }[]>([]);
-  // Images about to go with the next message (the + button, pasting, or dropping them on the chat).
-  const attach = useAttachments();
+  // Images and files about to go with the next message (the + button, pasting, or dropping them on the chat). A file
+  // goes where the chat's bot works: in a group, the main bot's (else its first bot's) computer.
+  const fileBot = solo ?? members.find((m) => m.isMain) ?? members[0];
+  const attach = useAttachments(() => (state.shared ? undefined : fileBot?.id));
   // What the Preview tab's Select and Draw put in the box (composer-bridge.tsx), never sent by themselves: its
   // pictures' keys in the tray and its lines in the draft (each with where it is in the page's code, never shown), so
   // the message that goes with any of them still there is tagged appNote, and carries those lines' code for the bot.
@@ -609,26 +611,30 @@ export function ChatView({
     const aboutApp = items.some((a) => fromApp.current.keys.has(a.key)) || [...fromApp.current.lines.keys()].some((l) => text.includes(l));
     fromApp.current = { keys: new Set(), lines: new Map() };
     // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
-    const previews = attach.items.map((a) => a.preview);
+    const previews = attach.items.flatMap((a) => (a.preview ? [a.preview] : []));
     setDraft("");
     setReplying(null);
     attach.clear();
-    const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), previews: items.length ? items.map((a) => a.preview) : undefined };
+    const pics = items.flatMap((a) => (a.preview ? [a.preview] : []));
+    const filed = items.filter((a) => a.kind === "file").map((a) => ({ name: a.name, size: a.size }));
+    const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), previews: pics.length ? pics : undefined, files: filed.length ? filed : undefined };
     const drop = () => {
       setPending((p) => p.filter((x) => x.id !== mine.id));
       previews.forEach((u) => URL.revokeObjectURL(u));
     };
     setPending((p) => [...p, mine]);
     setSent((s) => [...s.slice(-19), { chatId: c.id, text, at: mine.at }]);
-    // Shows at once; goes once its images have finished uploading (usually they already have).
-    const images = (await Promise.all(items.map((a) => a.done))).filter((x) => !!x);
-    if (!text && !images.length) return drop();
+    // Shows at once; goes once its images and files have finished uploading (usually they already have).
+    const got = await Promise.all(items.map((a) => a.done));
+    const images = got.flatMap((x) => (x && "pic" in x ? [x.pic] : []));
+    const files = got.flatMap((x) => (x && "file" in x ? [x.file.id] : []));
+    if (!text && !images.length && !files.length) return drop();
     // Only a pick the bot can run now goes; one that can't anymore is let go (boxAgents).
     const pick = solo && agentPicks[c.id] ? boxAgents(state, solo, agentPicks[c.id], boxKeys).picked?.id : undefined;
     if (agentPicks[c.id] && !pick) dropPick();
-    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined, lookingAt: looking?.id, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) }).finally(drop);
+    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined, files: files.length ? files : undefined, lookingAt: looking?.id, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) }).finally(drop);
   };
-  const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => f.type.startsWith("image/"));
+  const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])];
   // Sent messages the server's state doesn't have yet.
   const waiting = pending.filter((p) => p.chatId === c.id && !messages.some((m) => m.role === "user" && m.text === p.text && m.at >= p.at - 5000));
   // The person writing here, or what they just sent still on its way: the header's and an empty chat's idle bot looks down at the box.
@@ -716,7 +722,7 @@ export function ChatView({
     >
       {dropping && (
         <div className="pointer-events-none absolute inset-3 z-[40] flex items-center justify-center rounded-[20px] border-2 border-dashed border-[#0A0A0A]/25 bg-white/85 backdrop-blur-[2px]">
-          <span className="text-[14px] font-medium text-[#3A3A38]">Drop images to send {solo ? `to ${solo.name}` : "to the group"}</span>
+          <span className="text-[14px] font-medium text-[#3A3A38]">Drop images or files to send {solo ? `to ${solo.name}` : "to the group"}</span>
         </div>
       )}
       {pair && <PairSheet state={state} pairId={pair.id} focusId={pair.focus} onClose={() => setPair(null)} />}
@@ -869,6 +875,7 @@ export function ChatView({
             // Up from the composer as you send it (not again when you come back to the chat before it lands).
             <div key={p.id} className={`flex max-w-[86%] flex-col items-end gap-1 self-end ${seen.has(p.id) ? "" : "motion-send-in"}`}>
               {p.previews && <MessageImages previews={p.previews} />}
+              {p.files && <MessageFiles files={p.files} />}
               {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[#0A0A0A] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]"><AddressBreaks text={p.text} /></div>}
             </div>
           ))}
@@ -1024,8 +1031,8 @@ export function ChatView({
             <button
               type="button"
               onClick={() => filePicker.current?.click()}
-              aria-label="Attach images"
-              data-tip="Attach images · or paste / drop them"
+              aria-label="Add images or files"
+              data-tip="Add images or files · or paste / drop them"
               className="flex size-[30px] shrink-0 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink"
             >
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
@@ -1036,7 +1043,6 @@ export function ChatView({
             <input
               ref={filePicker}
               type="file"
-              accept="image/*"
               multiple
               hidden
               onChange={(e) => {
@@ -1844,6 +1850,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             {balloons}
             <div className={`flex flex-col gap-1 ${outgoing ? "items-end" : "items-start"}`}>
               {!!m.images?.length && <MessageImages images={m.images} align={outgoing ? "end" : "start"} />}
+              {!!m.files?.length && <MessageFiles files={m.files} botName={state.bots.find((x) => x.id === m.files![0].botId)?.name} align={outgoing ? "end" : "start"} />}
               {m.text && (
                 <div className={`select-text whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${outgoing ? "bg-ink text-white" : "bg-white text-ink shadow-[0_0_0_1px_#E2E2DF]"}`}><AddressBreaks text={m.text} /></div>
               )}

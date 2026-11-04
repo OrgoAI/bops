@@ -45,6 +45,7 @@ import { moveToMac, offerMove, replyToSession, startSession } from "./sessions";
 import { asksForMac, mentionsMac } from "./where";
 import { needsMemory } from "./judgment";
 import { dataUrlOf, uploadPath } from "./uploads";
+import { filesNote } from "../added-files";
 import { makeImage, SHAPES, type Shape } from "./images";
 import { stopWatch, watchesNote, watchFromChat, watchInstead } from "./watches";
 import { addMessage, bot, chat, getState, id, ownerLine, ownerName, patchSession, react, sameState, setAsking, setTyping, stateEpoch, update } from "./store";
@@ -583,7 +584,9 @@ function history(chatId: string, selfId: string | undefined, opts: { unattended?
       const did = m.role === "bot" ? deeds(m) : "";
       // What Select picked on an app's page, in the owner's words: where each is in the page's code (Message.picks).
       const code = m.picks?.length ? ` [Bops: in the page's code, ${m.picks.map((p) => `${p.line} is ${p.code}`).join("; ")}]` : "";
-      const text = `${m.via === "sms" ? "[by text message] " : m.via ? `[in ${m.via[0].toUpperCase()}${m.via.slice(1)}] ` : ""}${quote}${m.text}${code}${reacted}${did}`;
+      // Files the user added with it (Message.files): where they are, for the bot to open.
+      const filed = m.role === "user" && m.files?.length ? ` ${filesNote(m.files, m.member?.name ?? owner)}` : "";
+      const text = `${m.via === "sms" ? "[by text message] " : m.via ? `[in ${m.via[0].toUpperCase()}${m.via.slice(1)}] ` : ""}${quote}${m.text}${filed}${code}${reacted}${did}`;
       // The user's images, as images the model can look at (recent ones; older ones are just mentioned).
       if (m.role === "user" && m.images?.length) {
         const pics = withImages.has(m.id) ? m.images.map((i) => dataUrlOf(i.id)).filter(Boolean) as string[] : [];
@@ -634,6 +637,8 @@ export async function handleMessage(
   appNote?: boolean,
   /** With appNote: what Select put in those words and where each is in the page's code (Message.picks). */
   picks?: Message["picks"],
+  /** Files the user added for the bot with it, already where it works (lib/server/bot-files.ts): it's told where. */
+  files?: Message["files"],
 ) {
   const c = chat(chatId);
   if (!c) return null;
@@ -642,18 +647,20 @@ export async function handleMessage(
   const target = replyTo ? getState().messages.find((m) => m.id === replyTo && m.chatId === chatId) : undefined;
   const root = target ? (target.replyTo ?? target.id) : undefined;
   const app = lookingAt && madeApp(lookingAt) ? lookingAt : undefined;
-  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel, lookingAt: app, ...(member ? { member: saidOf(member) } : {}), ...(agent && !member && /^[A-Za-z0-9_]{1,40}$/.test(agent) ? { agent } : {}), ...(appNote && !member ? { appNote: true as const } : {}), ...(appNote && !member && picks?.length ? { picks } : {}) });
+  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, files: files?.length ? files : undefined, via, phone, channel, lookingAt: app, ...(member ? { member: saidOf(member) } : {}), ...(agent && !member && /^[A-Za-z0-9_]{1,40}$/.test(agent) ? { agent } : {}), ...(appNote && !member ? { appNote: true as const } : {}), ...(appNote && !member && picks?.length ? { picks } : {}) });
   trackServerEvent("bops_message_sent", { chat_kind: c.kind, via: onCall ? "call" : (via ?? "app"), image_count: images?.length ?? 0, is_reply: !!root });
   // Into the shared memory (unless the user wants it kept from someone), and remembered if it's a lasting fact. A
   // member's words go in as theirs, so nothing they say about themselves is taken for the owner.
   const words = member ? `${member.name} said: ${text}` : text;
+  // Files added with it, where the bot can open them: what it's told (here and in a thread it goes to).
+  const filed = files?.length ? filesNote(files, member?.name ?? ownerName()) : "";
   // (A bot's own chat goes to its memory scope: its own bank while it keeps its memory to itself. A group's, the team's.)
-  rememberMessage(c.kind === "bot" ? scopeOf(c.botIds[0]) : wsOf(c.botIds[0]), chatId, mine.id, images?.length ? `${words} [attached ${images.length} image${images.length === 1 ? "" : "s"}]`.trim() : words, { chat: chatName(chatId) }, member);
+  rememberMessage(c.kind === "bot" ? scopeOf(c.botIds[0]) : wsOf(c.botIds[0]), chatId, mine.id, `${words}${images?.length ? ` [attached ${images.length} image${images.length === 1 ? "" : "s"}]` : ""}${files?.length ? ` [added ${files.map((f) => f.name).join(", ")}]` : ""}`.trim(), { chat: chatName(chatId) }, member);
   // A follow-up to work already under way goes into that thread instead of starting another (not one
   // with images: a thread only takes words, and the bot here can see them).
   // Not while an app is open next to the chat: what they say then is most likely about the app. Nor with what
   // Select picked on one (a thread would get its words without where they are in the page's code).
-  if (!images?.length && !app && !mine.picks && (await continueThread(chatId, text, root, member))) return mine;
+  if (!images?.length && !app && !mine.picks && (await continueThread(chatId, filed ? `${text}\n\n${filed}`.trim() : text, root, member))) return mine;
   if (!ours()) return mine;
   if (c.kind === "group") {
     await groupTurn(chatId, mine, member);
@@ -2848,8 +2855,10 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // A task started from a message with images: it gets where the images are (files on the user's Mac;
     // a cloud computer can't open them, so the goal has to say what's in them).
     const pics = (answering?.images ?? []).map((i) => uploadPath(i.id)?.path).filter(Boolean) as string[];
+    // And the files added with it, where they are (on the computer the task works on, or this Mac).
+    const addedNote = answering?.files?.length ? `\n\n${filesNote(answering.files, answering.member?.name ?? owner)}` : "";
     const withImages = (goal: string) =>
-      pics.length ? `${goal}\n\n${pics.length === 1 ? "An image" : `${pics.length} images`} attached by ${owner} (files on their Mac; a cloud computer can't open them): ${pics.join(", ")}` : goal;
+      (pics.length ? `${goal}\n\n${pics.length === 1 ? "An image" : `${pics.length} images`} attached by ${owner} (files on their Mac; a cloud computer can't open them): ${pics.join(", ")}` : goal) + addedNote;
     const sessionIds: string[] = [];
     // Parts started together in this turn (start_task part_of), by their name: one group each.
     const groups = new Map<string, { id: string; title: string }>();

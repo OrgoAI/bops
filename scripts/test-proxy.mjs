@@ -11,14 +11,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-// proxy.ts imports "next/server" the way Next resolves it (the package's CommonJS entry file).
+// proxy.ts imports "next/server" the way Next resolves it (the package's CommonJS entry file), and lib/api-guard
+// without its extension, as Next does.
 registerHooks({
   resolve(specifier, context, next) {
+    if (specifier === "./lib/api-guard") specifier = "./lib/api-guard.ts";
     return next(specifier === "next/server" ? "next/server.js" : specifier, context);
   },
 });
 const { NextRequest } = await import("next/server");
-const { proxy } = await import(`${root}/proxy.ts`);
+const { proxy, config } = await import(`${root}/proxy.ts`);
+const { refused } = await import(`${root}/lib/api-guard.ts`);
 
 const TOKEN = "t".repeat(64);
 const call = (method, path, { host = "localhost:3210", origin = "http://localhost:3210", cookie, header } = {}) => {
@@ -78,5 +81,18 @@ const bare = [...main.matchAll(/fetch\(\s*`\$\{(?:LOCAL|URL)\}(\/api\/[^`?]*)/g)
 assert.deepEqual(bare, [], "main.cjs calls the API without the window's token");
 assert.ok(/fetch\(\.\.\.ownCall\(LOCAL, windowToken\(\), "\/api\/restart", \{ method: "POST", timeoutMs: 20_000 \}\)\)/.test(main), "main.cjs's restart call is the one checked above");
 assert.ok(!main.includes("sleeping: true"), "the Mac going to sleep hands nothing back: a computer's routines are never the Mac's to hold");
+// A file's bytes (POST /api/bots/files) skip the proxy, so Next doesn't copy them for it (10 MB at most): that route
+// asks the same guard first thing (refused), and every other path still goes through the proxy.
+// (Next compiles the matcher to ^/api(?:/(…))[/#?]?$, the group as it's written; its own compiler can't load here.)
+assert.equal(config.matcher, "/api/((?!bots/files$).*)");
+const matcher = /^\/api(?:\/((?!bots\/files$).*))[/#?]?$/;
+assert.ok(!matcher.test("/api/bots/files"), "the file route is its own guard's");
+for (const path of ["/api/bots", "/api/bots/terminal", "/api/bots/files/x", "/api/bots/filesx", "/api/state", "/api/uploads", "/api/chats/c_1/messages"]) assert.ok(matcher.test(path), `${path} goes through the proxy`);
+const raw = (path, { host = "localhost:3210", origin = "http://localhost:3210", cookie, header } = {}) =>
+  refused(new Request(`http://${host}${path}`, { method: "POST", headers: { host, ...(origin ? { origin } : {}), ...(cookie ? { cookie } : {}), ...(header ? { "x-bops-window": header } : {}) } }));
+assert.equal(raw("/api/bots/files?botId=b&name=a.pdf")?.status, 403, "no token, no file");
+assert.equal(raw("/api/bots/files?botId=b&name=a.pdf", { cookie: `bops_window=${TOKEN}`, host: "192.168.1.5:3210", origin: null })?.status, 403, "another host, no file");
+assert.equal(raw("/api/bots/files?botId=b&name=a.pdf", { cookie: `bops_window=${TOKEN}`, origin: "https://evil.example" })?.status, 403, "another origin, no file");
+assert.equal(raw("/api/bots/files?botId=b&name=a.pdf", { cookie: `theme=dark; bops_window=${TOKEN}` }), null, "the window adds a file");
 delete process.env.BOPS_UI_TOKEN;
 console.log("proxy: ok");

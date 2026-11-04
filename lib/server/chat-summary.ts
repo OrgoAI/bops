@@ -104,7 +104,9 @@ function line(m: Message, owner: string, zone: string | undefined): string {
           : `[${name(m.botId)} emailed ${e.to.join(", ")}, subject "${e.subject}"] ${text}`;
   } else if (m.role === "user") {
     const pics = m.images?.length ? ` [${m.images.length} image${m.images.length === 1 ? "" : "s"}]` : "";
-    said = `${m.member ? `${m.member.name} (someone ${owner} gave this bot to)` : owner}: ${text}${pics}`;
+    // Files added with it (Message.files): where they were put, so the summary keeps where to find them.
+    const filed = m.files?.length ? ` [added ${m.files.map((f) => f.path).join(", ")}]` : "";
+    said = `${m.member ? `${m.member.name} (someone ${owner} gave this bot to)` : owner}: ${text}${pics}${filed}`;
   } else {
     // What the bot did for it, not in its words: the tasks it started, the one this is the result of.
     const did = m.resultOf ? [`the result of the task "${title(m.resultOf) ?? "a task"}"`] : (m.sessionIds ?? []).flatMap((id) => (title(id) ? [`started the task "${title(id)}"`] : []));

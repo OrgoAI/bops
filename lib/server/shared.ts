@@ -242,12 +242,13 @@ export function sharedKeysOpen(): {
 export function sharedChangesOpen(): { wsId: string; botIds: string[]; can: string[]; changes: boolean } | null {
   const open = openNow();
   if (!open) return null;
-  const s = open.data.state;
+  // (What Bops Cloud sent, unchecked: an older one's, or one still loading, may lack any of it.)
+  const s = open.data?.state;
   return {
     wsId: open.at.wsId,
-    botIds: s.bots.flatMap((b) => (typeof b.id === "string" ? [b.id] : [])),
-    can: Array.isArray(s.can) ? s.can.filter((x): x is string => typeof x === "string") : [],
-    changes: s.changes === true,
+    botIds: (Array.isArray(s?.bots) ? s.bots : []).flatMap((b) => (typeof b?.id === "string" ? [b.id] : [])),
+    can: Array.isArray(s?.can) ? s.can.filter((x): x is string => typeof x === "string") : [],
+    changes: s?.changes === true,
   };
 }
 

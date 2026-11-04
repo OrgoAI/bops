@@ -1,0 +1,3 @@
+- Add files in chat with +, or drop them on a bot's screen.
+- Files land on the bot's computer Desktop, and the bot knows where.
+- A bot asks for a key on a card in the chat.
