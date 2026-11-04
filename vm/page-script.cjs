@@ -5,12 +5,17 @@
 // does for the browser tools). It never closes Chrome: when it's done, it only disconnects.
 // With what it returned comes a receipt (whether the page changed, a dialog, a download, a new tab), so
 // the bot can tell a script that did nothing from one that worked, and whether the bot asked to see the
-// screen (screenshot(), the script's third argument), which Bops then sends it.
+// screen (screenshot(), the script's third argument), which Bops then sends it. Once the browser has two
+// or more tabs, the receipt lists them (title, address, which is in front). A file the page downloads is
+// saved to the computer's Downloads under the name the site gave it, never over another, and the receipt
+// gives the path: Playwright, attached over CDP, would otherwise leave it in a temp folder of its own under
+// a random name, where the bot can't find it.
 // Usage: node page-script.cjs <CDP port> <seconds> <script file>
 "use strict";
 /* eslint-disable @typescript-eslint/no-require-imports -- plain CommonJS, run by node on the computer (as desktop/ is) */
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
+const { closeSync, mkdirSync, openSync, readFileSync, unlinkSync } = require("node:fs");
+const { homedir } = require("node:os");
+const { basename, extname, join } = require("node:path");
 const { chromium } = require(join(__dirname, "node_modules", "playwright-core"));
 
 const MARK = "@@bops-page@@";
@@ -19,8 +24,21 @@ const limit = Math.max(1, Number(seconds) || 60) * 1000;
 const AsyncFunction = (async () => {}).constructor;
 
 let current;
-/** What happened while it ran, for its receipt: dialogs (dismissed unless the script answered them), downloads, tabs opened. */
-const happened = { dialogs: [], downloads: [], opened: 0 };
+/** The browser's context once attached: its tabs go in the receipt. */
+let browsing;
+/** What happened while it ran, for its receipt: dialogs (dismissed unless the script answered them), downloads (where each was saved), downloads that couldn't be saved (and why), tabs opened. */
+const happened = { dialogs: [], downloads: [], unsaved: [], opened: 0 };
+/**
+ * Downloads being saved: the receipt waits for them, up to SAVE_WAIT_MS after the script ends. Bops gives the whole
+ * run 30 seconds past the script's limit (computer-task.ts pageScript), and the receipt's own reads take up to 2.5 more:
+ * this keeps a script stopped at its limit inside that.
+ */
+const saving = [];
+const SAVE_WAIT_MS = 15_000;
+/** The tabs the receipt lists, at most. */
+const TABS_LISTED = 12;
+/** Where downloads go: the computer's own Downloads, as Chrome's would. */
+const DOWNLOADS = join(homedir(), "Downloads");
 /** The page before the script ran (see stateOf), and whether it asked to see the screen. */
 let before;
 let look = false;
@@ -39,10 +57,79 @@ async function stateOf(page) {
 async function done(out) {
   if (finished) return;
   finished = true;
+  // Downloads still saving: given a while to land (a script that waited for its download has it already), with any that
+  // start meanwhile.
+  const until = Date.now() + SAVE_WAIT_MS;
+  let late = false;
+  for (let seen = -1; seen !== saving.length && !late; ) {
+    seen = saving.length;
+    late = await Promise.race([Promise.allSettled(saving).then(() => false), new Promise((r) => setTimeout(() => r(true), Math.max(0, until - Date.now())))]);
+  }
+  if (late) happened.unsaved.push(`still downloading ${SAVE_WAIT_MS / 1000} seconds after the script ended; wait for it in the script: const d = await page.waitForEvent("download"), then await d.path()`);
+  // Where it ended: the tab in front now (a script can bring another to the front without navigating it).
+  if (browsing) current = (await Promise.race([front(browsing), new Promise((r) => setTimeout(r, 2000))]).catch(() => undefined)) ?? current;
   const url = current && !current.isClosed() ? current.url() : undefined;
   const after = await Promise.race([stateOf(current), new Promise((r) => setTimeout(r, 1500))]).catch(() => undefined);
   const changed = !!(before && after && (before.url !== after.url || before.print !== after.print)) || happened.opened > 0 || happened.dialogs.length > 0 || happened.downloads.length > 0;
-  process.stdout.write(`\n${MARK}${JSON.stringify({ ...out, url, changed, ...happened, look })}\n`, () => process.exit(0));
+  const tabs = await tabsNow();
+  process.stdout.write(`\n${MARK}${JSON.stringify({ ...out, url, changed, ...happened, ...(tabs ? { tabs } : {}), look })}\n`, () => process.exit(0));
+}
+
+/** The browser's tabs once there are two or more (title, address, whether it's the one in front), else undefined. */
+async function tabsNow() {
+  const pages = browsing ? browsing.pages().filter((p) => !p.isClosed()) : [];
+  if (pages.length < 2) return undefined;
+  return Promise.all(
+    pages.slice(0, TABS_LISTED).map(async (p) => ({
+      title: await Promise.race([p.title(), new Promise((r) => setTimeout(() => r(""), 1000))]).catch(() => ""),
+      url: p.url(),
+      front: p === current,
+    })),
+  );
+}
+
+/**
+ * A path in Downloads for a file the site named `name` (its last part only, no leading dot; "name (1).ext" when that's
+ * taken), reserved by creating it, so another download, here or in another screen's task, never gets the same one.
+ */
+function savePath(name) {
+  const file = basename(String(name || "")).replace(/[\u0000-\u001f]/g, "").replace(/^\.+/, "") || "download";
+  const ext = extname(file);
+  const stem = file.slice(0, file.length - ext.length) || "download";
+  for (let i = 0; ; i++) {
+    const to = join(DOWNLOADS, i ? `${stem} (${i})${ext}` : file);
+    try {
+      closeSync(openSync(to, "wx"));
+      return to;
+    } catch (e) {
+      if (!e || e.code !== "EEXIST") throw e;
+    }
+  }
+}
+
+/** A download, saved where the bot can find it (the receipt says where, or why not). */
+function keep(d) {
+  const name = d.suggestedFilename();
+  saving.push(
+    (async () => {
+      let to;
+      try {
+        mkdirSync(DOWNLOADS, { recursive: true });
+        to = savePath(name);
+        await d.saveAs(to);
+        happened.downloads.push(to);
+        // Playwright's own copy in its temp folder: not needed once saved.
+        await d.delete().catch(() => {});
+      } catch (e) {
+        if (to) {
+          try {
+            unlinkSync(to);
+          } catch {}
+        }
+        happened.unsaved.push(`${name}: ${String(e && e.message ? e.message : e).split("\n")[0].slice(0, 300)}`);
+      }
+    })(),
+  );
 }
 
 /** An error in the bot's terms: a click on something covered says what's on top, and what to do. */
@@ -70,7 +157,7 @@ function follow(page) {
     // After the script's own handler, if it has one (page.once("dialog", …)): what's left is dismissed, so nothing waits on it.
     setTimeout(() => d.dismiss().catch(() => {}), 0);
   });
-  page.on("download", (d) => happened.downloads.push(d.suggestedFilename()));
+  page.on("download", keep);
   page.on("framenavigated", (frame) => {
     if (frame === page.mainFrame()) {
       current = page;
@@ -119,6 +206,7 @@ async function front(context) {
   }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 15_000 });
   const context = browser.contexts()[0] ?? (await browser.newContext());
+  browsing = context;
   context.setDefaultTimeout(Math.min(30_000, limit));
   current = (await front(context)) ?? (await context.newPage());
   const page = current;

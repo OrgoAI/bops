@@ -570,7 +570,7 @@ export function BotAiSection({
       )}
       <Fold open={open}>
         <div className={bare ? "flex flex-col gap-3" : "flex flex-col gap-3 border-t border-black/[0.05] px-4 pb-4 pt-3"}>
-          <span className="text-[11px] font-medium uppercase leading-4 tracking-[0.04em] text-[#8A8A88]">Agents it can run</span>
+          <span className="text-[12px] font-semibold leading-4 text-[#8A8A88]">Agents it can run</span>
           <div className="flex flex-wrap gap-2">
             {ai.agents.map((x) => (
               <AgentTile key={x.id} agent={x} bot={b} state={state} keys={keys} isDefault={x.id === ai.default} on={x.id === editing} onClick={() => setEditing((e) => (e === x.id ? null : x.id))} />
@@ -611,7 +611,7 @@ export function BotAiSection({
               ))}
             </div>
           </div>
-          <span className="text-[11px] font-medium uppercase leading-4 tracking-[0.04em] text-[#8A8A88]">Threads now</span>
+          <span className="text-[12px] font-semibold leading-4 text-[#8A8A88]">Threads now</span>
           <ThreadsNow state={state} bot={b} onOpenThread={onOpenThread} onMore={onOpenChat} />
           <div className="flex items-center gap-2">
             {BRAINS_ON && !ro && (

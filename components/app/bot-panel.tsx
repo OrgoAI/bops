@@ -30,8 +30,8 @@ import { aiKinds, aiLine, SETTINGS_WORDS, teamLine, type SettingsSection } from 
 import { onCount } from "@/lib/sequences";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
-export type Section = "details" | "skills" | "routines" | "memory" | "phone";
-const SECTIONS: Section[] = ["details", "skills", "routines", "memory", "phone"];
+export type Section = "details" | "skills" | "routines" | "memory";
+const SECTIONS: Section[] = ["details", "skills", "routines", "memory"];
 
 export function BotPanel({
   state,
@@ -103,7 +103,6 @@ export function BotPanel({
           }`}
         >
           {t}
-          {t === "phone" && <span className="ml-1 align-[1px] text-[10px] font-semibold uppercase tracking-[0.04em] text-[#9A9A98]">soon</span>}
         </button>
       ))}
     </div>
@@ -151,13 +150,12 @@ export function BotPanel({
         <BotRoutines state={state} bot={b} app={app} onApp={(a) => setOnly({ bot: b.id, app: a })} onOpenAutopilot={onOpenAutopilot} onAsk={onAsk} />
       )}
       {tab === "memory" && <BotMemory state={state} bot={b} onOpenThread={onOpenThread} />}
-      {tab === "phone" && <Phone state={state} bot={b} />}
     </section>
   );
 }
 
 /** Each panel tab's section on the full page: Details opens it at the top. */
-const PANEL_TO_PAGE: Record<Section, SettingsSection | undefined> = { details: undefined, skills: "skills", routines: "routines", memory: "memory", phone: "phone" };
+const PANEL_TO_PAGE: Record<Section, SettingsSection | undefined> = { details: undefined, skills: "skills", routines: "routines", memory: "memory" };
 
 /** The panel's way to its full settings page: the X's size and look, arrows out, with its tip. */
 function ExpandButton({ onClick }: { onClick: () => void }) {
@@ -1161,48 +1159,3 @@ export function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: 
 }
 
 /** Not built yet: a label that says so, wherever a feature is shown ahead of time. */
-function ComingSoon() {
-  return <span className="rounded-full bg-highlighter px-2 py-[3px] text-[10.5px] font-semibold uppercase leading-3 tracking-[0.05em] text-ink">Coming soon</span>;
-}
-
-/* ---------------- Phone ---------------- */
-
-function Phone({ state, bot: b }: { state: AppState; bot: Bot }) {
-  return (
-    <div className="flex gap-4">
-      <div className="flex w-[260px] shrink-0 items-center justify-center rounded-[20px] py-6" style={{ backgroundImage: botWash(b) }}>
-        <div className="flex h-[400px] w-[196px] rounded-[38px] bg-ink p-[7px] shadow-[0_22px_44px_-16px_#28320073]">
-          <div className="flex flex-1 flex-col items-center gap-3 rounded-[31px] bg-white px-4 pt-3">
-            <span className="h-[18px] w-[62px] rounded-full bg-ink" />
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-              <Mascot botId={b.id} color={b.color} size={48} />
-              <span className="text-[13px] font-semibold">{b.name}&apos;s phone</span>
-              <span className="text-[11.5px] leading-4 text-[#6B6B6B]">Coming soon</span>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-3 py-1">
-        <span className="flex items-center gap-2">
-          <span className="text-[14px] font-semibold leading-[18px]">A real phone, not a simulator</span>
-          <ComingSoon />
-        </span>
-        <span className="text-[13px] leading-5 text-[#3A3A38]">
-          Soon {b.name} will get its own physical phone in the cloud, with its own number for calls, texts, iMessage and two-factor codes. It will drive the phone the same way it drives its computer.
-        </span>
-        <div className="flex flex-wrap gap-1.5">
-          {["Calls", "SMS", "iMessage", "2FA codes", "Apps"].map((x) => (
-            <span key={x} className="rounded-full bg-[#F2F2F0] px-2.5 py-1 text-[12px] leading-4">
-              {x}
-            </span>
-          ))}
-        </div>
-        <span className="text-[12px] leading-[17px] text-[#9A9A98]">
-          {state.shared
-            ? `Not available yet. Until then, the owner can text and call ${b.isMain ? b.name : "their main bot"} on its number.`
-            : `Not available yet. Until then, you can text and call ${b.isMain ? b.name : "your main bot"} on its number (Settings, How your bots reach you).`}
-        </span>
-      </div>
-    </div>
-  );
-}
