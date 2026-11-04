@@ -99,7 +99,8 @@ function hidePairs(pairs: string, depth = 0): string {
  */
 export function shownAddress(address: string): string {
   // The user part runs to the authority's last @ (a password can hold one).
-  const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#\s]*@)?([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(address);
+  // The fragment takes any character (a line break too), so the match never fails late and backtracks.
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#\s]*@)?([^?#]*)(\?[^#]*)?(#[^]*)?$/i.exec(address);
   if (!m) return address.replace(/([?&#])([^=&#?\s]*)=([^&#\s]*)/g, (all, sep: string, name: string, value: string) => (value && (SECRET_NAME.test(nameOf(name)) || OPAQUE.test(value)) ? `${sep}${name}=•••` : all));
   const [, scheme, rest, query, hash] = m;
   // A fragment is pairs itself ("#access_token=…", a ? in a value or not) or a route with a query after it ("#/cb?code=…").
