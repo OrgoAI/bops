@@ -261,6 +261,16 @@ const actRoute: Route = {
 
 const wss = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: MAX_FRAME });
 
+/** A runner's list of its browser's tabs, kept to what a tab is (an id of letters and digits, a title, an address), at most 20. */
+function tabsOf(m: { tabs?: unknown; front?: unknown }): { tabs: { id: string; title: string; url: string }[]; front: string | null } {
+  const tabs = (Array.isArray(m.tabs) ? m.tabs : [])
+    .filter((t): t is { id: string; title?: unknown; url?: unknown } => !!t && typeof t === "object" && typeof t.id === "string" && /^[A-Za-z0-9]{1,64}$/.test(t.id))
+    .slice(0, 20)
+    .map((t) => ({ id: t.id, title: typeof t.title === "string" ? t.title.slice(0, 200) : "", url: typeof t.url === "string" ? t.url.slice(0, 2048) : "" }));
+  const front = typeof m.front === "string" && tabs.some((t) => t.id === m.front) ? m.front : null;
+  return { tabs, front };
+}
+
 /** What a runner said, passed on to the viewers of each bot it's for (on that computer); a frame skips a viewer that's behind. */
 function fromRunner(r: Runner, m: RunnerToBrowser) {
   if (!m || typeof m !== "object" || !Array.isArray(m.bots)) return;
@@ -275,6 +285,7 @@ function fromRunner(r: Runner, m: RunnerToBrowser) {
       if (m.t === "frame") {
         if (!v.res.writableNeedDrain && typeof m.data === "string") event(v.res, { t: "frame", data: m.data, meta: m.meta });
       } else if (m.t === "page") event(v.res, { t: "page", url: String(m.url ?? ""), title: String(m.title ?? ""), back: typeof m.back === "number" ? m.back : null });
+      else if (m.t === "tabs") event(v.res, { t: "tabs", ...tabsOf(m) });
       else if (m.t === "control") event(v.res, { t: "control", by: m.by ?? null, you: !!m.by && m.by.id === v.person.id });
       else if (m.t === "pointer") {
         // A move or a scroll skips a viewer that's behind, as a frame does (the next says where); a press never does.

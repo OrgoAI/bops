@@ -1140,11 +1140,16 @@ export const TURN_BEAT_MS = 30_000;
  * relays, never keeps. Bops Cloud lets watch, and take control, only the owner and a member with Write on that bot
  * and Use its computer (cloud/browser.ts mayUseBrowser, the check a member's computer chat turn goes by: turns.ts
  * memberStill). A person in control sends only these CDP methods, each with its parameters checked
- * (lib/browser-relay.ts cleanInput); anything else is refused, on the runner, whatever Bops Cloud let through.
+ * (lib/browser-relay.ts cleanInput); anything else is refused, on the runner, whatever Bops Cloud let through. The
+ * Target ones are the browser's tabs: a new tab at an http or https page, and a switch to or close of a tab the runner
+ * listed ("tabs"), done through Chrome's DevTools address on the computer, never a CDP session on the browser itself.
  */
-export const BROWSER_METHODS = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"] as const;
+export const BROWSER_METHODS = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry", "Target.createTarget", "Target.activateTarget", "Target.closeTarget"] as const;
 export type BrowserMethod = (typeof BROWSER_METHODS)[number];
 export const isBrowserMethod = (v: unknown): v is BrowserMethod => typeof v === "string" && (BROWSER_METHODS as readonly string[]).includes(v);
+
+/** One of the browser's tabs, as the runner lists them (its DevTools target id, title and address), oldest first. */
+export type BrowserTab = { id: string; title: string; url: string };
 
 /** Someone watching or in control, as Bops Cloud vouches for them: their Orgo user id and the name others see. */
 export type BrowserPerson = { id: string; name: string };
@@ -1182,6 +1187,7 @@ export type BrowserToRunner =
 export type RunnerToBrowser =
   | { t: "frame"; bots: string[]; data: string; meta: BrowserFrameMeta }
   | { t: "page"; bots: string[]; url: string; title: string; back: number | null }
+  | { t: "tabs"; bots: string[]; tabs: BrowserTab[]; front: string | null }
   | { t: "control"; bots: string[]; by: BrowserPerson | null }
   | ({ t: "pointer"; bots: string[]; by: BrowserPerson | null } & BrowserPointer)
   | ({ t: "activity"; bots: string[] } & BrowserActivity)
@@ -1189,7 +1195,7 @@ export type RunnerToBrowser =
 
 /**
  * What a viewer's stream carries (GET /v1/browser/watch, server-sent events named for `t`): frames, the page's address and
- * title (`back`: the history entry Back goes to, null when there's none), who has control (`you`: the viewer does), a
+ * title (`back`: the history entry Back goes to, null when there's none), the browser's tabs and which is in front, who has control (`you`: the viewer does), a
  * pointer event on the page and who drove it (`you`: the viewer, whose own pointer is never drawn twice), what the bot
  * is doing with it ("activity"), an input of theirs refused and why (no `code`), or the stream itself, as they may no
  * longer watch (a `code`), and whether the bot's computer is connected at all ("computer"). `?only=activity`: a stream of
@@ -1198,6 +1204,7 @@ export type RunnerToBrowser =
 export type BrowserEvent =
   | { t: "frame"; data: string; meta: BrowserFrameMeta }
   | { t: "page"; url: string; title: string; back: number | null }
+  | { t: "tabs"; tabs: BrowserTab[]; front: string | null }
   | { t: "control"; by: BrowserPerson | null; you: boolean }
   | ({ t: "pointer"; by: BrowserPerson | null; you: boolean } & BrowserPointer)
   | ({ t: "activity" } & BrowserActivity)

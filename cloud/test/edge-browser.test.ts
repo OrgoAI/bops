@@ -150,8 +150,19 @@ test("the owner and a member with Write and Use its computer watch the bot's bro
   assert.deepEqual(w.t === "watch" && w.viewers.map((v) => v.id).sort(), [owner, writer].sort());
   r.send({ t: "page", bots: ["max"], url: "https://example.com/", title: "Example", back: null });
   r.send({ t: "frame", bots: ["max"], data: "AAAA", meta: { deviceWidth: 1280, deviceHeight: 800, offsetTop: 0, pageScaleFactor: 1, scrollOffsetX: 0, scrollOffsetY: 0 } });
+  // The browser's tabs: passed on with only what a tab is (an id of letters and digits, a title, an address), at most 20.
+  const junk = { id: "../json/close/x", title: "bad", url: "https://x.com/" };
+  r.send({ t: "tabs", bots: ["max"], tabs: [{ id: "AB12", title: "Example", url: "https://example.com/", extra: "x" }, junk, { id: "CD34", title: 5, url: "https://two.example/" }] as never, front: "CD34" });
   r.send({ t: "control", bots: ["max"], by: { id: writer, name: "writer" } });
   await until(() => theirs.events.some((e) => e.t === "control") && mine.events.some((e) => e.t === "control"), "control to reach both");
+  assert.deepEqual(theirs.events.find((e) => e.t === "tabs"), {
+    t: "tabs",
+    tabs: [
+      { id: "AB12", title: "Example", url: "https://example.com/" },
+      { id: "CD34", title: "", url: "https://two.example/" },
+    ],
+    front: "CD34",
+  });
   assert.deepEqual(theirs.events.find((e) => e.t === "page"), { t: "page", url: "https://example.com/", title: "Example", back: null });
   assert.equal(theirs.events.find((e) => e.t === "frame")?.data, "AAAA");
   assert.equal(theirs.events.find((e) => e.t === "control")?.you, true, "the member is told it's them");
@@ -204,15 +215,18 @@ test("only someone who may watch takes control or sends input, and the runner he
   assert.ok(!r.got.some((m) => m.t !== "watch"), "nothing of theirs reached the runner");
   assert.equal((await act(writer, { act: "take" })).status, 202);
   assert.equal((await act(writer, { act: "input", method: "Input.insertText", params: { text: "hi" } })).status, 202);
+  // A tab of its own: a new one at a page reaches the runner (which checks the address and the tab ids itself).
+  assert.equal((await act(writer, { act: "input", method: "Target.createTarget", params: { url: "https://example.com/" } })).status, 202);
   const outside = await act(writer, { act: "input", method: "Runtime.evaluate", params: { expression: "document.cookie" } });
   assert.equal(outside.status, 400, "a method outside the allowlist never reaches the runner");
   assert.equal((await act(writer, { act: "release" })).status, 202);
-  await until(() => r.got.filter((m) => m.t !== "watch").length === 3, "the three acts");
+  await until(() => r.got.filter((m) => m.t !== "watch").length === 4, "the four acts");
   assert.deepEqual(
     r.got.filter((m) => m.t !== "watch"),
     [
       { t: "take", bot: "max", who: { id: writer, name: "writer" } },
       { t: "input", bot: "max", who: { id: writer, name: "writer" }, method: "Input.insertText", params: { text: "hi" } },
+      { t: "input", bot: "max", who: { id: writer, name: "writer" }, method: "Target.createTarget", params: { url: "https://example.com/" } },
       { t: "release", bot: "max", who: { id: writer, name: "writer" } },
     ],
   );
