@@ -76,7 +76,7 @@ export function changeFilesTool(keys: KeyProvider[]) {
 }
 
 /** change_files' arguments as the model sent them (JSON): checked before anything is read. */
-type ChangeArgs = { [k: string]: unknown; key?: unknown; repo?: unknown; branch?: unknown; base?: unknown; message?: unknown; reason?: unknown; files?: unknown };
+export type ChangeArgs = { [k: string]: unknown; key?: unknown; repo?: unknown; branch?: unknown; base?: unknown; message?: unknown; reason?: unknown; files?: unknown };
 /** A file of a change as checked: its whole new text, or that it goes. */
 type FileIn = { path: string; text: string } | { path: string; delete: true };
 
@@ -195,7 +195,7 @@ export function diffOf(was: string | null, next: string): string[] {
 
 /**
  * change_files. The key must be one the bot may use (Bot.keys), set in the vault, and one a change goes with; a chat
- * turn's only (`chat`). Before the ask, Bops only reads (GETs run at once, as call_api's): the branch, or its base, the
+ * turn's (`chat`) or a task's (`task`, never without a card). Before the ask, Bops only reads (GETs run at once, as call_api's): the branch, or its base, the
  * folders on each file's way (git's trees: what each is, and an executable's mode, which the card keeps and the yes
  * writes), and each file there now, for the card's diff. A link, a repository of its own inside, a file too big to read,
  * or a change too big to show whole is refused, never asked for. Then it asks the user, every time, as any write with a key does (NeedsOk:
@@ -204,14 +204,14 @@ export function diffOf(was: string | null, next: string): string[] {
  * run on the commit the card was made from and only for the files it listed, the branch moving last; one that moved
  * meanwhile stops it, as what was shown could undo what came since.
  */
-export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere, opts: { chat?: boolean; approved?: boolean; asked?: FileChange } = {}): Promise<ChangeDone> {
+export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere, opts: { chat?: boolean; task?: boolean; approved?: boolean; asked?: FileChange } = {}): Promise<ChangeDone> {
   const b = bot(botId);
   if (!b) return { text: "Unknown bot." };
   const owner = ownerName();
   const name = keyName(String(a.key ?? ""));
   const p = keyProvider(name);
   if (!p || !CHANGE_KEYS.has(name) || !b.keys?.includes(name)) return { text: `You may not change files with ${name || "that key"}. ${owner} can let you use the GitHub key in Keys.` };
-  if (!opts.chat) return { text: "Only in the chat: a task's keys only read." };
+  if (!opts.chat && !opts.task) return { text: "Only in the chat or a task: nothing else changes files." };
   const usable = await usableKeys(b);
   if (!usable.some((k) => k.name === name)) return { text: `The ${p.label} key isn't set in ${owner}'s vault. ${owner} can add it in Keys.` };
   const c = check(a);
@@ -368,8 +368,9 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
     ...(asker ? { askedFor: asker } : {}),
     ...(reason ? { reason } : {}),
   };
-  // As call_api's writes: an Always allow for the service goes without asking (the owner's own turn only).
-  if (!asker && allows(b, ask, { justDoIt: false })) return run("auto", { ...s, listed: shown });
+  // As call_api's writes: an Always allow for the service goes without asking (the owner's own turn only), never in a
+  // task, whose browser reads pages anyone could have written: there every change is a card someone answers.
+  if (!asker && !opts.task && allows(b, ask, { justDoIt: false })) return run("auto", { ...s, listed: shown });
   used("waiting");
   throw new NeedsOk(ask);
 }

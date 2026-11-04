@@ -305,14 +305,28 @@ await check("a bot with the GitHub key has change_files in the chat, saying to u
   for (const t of [tool.description, ...Object.values(tool.parameters.properties).map((p) => p.description ?? "")]) assert.ok(!DASHES.test(t), t);
 });
 
-await check("a task never has it: its key calls only read, and change_files refuses outside the chat, sending nothing", async () => {
+await check("a task has change_files too, and each change it makes is one card someone answers, even with an Always allow saved; the yes writes as the card said; nothing else changes files", async () => {
   const src = readFileSync(`${root}/lib/server/computer-task.ts`, "utf8");
-  assert.ok(!/change_files|changeFiles|repo-change/.test(src), "nothing of it in a task's tools");
+  assert.match(src, /changeFilesTool\(keyed\)/, "offered to a task with the GitHub key");
+  assert.match(src, /changeFiles\([^)]*\{ task: true, approved: opts\.approved/, "a task's change asks as a task's");
   const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  freshRepo();
+  S.update(() => (S.bot("boppy").permissions = [{ action: "Call GitHub", resource: "*", effect: "allow" }]));
+  try {
+    const e = await changeFiles("boppy", change(), { sessionId: "ses_x" }, { task: true }).then(() => null, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, "asked, never run by the Always allow");
+    assert.deepEqual(e.ask.resources, ["src/look.ts", "src/notes.md"], "one card for both files");
+    assert.deepEqual(writes(), [], "nothing written before the yes");
+    const done = await changeFiles("boppy", change(), { sessionId: "ses_x" }, { task: true, approved: true, asked: e.ask.api.change });
+    assert.equal(done.failed, undefined, done.text);
+    assert.ok(writes().some((c) => c.path.includes("/git/refs")), "the branch made, last");
+  } finally {
+    S.update(() => delete S.bot("boppy").permissions);
+  }
   const n = gh.calls.length;
   const r = await changeFiles("boppy", change(), { sessionId: "ses_x" });
-  assert.equal(r.text, "Only in the chat: a task's keys only read.");
-  assert.equal(gh.calls.length, n);
+  assert.equal(r.text, "Only in the chat or a task: nothing else changes files.");
+  assert.equal(gh.calls.length, n, "nothing sent");
 });
 
 /* ---------------- The card's diff ---------------- */

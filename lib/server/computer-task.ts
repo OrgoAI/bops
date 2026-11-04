@@ -11,6 +11,7 @@ import { shownAddress } from "@/lib/plain-words";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
+import { changeFiles, changeFilesTool, type ChangeArgs } from "./repo-change";
 import { readSkill, READ_SKILL_TOOL } from "./workspace-skills";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
@@ -137,7 +138,9 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
   // read_skill always: every bot has Bops' own skills, under their labels (sessions.ts lists them in its instructions).
-  // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
+  // call_api with the user's keys (keys.ts), and change_files with a GitHub key (repo-change.ts): a read runs at once;
+  // anything that changes something asks, on a card someone answers, every time (never an Always allow here: the
+  // task's browser reads pages anyone could have written). It pauses the run till then (NeedsOk), as in the chat.
   // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
   // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
   // One a member with Write started or told something (memberThread) has the logins its bot has: they reach the
@@ -146,6 +149,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   const outside = strangersTask(t.sessionId);
   const others = outsideTask(t.sessionId);
   const keyed = outside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
+  const changeTool = changeFilesTool(keyed);
   const tools = [
     { type: "computer" },
     { type: "web_search" },
@@ -157,7 +161,8 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     ...(t.apps && !outside ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
     ...(others ? [] : CRM_TOOLS(b)),
-    ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
+    ...(keyed.length ? [callApiTool(keyed)] : []),
+    ...(changeTool ? [changeTool] : []),
   ];
   const guard = newPageGuard();
   // A turn that was stopped mid-step, or paused at a call that needed the user's OK, owes OpenAI the outputs of the
@@ -303,7 +308,7 @@ async function answerPaused(t: ComputerTurn, a: AppApproval, call: { name: strin
     return { type: "function_call_output", call_id: callId, output: declined(a) };
   }
   keep("Not known: Bops stopped while doing it, so it may or may not have happened. Check before doing it again.");
-  const answered = await runFunction(t, { type: "function_call", call_id: callId, name: call.name, arguments: call.arguments }, guard, { approved: true });
+  const answered = await runFunction(t, { type: "function_call", call_id: callId, name: call.name, arguments: call.arguments }, guard, { approved: true, asked: a });
   const output = "pause" in answered ? "Failed: it still needs the user's OK." : answered.output;
   keep(typeof output === "string" ? output : (output.find((c) => c.type === "input_text")?.text ?? ""));
   return { type: "function_call_output", call_id: callId, output };
@@ -730,7 +735,7 @@ function orStop<T>(t: ComputerTurn, work: Promise<T>): Promise<T> {
  * One tool call, answered. `approved`: the user said yes to this very call (its run paused for it). A call that
  * needs their OK and hasn't it answers `pause`, with what to ask: the run pauses there (pauseAt).
  */
-async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard(), opts: { approved?: boolean } = {}): Promise<FunctionOutput | { pause: AskSpec }> {
+async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard(), opts: { approved?: boolean; asked?: AppApproval } = {}): Promise<FunctionOutput | { pause: AskSpec }> {
   const s = session(t.sessionId)!;
   // A stranger's task has none of the owner's logins; anyone else's (a member's too) none of the CRM.
   const outside = strangersTask(t.sessionId);
@@ -783,8 +788,14 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
       t.step("use_app", `used ${String(args.action ?? "an app")}`);
       output = await orStop(t, runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, (args.account as string | null) ?? null, { approved: opts.approved }));
     } else if (o.name === "call_api" && !outside) {
-      const r = await orStop(t, callApi(s.botId, args, { sessionId: t.sessionId }));
+      const r = await orStop(t, callApi(s.botId, args, { sessionId: t.sessionId }, { task: true, approved: opts.approved }));
       t.step("call_api", r.did ?? `tried to call ${String(args.key ?? "an API")}`);
+      output = r.text;
+    } else if (o.name === "change_files" && !outside) {
+      // The yes is to the card it showed (its commit and files): the writes go only as that card said.
+      const change = opts.approved ? opts.asked?.api?.change : undefined;
+      const r = await orStop(t, changeFiles(s.botId, args as ChangeArgs, { sessionId: t.sessionId }, { task: true, approved: opts.approved, ...(change ? { asked: change } : {}) }));
+      t.step("change_files", r.did?.length ? r.did.join("; ") : `tried to change files with ${String(args.key ?? "a key")}`);
       output = r.text;
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
