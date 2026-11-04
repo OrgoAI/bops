@@ -94,7 +94,9 @@ function freshRepo() {
 /** A folder of root tree `root` (`prefix` "" or "src/"), as GitHub lists one (GET /git/trees/<sha>): its own sha here. */
 function folderSha(root, prefix) {
   if (!prefix) return root;
-  const sha = sha1(`${root}:${prefix}`);
+  // By what's in it, as git's are: the same folder in two commits has one sha.
+  const under = Object.entries(gh.trees.get(root)).filter(([p]) => p.startsWith(prefix)).sort(([a], [b]) => (a < b ? -1 : 1));
+  const sha = sha1(`${prefix}${JSON.stringify(under.map(([p, e]) => [p.slice(prefix.length), e.sha, e.mode]))}`);
   gh.folders.set(sha, { root, prefix });
   return sha;
 }
@@ -102,6 +104,7 @@ freshRepo();
 /** What the stand-in GitHub answers one call (as the broker passes it on): status and JSON. */
 function github(method, path, query, body) {
   gh.calls.push({ method, path, query, body });
+  gh.onCall?.(method, path);
   const ok = (b, status = 200) => ({ status, body: b });
   const no = (status, message) => ({ status, body: { message } });
   if (gh.fail && gh.fail.method === method && gh.fail.path.test(path)) return no(gh.fail.status, gh.fail.message);
@@ -263,10 +266,11 @@ Keys.grantKey("GITHUB_TOKEN", "boppy", true);
 const messages = () => S.getState().messages.filter((m) => m.chatId === chatId);
 const outputOf = (body, i = 0) => body.input.filter((x) => x.type === "function_call_output")[i]?.output;
 const NEW_LOOK = 'export const look = {\n  accent: "#F15B3B",\n  ink: "#20222D",\n};\n';
+// (On the default branch, main: what goes live, so it asks. A draft branch is saved at once: draft below.)
 const change = (over = {}) => ({
   key: "GITHUB_TOKEN",
   repo: "acme/site",
-  branch: "site/orange-buttons",
+  branch: "main",
   base: null,
   message: "Use the logo orange for the buttons",
   reason: "Make the buttons the logo's orange, as a draft",
@@ -411,6 +415,91 @@ await check("a task's write card: Bops' facts lead and the bot's words are label
   }
 });
 
+/* ---------------- Drafts ---------------- */
+
+/** The repository lists its draft branches (.github/bops.json on main, as its people put it there). */
+const listDrafts = (drafts = ["site/"]) => theirCommit("main", ".github/bops.json", JSON.stringify({ drafts }));
+
+await check("a draft on a branch the repository lists, from main, is saved at once, on the owner's turn, a member's and a task's: no card", async () => {
+  const { changeFiles, isDraft, draftPrefixes } = await import(`${root}/lib/server/repo-change.ts`);
+  const on = (branch, base = null) => ({ branch, base });
+  assert.equal(isDraft(on("site/orange"), "main", ["site/"], [{ path: "src/look.ts" }]), true);
+  assert.equal(isDraft(on("site/orange", "main"), "main", ["site/"], [{ path: "src/look.ts" }]), true, "a new one from main");
+  assert.equal(isDraft(on("site/orange", "site/old"), "main", ["site/"], [{ path: "a.md" }]), false, "a new one from another branch asks");
+  assert.equal(isDraft(on("feature/x"), "main", ["site/"], [{ path: "a.md" }]), false, "a branch it doesn't list asks");
+  assert.equal(isDraft(on("site/x"), "main", [], [{ path: "a.md" }]), false, "a repository that lists none asks");
+  assert.equal(isDraft(on("Main"), "main", ["M", "Main/"], [{ path: "a.md" }]), false, "the default branch in any case asks");
+  assert.equal(isDraft(on("site/x"), "main", ["site/"], [{ path: ".github/workflows/ci.yml" }]), false, "GitHub's automation asks");
+  assert.equal(isDraft(on("site/x"), "", ["site/"], [{ path: "a.md" }]), false, "no default branch known: it asks");
+  assert.deepEqual(draftPrefixes('{"drafts":["site/","x","/root/","a/../b/",7,"refs/","heads/x/","preview/"]}'), ["site/", "preview/"], "each ends in /, nothing odd");
+  assert.deepEqual([draftPrefixes(null), draftPrefixes("not json"), draftPrefixes('{"drafts":"site/"}')], [[], [], []]);
+  for (const [who, where, opts] of [["owner", { chatId }, { chat: true }], ["member", { chatId, member: "Dee" }, { chat: true }], ["task", { sessionId: "ses_draft" }, { task: true }]]) {
+    freshRepo();
+    listDrafts();
+    const asks = S.getState().appApprovals?.length ?? 0;
+    const done = await changeFiles("boppy", change({ branch: "site/orange-buttons" }), where, opts);
+    assert.equal(done.failed, undefined, `${who}: ${done.text}`);
+    assert.match(done.text, /^Saved: 2 files on site\/orange-buttons in acme\/site, a new branch from main \(commit [0-9a-f]{7}\)/, who);
+    assert.equal(S.getState().appApprovals?.length ?? 0, asks, `${who}: no card`);
+    assert.equal(writes().at(-1).path, "/repos/acme/site/git/refs", `${who}: the branch made last`);
+    assert.equal(fileAt("site/orange-buttons", "src/look.ts"), NEW_LOOK);
+    assert.equal(fileAt("main", "src/look.ts").includes("#FFD400"), true, `${who}: main untouched`);
+  }
+});
+
+await check("anything else asks, a task's too, nothing written before the yes: no list, a branch it doesn't list, one from another branch, .github/, the default branch", async () => {
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const asks = async (args, opts = { task: true }, where = { sessionId: "ses_ask" }) => {
+    const e = await changeFiles("boppy", args, where, opts).then((r) => r, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, `asked: ${args.branch} (${e?.text ?? e})`);
+  };
+  freshRepo();
+  await asks(change({ branch: "site/orange-buttons" }));
+  listDrafts();
+  gh.refs.set("site/old", gh.refs.get("main"));
+  await asks(change({ branch: "feature/orange" }));
+  await asks(change({ branch: "site/orange-buttons", base: "site/old" }));
+  await asks(change({ branch: "site/ci", files: [{ path: ".github/workflows/preview.yml", text: "on: push\n", delete: null }] }));
+  await asks(change({ branch: "site/ci", files: [{ path: ".github/bops.json", text: '{"drafts":["feature/"]}', delete: null }] }), { chat: true }, { chatId });
+  await asks(change());
+  // A listed branch a person gave automation of its own: its push would run that, so it asks.
+  gh.refs.set("site/own", gh.refs.get("main"));
+  theirCommit("site/own", ".github/workflows/own.yml", "on: push\n");
+  await asks(change({ branch: "site/own" }));
+  assert.deepEqual(writes(), []);
+  // One with the default branch's automation, other changes of its own: a draft.
+  gh.refs.set("site/same", gh.refs.get("main"));
+  theirCommit("site/same", "README.md", "# Site, edited\n");
+  const done = await changeFiles("boppy", change({ branch: "site/same" }), { sessionId: "ses_same" }, { task: true });
+  assert.match(done.text, /^Saved: 2 files on site\/same in acme\/site \(commit/);
+});
+
+await check("a task stopped while its draft is saving writes nothing more, and its branch never moves", async () => {
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  freshRepo();
+  listDrafts();
+  const stop = new AbortController();
+  stop.abort();
+  const r = await changeFiles("boppy", change({ branch: "site/stopped" }), { sessionId: "ses_stop" }, { task: true, signal: stop.signal });
+  assert.match(r.text, /^Not saved: stopped, the task was stopped first\. Nothing changed on site\/stopped\.$/);
+  assert.deepEqual(writes(), []);
+  assert.equal(gh.refs.has("site/stopped"), false);
+  assert.match(readFileSync(`${root}/lib/server/computer-task.ts`, "utf8"), /changeFiles\([^)]*signal: t\.signal/, "a task passes its Stop");
+  // Stopped during the last read before saving (the third commit read: the change's start, the default branch's, then
+  // the save's own): nothing is written after it.
+  freshRepo();
+  listDrafts();
+  const late = new AbortController();
+  let reads = 0;
+  gh.onCall = (method, path) => method === "GET" && path.includes("/git/commits/") && ++reads === 3 && late.abort();
+  const r2 = await changeFiles("boppy", change({ branch: "site/stopped" }), { sessionId: "ses_stop" }, { task: true, signal: late.signal });
+  gh.onCall = undefined;
+  assert.equal(late.signal.aborted, true, "stopped during a read");
+  assert.match(r2.text, /^Not saved: stopped/);
+  assert.deepEqual(writes(), [], "nothing written after the Stop");
+  assert.equal(gh.refs.has("site/stopped"), false);
+});
+
 /* ---------------- The card's diff ---------------- */
 
 await check("the card's diff: only the lines that change, each part where it is, so two edits far apart count as two lines each", async () => {
@@ -440,64 +529,65 @@ await check("two files, one call: exactly ONE ask; before it only reads went out
   assert.equal(asked.length, a0 + 1, "the turn paused at it");
   assert.deepEqual(writes(), [], "nothing written before the yes");
   assert.deepEqual([apr.action, apr.kind, apr.reason], ["Call GitHub", "api", "Make the buttons the logo's orange, as a draft"]);
-  assert.deepEqual(apr.api.change, { repo: "acme/site", branch: "site/orange-buttons", base: "main", at: gh.refs.get("main"), files: [{ path: "src/look.ts", op: "change", bytes: Buffer.byteLength(NEW_LOOK) }, { path: "src/notes.md", op: "add", bytes: 17 }] });
-  assert.equal(apiFacts(apr.api), "GitHub · changes 2 files in acme/site, on site/orange-buttons");
-  assert.match(apr.preview, /^acme\/site, branch site\/orange-buttons\nNew branch site\/orange-buttons, from main\.\n\n/, "the repository and the branch first, in words an app that reads no more than them shows too");
+  assert.deepEqual(apr.api.change, { repo: "acme/site", branch: "main", at: gh.refs.get("main"), files: [{ path: "src/look.ts", op: "change", bytes: Buffer.byteLength(NEW_LOOK) }, { path: "src/notes.md", op: "add", bytes: 17 }] });
+  assert.equal(apiFacts(apr.api), "GitHub · changes 2 files in acme/site, on main");
+  assert.match(apr.preview, /^acme\/site, branch main\n\n/, "the repository and the branch first, in words an app that reads no more than them shows too");
   assert.match(apr.preview, /src\/look\.ts: changed, \d+ B\nat line 2\n- {3}accent: "#FFD400",\n\+ {3}accent: "#F15B3B",/);
   assert.match(apr.preview, /src\/notes\.md: added, 17 B\n\+ Buttons: orange\./);
   assert.ok(!/[A-Za-z0-9+/]{40,}={0,2}/.test(apr.preview), "no base64 on the card");
   globalThis.__lastAsk = apr;
 });
 
-await check("Allow: the blobs as UTF-8, the tree, the commit, and the branch made last; the chat says it plainly; the bot gets the link", async () => {
+await check("Allow: the blobs as UTF-8, the tree, the commit, and the branch moved last; the chat says it plainly; the bot gets the link", async () => {
   const apr = globalThis.__lastAsk;
+  const was = gh.refs.get("main");
   const a0 = asked.length;
   assert.equal(P.replyToAsk(apr.id, "once"), undefined);
-  await until(() => asked.length === a0 + 1 && gh.refs.has("site/orange-buttons"), "the change to go in");
+  await until(() => asked.length === a0 + 1 && gh.refs.get("main") !== was, "the change to go in");
   const w = writes();
-  assert.deepEqual(w.map((c) => `${c.method} ${c.path}`), ["POST /repos/acme/site/git/blobs", "POST /repos/acme/site/git/blobs", "POST /repos/acme/site/git/trees", "POST /repos/acme/site/git/commits", "POST /repos/acme/site/git/refs"], "the branch moves last");
+  assert.deepEqual(w.map((c) => `${c.method} ${c.path}`), ["POST /repos/acme/site/git/blobs", "POST /repos/acme/site/git/blobs", "POST /repos/acme/site/git/trees", "POST /repos/acme/site/git/commits", "PATCH /repos/acme/site/git/refs/heads/main"], "the branch moves last");
   assert.deepEqual(w.slice(0, 2).map((c) => c.body), [{ content: NEW_LOOK, encoding: "utf-8" }, { content: "Buttons: orange.\n", encoding: "utf-8" }]);
-  assert.equal(fileAt("site/orange-buttons", "src/look.ts"), NEW_LOOK);
-  assert.equal(fileAt("site/orange-buttons", "README.md"), "# Site\n", "the rest kept");
-  assert.equal(fileAt("main", "src/look.ts").includes("#FFD400"), true, "main untouched");
+  assert.equal(fileAt("main", "src/look.ts"), NEW_LOOK);
+  assert.equal(fileAt("main", "README.md"), "# Site\n", "the rest kept");
   const out = outputOf(asked[a0]);
-  assert.match(out, /^Saved: 2 files on site\/orange-buttons in acme\/site, a new branch from main \(commit [0-9a-f]{7}\): https:\/\/github\.com\/acme\/site\/commit\/[0-9a-f]{40}$/);
+  assert.match(out, /^Saved: 2 files on main in acme\/site \(commit [0-9a-f]{7}\): https:\/\/github\.com\/acme\/site\/commit\/[0-9a-f]{40}$/);
   const notes = messages().filter((m) => m.appResult && m.at >= apr.at);
   assert.deepEqual(notes.map((m) => m.text), ["Boppy: Called GitHub PUT /repos/acme/site/contents/src/look.ts", "Boppy: Called GitHub PUT /repos/acme/site/contents/src/notes.md"], "one note per file, which the chat folds into one line");
   assert.ok(!S.getState().appApprovals.some((x) => x.id === apr.id), "the ask taken out");
 });
 
 await check("an existing branch moves by a fast forward, last; a delete says so on the card and in the facts line", async () => {
-  const before = gh.refs.get("site/orange-buttons");
+  const before = gh.refs.get("main");
   gh.calls = [];
   const { apr, opened } = await asking(change({ files: [{ path: "src/look.ts", text: NEW_LOOK.replace("F15B3B", "E04A2A"), delete: null }, { path: "old.css", text: null, delete: true }] }));
   assert.equal(opened, 1);
-  assert.equal(apiFacts(apr.api), "GitHub · changes 1 file and deletes 1 in acme/site, on site/orange-buttons");
+  assert.equal(apiFacts(apr.api), "GitHub · changes 1 file and deletes 1 in acme/site, on main");
   assert.match(apr.preview, /old\.css: deleted/);
   assert.ok(!/New branch/.test(apr.preview));
-  assert.match(apr.preview, /^acme\/site, branch site\/orange-buttons\n\n/, "an existing branch named too");
+  assert.match(apr.preview, /^acme\/site, branch main\n\n/, "an existing branch named too");
   const a0 = asked.length;
   P.replyToAsk(apr.id, "once");
   await until(() => asked.length === a0 + 1, "the change to go in");
   assert.deepEqual(writes().map((c) => c.method).at(-1), "PATCH");
   assert.deepEqual(writes().at(-1).body.force, false);
-  assert.equal(gh.commits.get(gh.refs.get("site/orange-buttons")).parents[0], before);
-  assert.equal(fileAt("site/orange-buttons", "old.css"), undefined, "deleted");
+  assert.equal(gh.commits.get(gh.refs.get("main")).parents[0], before);
+  assert.equal(fileAt("main", "old.css"), undefined, "deleted");
   const only = await asking(change({ files: [{ path: "README.md", text: null, delete: true }] }));
-  assert.equal(apiFacts(only.apr.api), "GitHub · deletes 1 file in acme/site, on site/orange-buttons");
+  assert.equal(apiFacts(only.apr.api), "GitHub · deletes 1 file in acme/site, on main");
   P.replyToAsk(only.apr.id, "reject");
   await until(() => !S.getState().appApprovals.some((x) => x.id === only.apr.id), "the no to be read");
 });
 
 await check("Deny: nothing is written, and the bot is told", async () => {
   freshRepo();
+  const was = gh.refs.get("main");
   const { apr } = await asking(change(), "Ok, I left it.");
   const a0 = asked.length;
   P.replyToAsk(apr.id, "reject", "Not yet");
   await until(() => asked.length === a0 + 1, "the turn to go on from the no");
   assert.equal(outputOf(asked[a0]), "Declined: Not yet");
   assert.deepEqual(writes(), []);
-  assert.equal(gh.refs.has("site/orange-buttons"), false);
+  assert.equal(gh.refs.get("main"), was);
 });
 
 await check("a failure part way leaves no half change on the branch: it never moves, and the bot hears why in plain words", async () => {
@@ -539,8 +629,8 @@ await check("the yes is to the card: a branch that moved after it was made stops
   assert.deepEqual(writes(), [], "nothing written");
   assert.equal(gh.refs.get("main"), theirs, "the teammate's commit stays");
   assert.equal(outputOf(asked[a0]), "Not saved: main changed after the card was made, and this could undo that. Ask again to see what changes now. Nothing changed on main.");
-  // A new branch someone made meanwhile: the same.
-  const fresh = await asking(change({ branch: "site/new" }));
+  // A new branch someone made meanwhile: the same (a change to .github/ asks on any branch).
+  const fresh = await asking(change({ branch: "site/new", files: [{ path: ".github/workflows/ci.yml", text: "on: push\n", delete: null }] }));
   gh.refs.set("site/new", gh.refs.get("main"));
   gh.calls = [];
   const a1 = asked.length;
