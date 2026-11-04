@@ -77,10 +77,10 @@ const isFileLink = (href: string) => /^(\/workspace\/|~\/|\/Users\/|file:\/\/\/)
 export function Rich({ text, botId }: { text: string; botId?: string }) {
   // Code blocks (ASCII diagrams, commands) keep their monospace layout; the rest is inline text.
   // A model's citation markers are for it, not for people: they go.
-  const blocks = dropCitations(text).split(/```[a-z0-9-]*\n?([\s\S]*?)```/g);
+  const blocks = dropCitations(text).split(/```[a-z0-9-]*\r?\n?([\s\S]*?)```/g);
   return (
     <LinkedBy.Provider value={botId}>
-      {blocks.map((b, i) => (i % 2 ? <CodeBlock key={i} code={b.replace(/\n$/, "")} /> : <Prose key={i} text={b} />))}
+      {blocks.map((b, i) => (i % 2 ? <CodeBlock key={i} code={b.replace(/\r?\n$/, "")} /> : <Prose key={i} text={b} />))}
     </LinkedBy.Provider>
   );
 }

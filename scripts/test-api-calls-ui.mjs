@@ -211,6 +211,19 @@ await test("a long block of code in a reply folds behind a quiet line that opens
   assert.ok(box.textContent.includes("const line20"), "opened: all of it");
   await act(async () => r.unmount());
   box.remove();
+  // 15 lines show, 16 fold, whatever the line endings.
+  const lines = (n, nl) => Array.from({ length: n }, (_, i) => `line ${i}`).join(nl);
+  for (const [n, nl, folded] of [[15, "\n", false], [16, "\n", true], [15, "\r\n", false], [16, "\r\n", true]]) {
+    const b2 = doc.createElement("div");
+    doc.body.appendChild(b2);
+    const r2 = createRoot(b2);
+    await act(async () => (r2.render(h(Rich, { text: `Here:${nl}\`\`\`${nl}${lines(n, nl)}${nl}\`\`\`` })), await settle()));
+    const f2 = b2.querySelector("[data-code-fold]");
+    assert.equal(!!f2, folded, `${n} lines, ${JSON.stringify(nl)}`);
+    if (f2) assert.equal(f2.textContent.trim(), `${n} lines of code`);
+    await act(async () => r2.unmount());
+    b2.remove();
+  }
 });
 
 console.log(`\napi calls ui: ${passed} passed`);
