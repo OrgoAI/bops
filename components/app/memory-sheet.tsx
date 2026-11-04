@@ -91,7 +91,7 @@ export function MemorySheet({ state, onClose }: { state: AppState; onClose: () =
   );
 }
 
-const SECTION = "text-[12px] font-medium uppercase tracking-[0.04em] text-[#9A9A98]";
+const SECTION = "text-[12px] font-semibold text-[#9A9A98]";
 const BUTTON = "h-8 shrink-0 rounded-full bg-[#0A0A0A] px-3.5 text-[13px] font-medium text-white hover:bg-[#2A2A2A] disabled:opacity-40";
 const QUIET = "h-8 shrink-0 rounded-full bg-white px-3.5 text-[13px] font-medium shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6] disabled:opacity-40";
 

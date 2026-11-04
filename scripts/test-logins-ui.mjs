@@ -204,8 +204,8 @@ await test("Settings: Account, then Workspace with its switcher, then Orgo team 
   try {
     assert.deepEqual(nav(m.box), ["profile", "plan", "usage", "reach", "ai", "privacy", "mac", "general", "team", "chart", "bots", "logins", "email"], "in the mockup's order");
     const text = m.box.querySelector("nav").textContent;
-    assert.match(text, /Account\s*Yours, in every workspace/);
-    assert.match(text, /Workspace[^]*fernway[^]*Shared with its people/, "the switcher as the group's heading");
+    assert.match(text, /Account[^]*Workspace[^]*fernway/, "the groups, the switcher as Workspace's heading");
+    assert.ok(!/Yours, in every workspace|Shared with its people|Shared with you/.test(text), "no line under a group's name");
     assert.ok(!text.includes("Orgo team only"), "not for anyone else");
     assert.equal(m.box.querySelector('[data-settings-nav="team"]').textContent.trim(), "Team2", "Team, and how many people");
     assert.equal(m.box.querySelector('[data-settings-nav="bots"]').textContent.trim().endsWith("3"), true, "how many bots");
@@ -250,8 +250,9 @@ await test("Logins: the open workspace's apps and site logins by service, who co
   const m = await mount(settings(stateOf()));
   try {
     const page = m.box.querySelector("[data-logins]");
-    assert.ok(page.textContent.includes("Workspace · fernway"));
-    assert.ok(page.textContent.includes("Apps, keys and site logins for fernway's bots. Each bot gets only the access you give it."));
+    assert.ok(!page.textContent.includes("Workspace · fernway"), "no label over the title");
+    assert.ok(page.textContent.includes("Passwords stay in your Mac's Keychain, and no AI sees them."));
+    assert.ok(!page.textContent.includes("Each bot gets only the access you give it."), "one line under the title, not three");
     assert.ok(buttonOf(page, "Connect"), "Connect");
     assert.ok(page.querySelector('input[aria-label="Search logins"]'));
     assert.ok(buttonOf(page, "All") && buttonOf(page, "Needs attention 1"), "the filters, with how many need attention");
@@ -290,7 +291,7 @@ await test("the side panel: Connected by, Used in with its own workspace locked 
     assert.match(page.querySelector('[data-account="ca_sales"]').getAttribute("class"), /shadow-\[0_0_0_1\.5px_#0A0A0A\]/, "the sign in picked, outlined");
     assert.match(panel.textContent, /sales@fernway\.example\s*Gmail · in fernway · connected/);
     assert.match(panel.textContent, /Connected by\s*AR\s*Ava Reed \(you\)\s*ava@fernway\.example/);
-    assert.match(panel.textContent, /Working/);
+    assert.ok(!/Working/.test(panel.textContent), "a sign in that works says nothing about it");
     assert.match(panel.textContent, /Used 2h ago by Sales for Sam Ortiz/, "who it was for, when a member asked");
     // Used in: fernway on and locked (it was connected there), northwind a switch.
     const used = panel.querySelector("[data-used-in]");

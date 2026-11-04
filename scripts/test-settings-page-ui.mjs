@@ -12,7 +12,7 @@
 // compiled with the TypeScript in node_modules as they load. The people and places are made up.
 // Usage: node scripts/test-settings-page-ui.mjs   (not with --conditions=react-server: these are client components)
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -209,6 +209,12 @@ await test("every place in the nav draws in the page's own content area, the nav
       assert.deepEqual(overlays(), [], `${id}: no sheet, dialog or scrim opened`);
     }
     assert.deepEqual(picked, all, "the app hears each place");
+    // A title stands alone: no line under it saying what the page is for.
+    const restated = /Who your bots work for|What you pay for Bops|What your bots used, in every|Your numbers and emails: how|Your own AI plans and agent|What Bops keeps, for how long|Permissions here, where your bots|Each has a settings page|How people reach/;
+    for (const id of all) {
+      await click(m.box.querySelector(`[data-settings-nav="${id}"]`));
+      assert.ok(!restated.test(m.box.querySelector("main[data-settings-pane]").textContent), `${id}: no line restating its title`);
+    }
     // Team, the Org chart and Your Apps are drawn in the pane, not elsewhere.
     for (const [id, mark] of [["team", "[data-team]"], ["chart", "[data-team-chart]"]]) {
       await click(m.box.querySelector(`[data-settings-nav="${id}"]`));
@@ -225,6 +231,35 @@ await test("every place in the nav draws in the page's own content area, the nav
     await m.done();
   }
 });
+
+await test("a bot's menu: Phone and email opens its profile at its number and email, not a placeholder", async () => {
+  const got = [];
+  const actions = { onChat: noop, onCall: noop, onComputer: noop, onProfile: (...a) => got.push(["profile", ...a]), onNewTask: noop };
+  const m = await mount(h(BotMenu, { state: stateOf(), bot: SALES, x: 10, y: 10, onClose: noop, actions }));
+  try {
+    await click([...m.box.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent.startsWith("Phone and email")));
+    assert.deepEqual(got, [["profile", "sales", "details"]]);
+  } finally {
+    await m.done();
+  }
+});
+
+
+await test("no small all-capitals, letter-spaced labels in the app's screens: labels are plain words", () => {
+  const dir = new URL("../components/app/", import.meta.url).pathname;
+  // Kept on purpose: a one-letter tile (a workspace's initial), a calendar's day and month, a tiny "App" tag on a message.
+  const kept = [/\{wsName\[0\]|\{w\.name\[0\]/, /DOW\[x\.dow\]|Now \{clockOf|month: "short"/, />App<\/span>/];
+  const found = [];
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".tsx")))
+    readFileSync(dir + f, "utf8")
+      .split("\n")
+      .forEach((line, i) => {
+        if (/\buppercase\b/.test(line) && /tracking-\[/.test(line) && !kept.some((k) => k.test(line))) found.push(`${f}:${i + 1}`);
+        if (/toUpperCase\(\)\}<\/span>|>[A-Z]{2,}( [A-Z]{2,})+ \{/.test(line)) found.push(`${f}:${i + 1} (capitals in the text)`);
+      });
+  assert.deepEqual(found, []);
+});
+
 
 await test("Back leaves the page; each asking goes to its place again, even one it was at", async () => {
   let closed = 0;
@@ -331,7 +366,8 @@ await test("a bot's menu asks Delete in place, says what goes and stays, and Esc
     assert.ok(ask, "in the menu, where Delete was");
     assert.equal(!!buttonOf(m.box, "Delete Sales…"), false, "the button turned into the question");
     assert.match(ask.textContent, /Delete Sales\?This can't be undone\./);
-    assert.match(ask.textContent, /GOES WITH SALES[\s\S]*STAYS/);
+    assert.match(ask.textContent, /Goes with Sales[\s\S]*Stays/);
+    assert.ok(![...ask.querySelectorAll("span")].some((x) => /\b(font-mono|uppercase)\b/.test(x.getAttribute("class") ?? "")), "plain words, in the app's own type");
     assert.equal(!!doc.querySelector('[role="alertdialog"]'), false, "no dialog");
     await key(doc, "Escape");
     assert.equal(!!m.box.querySelector("[data-ask-in-place]"), false, "Esc is Cancel");
