@@ -353,7 +353,7 @@ function ContactCard({ ws, lines, onChange }: { ws: string; lines: Fact[]; onCha
     <div className="flex flex-col rounded-[18px] px-5 py-1 shadow-[0_0_0_1px_#ECECEA]">
       {groups.map(({ g, rows }) => (
         <div key={g} className="flex flex-col gap-2 border-b border-[#F0F0EE] py-4 last:border-b-0">
-          <div className="text-[11.5px] font-medium uppercase tracking-[0.06em] text-[#B0B0AD]">{g}</div>
+          <div className="text-[12px] font-semibold text-[#9A9A98]">{g}</div>
           {rows.map(([label, items]) => (
             <div key={label} className="flex gap-4 text-[13.5px] leading-[21px]">
               {g !== "Notes" && <span className="w-[116px] shrink-0 truncate text-[#9A9A98]" title={label}>{label}</span>}

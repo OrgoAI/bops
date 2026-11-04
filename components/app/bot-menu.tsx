@@ -121,7 +121,7 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
           <span className="flex-1">Routines</span>
           <span className="truncate text-[12px] text-[#9A9A98]">{routines.length ? `${routines.filter((r) => r.enabled).length} on` : "None yet"}</span>
         </button>
-        <button role="menuitem" onClick={go(() => actions.onProfile(b.id, "phone"))} className={row}>
+        <button role="menuitem" onClick={go(() => actions.onProfile(b.id, "details"))} className={row}>
           <span className="flex-1">Phone and email</span>
           <span className="truncate text-[12px] text-[#9A9A98]">{reach || "Set up"}</span>
         </button>
@@ -214,7 +214,7 @@ function DeleteBot({ state, bot: b, onCancel, onDone }: { state: AppState; bot: 
     <div className="px-1 pb-1">
       <AskInPlace compact danger focus="cancel" title={`Delete ${b.name}?`} line="This can't be undone." action={`Delete ${b.name}`} busy={busy} error={error} onConfirm={() => void remove()} onCancel={onCancel}>
         <div className="flex flex-col gap-1">
-          <span className="font-mono text-[10.5px] font-medium tracking-[0.06em] text-[#B42318]">GOES WITH {b.name.toUpperCase()}</span>
+          <span className="text-[12px] font-semibold leading-4 text-[#B42318]">Goes with {b.name}</span>
           {goes.map((g) => (
             <span key={g} className="text-[12.5px] leading-[17px] text-ink">
               {g}
@@ -222,7 +222,7 @@ function DeleteBot({ state, bot: b, onCancel, onDone }: { state: AppState; bot: 
           ))}
         </div>
         <div className="flex flex-col gap-1 border-t border-[#FECDCA] pt-2">
-          <span className="font-mono text-[10.5px] font-medium tracking-[0.06em] text-[#6B6B6B]">STAYS</span>
+          <span className="text-[12px] font-semibold leading-4 text-[#6B6B6B]">Stays</span>
           <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">{stays.join(", ").replace(/^./, (c) => c.toUpperCase())}</span>
           {madeApps && <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">{madeApps}</span>}
         </div>

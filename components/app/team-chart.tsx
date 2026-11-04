@@ -1303,7 +1303,7 @@ export function Switch({ label, on, onFlip, disabled, tip }: { label: string; on
 /* ---------------- A bot's sheet ---------------- */
 
 const SECTION = "flex flex-col gap-2 pt-4";
-const HEAD = "text-[12px] font-semibold uppercase tracking-[0.02em] text-[#8A8A88]";
+const HEAD = "text-[12px] font-semibold text-[#8A8A88]";
 const NOTE = "text-[11.5px] leading-[16px] text-[#8A8A88]";
 const BOXED = "w-full rounded-[12px] py-2 pl-3 pr-8 shadow-[0_0_0_1px_#E8E8E5]";
 

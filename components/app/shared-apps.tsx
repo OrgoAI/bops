@@ -260,7 +260,7 @@ function PreviewLine({ site: s, link, write }: { site: NonNullable<SharedApp["si
 function Part({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-[11px] font-semibold uppercase leading-4 tracking-[0.02em] text-[#9A9A97]">{title}</span>
+      <span className="text-[12px] font-semibold leading-4 text-[#9A9A97]">{title}</span>
       {children}
     </div>
   );
