@@ -670,7 +670,7 @@ await check("a GET that went out and failed leaves a red note no one approved: t
   assert.match(told, /\[Bops: Alex approved Stripe POST \/v1\/refunds\. It ran; /);
 });
 
-await check("a read-only service takes only GET, and a task's call_api reads only", async () => {
+await check("a read-only service takes only GET; a task's call_api reads at once and asks for a write on a card, even with an Always allow saved", async () => {
   Keys.grantKey("MERCURY_API_KEY", "boppy", true);
   const n = brokerCalls().length;
   const asks = S.getState().appApprovals?.length ?? 0;
@@ -678,15 +678,26 @@ await check("a read-only service takes only GET, and a task's call_api reads onl
   assert.equal(t.out(), "Mercury is read only in Bops: only GET.");
   assert.equal(brokerCalls().length, n);
   assert.equal(S.getState().appApprovals?.length ?? 0, asks, "not even asked");
-  // The task's tool: GET only, and a POST refused without asking.
-  const tool = Keys.callApiTool(await Keys.usableKeys(S.bot("boppy")), { getOnly: true });
-  assert.deepEqual(tool.parameters.properties.method.enum, ["GET"]);
-  hear(tool.description);
+  // Neither a chat turn nor a task: a POST refused without asking.
   const r = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: "{}" }, { sessionId: "ses_x" });
   assert.equal(r.text, "Only GET here, and only reads. Ask in the chat for anything that changes something.");
-  const g = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "GET", path: "/v1/balance", query: null, body: null }, { sessionId: "ses_x" });
+  // A task: a GET runs at once; a POST asks, and an Always allow saved for the service doesn't stand in for the card
+  // (a task's browser reads pages anyone could have written).
+  const g = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "GET", path: "/v1/balance", query: null, body: null }, { sessionId: "ses_x" }, { task: true });
   assert.equal(g.did, "Called Stripe GET /v1/balance");
   assert.equal(S.getState().appApprovals?.length ?? 0, asks);
+  const sent = brokerCalls().length;
+  S.update(() => (S.bot("boppy").permissions = [{ action: "Call Stripe", resource: "*", effect: "allow" }]));
+  try {
+    const e = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: "{}" }, { sessionId: "ses_x" }, { task: true }).then(() => null, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, "asked, never run by the Always allow");
+    assert.equal(e.ask.kind, "api");
+    assert.equal(brokerCalls().length, sent, "nothing sent before the yes");
+    const done = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: "{}" }, { sessionId: "ses_x" }, { task: true, approved: true });
+    assert.equal(done.did, "Called Stripe POST /v1/refunds");
+  } finally {
+    S.update(() => delete S.bot("boppy").permissions);
+  }
 });
 
 await check("bad input and a key gone from the vault are said plainly", async () => {

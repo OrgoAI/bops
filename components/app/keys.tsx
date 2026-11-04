@@ -1300,9 +1300,15 @@ type ChangeRow = DiffLine | { note: string };
  * lines under its own "<path>: changed, 59 B" line, in the card's order, and how many lines it changes (null when one
  * isn't a line: an older Bops's "and 4 more lines"). Null when the words aren't in that shape, which the card shows as they are.
  */
-export function changeOf(change: FileChange, preview: string): { head: string[]; files: ChangeRow[][]; changed: number | null } | null {
-  // A line is never empty ("+ " at least), so a blank line only ever ends a part.
-  const parts = preview.split("\n\n");
+/** How a task's card says the bot's own words, last and labelled (lib/server/repo-change.ts, keys.ts): a page it read may have written them. */
+export const BOT_WORDS = "In the bot's words: ";
+
+export function changeOf(change: FileChange, preview: string): { head: string[]; files: ChangeRow[][]; changed: number | null; said?: string } | null {
+  // A line is never empty ("+ " at least), so a blank line only ever ends a part. A task's card ends with the bot's
+  // words (BOT_WORDS), kept apart from the diff and shown last.
+  const all = preview.split("\n\n");
+  const said = all.length > 1 && all[all.length - 1].startsWith(BOT_WORDS) ? all[all.length - 1].slice(BOT_WORDS.length) : undefined;
+  const parts = said === undefined ? all : all.slice(0, -1);
   const skip = parts.length - change.files.length;
   if (skip !== 0 && skip !== 1) return null;
   const files: ChangeRow[][] = [];
@@ -1316,6 +1322,7 @@ export function changeOf(change: FileChange, preview: string): { head: string[];
     head: skip ? parts[0].split("\n").filter((l) => l !== `${change.repo}, branch ${change.branch}`) : [],
     files,
     changed: rows.every((r) => "t" in r || /^at line \d+$/.test(r.note)) ? rows.filter((r) => "t" in r).length : null,
+    ...(said !== undefined ? { said } : {}),
   };
 }
 
@@ -1417,6 +1424,12 @@ export function ApiAsk({ ask, detail, botName }: { ask: NonNullable<ReturnType<t
                   )}
                 </div>
               ))}
+              {shown?.said !== undefined && (
+                <span data-change-said className="px-3 text-[12px] leading-4 text-[#6B6B6B] [overflow-wrap:anywhere]">
+                  {BOT_WORDS}
+                  {shown.said}
+                </span>
+              )}
               {/* An older Bops's words, in another shape: as they are. */}
               {!shown && detail && <pre className="whitespace-pre-wrap px-3 font-mono text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">{detail}</pre>}
             </div>

@@ -1,5 +1,5 @@
 import "server-only";
-import { allows as rulesAllow, alwaysRule, ruleFor } from "@/lib/permission";
+import { allows as rulesAllow, alwaysRule, ruleFor, taskWrite } from "@/lib/permission";
 import { computerStaysDown, live, type AppApproval, type AskAnswer, type AskReply, type AskResume, type Bot } from "@/lib/types";
 import type { MemberWho } from "@/lib/member-access";
 import { onRunner } from "./persist";
@@ -155,6 +155,7 @@ export function replyToAsk(askId: string, reply: AskReply, message?: string, mem
   if (!a || a.reply) return "That isn't waiting on you anymore.";
   // A key's card is answered by saving it (or Done), never by a rule for the bot (keys.ts askForKey).
   if (a.kind === "key" && reply === "always") return "Save the key on its card.";
+  if (taskWrite(a) && reply === "always") return "A task's change is allowed once at a time: Allow once or Deny.";
   const me = stateDevice();
   const at = Date.now();
   const said = reply === "reject" ? message?.trim().slice(0, 2000) : undefined;
@@ -170,8 +171,10 @@ export function replyToAsk(askId: string, reply: AskReply, message?: string, mem
     if (!b) return;
     const added = alwaysRule(x.action, b.permissions);
     if (added) b.permissions = [...(b.permissions ?? []), added];
+    // The bot's other requests for that action, the same person's (an Always allow is theirs, not another member's), and
+    // never a task's write (taskWrite): that one waits for its own card.
     for (const y of s.appApprovals ?? [])
-      if (!y.reply && y.botId === x.botId && ruleFor(b, y.action) === "allow") {
+      if (!y.reply && y.botId === x.botId && ruleFor(b, y.action) === "allow" && !taskWrite(y) && (y.askedFor ?? null) === (x.askedFor ?? null)) {
         y.reply = { reply: "always", ...(me ? { by: me } : {}), at, ...(member ? { member } : {}) };
         answered.push(y);
       }
