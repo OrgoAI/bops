@@ -119,11 +119,17 @@ function routinesFollow(asks: AppApproval[]) {
       .catch((e: Error) => console.warn(`[asks] routines: ${e.message}`));
 }
 
-/** What the bot is told when the user says no: their words (what to do instead), else that they said no. */
+/**
+ * What the bot is told when someone says no: their words (what to do instead), else that they said no, named as
+ * whoever answered (an Admin or a member in their own Bops: AskAnswer.member), the owner otherwise.
+ */
 export function declined(a: Pick<AppApproval, "reply">): string {
   const said = a.reply?.message?.trim();
-  return said ? `Declined: ${said}` : `Declined: ${ownerName()} said no. Don't do it, and don't do it another way.`;
+  return said ? `Declined: ${said}` : `Declined: ${answeredBy(a)} said no. Don't do it, and don't do it another way.`;
 }
+
+/** Who answered an ask: the member or Admin who did, else the owner. */
+export const answeredBy = (a: Pick<AppApproval, "reply">) => a.reply?.member?.name?.trim() || ownerName();
 
 const mine = (a: AppApproval, me = stateDevice()) => (a.askedBy ?? null) === (me ?? null);
 
