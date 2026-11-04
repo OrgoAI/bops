@@ -13,7 +13,7 @@
 // Usage: node page-script.cjs <CDP port> <seconds> <script file>
 "use strict";
 /* eslint-disable @typescript-eslint/no-require-imports -- plain CommonJS, run by node on the computer (as desktop/ is) */
-const { existsSync, mkdirSync, readFileSync } = require("node:fs");
+const { closeSync, mkdirSync, openSync, readFileSync, unlinkSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { basename, extname, join } = require("node:path");
 const { chromium } = require(join(__dirname, "node_modules", "playwright-core"));
@@ -39,8 +39,6 @@ const SAVE_WAIT_MS = 15_000;
 const TABS_LISTED = 12;
 /** Where downloads go: the computer's own Downloads, as Chrome's would. */
 const DOWNLOADS = join(homedir(), "Downloads");
-/** Paths given out during this run, so two downloads of the same name never get the same one. */
-const taken = new Set();
 /** The page before the script ran (see stateOf), and whether it asked to see the screen. */
 let before;
 let look = false;
@@ -59,9 +57,17 @@ async function stateOf(page) {
 async function done(out) {
   if (finished) return;
   finished = true;
-  // Downloads still saving: given a while to land (a script that waited for its download has it already).
-  const late = await Promise.race([Promise.allSettled(saving).then(() => false), new Promise((r) => setTimeout(() => r(true), SAVE_WAIT_MS))]);
+  // Downloads still saving: given a while to land (a script that waited for its download has it already), with any that
+  // start meanwhile.
+  const until = Date.now() + SAVE_WAIT_MS;
+  let late = false;
+  for (let seen = -1; seen !== saving.length && !late; ) {
+    seen = saving.length;
+    late = await Promise.race([Promise.allSettled(saving).then(() => false), new Promise((r) => setTimeout(() => r(true), Math.max(0, until - Date.now())))]);
+  }
   if (late) happened.unsaved.push(`still downloading ${SAVE_WAIT_MS / 1000} seconds after the script ended; wait for it in the script: const d = await page.waitForEvent("download"), then await d.path()`);
+  // Where it ended: the tab in front now (a script can bring another to the front without navigating it).
+  if (browsing) current = (await Promise.race([front(browsing), new Promise((r) => setTimeout(r, 2000))]).catch(() => undefined)) ?? current;
   const url = current && !current.isClosed() ? current.url() : undefined;
   const after = await Promise.race([stateOf(current), new Promise((r) => setTimeout(r, 1500))]).catch(() => undefined);
   const changed = !!(before && after && (before.url !== after.url || before.print !== after.print)) || happened.opened > 0 || happened.dialogs.length > 0 || happened.downloads.length > 0;
@@ -82,16 +88,21 @@ async function tabsNow() {
   );
 }
 
-/** A path in Downloads for a file the site named `name`: its last part only, no leading dot, and "name (1).ext" when that's taken. */
+/**
+ * A path in Downloads for a file the site named `name` (its last part only, no leading dot; "name (1).ext" when that's
+ * taken), reserved by creating it, so another download, here or in another screen's task, never gets the same one.
+ */
 function savePath(name) {
   const file = basename(String(name || "")).replace(/[\u0000-\u001f]/g, "").replace(/^\.+/, "") || "download";
   const ext = extname(file);
   const stem = file.slice(0, file.length - ext.length) || "download";
   for (let i = 0; ; i++) {
     const to = join(DOWNLOADS, i ? `${stem} (${i})${ext}` : file);
-    if (!taken.has(to) && !existsSync(to)) {
-      taken.add(to);
+    try {
+      closeSync(openSync(to, "wx"));
       return to;
+    } catch (e) {
+      if (!e || e.code !== "EEXIST") throw e;
     }
   }
 }
@@ -101,14 +112,20 @@ function keep(d) {
   const name = d.suggestedFilename();
   saving.push(
     (async () => {
+      let to;
       try {
         mkdirSync(DOWNLOADS, { recursive: true });
-        const to = savePath(name);
+        to = savePath(name);
         await d.saveAs(to);
         happened.downloads.push(to);
         // Playwright's own copy in its temp folder: not needed once saved.
         await d.delete().catch(() => {});
       } catch (e) {
+        if (to) {
+          try {
+            unlinkSync(to);
+          } catch {}
+        }
         happened.unsaved.push(`${name}: ${String(e && e.message ? e.message : e).split("\n")[0].slice(0, 300)}`);
       }
     })(),

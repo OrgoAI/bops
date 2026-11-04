@@ -83,6 +83,9 @@ assert.equal(run("return await page.title()").value, "Second");
 // And a tab brought to the front the same way.
 r = run(`for (const p of context.pages()) if ((await p.title()) === "Form") { await p.bringToFront(); return "ok"; } return "no Form tab";`);
 assert.equal(r.value, "ok");
+// Its receipt says where it ended: the tab it brought to the front.
+assert.deepEqual(r.tabs?.find((t) => t.front)?.title, "Form", `the tab in front: ${JSON.stringify(r.tabs)}`);
+assert.match(r.url, /<title>Form/);
 assert.equal(run("return await page.title()").value, "Form");
 
 // What went wrong, said plainly.
@@ -127,6 +130,16 @@ assert.equal(readFileSync(saved, "utf8"), "a,b\n1,2");
 r = run(`const [d] = await Promise.all([page.waitForEvent("download"), page.getByText("Get the report").click()]); return d.suggestedFilename()`);
 assert.deepEqual([r.value, r.downloads], ["report.csv", [join(home, "Downloads", "report (1).csv")]]);
 assert.equal(readFileSync(saved, "utf8"), "a,b\n1,2", "the first is still there");
+// A file already there under that name, as another screen's task could have just saved: never written over.
+writeFileSync(join(home, "Downloads", "report (2).csv"), "theirs");
+r = run(`const [d] = await Promise.all([page.waitForEvent("download"), page.getByText("Get the report").click()]); return 1`);
+assert.deepEqual(r.downloads, [join(home, "Downloads", "report (3).csv")]);
+assert.equal(readFileSync(join(home, "Downloads", "report (2).csv"), "utf8"), "theirs");
+// A download that starts a moment after the click, waited for in the script as the tool says: saved.
+const later = `data:text/html,<title>Later</title><a id=f download="later.csv" href="data:text/csv,x"></a><button onclick="setTimeout(() => document.getElementById('f').click(), 400)">Export</button>`;
+run(`await page.goto(${JSON.stringify(later)}); return 1`);
+r = run(`const [d] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Export" }).click()]); return d.suggestedFilename()`);
+assert.deepEqual([r.value, r.downloads], ["later.csv", [join(home, "Downloads", "later.csv")]]);
 // Playwright's own copies in the temp folder are gone once saved (they'd pile up on the computer).
 const leftover = readdirSync(tmp).filter((d) => d.startsWith("playwright-artifacts-")).flatMap((d) => readdirSync(join(tmp, d)));
 assert.deepEqual(leftover, [], "no download left in the temp folder");
