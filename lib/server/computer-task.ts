@@ -7,6 +7,7 @@ import { sleptSince } from "./awake";
 import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { askFor, declined, declinedStep, NeedsOk, Paused, type AskSpec } from "./permission";
+import { shownAddress } from "@/lib/plain-words";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
@@ -342,7 +343,7 @@ function record(t: ComputerTurn, o: OutputItem, more: boolean) {
     if (text) t.step("note", text);
   } else if (o.type === "web_search_call") {
     const a = o.action as { type?: string; query?: string; url?: string } | undefined;
-    t.step("search", a?.type === "open_page" && a.url ? `read ${a.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
+    t.step("search", a?.type === "open_page" && a.url ? `read ${shownAddress(a.url).replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
   }
 }
 

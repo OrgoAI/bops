@@ -1,6 +1,7 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import { AGENTS, agentLabel, aiOf, isCli, keyVendor, ROUTE_NAMES, shellLabel, threadAgent, type AgentRun } from "@/lib/agents";
+import { shownAddress } from "@/lib/plain-words";
 import { redactDeep } from "@/lib/secret-patterns";
 import { BRAINS_ON, CLI_NAMES, live, planName, workspaceOf, type Bot, type Brain, type CliKind } from "@/lib/types";
 import { ensureBrainTools, ensureClaudeCode, ensureCodex, ensureOpenCode, revealBrainKey, revealNamedKey } from "./brains";
@@ -137,7 +138,7 @@ function claudeTool(name: string, args: Record<string, unknown>): { tool: string
     case "WebSearch":
       return { tool: "search", detail: `searched "${cut(str(args.query) ?? "", 70)}"` };
     case "WebFetch":
-      return { tool: "search", detail: `read ${cut((str(args.url) ?? "a page").replace(/^https?:\/\/(www\.)?/, ""), 70)}` };
+      return { tool: "search", detail: `read ${cut(shownAddress(str(args.url) ?? "a page").replace(/^https?:\/\/(www\.)?/, ""), 70)}` };
     case "TodoWrite":
       return { tool: "note", detail: "updated its todo list" };
     case "Task":
@@ -230,7 +231,7 @@ function fileChange(changes: unknown) {
 /** A web search as the thread shows it, as a Bops agent's are (sessions.ts describeSearch). */
 function codexSearch(item: Record<string, unknown>) {
   const a = (item.action && typeof item.action === "object" ? item.action : {}) as Record<string, unknown>;
-  if (a.type === "open_page" && str(a.url)) return `read ${cut(str(a.url)!.replace(/^https?:\/\/(www\.)?/, ""), 70)}`;
+  if (a.type === "open_page" && str(a.url)) return `read ${cut(shownAddress(str(a.url)!).replace(/^https?:\/\/(www\.)?/, ""), 70)}`;
   if (a.type === "find_in_page") return `looked for "${cut(str(a.pattern) ?? "", 40)}" in the page`;
   const q = str(item.query)?.trim() || str(a.query)?.trim() || (Array.isArray(a.queries) ? a.queries.filter((x) => typeof x === "string").join(", ") : "");
   return q ? `searched "${cut(q, 70)}"` : "searched the web";
@@ -322,7 +323,7 @@ function openCodeTool(name: string, args: Record<string, unknown>): { tool: stri
     case "list":
       return { tool: "search", detail: name === "grep" ? `searched files for "${cut(str(args.pattern) ?? "", 50)}"` : `looked for files like ${cut(str(args.pattern) ?? str(args.path) ?? "", 60)}` };
     case "webfetch":
-      return { tool: "search", detail: `read ${cut((str(args.url) ?? "a page").replace(/^https?:\/\/(www\.)?/, ""), 70)}` };
+      return { tool: "search", detail: `read ${cut(shownAddress(str(args.url) ?? "a page").replace(/^https?:\/\/(www\.)?/, ""), 70)}` };
     case "todowrite":
     case "todoread":
       return { tool: "note", detail: "updated its todo list" };
