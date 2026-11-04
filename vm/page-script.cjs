@@ -132,6 +132,65 @@ function keep(d) {
   );
 }
 
+/**
+ * Two pages side by side (the script's sideBySide): `left` in its window on the left half of the screen, `right` (a
+ * page, or an address to open) in a window of its own on the right half, so one look at the screen shows both and a
+ * drag can go from one to the other. A right page in the same window as the left one opens again at its address in a
+ * window of its own, and its tab closes (anything not saved on it is lost). Resolves to both pages.
+ */
+async function sideBySide(browser, context, left, right) {
+  if (right === left) throw new Error("sideBySide needs two different pages: pass another page, or an address to open.");
+  const cdp = await browser.newBrowserCDPSession();
+  try {
+    const targetOf = async (p) => {
+      const s = await context.newCDPSession(p);
+      try {
+        return (await s.send("Target.getTargetInfo")).targetInfo.targetId;
+      } finally {
+        await s.detach().catch(() => {});
+      }
+    };
+    const windowOf = async (p) => (await cdp.send("Browser.getWindowForTarget", { targetId: await targetOf(p) })).windowId;
+    const leftWindow = await windowOf(left);
+    let other = typeof right === "string" ? null : right;
+    if (!other || (await windowOf(other)) === leftWindow) {
+      const was = other;
+      other = null;
+      const { targetId } = await cdp.send("Target.createTarget", { url: typeof right === "string" ? right : right.url(), newWindow: true });
+      // The page Chrome made for it, by its id (not the next page to open: a popup could beat it).
+      const seen = new Set([left, was]);
+      for (const until = Date.now() + 10_000; !other; await new Promise((r) => setTimeout(r, 100))) {
+        for (const p of context.pages()) if (!seen.has(p) && (seen.add(p), (await targetOf(p).catch(() => null)) === targetId)) other = p;
+        if (!other && Date.now() > until) throw new Error("The new window for the right-hand page didn't open.");
+      }
+      await other.waitForLoadState().catch(() => {});
+      if (was) await was.close();
+    }
+    const { x, y, width, height } = await left.evaluate(() => ({ x: screen.availLeft, y: screen.availTop, width: screen.availWidth, height: screen.availHeight }));
+    const half = Math.floor(width / 2);
+    // A maximized window takes bounds only once it's back to normal, and the window manager can still be placing a
+    // window (restoring its old size, or a new one where it likes) after Chrome says yes: set, read back, until it holds.
+    const place = async (windowId, at, w) => {
+      const want = { left: x + at, top: y, width: w, height };
+      for (let i = 0; i < 20; i++) {
+        const { bounds } = await cdp.send("Browser.getWindowBounds", { windowId });
+        if (bounds.windowState === "normal" && ["left", "top", "width", "height"].every((k) => Math.abs(bounds[k] - want[k]) <= 16)) return;
+        await cdp.send("Browser.setWindowBounds", { windowId, bounds: bounds.windowState === "normal" ? want : { windowState: "normal" } });
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      throw new Error("Chrome's windows didn't move side by side on this screen.");
+    };
+    await place(leftWindow, 0, half);
+    await place(await windowOf(other), half, width - half);
+    // Each the tab in front in its window, so both show.
+    await left.bringToFront();
+    await other.bringToFront();
+    return { left, right: other };
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
 /** An error in the bot's terms: a click on something covered says what's on top, and what to do. */
 function said(e) {
   const m = String(e && e.message ? e.message : e).slice(0, 2000);
@@ -200,7 +259,7 @@ async function front(context) {
   setTimeout(() => done({ ok: false, error: `The script ran past ${limit / 1000} seconds and was stopped.` }), limit).unref();
   let run;
   try {
-    run = new AsyncFunction("page", "context", "screenshot", readFileSync(file, "utf8"));
+    run = new AsyncFunction("page", "context", "screenshot", "sideBySide", readFileSync(file, "utf8"));
   } catch (e) {
     return done({ ok: false, error: `The script doesn't parse: ${e.message}` });
   }
@@ -223,7 +282,7 @@ async function front(context) {
     return "(Bops sends you the screen with this script's answer.)";
   };
   try {
-    await done({ ok: true, value: shown(await run(page, context, screenshot)) });
+    await done({ ok: true, value: shown(await run(page, context, screenshot, (left, right) => sideBySide(browser, context, left, right))) });
   } catch (e) {
     await done({ ok: false, error: said(e) });
   }

@@ -31,7 +31,7 @@ const home = join(dir, "home");
 const tmp = join(dir, "tmp");
 mkdirSync(tmp);
 const port = 9300 + Math.floor(Math.random() * 600);
-const browser = spawn(chrome, ["--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${join(dir, "profile")}`, "--no-first-run", "--no-default-browser-check", "data:text/html,<title>First</title>one"], { stdio: "ignore" });
+const browser = spawn(chrome, ["--headless=new", "--screen-info={1600x900}", `--remote-debugging-port=${port}`, `--user-data-dir=${join(dir, "profile")}`, "--no-first-run", "--no-default-browser-check", "data:text/html,<title>First</title>one"], { stdio: "ignore" });
 const cleanup = () => {
   browser.kill("SIGKILL");
   // Chrome may still be writing its profile as it dies.
@@ -142,6 +142,30 @@ const later = `data:text/html,<title>Later</title><a id=f download="later.csv" h
 run(`await page.goto(${JSON.stringify(later)}); return 1`);
 r = run(`const [d] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Export" }).click()]); return d.suggestedFilename()`);
 assert.deepEqual([r.value, r.downloads], ["later.csv", [join(home, "Downloads", "later.csv")]]);
+
+// Side by side: two pages in two windows, the left half and the right half of the screen, so one look at the screen
+// shows both. A page in the same window as the left one opens again at its address in a window of its own.
+const right = `data:text/html,<title>Right</title>right`;
+run(`await page.goto(${JSON.stringify(getFile)}); return 1`);
+r = run(`const { left, right } = await sideBySide(page, ${JSON.stringify(right)}); const at = (p) => p.evaluate(() => ({ x: screenX, w: outerWidth, sw: screen.availWidth })); return { left: [await left.title(), await at(left)], right: [await right.title(), await at(right)] }`);
+assert.equal(r.ok, true, r.error);
+const sides = JSON.parse(r.value);
+assert.equal(sides.left[0], "Files");
+assert.equal(sides.right[0], "Right");
+const half = Math.floor(sides.left[1].sw / 2);
+assert.ok(Math.abs(sides.left[1].x) <= 2 && Math.abs(sides.left[1].w - half) <= 16, `the left half: ${JSON.stringify(sides.left[1])}`);
+assert.ok(Math.abs(sides.right[1].x - half) <= 16 && Math.abs(sides.right[1].w - half) <= 16, `the right half: ${JSON.stringify(sides.right[1])}`);
+// Two pages already open as tabs of one window: the right one moves to a window of its own, at its address.
+run(`for (const x of context.pages()) if ((await x.title()) === "Right") await x.close(); return 1`);
+r = run(`const pages = context.pages(); const tab = await context.newPage(); await tab.goto(${JSON.stringify("data:text/html,<title>Tab</title>tab")}); const s = await sideBySide(pages.find((p) => p.url().includes("Files")), tab); return [await s.right.title(), tab.isClosed(), await s.right.evaluate(() => screenX)]`);
+assert.equal(r.ok, true, r.error);
+const [title, oldClosed, x] = JSON.parse(r.value);
+assert.deepEqual([title, oldClosed], ["Tab", true], "reopened in a window of its own, the tab closed");
+assert.ok(Math.abs(x - half) <= 16, `on the right: ${x}`);
+run(`for (const x of context.pages()) if ((await x.title()) === "Tab") await x.close(); return 1`);
+// The same page twice: it says so, and the page stays open.
+r = run(`const p = context.pages().find((x) => x.url().includes("Files")); try { await sideBySide(p, p); return "placed"; } catch (e) { return [e.message, p.isClosed()]; }`);
+assert.deepEqual(JSON.parse(r.value), ["sideBySide needs two different pages: pass another page, or an address to open.", false]);
 
 // Chrome is still up, with both tabs: a script disconnects, it never closes the browser.
 assert.equal(await alive(), 2);

@@ -303,6 +303,7 @@ assert.ok(!/not pixels|Go further down the list only/.test(ladder + asked[0].too
 const pageTool = asked[0].tools.find((t) => t.name === "page_script").description;
 assert.match(pageTool, /context\.pages\(\) lists the tabs.*bringToFront\(\).*Close tabs you opened/);
 assert.match(pageTool, /A file the page downloads is saved to ~\/Downloads.*waitForEvent\('download'\).*setInputFiles\(/);
+assert.match(pageTool, /await sideBySide\(a, b\): a in a window on the left half of the screen, b \(a page, or an address to open\) on the right half/);
 assert.match(ladder, /To look things up or read, don't use the screen: search, and read pages as text\./);
 assert.ok(!/in the open|the way a capable person/.test(ladder), "nothing tells it to do everything on the screen");
 assert.match(asked[0].tools.find((t) => t.name === "run_command").description, /and to fetch a page or an API \(curl\)\. Don't use it to sign in to or act on websites or apps/);
