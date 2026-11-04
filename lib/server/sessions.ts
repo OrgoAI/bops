@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
 import { BLOCKER_LABEL, botChatId, BRAINS_ON, CLI_NAMES, COMPACTED, computerStaysDown, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, memberOf, memberThread, othersThread, outsideThread, ownerSent, pausedForOk, personaOf, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitsForOk, workBot, workspaceOf, type AppApproval, type Bot, type CliKind, type MemberSaid, type Routine, type Session, type Takeover, type TaskRoute, type ThreadReply } from "@/lib/types";
 import type { MemberWho } from "@/lib/member-access";
+import { shownAddress } from "@/lib/plain-words";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, outOfCreditWords, outOfCreditError, shortOfCredit } from "./cloud";
 import { browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -4046,7 +4047,7 @@ function describe(tool?: string, args?: Record<string, unknown>) {
   if (tool === "key") return `pressed ${args.keys}`;
   if (tool === "click") return `clicked (${args.x}, ${args.y})`;
   if (tool === "scroll") return `scrolled ${args.direction}`;
-  if (tool === "browser_navigate") return `opened ${args.url}`;
+  if (tool === "browser_navigate") return `opened ${shownAddress(String(args.url))}`;
   if (tool === "browser_click") return `clicked ${args.element ?? args.ref}`;
   if (tool === "browser_type") return `typed "${String(args.text).slice(0, 60)}"`;
   if (tool === "browser_press_key") return `pressed ${args.key}`;

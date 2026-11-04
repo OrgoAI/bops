@@ -1,0 +1,1 @@
+- A page a bot reads or opens is shown without any token or password in its address.
