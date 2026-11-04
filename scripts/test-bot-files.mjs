@@ -46,7 +46,8 @@ registerHooks({
           unfaked(name, url, [...ORGO, "orgo"]),
       };
     if (!name || !FAKES[name]) return next(url, context);
-    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`).join("\n") + unfaked(name, url, FAKES[name]) };
+    // (Every faked module's name and export is a plain word, as written above.)
+    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake.${name}.${n}(...a);`).join("\n") + unfaked(name, url, FAKES[name]) };
   },
 });
 
