@@ -312,7 +312,7 @@ export function Sidebar({
                 group={g}
                 folded={folds.isFolded(g.key)}
                 onFold={(f) => folds.fold(g.key, f)}
-                onRename={!state.shared && g.computerId ? (name) => renameComputer(ws, g.computerId!, name) : undefined}
+                onRename={!state.shared && g.nameKey ? (name) => renameComputer(ws, g.nameKey!, name) : undefined}
                 waiting={item.chats.some((c) => c.id !== chatId && (attention.bots.has(chatBot(c) ?? "") || unreadChat(state, c, false)))}
                 rows={item.chats.map(chatItem)}
                 selected={open && chatItem(open)}

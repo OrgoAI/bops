@@ -26,7 +26,7 @@ import { registerHooks } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
-const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const root = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
 /** lib/server/bot-groups.ts reaches the store and Orgo: both fakes here (globalThis.__g). */
 const FAKES = {
   "fake:store": "export const getState = () => globalThis.__g.state; export const update = (fn) => { fn(globalThis.__g.state); globalThis.__g.updates++; }; export const bot = (id) => globalThis.__g.state.bots.find((b) => b.id === id);",
@@ -674,6 +674,82 @@ await test("A member's Works on: read only, the site as they see it; nothing whe
   await k.done();
 });
 
+/* ---------------- One computer, two apps: a group for each ---------------- */
+
+/** Sam's computer with two apps: Ada and Bo on the shop, Cy and Dee on the notes. */
+const twoApps = () => {
+  const s = world();
+  s.bots.splice(4, 0, bot("dee", "Dee", { role: "Takes notes" }));
+  s.chats.push(chat("chat_dee", ["dee"]));
+  ws(s).hostedApps.notes = { botId: "cy", computerId: "comp_a", projectId: "proj_notes" };
+  ws(s).botSites = { ada: { app: "shop", site: "shop" }, bo: { app: "shop", site: "blog" }, cy: { app: "notes", site: "notes" }, dee: { app: "notes", site: "notes" } };
+  return s;
+};
+
+await test("Bots on one computer working on two apps: each app's bots a group of their own, named for the app or by the owner", () => {
+  const groups = G.botGroups(twoApps());
+  assert.deepEqual(
+    groups.map((g) => ({ key: g.key, nameKey: g.nameKey, app: g.app, name: g.name, named: g.named, bots: g.bots, host: g.host?.id })),
+    [
+      { key: "comp_a/shop", nameKey: "comp_a/shop", app: "shop", name: "shop", named: false, bots: ["ada", "bo"], host: "sam" },
+      { key: "comp_a/notes", nameKey: "comp_a/notes", app: "notes", name: "notes", named: false, bots: ["cy", "dee"], host: "sam" },
+    ],
+  );
+  assert.ok(groups.every((g) => g.computerId === "comp_a"));
+  // The owner's names, by the computer and the app; the computer's own name is for its bots on no app.
+  const named = withWs(twoApps(), (w) => (w.computerNames = { comp_a: "Front desk", "comp_a/shop": "Four Corners", "comp_a/notes": " cclc " }));
+  assert.deepEqual(G.botGroups(named).map((g) => [g.name, g.named]), [["Four Corners", true], ["cclc", true]]);
+  // Two on no app stay the computer's group, under its name.
+  const rest = withWs(twoApps(), (w) => (w.computerNames = { comp_a: "Front desk" }));
+  rest.bots.push(bot("eli", "Eli"), bot("fay", "Fay"));
+  const g3 = G.botGroups(rest);
+  assert.deepEqual(g3.map((g) => [g.key, g.name, g.bots]), [["comp_a/shop", "shop", ["ada", "bo"]], ["comp_a/notes", "notes", ["cy", "dee"]], ["comp_a", "Front desk", ["eli", "fay"]]]);
+  // One bot on the second app: that app has no group (a row as before); the first's two still do.
+  const one = twoApps();
+  one.bots = one.bots.filter((b) => b.id !== "dee");
+  assert.deepEqual(G.botGroups(one).map((g) => [g.key, g.bots]), [["comp_a/shop", ["ada", "bo"]]]);
+  // All on one app, or on none: the computer's one group, keyed and named as before.
+  const same = withWs(twoApps(), (w) => (w.botSites = { ada: { app: "shop", site: "shop" }, cy: { app: "shop", site: "docs" } }));
+  assert.deepEqual(G.botGroups(same).map((g) => [g.key, g.nameKey, g.app, g.bots]), [["comp_a", "comp_a", undefined, ["ada", "bo", "cy", "dee"]]]);
+});
+
+await test("A group of one app's bots renames by the computer and the app", async () => {
+  bops.sent = [];
+  const m = await mount(h(Sidebar, sidebarProps(twoApps())));
+  const name = () => m.box.querySelector('[data-bot-group="comp_a/notes"] [data-group-name]');
+  const input = () => m.box.querySelector('[data-bot-group="comp_a/notes"] [data-group-input]');
+  assert.ok(m.box.querySelector('[data-bot-group="comp_a/shop"]'), "the shop's group too");
+  assert.equal(name().textContent, "notes");
+  await click(name());
+  await type(input(), "cclc");
+  await key(input(), "Enter");
+  assert.deepEqual(renames(), [{ id: "ws_main", computerName: { computer: "comp_a/notes", name: "cclc" } }]);
+  await m.done();
+});
+
+await test("Bops Cloud splits a member's groups by app the same way: keys never a computer's id, the owner's names, else the app's", () => {
+  const blob = twoApps();
+  ws(blob).computerNames = { comp_a: "Storefront", "comp_a/shop": "Four Corners" };
+  ws(blob).memberAccess = { "kim@example.com": { others: "read", bots: {}, at: 1 } };
+  const kim = Slice.sharedSlice(blob, "ws_main", { role: "member", id: "u_kim", email: "kim@example.com" });
+  assert.deepEqual(kim.groups.map((g) => ({ bots: g.bots, name: g.name, host: g.host })), [
+    { bots: ["ada", "bo"], name: "Four Corners", host: "sam" },
+    { bots: ["cy", "dee"], name: "notes", host: "sam" },
+  ]);
+  assert.equal(new Set(kim.groups.map((g) => g.key)).size, 2);
+  assert.ok(kim.groups.every((g) => /^c[0-9a-f]{16}$/.test(g.key)));
+  assert.ok(!JSON.stringify(kim.groups).includes("comp_a"), "no computer id anywhere");
+  // In their window, as the owner's (memberView starts from world(), which has no Dee).
+  const view = memberView(kim);
+  view.bots.push({ ...bot("dee", "Dee"), workspaceId: "shared_p1" });
+  assert.deepEqual(G.botGroups(view).map((g) => [g.name, g.bots]), [["Four Corners", ["ada", "bo"]], ["notes", ["cy", "dee"]]]);
+  // One app: the same one group and key as before.
+  const plain = ownerBlob();
+  const before = Slice.sharedSlice(plain, "ws_main", { role: "member", id: "u_kim", email: "kim@example.com" }).groups;
+  assert.equal(before.length, 1);
+  assert.equal(before[0].name, "Storefront");
+});
+
 /* ---------------- On the Mac: what's kept, and the domains read ---------------- */
 
 const server = (state) => {
@@ -693,6 +769,15 @@ await test("A computer's name: only one this workspace's bots work on, kept clea
   Server.setComputerName("ws_main", "comp_a", "");
   Server.setComputerName("ws_main", "comp_b", null);
   assert.equal(ws(g.state).computerNames, undefined, "the map goes once it's empty");
+  // One app's bots on a computer: by the computer and an app some of its bots work on.
+  const two = server(twoApps());
+  assert.equal(Server.setComputerName("ws_main", "comp_a/notes", " cclc "), "cclc");
+  assert.deepEqual(ws(two.state).computerNames, { "comp_a/notes": "cclc" });
+  assert.throws(() => Server.setComputerName("ws_main", "comp_a/ledger", "x"), (e) => e.status === 404, "an app no bot there works on");
+  assert.throws(() => Server.setComputerName("ws_main", "comp_b/notes", "x"), (e) => e.status === 404, "nor on another computer");
+  assert.throws(() => Server.setComputerName("ws_main", "comp_a/", "x"), (e) => e.status === 404);
+  assert.throws(() => Server.setComputerName("ws_main", "comp_a/notes/x", "x"), (e) => e.status === 404);
+  assert.throws(() => Server.setComputerName("ws_main", "comp_c/notes", "x"), (e) => e.status === 404);
 });
 
 await test("A bot's site: only one of its workspace's apps' sites, None takes it off, a deleted bot's goes with it", () => {
