@@ -594,7 +594,7 @@ const utf8 = (s: string) => Buffer.from(s, "utf8").toString("latin1");
  * user's Orgo key, and `author` as X-Ingot-Author for a write. Throws IngotError (offline) when Ingot
  * can't be reached; any other HTTP answer comes back as it is, but a key Ingot didn't take.
  */
-async function api<T>(wsId: string, method: "GET" | "POST" | "DELETE", path: string, opts: { body?: unknown; author?: string; signal?: AbortSignal } = {}): Promise<Answer<T>> {
+async function api<T>(wsId: string, method: "GET" | "POST" | "DELETE", path: string, opts: { body?: unknown; author?: string; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<Answer<T>> {
   const ours = sameState();
   const project = ingotWorkspace(wsId);
   const key = await apiKey().catch(() => null);
@@ -604,7 +604,7 @@ async function api<T>(wsId: string, method: "GET" | "POST" | "DELETE", path: str
   const headers: Record<string, string> = { Authorization: `Bearer ${key}`, Accept: "application/json" };
   if (opts.author) headers["X-Ingot-Author"] = utf8(opts.author);
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
-  const timeout = AbortSignal.timeout(CALL_MS);
+  const timeout = AbortSignal.timeout(opts.timeoutMs ?? CALL_MS);
   let res: Response;
   try {
     res = await fetch(`${ingotUrl()}/api/v1/w/${encodeURIComponent(project)}${path}`, {
@@ -657,7 +657,7 @@ export type IngotFile = { path: string; blob: string; size: number; executable: 
  * One change of a commit Ingot makes on its own (POST /repos/{name}/commit), with no bytes sent: a file set to a
  * blob the repo has already, its executable bit said (unsaid, Ingot keeps the one the file had), or a file deleted.
  */
-export type IngotChange = { path: string; blob: string; executable: boolean } | { path: string; delete: true };
+export type IngotChange = { path: string; blob: string; executable: boolean } | { path: string; delete: true } | { path: string; content_base64: string; executable: boolean };
 
 /**
  * The changes that make a changeset's files (`now`) the files of another (`want`), in path order: each file `want`
@@ -712,8 +712,9 @@ export const ingot = {
     throw refusal(`Couldn't delete ${name}'s code`, r);
   },
   /** A repo's changesets on main, newest first (`before`: older than that one), and `next` for the page after; null when there's no such repo. */
-  log: async (wsId: string, name: string, opts: { before?: string; limit?: number; signal?: AbortSignal } = {}): Promise<{ changesets: IngotChangeset[]; next: string | null } | null> => {
-    const query = new URLSearchParams({ limit: String(Math.min(200, Math.max(1, opts.limit ?? 50))), ...(opts.before ? { before: opts.before } : {}) });
+  log: async (wsId: string, name: string, opts: { before?: string; limit?: number; at?: string; signal?: AbortSignal } = {}): Promise<{ changesets: IngotChangeset[]; next: string | null } | null> => {
+    // `at`: that changeset and its ancestors (else main's).
+    const query = new URLSearchParams({ limit: String(Math.min(200, Math.max(1, opts.limit ?? 50))), ...(opts.before ? { before: opts.before } : {}), ...(opts.at ? { at: opts.at } : {}) });
     const r = await api<{ changesets?: IngotChangeset[]; next?: string | null }>(wsId, "GET", `/repos/${name}/log?${query}`, { signal: opts.signal });
     if (r.status === 404) return null;
     if (r.status !== 200) throw refusal(`Couldn't read ${name}'s history`, r);
@@ -737,6 +738,21 @@ export const ingot = {
     return files as IngotFile[];
   },
   /**
+   * Every file of a repo's changeset `at` with a link to its bytes (GET /repos/{name}/manifest?at=): each link is
+   * presigned (no key; good for a few minutes), so fetch what's needed right away. Null when there's no such repo.
+   */
+  manifest: async (wsId: string, name: string, at: string, signal?: AbortSignal): Promise<(IngotFile & { url: string })[] | null> => {
+    if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
+    const r = await api<{ files?: unknown }>(wsId, "GET", `/repos/${name}/manifest?${new URLSearchParams({ at })}`, { signal });
+    if (r.status === 404) return null;
+    if (r.status !== 200 || !Array.isArray(r.json.files)) throw refusal(`Couldn't read ${name}'s files`, r);
+    return r.json.files.flatMap((v) => {
+      const f = fileOf(v);
+      const url = (v as { url?: unknown })?.url;
+      return f && typeof url === "string" && /^https?:\/\//.test(url) ? [{ ...f, url }] : [];
+    });
+  },
+  /**
    * A changeset Ingot makes on main itself (POST /repos/{name}/commit), on top of `base`, main's newest as it was
    * read, by `author` (X-Ingot-Author), from `changes` that name blobs the repo has already: no bytes go. Answers
    * its id; `stale` with where main is now when someone committed since (Ingot writes nothing then); `empty` when
@@ -749,9 +765,10 @@ export const ingot = {
     c: { base: string; message: string; changes: IngotChange[] },
     author: string,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<{ id: string } | { stale: string | null } | { empty: true }> => {
     if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
-    const r = await api<{ changeset?: { id?: unknown }; head?: unknown }>(wsId, "POST", `/repos/${name}/commit`, { body: { ref: "main", base: c.base, message: c.message, changes: c.changes }, author, signal });
+    const r = await api<{ changeset?: { id?: unknown }; head?: unknown }>(wsId, "POST", `/repos/${name}/commit`, { body: { ref: "main", base: c.base, message: c.message, changes: c.changes }, author, signal, timeoutMs });
     if ((r.status === 200 || r.status === 201) && typeof r.json.changeset?.id === "string") return { id: r.json.changeset.id };
     if (r.status === 409 && r.json.error === "stale") return { stale: typeof r.json.head === "string" && r.json.head ? r.json.head : null };
     if (r.status === 400 && r.json.error === "empty") return { empty: true };

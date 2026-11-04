@@ -416,6 +416,22 @@ await check("what Select picked, in the owner's words: the bot reads where each 
   assert.equal(messages().findLast((x) => x.role === "user").picks, undefined, "only with appNote (the owner's, from their window)");
 });
 
+/* ---------------- Out of steps ---------------- */
+
+await check("a reply that ran out of steps offers Go on as a button; a reply that finished doesn't", async () => {
+  const look = () => calling(toolCall("read_skill", { name: "nothing-here", file: null }));
+  answers.push(look(), look(), look(), look(), look(), look(), reply("I checked the setup but haven't changed it yet. Left: add the address."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, "set it up for me");
+  assert.match(JSON.stringify(asked.slice(n).at(-1).input), /out of steps for this reply/, "it ran out of steps");
+  const said = messages().findLast((m) => m.role === "bot");
+  assert.equal(said.text, "I checked the setup but haven't changed it yet. Left: add the address.");
+  assert.deepEqual(said.options, ["Go on"]);
+  answers.push(reply("You're welcome."));
+  await Chat.handleMessage(chatId, "thanks");
+  assert.equal(messages().findLast((m) => m.role === "bot").options, undefined, "a finished reply has none");
+});
+
 /* ---------------- web_fetch ---------------- */
 
 await check("web_fetch reads a page, marked as information, and refuses private addresses", async () => {

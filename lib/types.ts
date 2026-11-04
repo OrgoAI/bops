@@ -837,7 +837,7 @@ export type Message = {
    * the bot sees whether it worked. `unasked`: a call that went out without asking them (a GET that
    * failed: keys.ts callApi), which is never read as their approval.
    */
-  appResult?: { action: string; ok: boolean; output: string; unasked?: true };
+  appResult?: { action: string; ok: boolean; output: string; unasked?: true; read?: true };
   /** Set on a bot's reply: the API calls it made with the user's keys for it (call_api), "Called Stripe GET /v1/customers". */
   called?: string[];
   /** Set on a heads-up from a watched screen: which watch, so the message can offer to show it or reply. */

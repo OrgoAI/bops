@@ -414,5 +414,14 @@ export function ownerCall(text: string): string {
     .replace(/^You: /gm, "Owner: ");
 }
 
-/** A bot's line Bops wrote for it (out of AI credit), as a viewer reads it: what to do about the owner's credit is the owner's (ownerVoice). */
-export const ownerCredit = (text: string) => (/^I'm out of (?:AI|Orgo) credit, so I've stopped\./.test(text) ? text.replace(/\s*(?:Upgrade|Add credit) in Settings to [^.]*\.?$/, "") : text);
+/** What a teammate reads in place of the owner's "Add credit in Settings": whose credit it is, and who can add more. */
+export const OWNER_CREDIT_LINE = "It's the owner's credit: only they can add more.";
+
+/**
+ * A bot's line Bops wrote for it (out of AI credit), as a viewer reads it: what to do about the owner's credit is the
+ * owner's (ownerVoice), so it says whose credit it is and who can add more (OWNER_CREDIT_LINE).
+ */
+export const ownerCredit = (text: string) =>
+  /^I'm out of (?:AI|Orgo) credit, so I've stopped\./.test(text) && !text.includes(OWNER_CREDIT_LINE)
+    ? `${text.replace(/\s*(?:Upgrade|Add credit) in Settings to [^.]*\.?$/, "")} ${OWNER_CREDIT_LINE}`
+    : text;
