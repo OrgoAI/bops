@@ -12,4 +12,5 @@
 - A read a bot makes on its own that doesn't work is counted with its other reads, not shown as a red error.
 - When a bot runs out of steps mid-work, a Go on button carries it on.
 - A teammate who sees a bot out of AI credit is told it's the owner's credit and only they can add more.
+- A bot can put two pages side by side on its screen, see both at once and drag from one to the other.
 - A long block of code in a bot's reply folds behind one line ("40 lines of code") that opens it.
