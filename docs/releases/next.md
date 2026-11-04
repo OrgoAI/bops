@@ -14,3 +14,4 @@
 - A teammate who sees a bot out of AI credit is told it's the owner's credit and only they can add more.
 - A bot can put two pages side by side on its screen, see both at once and drag from one to the other.
 - A long block of code in a bot's reply folds behind one line ("40 lines of code") that opens it.
+- Watching a bot's browser takes about 300 MB less memory.

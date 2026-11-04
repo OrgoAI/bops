@@ -267,7 +267,7 @@ const owner = await person("owner");
 const sam = await person("sam");
 const shot = (p, name) => p.screenshot({ path: join(OUT, "shots", `${name}.png`) });
 
-/** What a person's Browser tab shows: the address bar, the state (its look, line and the line's background), the frame's src. */
+/** What a person's Browser tab shows: the address bar, the state (its look, line and the line's background), the frame (its canvas as a JPEG, once drawn). */
 const view = (p) =>
   p.evaluate(() => {
     const box = document.querySelector('[data-bot-browser]');
@@ -279,7 +279,10 @@ const view = (p) =>
       look: box.getAttribute("data-browser-look"),
       line: line?.textContent ?? null,
       lineBg: line ? getComputedStyle(line).backgroundColor : null,
-      frame: box.querySelector("img")?.getAttribute("src") ?? null,
+      frame: (() => {
+        const c = box.querySelector("canvas[data-browser-frame]");
+        return c && c.dataset.drawn !== undefined ? c.toDataURL("image/jpeg", 0.95) : null;
+      })(),
     };
   });
 const HIGHLIGHTER = "rgb(233, 255, 59)";
@@ -344,7 +347,7 @@ const diff = (p, a, b) =>
 async function onFrame(p, x, y) {
   const size = await onPage("[innerWidth, innerHeight]");
   const r = await p.evaluate(() => {
-    const b = document.querySelector('[data-bot-browser] img').getBoundingClientRect();
+    const b = document.querySelector('[data-bot-browser] canvas[data-browser-frame]').getBoundingClientRect();
     return { left: b.left, top: b.top, width: b.width, height: b.height };
   });
   return { x: r.left + (x / size[0]) * r.width, y: r.top + (y / size[1]) * r.height };
