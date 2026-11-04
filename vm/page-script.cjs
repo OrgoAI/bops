@@ -13,9 +13,9 @@
 // Usage: node page-script.cjs <CDP port> <seconds> <script file>
 "use strict";
 /* eslint-disable @typescript-eslint/no-require-imports -- plain CommonJS, run by node on the computer (as desktop/ is) */
-const { closeSync, mkdirSync, openSync, readFileSync, unlinkSync } = require("node:fs");
+const { closeSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync } = require("node:fs");
 const { homedir } = require("node:os");
-const { basename, extname, join } = require("node:path");
+const { basename, dirname, extname, join } = require("node:path");
 const { chromium } = require(join(__dirname, "node_modules", "playwright-core"));
 
 const MARK = "@@bops-page@@";
@@ -37,6 +37,8 @@ const saving = [];
 const SAVE_WAIT_MS = 15_000;
 /** The tabs the receipt lists, at most. */
 const TABS_LISTED = 12;
+/** Playwright's own temp folders for this run's downloads: removed once they're saved (they'd pile up on the computer). */
+const artifacts = new Set();
 /** Where downloads go: the computer's own Downloads, as Chrome's would. */
 const DOWNLOADS = join(homedir(), "Downloads");
 /** The page before the script ran (see stateOf), and whether it asked to see the screen. */
@@ -65,6 +67,7 @@ async function done(out) {
     seen = saving.length;
     late = await Promise.race([Promise.allSettled(saving).then(() => false), new Promise((r) => setTimeout(() => r(true), Math.max(0, until - Date.now())))]);
   }
+  for (const dir of artifacts) rmSync(dir, { recursive: true, force: true });
   if (late) happened.unsaved.push(`still downloading ${SAVE_WAIT_MS / 1000} seconds after the script ended; wait for it in the script: const d = await page.waitForEvent("download"), then await d.path()`);
   // Where it ended: the tab in front now (a script can bring another to the front without navigating it).
   if (browsing) current = (await Promise.race([front(browsing), new Promise((r) => setTimeout(r, 2000))]).catch(() => undefined)) ?? current;
@@ -118,8 +121,10 @@ function keep(d) {
         to = savePath(name);
         await d.saveAs(to);
         happened.downloads.push(to);
-        // Playwright's own copy in its temp folder: not needed once saved.
-        await d.delete().catch(() => {});
+        // Playwright's own copy, in a temp folder of its own for this run: not needed once saved. The whole folder goes at
+        // the end, as Chrome can still be renaming its partial file there when the copy is made.
+        const own = await d.path().catch(() => null);
+        if (own && basename(dirname(own)).startsWith("playwright-artifacts-")) artifacts.add(dirname(own));
       } catch (e) {
         if (to) {
           try {
