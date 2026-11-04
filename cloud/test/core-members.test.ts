@@ -232,6 +232,8 @@ test("a message is shown as its chat shows it, one kept between us too", () => {
   // A message's files: what they are and whose computer, as the chat shows them (never where they are or the ids).
   const files = [{ id: "file_1", name: "Itinerary.pdf", size: 1200, path: "~/Desktop/Itinerary.pdf", botId: "max", hostId: "max", hostName: "Max" }];
   assert.deepEqual(sharedMessage({ id: "m3", chatId: "bot:max", role: "user", text: "", at: 5, files }, new Set(["max"])), { id: "m3", chatId: "bot:max", role: "user", text: "", at: 5, files: [{ name: "Itinerary.pdf", size: 1200, hostName: "Max" }] });
+  // On the computer of a bot they aren't shown: whose it is isn't said.
+  assert.deepEqual(sharedMessage({ id: "m4", chatId: "bot:max", role: "user", text: "", at: 6, files: [{ ...files[0], hostId: "boss", hostName: "Boss" }] }, new Set(["max"]))?.files, [{ name: "Itinerary.pdf", size: 1200 }]);
 });
 
 test("a reply a bot drafted for the owner is shown read only: who, where, the words and whether it went, never the ids it goes by", () => {
@@ -659,6 +661,9 @@ test("cleanAct keeps a message's files with their own fields alone, each a Deskt
     [{ ...file, name: ".bashrc", path: "~/Desktop/.bashrc" }],
     [{ ...file, name: "a\nb", path: "~/Desktop/a\nb" }],
     [{ ...file, name: "line\u0007", path: "~/Desktop/line\u0007" }],
+    [{ ...file, name: "a\u2028b.pdf", path: "~/Desktop/a\u2028b.pdf" }],
+    [{ ...file, name: "invoice\u202efdp.exe", path: "~/Desktop/invoice\u202efdp.exe" }],
+    [{ ...file, name: "a\u0085b.pdf", path: "~/Desktop/a\u0085b.pdf" }],
     [{ ...file, size: 0 }],
     [{ ...file, size: 2 * 1024 ** 3 + 1 }],
     [{ ...file, id: "bad id!" }],

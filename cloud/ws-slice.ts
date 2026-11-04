@@ -731,7 +731,9 @@ export function sharedMessage(json: Record<string, unknown>, bots?: ReadonlySet<
   const theirs = bots && lines?.filter((h) => typeof h.botId === "string" && bots.has(h.botId) && typeof h.text === "string");
   if (bots && !lines && json.role === "bot" && typeof json.text === "string" && json.text.startsWith(HELD_HEAD)) return null;
   if (theirs && !theirs.length) return null;
-  const out = keep(json, MESSAGE) as Record<string, unknown>;
+  // A file on the computer of a bot they aren't shown (the main bot's, the free computer's): whose it is stays the owner's.
+  const shown = bots && Array.isArray(json.files) ? { ...json, files: json.files.map((f) => (isObject(f) && !(typeof f.hostId === "string" && bots.has(f.hostId)) ? { ...f, hostName: undefined } : f)) } : json;
+  const out = keep(shown, MESSAGE) as Record<string, unknown>;
   if (theirs && lines && theirs.length < lines.length) out.text = heldText(theirs.map((h) => String(h.text)));
   if (bots && Array.isArray(out.asked)) {
     out.asked = (out.asked as Record<string, unknown>[]).filter((a) => typeof a.botId === "string" && bots.has(a.botId));

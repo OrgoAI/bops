@@ -15,7 +15,7 @@
 // - a test site that Chrome opens (a page with a unique word, a button, a field and a ticker; a sign-in page for the
 //   fixture's test account);
 // - the bot's computer's Desktop for files an Admin adds (lib/server/bot-files.ts: TWO_PERSON_MEMBER_ROLE=admin): a
-//   folder, where the fake orgo-web runs the claim script with HOME there, and Orgo's file uploads with a storage stand-in
+//   folder, where the fake orgo-web does what the claim script does (in JS, never a shell), and Orgo's file uploads with a storage stand-in
 //   on HTTPS (a certificate made for 127.0.0.1 at start, which sam's Bops alone trusts);
 // - two Bops apps (next dev), the owner's and sam's, each with a scratch HOME and a folder for a Keychain, signed in
 //   with their made-up keys and pointed at the local cloud and the fake orgo-web.
@@ -31,7 +31,7 @@
 // Usage: node scripts/dev-two-person.mjs start | stop | status     (npm run two-person, npm run two-person:stop)
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createTlsServer } from "node:https";
 import { createRequire, registerHooks } from "node:module";
@@ -445,6 +445,40 @@ async function serve() {
     mkdirSync(tls);
     const made = spawnSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(tls, "key.pem"), "-out", join(tls, "cert.pem"), "-days", "1", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"], { encoding: "utf8" });
     if (made.status !== 0) throw new Error(`openssl: ${made.stderr}`);
+    /**
+     * What adding a file runs on the bot's computer (lib/server/bot-files.ts: its claim script, letting a claim go, the
+     * touch after a long upload), done here in JS on the stand-in's Desktop: no shell ever runs what a request sent.
+     * Anything else: null.
+     */
+    const quotedWord = "'((?:[^']|'\\\\'')*)'";
+    const unquote = (w) => w.replace(/'\\''/g, "'");
+    const onDesktop = (command) => {
+      if (command === "true") return { output: "", exit_code: 0 };
+      const d = join(computerHome, "Desktop");
+      const claim = new RegExp(`^d="\\$HOME/Desktop"; mkdir -p "\\$d" \\|\\| exit 3\\nset -C; n=${quotedWord}; i=2\\n`).exec(command);
+      if (claim) {
+        const name = unquote(claim[1]);
+        if (!name || name.includes("/")) return { output: "", exit_code: 3 };
+        mkdirSync(d, { recursive: true });
+        const dot = name.lastIndexOf(".");
+        const [stem, ext] = dot > 0 && name.length - dot <= 16 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+        for (let i = 1; i <= 500; i++) {
+          const n = i === 1 ? name : `${stem} (${i})${ext}`;
+          try {
+            writeFileSync(join(d, n), "", { flag: "wx" });
+            return { output: `__BOPS_NAME__${n}__BOPS_END__`, exit_code: 0 };
+          } catch {}
+        }
+        return { output: "", exit_code: 4 };
+      }
+      const unclaim = new RegExp(`^f="\\$HOME/Desktop/"${quotedWord}; `).exec(command);
+      if (unclaim) {
+        const f = join(d, unquote(unclaim[1]));
+        if (!unquote(unclaim[1]).includes("/") && existsSync(f) && statSync(f).size === 0) rmSync(f);
+        return { output: "", exit_code: 0 };
+      }
+      return null;
+    };
     /** An upload by its token: the name Orgo was told, and its bytes once they came. */
     const uploads = new Map();
     const storage = createTlsServer({ key: readFileSync(join(tls, "key.pem")), cert: readFileSync(join(tls, "cert.pem")) }, async (req, res) => {
@@ -508,10 +542,8 @@ async function serve() {
       // folder, and nothing else; the upload's link to the storage stand-in; /complete puts the bytes on its Desktop.
       const admin = SAM_ROLE === "admin" && key === SAM.key;
       if (admin && req.method === "POST" && url.pathname === `/api/computers/${COMPUTER.id}/bash`) {
-        const command = String(body.command ?? "");
-        if (!(command.startsWith('d="$HOME/Desktop"; mkdir -p "$d"') || command.startsWith('f="$HOME/Desktop/"') || command === "true")) return send(404, { error: "Not faked in the two-person stack" });
-        const r = spawnSync("/bin/bash", ["-c", command], { env: { HOME: computerHome, PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 30_000 });
-        return send(200, { output: `${r.stdout ?? ""}${r.stderr ?? ""}`, exit_code: r.status ?? 1 });
+        const done = onDesktop(String(body.command ?? ""));
+        return done ? send(200, done) : send(404, { error: "Not faked in the two-person stack" });
       }
       if (admin && req.method === "POST" && url.pathname === "/api/files/uploads" && body.desktopId === COMPUTER.id && typeof body.filename === "string") {
         const token = randomBytes(16).toString("hex");

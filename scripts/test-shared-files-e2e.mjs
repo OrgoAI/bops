@@ -82,7 +82,8 @@ try {
   // 1. On the bot's computer's Desktop, byte for byte.
   const desktop = await until(async () => {
     const { files } = await control("/computer/desktop");
-    return files.filter((f) => f.name.includes(tag)).length === 2 && files;
+    // (Each name is claimed as an empty file first: done once both have all their bytes.)
+    return [pdf, png].every((f) => files.some((x) => x.name === f.name && x.size === f.buffer.length)) && files;
   }, "both files on the bot's Desktop", 30_000);
   for (const f of [pdf, png]) {
     const on = desktop.find((x) => x.name === f.name);
@@ -112,7 +113,7 @@ try {
     const st = s.state ?? s;
     return st.messages?.find((m) => m.role === "bot" && m.at >= mine.at && /I have them on my Desktop/.test(m.text));
   }, "the bot's answer", 60_000);
-  for (const f of [pdf, png]) assert.ok(reply.text.includes(`~/Desktop/${f.name}`), `the answer names ${f.name}: ${reply.text}`);
+  for (const f of [pdf, png]) assert.ok(reply.text.includes(`~/Desktop/'${f.name}'`), `the answer names ${f.name}: ${reply.text}`);
   passed++;
   console.log(`ok - 3. the bot was told where they are: "${reply.text}"`);
 

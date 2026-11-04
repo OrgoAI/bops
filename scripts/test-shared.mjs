@@ -573,6 +573,10 @@ await check("while a shared workspace is open, what its bots wait on the owner's
   for (const [method, path] of [["POST", "/api/keys"], ["PATCH", "/api/keys"], ["DELETE", "/api/keys/NOTION_API_KEY?scope=workspace"], ["POST", "/api/keys/reveal"]])
     assert.equal(callAllowed(method, path), true, `${method} ${path}`);
   assert.equal(callAllowed("POST", "/api/keysmith"), false);
+  // An Admin's files go: the route puts them on the shared bot's computer while one is open (lib/server/shared.ts sharedFilesTo).
+  assert.equal(callAllowed("POST", "/api/bots/files?botId=boppy&name=a.pdf"), true);
+  assert.equal(callAllowed("POST", "/api/bots/filesx"), false);
+  assert.match(readFileSync(`${root}/app/api/bots/files/route.ts`, "utf8"), /sharedOpen\(\)[\s\S]*sharedFilesTo\(botId\)/, "the files route takes the shared workspace's computer while one is open");
   const routes = ["route.ts", "[name]/route.ts", "reveal/route.ts"].map((f) => readFileSync(`${root}/app/api/keys/${f}`, "utf8"));
   assert.ok(routes.every((src) => /sharedOpen\(\)/.test(src)), "each keys route takes the shared workspace's path while one is open");
 });

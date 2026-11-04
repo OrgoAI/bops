@@ -39,6 +39,9 @@ const ALLOWED = [
   // that workspace's own keys alone (lib/server/shared-keys.ts: orgo-web with the user's own Orgo key, which checks they
   // have Keys there; a bot's switch is an act through Bops Cloud), never the user's own vault or bots.
   /^\/api\/keys(\/|\?|$)/,
+  // An Admin's files for a bot there (attachments.tsx): put on the computer Bops Cloud names for that bot (lib/server/shared.ts
+  // sharedFilesTo, with their own Orgo key), never one of their own bots' of that id; anyone else's are refused.
+  /^\/api\/bots\/files(\?|$)/,
 ];
 
 /** The reads that don't go while it's open: answered from the user's own bot or workspace of that id, never the shared one's. */

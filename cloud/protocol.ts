@@ -1056,6 +1056,8 @@ export const MEMBER_MAX_NOTE = 2000;
  * A file a member's own Bops put on the Desktop of the computer one of the owner's bots works on (an Admin's, with their
  * own Orgo key: lib/server/bot-files.ts), named in their chat act for that bot (lib/added-files.ts AddedFile without its
  * host: the owner's side works out whose computer that is from its own state, the bot's own or the main bot's it shares).
+ * Bops Cloud and the owner's Mac take them from anyone with Write and Use its computer; only an Admin's Bops is told the
+ * computer, so only an Admin's can upload one. Naming a file that isn't there tells the bot no more than their words could.
  */
 export type MemberFile = { id: string; name: string; size: number; path: string; botId: string };
 /** The most files one message names (lib/added-files.ts ATTACH_MAX). */
@@ -1063,7 +1065,7 @@ export const MEMBER_FILES_MAX = 10;
 const FILE_PART = /^[A-Za-z0-9_:-]{1,120}$/;
 /**
  * A chat act's files, each with only its own fields, checked: a name that is one file on a Desktop (no folder, not hidden,
- * no control characters, 255 bytes at most), its path exactly ~/Desktop/<name>, a size Orgo's uploads take (2 GiB at
+ * no control, format or line-breaking characters, as lib/added-files.ts cleanFileName leaves none; 255 bytes at most), its path exactly ~/Desktop/<name>, a size Orgo's uploads take (2 GiB at
  * most), each named once. Null when any isn't.
  */
 export function memberFiles(v: unknown): MemberFile[] | null {
@@ -1073,7 +1075,7 @@ export function memberFiles(v: unknown): MemberFile[] | null {
     if (!f || typeof f !== "object") return null;
     const { id, name, size, path, botId } = f as Record<string, unknown>;
     if (typeof id !== "string" || !FILE_PART.test(id) || typeof botId !== "string" || !FILE_PART.test(botId)) return null;
-    if (typeof name !== "string" || !name.trim() || name.startsWith(".") || /[/\\\u0000-\u001f\u007f]/.test(name) || new TextEncoder().encode(name).length > 255) return null;
+    if (typeof name !== "string" || !name.trim() || name.startsWith(".") || /[/\\\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name) || new TextEncoder().encode(name).length > 255) return null;
     if (path !== `~/Desktop/${name}` || typeof size !== "number" || !Number.isSafeInteger(size) || size <= 0 || size > 2 * 1024 ** 3) return null;
     out.push({ id, name, size, path, botId });
   }
