@@ -287,6 +287,16 @@ async function asking(args, after = "Saved.") {
 
 /* ---------------- The tool ---------------- */
 
+await check("a reply with a key has room for a whole site change: twenty reads, then its answer, never out of steps", async () => {
+  const look = () => calling(toolCall("read_skill", { name: "nothing-here", file: null }));
+  answers.push(...Array.from({ length: 20 }, look), reply("Read them all."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, "look over the site's files");
+  assert.equal(asked.length - n, 21, "twenty rounds of reading and the answer");
+  assert.doesNotMatch(JSON.stringify(asked.at(-1).input), /out of steps for this reply/);
+  assert.equal(messages().findLast((m) => m.role === "bot").text, "Read them all.");
+});
+
 await check("a bot with the GitHub key has change_files in the chat, saying to use it for any change to files; call_api says so too, and the prompt", async () => {
   answers.push(reply("Hi."));
   const n = asked.length;
