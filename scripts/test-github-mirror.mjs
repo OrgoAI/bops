@@ -86,7 +86,10 @@ function makeGithub(files) {
   /** Someone commits on GitHub: some paths changed (null: deleted). */
   gh.push = (changes) => {
     const map = new Map(gh.commits.get(gh.head).files);
-    for (const [p, v] of Object.entries(changes)) v === null ? map.delete(p) : map.set(p, { sha: blob(B(v)), mode: "100644" });
+    for (const [p, v] of Object.entries(changes)) {
+      if (v === null) map.delete(p);
+      else map.set(p, { sha: blob(B(v)), mode: "100644" });
+    }
     gh.head = commit(map, gh.head);
     return gh.head;
   };
@@ -132,7 +135,10 @@ function makeGithub(files) {
     if (method === "POST" && path.endsWith("/git/trees")) {
       const base = gh.trees.get(body.base_tree).files;
       const map = new Map(base);
-      for (const e of body.tree) e.sha === null ? map.delete(e.path) : map.set(e.path, { sha: e.sha, mode: e.mode });
+      for (const e of body.tree) {
+        if (e.sha === null) map.delete(e.path);
+        else map.set(e.path, { sha: e.sha, mode: e.mode });
+      }
       const id = sha1(`n${Math.random()}`);
       gh.trees.set(id, { files: map, dir: "" });
       return ok({ sha: id }, 201);
@@ -168,7 +174,10 @@ function makeIngot(files) {
   };
   ig.change = (changes) => {
     const map = new Map(ig.sets.get(ig.head));
-    for (const [p, v] of Object.entries(changes)) v === null ? map.delete(p) : map.set(p, { b: B(typeof v === "object" ? v.text : v), x: typeof v === "object" && !!v.x });
+    for (const [p, v] of Object.entries(changes)) {
+      if (v === null) map.delete(p);
+      else map.set(p, { b: B(typeof v === "object" ? v.text : v), x: typeof v === "object" && !!v.x });
+    }
     return make(map);
   };
   ig.files = (at = ig.head) => new Map([...ig.sets.get(at)].map(([p, f]) => [p, f.b.toString()]));
@@ -181,7 +190,10 @@ function makeIngot(files) {
       ig.commits.push({ ...c, author });
       if (c.base !== ig.head) return { stale: ig.head };
       const map = new Map(ig.sets.get(ig.head));
-      for (const ch of c.changes) ch.delete ? map.delete(ch.path) : map.set(ch.path, { b: Buffer.from(ch.content_base64, "base64"), x: !!ch.executable });
+      for (const ch of c.changes) {
+        if (ch.delete) map.delete(ch.path);
+        else map.set(ch.path, { b: Buffer.from(ch.content_base64, "base64"), x: !!ch.executable });
+      }
       return { id: make(map) };
     },
   };
