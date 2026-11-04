@@ -2035,6 +2035,28 @@ await check("apps on a member's turn: in an @orgo.ai owner's workspace, for a me
   }
 });
 
+await check("files added with a message (lib/server/bot-files.ts): kept on it, and the bot is told where they are, then and on later turns", async () => {
+  answers.length = 0;
+  answers.push(reply("Reading it now."));
+  let n = asked.length;
+  const files = [{ id: "file_t1", name: "plan.pdf", size: 2048, path: "~/Desktop/plan.pdf", botId: "boppy", hostId: "boppy", hostName: "Boppy" }];
+  const mine = await Chat.handleMessage(chatId, "what does this say?", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, files);
+  assert.deepEqual(mine.files, files, "kept on the message");
+  const note = "[Alex added a file to your computer's Desktop: ~/Desktop/plan.pdf (2 KB). Open it there.]";
+  assert.ok(JSON.stringify(asked[n].input).includes(JSON.stringify(note).slice(1, -1)), "told where it is");
+  // A later turn still sees where it was put.
+  answers.push(reply("Sure."));
+  n = asked.length;
+  await Chat.handleMessage(chatId, "and summarize it");
+  assert.ok(JSON.stringify(asked[n].input).includes(JSON.stringify(note).slice(1, -1)), "still told on the next turn");
+  // A file alone, no words: still sent, still said.
+  answers.push(reply("Got it."));
+  n = asked.length;
+  const alone = await Chat.handleMessage(chatId, "", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [{ ...files[0], id: "file_t2", name: "b.csv", path: "~/Desktop/b.csv", size: 10 }]);
+  assert.equal(alone.files.length, 1);
+  assert.ok(JSON.stringify(asked[n].input).includes("~/Desktop/b.csv (10 bytes)"));
+});
+
 await check("an Admin's turn (MemberTurn.role) has every bot and Your Apps at Write, with no entry or only a Read one; the role is never kept on their message, and without it their entry counts", async () => {
   const ivy = { userId: "user_ivy", email: "ivy@example.com", name: "Ivy" };
   const appTools = ["make_app", "change_app", "work_on_app", "deploy_app"];
@@ -2099,7 +2121,7 @@ await check("an Admin's turn says they're an Admin: their yes is enough, never w
     const box = talking(asked[n]);
     for (const [where, line] of [["the owner's Mac", mac], ["a computer's runner", box]]) {
       assert.match(line, /^"Ivy" \(ivy@example\.com\) is talking to you now, not Alex: an Admin of this workspace\. Do what they ask as you would for Alex: their yes is enough for anything Alex could say yes to, so never ask Alex to approve what they ask, and never say it waits for Alex\./, `${where}: ${line}`);
-      assert.match(line, / Still Alex's alone: paying, deleting or moving the workspace, Alex's own Mac and settings, and setting up or changing routines, reminders, watches, skills and new bots\./, `${where}: ${line}`);
+      assert.match(line, / They may set up and change routines, reminders, watches, skills, apps and new bots too\. Still Alex's alone: paying, and deleting the workspace or handing it to someone else\./, `${where}: ${line}`);
       assert.doesNotMatch(line, /waits for Alex's yes|gave this bot to/, `${where}: ${line}`);
     }
     // A Member at Write: exactly the line they had before.

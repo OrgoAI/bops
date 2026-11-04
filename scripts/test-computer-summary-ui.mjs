@@ -93,4 +93,14 @@ await test("the computer's state and size, in the window's type, not code type",
   assert.equal((await statusLine())?.text, "asleep · 2 CPU", "a suspended one is asleep");
 });
 
+await test("a screen tile's label: a long bot name shortens inside its tile, never over the next one", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const file of ["computer.tsx", "mac-computer.tsx"]) {
+    const src = readFileSync(new URL(`../components/app/${file}`, import.meta.url), "utf8");
+    // Next to what it's doing, the name goes last: what it's doing shortens first, then the name ("Orgo te…").
+    assert.doesNotMatch(src, /className="shrink-0 font-semibold">\{(whoOn\(d\)|w\.site|who\?\.name|i\.bot\??\.name)/, `${file}: a name that can't shorten`);
+    assert.match(src, /min-w-0 shrink-\[0\.01\] truncate font-semibold/, file);
+  }
+});
+
 console.log(`\ncomputer summary ui: ${passed} passed`);

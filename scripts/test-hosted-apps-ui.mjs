@@ -3250,7 +3250,7 @@ await test("the Preview tab's wiring (bops-app.tsx): its bot and chat, the owner
   assert.match(chat, /\.\.\.\(aboutApp \? \{ appNote: true \} : \{\}\)/, "and the message that goes with it is tagged appNote");
   const route = readFileSync(`${root}/app/api/chats/[chatId]/messages/route.ts`, "utf8");
   assert.match(route, /const aboutApp = appNote === true && fromBopsWindow\(request\) && !sharedOpen\(\) && appsOwnShown\(getState\(\)\);/, "appNote only from the owner's own window, where their apps show");
-  assert.match(route, /picked, aboutApp, aboutApp \? picksOf\(picks, text\?\.trim\(\) \?\? ""\) : undefined\);/, "what Select picked, only with appNote");
+  assert.match(route, /picked, aboutApp, aboutApp \? picksOf\(picks, text\?\.trim\(\) \?\? ""\) : undefined, added\);/, "what Select picked, only with appNote");
 });
 
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
