@@ -1,0 +1,1 @@
+- Files a bot downloads from a website stay in its computer's Downloads under their own names, and it keeps track of its open tabs.
