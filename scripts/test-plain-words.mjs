@@ -24,6 +24,12 @@ check("an address said in a row hides what could let someone in: a user and pass
   assert.equal(shownAddress("https://x.example/#access_token=madeup&type=bearer"), "https://x.example/#access_token=•••&type=bearer");
   for (const plain of ["https://x.example/search?q=red+shoes&page=2#top", "https://x.example/docs/getting-started", "http://localhost:3000/?tab=preview"]) assert.equal(shownAddress(plain), plain, "plain ones stay as they are");
   assert.equal(shownAddress("not quite an address ?token=madeup"), "not quite an address ?token=•••");
+  // A query after a route in the fragment, a second @ in the user part, and a hostile string of ? (no slow match).
+  assert.equal(shownAddress("https://x.example/app#/cb?code=abc&next=home"), "https://x.example/app#/cb?code=•••&next=home");
+  assert.equal(shownAddress("https://one@two:not-a-real-pass@x.example/p"), "https://x.example/p");
+  const t0 = Date.now();
+  shownAddress(`not an address ${"?".repeat(32_000)}`);
+  assert.ok(Date.now() - t0 < 100, `a long string of ? is quick (${Date.now() - t0} ms)`);
 });
 
 check("citation markers go, with the space before them, and nothing else changes", () => {

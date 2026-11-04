@@ -93,10 +93,17 @@ const hidePairs = (pairs: string) =>
  * value) as •••. The rest stays as written. Rows are kept and shared with whoever sees the chat.
  */
 export function shownAddress(address: string): string {
-  const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#@\s]*@)?([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(address);
-  if (!m) return address.replace(/([?&#])([^=&#\s]*)=([^&#\s]*)/g, (all, sep: string, name: string, value: string) => (value && (SECRET_NAME.test(nameOf(name)) || OPAQUE.test(value)) ? `${sep}${name}=•••` : all));
+  // The user part runs to the authority's last @ (a password can hold one).
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#\s]*@)?([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(address);
+  if (!m) return address.replace(/([?&#])([^=&#?\s]*)=([^&#\s]*)/g, (all, sep: string, name: string, value: string) => (value && (SECRET_NAME.test(nameOf(name)) || OPAQUE.test(value)) ? `${sep}${name}=•••` : all));
   const [, scheme, rest, query, hash] = m;
-  return `${scheme}${rest}${query ? `?${hidePairs(query.slice(1))}` : ""}${hash ? (hash.includes("=") ? `#${hidePairs(hash.slice(1))}` : hash) : ""}`;
+  // A fragment can carry a query after a route ("#/cb?code=…") or be one ("#access_token=…").
+  const fragment = (h: string) => {
+    const q = h.indexOf("?");
+    if (q >= 0) return `${h.slice(0, q + 1)}${hidePairs(h.slice(q + 1))}`;
+    return h.includes("=") ? hidePairs(h) : h;
+  };
+  return `${scheme}${rest}${query ? `?${hidePairs(query.slice(1))}` : ""}${hash ? `#${fragment(hash.slice(1))}` : ""}`;
 }
 
 /** A link to a page on the computer it runs on (localhost, 127.0.0.1): it opens there and nowhere else. */

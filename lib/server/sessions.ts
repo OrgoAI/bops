@@ -4029,7 +4029,7 @@ async function finalAnswer(agentSessionId: string) {
 }
 
 function describeSearch(a?: Item["action"]) {
-  if (a?.type === "open_page" && a.url) return `read ${a.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}`;
+  if (a?.type === "open_page" && a.url) return `read ${shownAddress(a.url).replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}`;
   if (a?.type === "find_in_page") return `looked for "${String(a.pattern ?? "").slice(0, 40)}" in the page`;
   const q = a?.query ?? a?.queries?.join(", ");
   return q ? `searched "${q.slice(0, 70)}"` : "searched the web";
