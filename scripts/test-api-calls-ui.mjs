@@ -115,12 +115,18 @@ await test("a change says Changed, by whom; a single read says it too, its path 
   assert.deepEqual(lines(chat([posted])), ["Boppy changed something on Slack"]);
 });
 
-await test("another service, a change among reads, a failed call or a quarter of an hour between them starts a new line", () => {
+await test("another service, a change among reads, a failed write or a quarter of an hour between them starts a new line", () => {
   assert.deepEqual(lines(chat([read("r1", 1), read("r2", 2), read("s1", 3, "/v1/customers", "Stripe"), read("r3", 4)])), ["Looked at 2 files on GitHub", "Looked at something on Stripe", "Looked at a file on GitHub"]);
   assert.deepEqual(lines(chat([read("r1", 1), wrote("w1", 2), read("r2", 3)])), ["Looked at a file on GitHub", "Boppy changed a file on GitHub", "Looked at a file on GitHub"]);
-  const broken = chat([read("r1", 1), failed("f1", 2), read("r2", 3)]);
+  // A read the bot made on its own that didn't work (a file that isn't there) is one of its reads, said quietly: no red
+  // note in the chat for it. A write someone said yes to that failed keeps its own note, with why.
+  const looked = chat([read("r1", 1), failed("f1", 2), read("r2", 3)]);
+  assert.deepEqual(lines(looked), ["Looked at 3 files on GitHub, 1 didn&#x27;t work"]);
+  assert.doesNotMatch(looked, /couldn&#x27;t call/, "no red note for a read");
+  const failedWrite = { id: "fw", chatId: "bot:boppy", role: "system", text: "Boppy couldn't call it: GitHub answered 409", appResult: { action: `GitHub PUT ${file("fw")}`, ok: false, output: "Conflict" }, at: T + 2000 };
+  const broken = chat([read("r1", 1), failedWrite, read("r2", 3)]);
   assert.deepEqual(lines(broken), ["Looked at a file on GitHub", "Looked at a file on GitHub"]);
-  assert.match(broken, /Boppy couldn&#x27;t call GitHub/, "a failed one keeps its own note, with why");
+  assert.match(broken, /Boppy couldn&#x27;t call GitHub/, "a failed write keeps its own note, with why");
   assert.deepEqual(lines(chat([read("r1", 1), read("r2", 16 * 60)])), ["Looked at a file on GitHub", "Looked at a file on GitHub"]);
   assert.deepEqual(lines(chat([read("r1", 1), said("b1", 2, "Here it is."), read("r2", 3)])), ["Looked at a file on GitHub", "Looked at a file on GitHub"], "a message between them");
   // A thread's chip under a call ends its line there: nothing after it folds above the chip.
