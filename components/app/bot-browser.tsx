@@ -1,6 +1,6 @@
 "use client";
 
-import { useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { BrowserActivity, BrowserEvent, BrowserFrameMeta, BrowserMethod, BrowserPerson } from "@/cloud/protocol";
 import type { Bot } from "@/lib/types";
 import { initialsFrom } from "./account";
@@ -76,7 +76,7 @@ const MOVE_MS = 50;
  * edge over (its bar is the tab's, as a web tab's is).
  */
 export function BotBrowser({ bot, project = "", hidden = false, inset = false }: { bot: Bot; project?: string; hidden?: boolean; inset?: boolean }) {
-  const [frame, setFrame] = useState<{ src: string; meta: BrowserFrameMeta } | null>(null);
+  const [frame, setFrame] = useState<{ meta: BrowserFrameMeta } | null>(null);
   const [page, setPage] = useState<Page | null>(null);
   const [control, setControl] = useState<{ by: BrowserPerson | null; you: boolean }>({ by: null, you: false });
   const [refused, setRefused] = useState<Refused | null>(null);
@@ -90,7 +90,35 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
   const [feed] = useState(cursorFeed);
   const [typing, setTyping] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
-  const shot = useRef<HTMLImageElement>(null);
+  const shot = useRef<HTMLCanvasElement | null>(null);
+  // The newest frame, decoded, drawn on one canvas drawn in software (willReadFrequently), and the one before it freed.
+  // Each frame as a new image (an <img> given a new data URL, or a canvas drawn on the GPU) left a new texture in the
+  // graphics process each time: it held about 300 MB more while the browser streamed.
+  const last = useRef<ImageBitmap | null>(null);
+  const frames = useRef(0);
+  const paint = useCallback(() => {
+    const c = shot.current;
+    const b = last.current;
+    if (!c || !b) return;
+    if (c.width !== b.width) c.width = b.width;
+    if (c.height !== b.height) c.height = b.height;
+    c.getContext("2d", { willReadFrequently: true })?.drawImage(b, 0, 0);
+    c.dataset.drawn = "";
+  }, []);
+  const canvas = useCallback(
+    (c: HTMLCanvasElement | null) => {
+      shot.current = c;
+      paint();
+    },
+    [paint],
+  );
+  useEffect(
+    () => () => {
+      last.current?.close();
+      last.current = null;
+    },
+    [],
+  );
   const surface = useRef<HTMLDivElement>(null);
   const sending = useRef(Promise.resolve());
   const lastMove = useRef(0);
@@ -116,6 +144,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
   // Watching: only while the tab shows.
   useEffect(() => {
     if (hidden) return;
+    const decoding = frames;
     const es = new EventSource(`/api/browser?${new URLSearchParams({ bot: bot.id, ...(project ? { project } : {}) })}`);
     const on = <T extends BrowserEvent["t"]>(t: T, f: (e: Extract<BrowserEvent, { t: T }>) => void) =>
       es.addEventListener(t, (m) => {
@@ -127,7 +156,18 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     es.onerror = () => setCut(true);
     on("frame", (e) => {
       meta.current = e.meta;
-      setFrame({ src: `data:image/jpeg;base64,${e.data}`, meta: e.meta });
+      setFrame({ meta: e.meta });
+      const n = ++frames.current;
+      void createImageBitmap(new Blob([Uint8Array.from(atob(e.data), (ch) => ch.charCodeAt(0))], { type: "image/jpeg" })).then(
+        (b) => {
+          // A newer frame came while this one decoded: it's drawn instead.
+          if (n !== frames.current) return b.close();
+          last.current?.close();
+          last.current = b;
+          paint();
+        },
+        () => {},
+      );
     });
     on("page", (e) => setPage({ url: e.url, title: e.title, back: e.back }));
     on("control", (e) => {
@@ -156,12 +196,14 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     });
     return () => {
       es.close();
+      // A frame still decoding is stale now: it frees itself when it's done.
+      decoding.current++;
       clearTimeout(held.current.timer);
       held.current = {};
       setControl({ by: null, you: false });
       setKnown(false);
     };
-  }, [bot.id, project, hidden, feed, attempt]);
+  }, [bot.id, project, hidden, feed, attempt, paint]);
 
   // A note (an input refused) goes after a while.
   useEffect(() => {
@@ -390,8 +432,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
               </button>
             </div>
           ) : frame ? (
-            // eslint-disable-next-line @next/next/no-img-element -- a live frame (a data URL many times a second), not an asset to optimize
-            <img ref={shot} src={frame.src} alt={page?.title ? `${bot.name}'s browser: ${page.title}` : `${bot.name}'s browser`} draggable={false} className="block h-full w-full select-none" />
+            <canvas ref={canvas} role="img" aria-label={page?.title ? `${bot.name}'s browser: ${page.title}` : `${bot.name}'s browser`} data-browser-frame className="block h-full w-full select-none" />
           ) : (
             <div className="flex h-full w-full items-center justify-center px-8 text-center text-[13px] leading-5 text-[#6B6B6B]">{`Opening ${bot.name}'s browser…`}</div>
           )}
