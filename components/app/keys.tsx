@@ -1176,7 +1176,7 @@ export function apiCallOf(m: Message): ApiCall | null {
     const call = { label: x[1], method: x[2], path: x[3] };
     const failed = /^(.+?) couldn't call it: ([\s\S]+)$/.exec(m.text);
     // A read the bot made on its own that didn't work (a file that isn't there): one of its reads, quietly.
-    if (failed && m.appResult.unasked && call.method === "GET") return { ...call, failed: failed[2], quiet: true };
+    if (failed && m.appResult.read) return { ...call, failed: failed[2], quiet: true };
     if (failed) return { ...call, who: failed[1], failed: failed[2] };
     const did = /^(.+?): Called /.exec(m.text);
     return did ? { ...call, who: did[1] } : null;
@@ -1208,7 +1208,7 @@ export function callsSaid(calls: ApiCall[]) {
   const files = calls.every((x) => /\/contents(?:\/|$)/.test(x.path));
   const what = calls.length === 1 ? (files ? "a file" : "something") : `${calls.length} ${files ? "files" : "things"}`;
   const failed = calls.filter((x) => x.failed !== undefined).length;
-  const did = `${changes(c) ? "changed" : "looked at"} ${what} on ${c.label}${failed ? `, ${failed === calls.length && failed > 1 ? "none" : failed} didn't work` : ""}`;
+  const did = `${changes(c) ? "changed" : "looked at"} ${what} on ${c.label}${failed ? `, ${failed} didn't work` : ""}`;
   return c.who ? `${c.who} ${did}` : did[0].toUpperCase() + did.slice(1);
 }
 
@@ -1229,7 +1229,7 @@ export function lastCalls(messages: Message[]): ApiCall[] {
 /**
  * A bot's calls to one service in a row (oneLine) as one quiet line in the chat (callsSaid), which opens the list of
  * what was called, each method and path whole; a single call's on hover too. A read the bot made on its own that didn't
- * work is one of them, said as such ("didn't work", why on hover); a failed write keeps its own note (ApiNote).
+ * work is one of them, said as such ("didn't work" and why); a failed write keeps its own note (ApiNote).
  */
 export function ApiCalls({ calls }: { calls: ApiCall[] }) {
   const [open, setOpen] = useState(false);
@@ -1254,12 +1254,7 @@ export function ApiCalls({ calls }: { calls: ApiCall[] }) {
           {calls.map((c, i) => (
             <li key={i} data-api-call className="font-mono [overflow-wrap:anywhere]">
               <span className={`font-semibold ${methodColor(c.method)}`}>{c.method}</span> {c.path}
-              {c.failed !== undefined && (
-                <span title={undash(c.failed)} className="font-sans text-[#9A9A98]">
-                  {" "}
-                  · didn&apos;t work
-                </span>
-              )}
+              {c.failed !== undefined && <span className="font-sans text-[#9A9A98]"> · didn&apos;t work: {undash(c.failed)}</span>}
             </li>
           ))}
         </ul>

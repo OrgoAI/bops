@@ -2710,7 +2710,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             }
             // A GET that went out and didn't work: a red note, like a write's. No one was asked (unasked): never
             // read as the user's approval.
-            if (r.failed) addMessage({ chatId, role: "system", text: `${b.name} couldn't call it: ${r.failed.why.slice(0, 160)}`, appResult: { action: r.failed.did.replace(/^Called /, ""), ok: false, output: r.text, unasked: true } });
+            // `read`: it was a read (one that never asks), which the chat says with the bot's other reads.
+            if (r.failed) addMessage({ chatId, role: "system", text: `${b.name} couldn't call it: ${r.failed.why.slice(0, 160)}`, appResult: { action: r.failed.did.replace(/^Called /, ""), ok: false, output: r.text, unasked: true, ...(r.failed.read ? { read: true as const } : {}) } });
             if (r.did) {
               called.push(r.did);
               notes.push(r.did);

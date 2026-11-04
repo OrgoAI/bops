@@ -1972,7 +1972,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   if (m.role === "system")
     return (
       <div className={`flex w-full flex-col items-center gap-1.5 self-center py-0.5 ${enterClass}`}>
-        {api ? api.failed !== undefined ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
+        {api ? !quietCall(api) ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
         {chipList}
       </div>
     );
