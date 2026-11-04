@@ -1,4 +1,0 @@
-- Admins can see and change the org chart.
-- Team has switches for what each person can change.
-- Admins can answer and guide work on the owner's Mac.
-- Admins' bots can set up routines, watches, skills and new bots.
