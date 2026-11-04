@@ -377,10 +377,13 @@ export function keyGrants(): Record<string, string[]> {
   return out;
 }
 
-/** The keys a bot may use that are set in the vault right now: none when Bops isn't signed in to Orgo, or Orgo is slow. */
-export async function usableKeys(b: Bot): Promise<KeyProvider[]> {
+/**
+ * The keys a bot may use that are set in the vault right now: none when Bops isn't signed in to Orgo, or Orgo is slow.
+ * `fresh`: read the vault again (a turn going on from a key card, whose key may have been saved on another Bops).
+ */
+export async function usableKeys(b: Bot, { fresh = false } = {}): Promise<KeyProvider[]> {
   if (!b.keys?.length) return [];
-  const set = await Promise.race([listKeys().catch(() => [] as VaultKey[]), new Promise<VaultKey[]>((r) => setTimeout(() => r([]), 4000))]);
+  const set = await Promise.race([listKeys({ fresh }).catch(() => [] as VaultKey[]), new Promise<VaultKey[]>((r) => setTimeout(() => r([]), 4000))]);
   const names = new Set(keysOf(set, workspaceOf(b)).map((k) => k.name));
   return b.keys.filter((k) => names.has(k)).map((k) => keyProvider(k)!).filter(Boolean);
 }
@@ -565,4 +568,70 @@ export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, op
   if (!asker && allows(b, ask, { justDoIt: false })) return run("auto");
   used(action, "waiting");
   throw new NeedsOk(ask);
+}
+
+/* ---------------- Asking for a key in the chat ---------------- */
+
+/**
+ * ask_for_key: a chat turn's way to get a key it needs. The bot names the service and why; Bops shows a card in the chat
+ * that is the Logins key form (components/app/keys.tsx KeyAskCard), and the turn pauses there (NeedsOk, kind "key"). The
+ * value goes from that form to /api/keys, the same save as Logins (the vault, or a shared workspace's own through
+ * shared-keys.ts), never through the chat, the model or this tool. `change`: the person asked to see the card for a key
+ * again, to replace or remove it.
+ */
+export function askForKeyTool() {
+  const owner = ownerName();
+  return {
+    type: "function" as const,
+    name: "ask_for_key",
+    description: `Ask ${owner} for an API key you need, on a card in this chat: they paste it there, it goes to their Orgo vault (it shows in Logins, Keys too), and you never see it. Whenever you need a key, use this: never ask anyone to type, paste or send a key, token or password in a message. Only for the services listed. Set change to true when they ask to see the card for a key again, to replace or remove it. Your reply waits until they answer the card.`,
+    strict: true,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["service", "reason", "change"],
+      properties: {
+        service: { type: "string", enum: KEY_PROVIDERS.map((k) => k.name), description: KEY_PROVIDERS.map((k) => `${k.name}: ${k.label}`).join("; ") },
+        reason: { type: ["string", "null"], description: `What ${owner} gets from it, in plain words under 80 characters, as ${owner} would say it, e.g. "Read the open issues in the site's repository". No codes or tool names.` },
+        change: { type: "boolean", description: "True when they asked to see the card for this key again, to replace or remove it; else false." },
+      },
+    },
+  };
+}
+
+/** What ask_for_key did: words for the model, and the one quiet line for the chat once the card is answered. */
+export type KeyAskDone = { text: string; line?: string };
+
+/**
+ * ask_for_key. Asked: a card (NeedsOk, kind "key", the vault name its only resource), unless the bot can use that key
+ * already and nobody asked to change it. Answered (`approved`: the card was saved, or Done): the vault is read again and
+ * only what's really there is said, the card's reply taken for nothing; this never saves, shows, ticks or points a key
+ * anywhere. Who may use it is what the person saving picked (Bot.keys), as in Logins.
+ */
+export async function askForKey(botId: string, a: { service?: unknown; reason?: unknown; change?: unknown } & Record<string, unknown>, where: UseWhere, opts: { approved?: boolean } = {}): Promise<KeyAskDone> {
+  const b = bot(botId);
+  if (!b) return { text: "Unknown bot." };
+  const owner = ownerName();
+  const name = keyName(String(a.service ?? ""));
+  const p = keyProvider(name);
+  if (!p) return { text: `Bops can't call ${String(a.service ?? "").trim() || "that service"} yet: only ${[...new Set(KEY_PROVIDERS.map((k) => k.label))].join(", ")}. Say so plainly, and never ask for its key in a message.` };
+  const change = a.change === true;
+  const here = async () => {
+    const all = await listKeys({ fresh: true });
+    return { saved: keysOf(all, workspaceOf(b)).some((k) => k.name === name), uses: !!bot(botId)?.keys?.includes(name) };
+  };
+  if (!opts.approved) {
+    const now = await here().catch(() => null);
+    if (now?.saved && now.uses && !change) return { text: `You have the ${p.label} key already: use call_api with ${name}. If it stops working, ask again with change true.` };
+    const reason = plainReason(a.reason);
+    const asker = forMember(where);
+    throw new NeedsOk({ action: change ? `Change the ${p.label} key` : `Use a ${p.label} key`, resources: [name], preview: "", kind: "key", ...(asker ? { askedFor: asker } : {}), ...(reason ? { reason } : {}) });
+  }
+  const now = await here().catch(() => null);
+  if (!now) return { text: `Bops couldn't check ${owner}'s vault just now, so it can't say whether the ${p.label} key is there. Say so in one short line.` };
+  if (now.saved && now.uses) return { text: `The ${p.label} key is in ${owner}'s vault and you may use it now: call_api with ${name}. Carry on with what you were doing.`, line: `${p.label} key saved · used by ${b.name}` };
+  if (now.saved) return { text: `The ${p.label} key is saved, but you may not use it yet. ${owner} or someone with Keys can let you in Logins, Keys. Say so in one short line.`, line: `${p.label} key saved · ${b.name} can't use it yet` };
+  return change
+    ? { text: `The ${p.label} key isn't in the vault anymore. Say so in one short line.`, line: `${p.label} key removed` }
+    : { text: `The ${p.label} key wasn't saved. Say so in one short line, and never ask for it in a message.` };
 }

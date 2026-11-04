@@ -140,6 +140,8 @@ export function replyToAsk(askId: string, reply: AskReply, message?: string, mem
   if (onRunner()) return "A bot's computer can't answer for you.";
   const a = getState().appApprovals?.find((x) => x.id === askId);
   if (!a || a.reply) return "That isn't waiting on you anymore.";
+  // A key's card is answered by saving it (or Done), never by a rule for the bot (keys.ts askForKey).
+  if (a.kind === "key" && reply === "always") return "Save the key on its card.";
   const me = stateDevice();
   const at = Date.now();
   const said = reply === "reject" ? message?.trim().slice(0, 2000) : undefined;

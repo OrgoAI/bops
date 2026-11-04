@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
 import type { DiffLine } from "@/lib/skill-proposals";
+import { askHeadline } from "@/lib/permission";
 import { KEYS_GIVEN_LINE, OWNERS_KEY_LINE, REPLY_WAITS_LINE } from "@/lib/shared";
 import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type FileChange, type LastUses, type Message, type Watch } from "@/lib/types";
 import { BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon, usedLine } from "./apps";
@@ -505,6 +506,8 @@ function KeyLine({
   routines,
   anchorRef,
   switchesOff,
+  onRemoved,
+  onBusy,
 }: {
   k: KeyRow;
   state: AppState;
@@ -522,11 +525,16 @@ function KeyLine({
   anchorRef: (el: HTMLSpanElement | null) => void;
   /** In a shared workspace whose owner's Bops can't take the bots' switches yet: they're shown, not changed. */
   switchesOff?: boolean;
+  /** Told once it's removed (a key card in the chat goes on then). */
+  onRemoved?: () => void;
+  /** Told while one of its writes (a bot's switch, a remove) is on its way: a key card's Done waits for it. */
+  onBusy?: (busy: boolean) => void;
 }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const v = useKeyValue(k.name, k.scope, setError);
+  useEffect(() => onBusy?.(busy), [busy, onBusy]);
   const toggle = async (b: Bot, allowed: boolean) => {
     setBusy(true);
     setError(await grant(k.name, b.id, allowed));
@@ -547,6 +555,7 @@ function KeyLine({
       setBusy(false);
       setSure(false);
       keysChanged();
+      onRemoved?.();
     } catch {
       setError("Couldn't reach Bops. Try again.");
       setBusy(false);
@@ -698,7 +707,8 @@ const ORGO_USES: Record<string, string> = { ANTHROPIC_API_KEY: "Anthropic", OPEN
  * Add a key: a service from the list Bops can call (by its vault name, as in Orgo's Secrets), the key pasted into a password field, and the bots that may use it. `replace`: a new value for a saved key,
  * which keeps who may use it. The value is cleared once Orgo has it. A key pasted that says whose it is by how it starts
  * (serviceOfKey) picks that service; picked another by hand after, one line says whose it looks like. `shared`: a workspace
- * shared with the user, whose own keys these are (This workspace's, in the owner's vault).
+ * shared with the user, whose own keys these are (This workspace's, in the owner's vault). `service`: the one a bot asked for
+ * on a key card in the chat (KeyAskCard), which this form saves alone: no list to pick from, and Esc doesn't put the card away.
  */
 function AddKey({
   info,
@@ -710,6 +720,8 @@ function AddKey({
   first,
   onSaved,
   onCancel,
+  service,
+  cancelLabel = "Cancel",
 }: {
   info: KeysInfo;
   team: Bot[];
@@ -721,12 +733,14 @@ function AddKey({
   first: boolean;
   onSaved: (name: string, note?: string) => void;
   onCancel: () => void;
+  service?: string;
+  cancelLabel?: string;
 }) {
   // Every name Orgo can call. A service with two (Stripe) shows each one's name.
   const services = info.providers;
   const twice = (label: string) => services.filter((x) => x.label === label).length > 1;
   const inScope = info.keys.filter((k) => k.scope === scope);
-  const [pick, setPick] = useState(replace?.name ?? services.find((p) => !inScope.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
+  const [pick, setPick] = useState(replace?.name ?? service ?? services.find((p) => !inScope.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
   const [value, setValue] = useState("");
   const [bots, setBots] = useState(startBots);
   const [busy, setBusy] = useState(false);
@@ -741,7 +755,7 @@ function AddKey({
   const typed = (v: string) => {
     setValue(v);
     const f = serviceOfKey(v, names, pick);
-    if (f && f !== lastFound.current && !replace) {
+    if (f && f !== lastFound.current && !replace && !service) {
       setPick(f);
       setError(null);
     }
@@ -774,8 +788,8 @@ function AddKey({
         void save();
       }}
       onKeyDown={(e) => {
-        // Closes the form, and keeps the Vault open (the app's Esc would close it).
-        if (e.key === "Escape") {
+        // Closes the form, and keeps the Vault open (the app's Esc would close it). A key card stays.
+        if (e.key === "Escape" && !service) {
           e.preventDefault();
           e.stopPropagation();
           onCancel();
@@ -787,7 +801,7 @@ function AddKey({
         <span className="text-[13px] leading-[18px]">
           New value for <span className="font-mono text-[12.5px] font-medium">{replace.name}</span>
         </span>
-      ) : (
+      ) : service ? null : (
         <div className="flex flex-wrap items-center gap-2">
           <span className="relative flex">
             <select
@@ -833,7 +847,8 @@ function AddKey({
         aria-label="Key"
         autoComplete="off"
         spellCheck={false}
-        autoFocus
+        // On a key card the chat's message box keeps the focus: the card comes while someone may be typing there.
+        autoFocus={!service}
         className={`${field} w-full font-mono text-[12.5px]`}
       />
       {looksLike && (
@@ -855,7 +870,7 @@ function AddKey({
           {busy ? "Saving…" : "Save"}
         </button>
         <button type="button" disabled={busy} onClick={onCancel} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-          Cancel
+          {cancelLabel}
         </button>
         {error && (
           <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
@@ -864,6 +879,157 @@ function AddKey({
         )}
       </div>
     </form>
+  );
+}
+
+/* ---------------- A key card in the chat ---------------- */
+
+/**
+ * A bot asking for a key it needs (AppApproval kind "key", lib/server/keys.ts askForKey), as its card in the chat: the
+ * Logins form itself (AddKey, the service the bot named and that bot picked; the same save to the vault, or a shared
+ * workspace's own), or that key's own Logins row (KeyLine: Show, Copy, Replace, Remove, its bots) when it's there already
+ * or the bot was asked to bring the card back. A save, a remove or Done answers it (`onAnswer` once), and the bot goes on:
+ * the server reads the vault again and leaves one quiet line in the chat, never the key. Not now answers no. Whoever can't
+ * add keys here (a Member without Keys, or anyone who can't answer it: `answerer`) reads it, with one line saying who can.
+ * The value lives only in the form's field until Orgo has it.
+ */
+export function KeyAskCard({
+  state,
+  approval: a,
+  answerer,
+  busy,
+  onAnswer,
+  className = "",
+  children,
+}: {
+  state: AppState;
+  approval: AppApproval;
+  /** "you", or the line saying who answers it (lib/shared.ts askAnswerer). */
+  answerer: string;
+  busy: boolean;
+  onAnswer: (reply: "once" | "reject") => void;
+  className?: string;
+  /** The answer's own lines from a shared workspace (on its way, or why it didn't go). */
+  children?: React.ReactNode;
+}) {
+  const { info, failed, retry } = useKeys(state.workspace ?? MAIN_WORKSPACE);
+  const [replacing, setReplacing] = useState<string | null>(null);
+  // A write of its key row on its way (a bot's switch, a remove): Done waits for it, so the bot goes on with what was set.
+  const [rowBusy, setRowBusy] = useState(false);
+  const name = a.resources[0] ?? "";
+  const b = state.bots.find((x) => x.id === a.botId);
+  // Saved in a shared workspace: the bot's switch is an act the owner's Bops does (shared-keys.ts sharedSave), so the card
+  // answers once it landed, never before, as the bot would go on without it: the bot has the key and no switch of it is
+  // still on its way (the window shows one on its way as done already: lib/server/shared-core.ts switchedKeys). Meanwhile
+  // it says so, and Go on without it answers anyway (the switch not gone, or the owner's Bops shut).
+  const [waitTick, setWaitTick] = useState(false);
+  const sends = state.shared?.keySends?.filter((x) => x.name === name && x.botId === a.botId) ?? [];
+  const ticked = !!b?.keys?.includes(name) && !sends.some((x) => x.state !== "failed");
+  const answered = useRef(false);
+  useEffect(() => {
+    if (!waitTick || !ticked || answered.current) return;
+    answered.current = true;
+    onAnswer("once");
+  }, [waitTick, ticked, onAnswer]);
+  const [note, setNote] = useState<string | null>(null);
+  const saved = (_: string, said?: string) => {
+    if (!state.shared || !b || ticked) return onAnswer("once");
+    setNote(said ?? null);
+    setWaitTick(true);
+  };
+  const sendFailed = sends.at(-1)?.state === "failed" ? sends.at(-1) : undefined;
+  const botName = b?.name ?? "The bot";
+  const shared = !!state.shared;
+  const p = info?.providers.find((x) => x.name === name);
+  const rows = info?.keys.filter((k) => k.name === name) ?? [];
+  const team = teamOf(state);
+  // Where it's saved: as Logins' Add a key would, This workspace where it has keys of its own (a shared workspace: always).
+  const scope: Scope = info?.workspaceKeys && (shared || info.keys.some((k) => k.scope === "workspace")) ? "workspace" : "all";
+  const mine = answerer === "you" && (!shared || !!info?.shared?.keys);
+  const line = "text-[12.5px] leading-[18px] text-[#6B6B6B]";
+  let body: React.ReactNode;
+  if (answerer !== "you") body = <span data-who-answers className={line}>{answerer}</span>;
+  else if (!info)
+    body = failed ? (
+      <span role="alert" className={`flex flex-wrap items-center gap-x-3 gap-y-1 ${line}`}>
+        {failed}
+        <button type="button" onClick={retry} className="font-medium text-ink underline-offset-2 hover:underline">
+          Try again
+        </button>
+      </span>
+    ) : (
+      <span className={line}>Checking</span>
+    );
+  else if (!info.signedIn) body = <span className={line}>{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
+  else if (!p) body = <span className={line}>Bops can&apos;t call that service yet.</span>;
+  else if (!mine) body = <span data-who-answers className={line}>{NO_KEYS_LINE}</span>;
+  else if (waitTick)
+    body = (
+      <div className="flex flex-col gap-2">
+        <span data-key-waits className={line}>
+          Saved. {botName} can use it once the workspace&apos;s Bops lets it. {sends.some((x) => x.state === "waiting") ? REPLY_WAITS_LINE : ""}
+        </span>
+        {(note ?? sendFailed?.error) && (
+          <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+            {undash(note ?? sendFailed!.error!)}
+          </span>
+        )}
+        <button type="button" disabled={busy} onClick={() => onAnswer("once")} className={`${btn} self-start bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          Go on without it
+        </button>
+      </div>
+    );
+  else if (rows.length)
+    body = (
+      <div className="flex flex-col">
+        {rows.map((k) => (
+          <Fragment key={keyId(k)}>
+            <KeyLine
+              k={k}
+              state={state}
+              team={team}
+              used={null}
+              onReplace={() => setReplacing(keyId(k))}
+              anchorRef={() => {}}
+              switchesOff={shared && !info.shared?.acts}
+              onRemoved={() => onAnswer("once")}
+              onBusy={setRowBusy}
+            />
+            {replacing === keyId(k) && <AddKey info={info} team={team} replace={k} scope={k.scope} shared={shared} bots={[]} first={false} onSaved={() => onAnswer("once")} onCancel={() => setReplacing(null)} />}
+          </Fragment>
+        ))}
+        {!replacing && (
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button type="button" disabled={busy || rowBusy} onClick={() => onAnswer("once")} className={`${btn} bg-ink text-white`}>
+              Done
+            </button>
+            <button type="button" disabled={busy} onClick={() => onAnswer("reject")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+              Not now
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  else
+    body = <AddKey info={info} team={team} scope={scope} shared={shared} bots={b ? [b.id] : []} first service={name} cancelLabel="Not now" onSaved={saved} onCancel={() => onAnswer("reject")} />;
+  return (
+    <div data-key-card={name} className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${className}`}>
+      <div className="flex items-start gap-2.5">
+        {b && <Mascot botId={b.id} color={b.color} size={26} />}
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="text-[13.5px] font-semibold leading-[18px] [overflow-wrap:anywhere]">{askHeadline(botName, { action: a.action, reason: a.reason && undash(a.reason) })}</span>
+          {/* Bops' own words for what it is, never the bot's: which service, where it's kept, that the bot never sees it. */}
+          {p && (
+            <span data-ask-facts className="text-[12px] leading-4 text-[#6B6B6B]">
+              {p.label} key · kept in {shared ? "the owner's" : "your"} Orgo vault, {botName} never sees it
+            </span>
+          )}
+          {a.askedFor && <span data-asked-for className="truncate text-[12px] leading-4 text-[#6B6B6B]">{a.askedFor} asked for it</span>}
+        </div>
+      </div>
+      {body}
+      {children}
+    </div>
   );
 }
 

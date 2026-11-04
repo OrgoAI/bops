@@ -35,6 +35,10 @@ const ALLOWED = [
   // The bot's browser (bot-browser.tsx): asked of Bops Cloud for the shared workspace's bot (lib/server/browser-view.ts
   // names its project), never the user's own bot of that id; Bops Cloud lets through only an Admin, or Write with Use its computer.
   /^\/api\/browser(\?|$)/,
+  // Keys (keys.tsx: Logins and a bot's key card in the chat): while a shared workspace is open, every keys route acts on
+  // that workspace's own keys alone (lib/server/shared-keys.ts: orgo-web with the user's own Orgo key, which checks they
+  // have Keys there; a bot's switch is an act through Bops Cloud), never the user's own vault or bots.
+  /^\/api\/keys(\/|\?|$)/,
 ];
 
 /** The reads that don't go while it's open: answered from the user's own bot or workspace of that id, never the shared one's. */
