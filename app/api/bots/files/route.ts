@@ -1,7 +1,7 @@
 import { refused } from "@/lib/api-guard";
-import { addFile, AddFileError } from "@/lib/server/bot-files";
+import { addFile, addFileTo, AddFileError } from "@/lib/server/bot-files";
 import { notReady } from "@/lib/server/ready";
-import { sharedOpen } from "@/lib/server/shared";
+import { sharedFilesTo, sharedOpen } from "@/lib/server/shared";
 import { bot } from "@/lib/server/store";
 
 export const dynamic = "force-dynamic";
@@ -13,20 +13,23 @@ export const dynamic = "force-dynamic";
  * { file } for the message it goes with.
  *
  * proxy.ts leaves this path to its route, which streams the body instead of Next copying it for the proxy (which
- * keeps 10 MB at most), so the same guard (lib/api-guard.ts) runs here first. Never in a shared workspace: its
- * bots and their computers are the owner's.
+ * keeps 10 MB at most), so the same guard (lib/api-guard.ts) runs here first. In a shared workspace, an Admin's go on
+ * the computer the owner's bot works on, with their own Orgo key (lib/server/shared.ts sharedFilesTo), never one of
+ * their own bots' of that id; anyone else's are refused.
  */
 export async function POST(request: Request) {
   const unready = refused(request) ?? notReady();
   if (unready) return unready;
-  if (sharedOpen()) return Response.json({ error: "Files can't be added in a shared workspace yet." }, { status: 403 });
   const q = new URL(request.url).searchParams;
-  const b = bot(q.get("botId") ?? "");
-  if (!b) return Response.json({ error: "no such bot" }, { status: 404 });
+  const botId = q.get("botId") ?? "";
+  const shared = sharedOpen();
+  const b = shared ? undefined : bot(botId);
+  if (!shared && !b) return Response.json({ error: "no such bot" }, { status: 404 });
   const size = Number(request.headers.get("content-length") ?? NaN);
   if (!request.body) return Response.json({ error: "That file is empty." }, { status: 400 });
   try {
-    return Response.json({ file: await addFile(b, q.get("name") ?? "", size, request.body, { screen: q.get("to") === "screen" }) });
+    const name = q.get("name") ?? "";
+    return Response.json({ file: b ? await addFile(b, name, size, request.body, { screen: q.get("to") === "screen" }) : await addFileTo(sharedFilesTo(botId), botId, name, size, request.body) });
   } catch (e) {
     const status = e instanceof AddFileError ? e.status : 500;
     return Response.json({ error: e instanceof AddFileError ? e.message : "The file couldn't be added. Try again." }, { status });

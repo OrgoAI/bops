@@ -189,6 +189,8 @@ const MESSAGE: Spec = {
   email: { dir: true, from: true, to: true, cc: true, subject: true, files: [{ name: true, size: true }], bulk: true },
   emailed: true,
   images: [{ id: true, type: true, w: true, h: true }],
+  // Files added with it, on a bot's computer (Message.files): what they are and whose computer, as the chat shows them.
+  files: [{ name: true, size: true, hostName: true }],
   picture: { prompt: true },
   // `questionId`: where that exchange is in the two bots' own conversation (pairChatsOf), which "Asked ● Sam" opens at.
   asked: [{ botId: true, question: true, answer: true, questionId: true }],

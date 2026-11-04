@@ -65,6 +65,7 @@ import {
   WS_NOT_SHAREABLE,
   WS_ROLES,
   isAppAct,
+  memberFiles,
   type MemberAct,
   type MemberAppAct,
   type MemberActAnswer,
@@ -520,9 +521,11 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
   const x = a as Record<string, unknown>;
   switch (x.act) {
     case "chat": {
-      const text = words(x.text, MEMBER_MAX_TEXT);
-      if (!anId(x.chatId) || !text || (x.replyTo !== undefined && x.replyTo !== null && !anId(x.replyTo))) return null;
-      return { key, act: { act: "chat", chatId: x.chatId, text, ...(anId(x.replyTo) ? { replyTo: x.replyTo } : {}) } };
+      // Files added for its bots (protocol.ts memberFiles): with them, the words may be empty, as in the owner's own box.
+      const files = x.files === undefined || x.files === null ? [] : memberFiles(x.files);
+      const text = files?.length && (x.text === "" || (typeof x.text === "string" && !x.text.trim())) ? "" : words(x.text, MEMBER_MAX_TEXT);
+      if (!anId(x.chatId) || !files || text === null || (x.replyTo !== undefined && x.replyTo !== null && !anId(x.replyTo))) return null;
+      return { key, act: { act: "chat", chatId: x.chatId, text, ...(anId(x.replyTo) ? { replyTo: x.replyTo } : {}), ...(files.length ? { files } : {}) } };
     }
     case "reply": {
       const text = words(x.text, MEMBER_MAX_TEXT);
@@ -677,6 +680,8 @@ function computerAct(blob: Record<string, unknown>, slice: ReturnType<typeof sli
   // Where a thread runs: on the bot's computer.
   if (act.act === "where") return act.to === "cloud";
   if (act.act === "compact") return "sessionId" in act && onComputer(act.sessionId);
+  // Files with a message: on the bots' computers already, for the bot to open there.
+  if (act.act === "chat") return !!act.files?.length;
   if (act.act === "answer") {
     const a = slice.approvals?.find((x) => x.id === act.askId);
     if (!a) return false;
@@ -932,6 +937,8 @@ const actIn: Route = {
       const inChat = body.act.act === "chat" || (body.act.act === "compact" && "chatId" in body.act);
       const may = inChat ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
       if (!may) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
+      // A message's files: each for a bot of that chat.
+      if (body.act.act === "chat" && body.act.files?.some((f) => !bots.includes(f.botId))) throw new HttpError(400, "A file is for a bot of this chat.");
       // The owner's app work: Your Apps at Write too (the owner's Mac would drop it otherwise).
       if (appWorkRefused(blob, viewer, access, threadsOfAct(slice, body.act))) throw new HttpError(403, APP_WORK, { code: MEMBER_APPS_READ_ONLY });
     }
@@ -1127,6 +1134,7 @@ async function cloudChat(
     id: `msg_m_${user.id}_${key}`,
     text: act.text,
     ...(act.replyTo ? { replyTo: act.replyTo } : {}),
+    ...(act.files?.length ? { files: act.files } : {}),
     // orgo-web's word on Use its computer goes with the turn: its claim, beats and resume go by it (turns.ts memberStill).
     member: {
       ...who,

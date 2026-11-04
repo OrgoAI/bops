@@ -571,7 +571,10 @@ export function ChatView({
   // Images and files about to go with the next message (the + button, pasting, or dropping them on the chat). A file
   // goes where the chat's bot works: in a group, the main bot's (else its first bot's) computer.
   const fileBot = solo ?? members.find((m) => m.isMain) ?? members[0];
-  const attach = useAttachments(() => (state.shared ? undefined : fileBot?.id));
+  // In a shared workspace, an Admin's go on the computer that bot works on (lib/server/shared.ts sharedFilesTo), pictures
+  // too, as files: the owner's bots never see this Mac's pictures. Nobody else's there.
+  const takesFiles = !state.shared || (state.shared.role === "admin" && !!fileBot && canAct(state, c.botIds) && !!state.shared.screens?.includes(fileBot.id));
+  const attach = useAttachments(() => (takesFiles ? fileBot?.id : undefined), () => !!state.shared);
   // What the Preview tab's Select and Draw put in the box (composer-bridge.tsx), never sent by themselves: its
   // pictures' keys in the tray and its lines in the draft (each with where it is in the page's code, never shown), so
   // the message that goes with any of them still there is tagged appNote, and carries those lines' code for the bot.
@@ -616,21 +619,34 @@ export function ChatView({
   const send = async () => {
     const text = draft.trim();
     if (!text && !attaching.length) return;
+    const items = attaching;
     // In a shared workspace (the viewer has Write on every bot here): their words go to the owner's Bops through
-    // Bops Cloud (shared-act.ts), shown as theirs at once. Pictures stay on this Mac (view-only.ts uploads).
+    // Bops Cloud (shared-act.ts), shown as theirs at once, with an Admin's files once they're on the bot's computer.
     if (state.shared) {
-      if (attaching.length || !text) return setMicError("Pictures can't be sent in a shared workspace.");
       setDraft("");
       setReplying(null);
-      const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now() };
+      attach.release(tray.map((a) => a.key));
+      const filed = items.map((a) => ({ name: a.name, size: a.size }));
+      const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), files: filed.length ? filed : undefined };
       setPending((p) => [...p, mine]);
       setSent((x) => [...x.slice(-19), { chatId: c.id, text, at: mine.at }]);
-      const r = await memberAct({ act: "chat", chatId: c.id, text, ...(replying ? { replyTo: replying.id } : {}) });
-      setPending((p) => p.filter((x) => x.id !== mine.id));
-      if (!r.ok && r.error) setMicError(r.error);
+      const chatId = c.id;
+      const replyTo = replying?.id;
+      const go = async () => {
+        const got = await Promise.all(items.map((a) => a.done));
+        const files = got.flatMap((x) => (x && "file" in x ? [x.file] : []));
+        const failed = got.flatMap((x) => (x && "failed" in x ? [x.failed] : []));
+        if (failed.length) setMicError(failed.length === 1 ? `${failed[0].name} didn't go: ${failed[0].error}` : `${failed.length} of them didn't go: ${failed[0].error}`);
+        if (!text && !files.length) return;
+        const r = await memberAct({ act: "chat", chatId, text, ...(replyTo ? { replyTo } : {}), ...(files.length ? { files } : {}) });
+        if (!r.ok && r.error) setMicError(r.error);
+      };
+      const before = sending.current.get(chatId) ?? Promise.resolve();
+      const mineGoes = before.catch(() => {}).then(go).finally(() => setPending((p) => p.filter((x) => x.id !== mine.id)));
+      sending.current.set(chatId, mineGoes);
+      await mineGoes.finally(() => sending.current.get(chatId) === mineGoes && sending.current.delete(chatId));
       return;
     }
-    const items = attaching;
     // Anything Select or Draw put here, still in it: the message is about the app (and Select's lines still in it
     // take their code along, lib/app-preview.ts picksOf).
     const picks = [...fromApp.current.lines].filter(([l]) => text.includes(l)).flatMap(([line, codes]) => codes.map((code) => ({ line, code })));
@@ -741,8 +757,8 @@ export function ChatView({
     <main
       className="relative flex min-h-0 min-w-0 flex-1 flex-col border-r border-[#ECECEA] bg-white"
       onDragOver={(e) => {
-        // Nothing's sent in a shared workspace, so it takes no images (the window refuses them: bops-app.tsx).
-        if (state.shared || ![...e.dataTransfer.types].includes("Files")) return;
+        // A shared workspace takes them from an Admin alone (takesFiles); otherwise the window refuses them (bops-app.tsx).
+        if (!takesFiles || ![...e.dataTransfer.types].includes("Files")) return;
         e.preventDefault();
         if (!dropping) setDropping(true);
       }}
@@ -750,7 +766,7 @@ export function ChatView({
       onDrop={(e) => {
         e.preventDefault();
         setDropping(false);
-        if (state.shared) return;
+        if (!takesFiles) return;
         const files = filesOf(e.dataTransfer);
         if (files.length) {
           attach.add(files);
@@ -1060,12 +1076,12 @@ export function ChatView({
               e.preventDefault();
               void send();
             }}
-            className={`flex flex-col rounded-[22px] bg-white py-2 ${state.shared ? "pl-4" : "pl-2"} pr-2 shadow-[0_0_0_1px_#E2E2DF]`}
+            className={`flex flex-col rounded-[22px] bg-white py-2 ${takesFiles ? "pl-2" : "pl-4"} pr-2 shadow-[0_0_0_1px_#E2E2DF]`}
           >
             <AttachmentTray items={tray} onRemove={attach.remove} />
             <div className="flex items-end gap-2">
-            {/* No pictures in a shared workspace: they'd stay on this Mac (view-only.ts uploads). */}
-            {!state.shared && (
+            {/* In a shared workspace, an Admin's alone: they go on the bot's computer (takesFiles). */}
+            {takesFiles && (
             <button
               type="button"
               onClick={() => filePicker.current?.click()}
@@ -1095,7 +1111,7 @@ export function ChatView({
               onChange={setDraft}
               onPaste={(e) => {
                 const files = filesOf(e.clipboardData);
-                if (!files.length || state.shared) return;
+                if (!files.length || !takesFiles) return;
                 e.preventDefault();
                 attach.add(files);
               }}
