@@ -567,7 +567,7 @@ export function AppPicker({ state, start, replaces, onClose }: { state: AppState
                 <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-[#9A9A98]">{error ? `Couldn't load the apps: ${error}` : <><Spinner size={14} /> Loading apps…</>}</div>
               ) : !q.trim() ? (
                 <>
-                  <div className="px-2 pb-1.5 pt-1 text-[11.5px] font-medium uppercase tracking-[0.05em] text-[#9A9A98]">Popular for business</div>
+                  <div className="px-2 pb-1.5 pt-1 text-[12px] font-semibold text-[#9A9A98]">Popular for business</div>
                   <div className="grid grid-cols-3 gap-0.5">
                     {featured.map((a, i) => (
                       <button key={a.app} onMouseEnter={() => setCursor(i)} onClick={() => setChosen(a.app)} className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-left ${cursor === i ? "bg-[#F4F4F2]" : ""}`}>

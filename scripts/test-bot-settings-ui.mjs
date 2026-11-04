@@ -276,6 +276,14 @@ await test("the panel's Open full settings button: top left, every tab, only wit
   await m.done();
 });
 
+await test("the panel's tabs: Details, Skills, Routines, Memory; no Coming soon phone in place of the real Phone and voice", async () => {
+  const m = await mount(h(Panel.BotPanel, { state: baseState(), bot: JUNO, section: "details", onSection: noop, ...links(), onClose: noop, onExpand: calls() }));
+  const tabs = [...m.box.querySelectorAll("section button")].map((b) => b.textContent.trim()).filter((t) => /^(details|skills|routines|memory|phone)/i.test(t));
+  assert.deepEqual(tabs, ["details", "skills", "routines", "memory"]);
+  assert.ok(!/not a simulator|its own physical phone/i.test(m.box.textContent), "no placeholder phone");
+  await m.done();
+});
+
 await test("the panel's rows: AI, Team, Sequences after the contact card and before the computer, each opening the page there", async () => {
   const expand = calls();
   const st = baseState();
