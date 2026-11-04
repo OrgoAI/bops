@@ -182,12 +182,18 @@ test("an Admin's invite entry, and what they can't change: the owner, an Admin, 
   assert.equal("new.member@example.com" in (await kept()), false);
 });
 
-test("an Admin says where chat is answered (kept as an Admin's choice); waking a computer billed by the hour stays the owner's", async () => {
+test("an Admin says where chat is answered (kept as an Admin's choice), and whether a message may wake a computer billed by the hour", async () => {
   const r = await call(admin, "PATCH", "routing", { mode: "mac" });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   const row = (await query<{ mode: string; set_by: string }>("SELECT mode, set_by FROM bops.chat_routing WHERE user_id = $1 AND ws_id = 'ws_studio'", [owner])).rows[0];
   assert.deepEqual(row, { mode: "mac", set_by: "admin" });
-  assert.deepEqual([(await call(admin, "PATCH", "routing", { allowHourly: true })).status, (await call(admin, "PATCH", "routing", { mode: "mac", allowHourly: true })).json.code], [403, "owner_only_always"]);
+  // Waking a computer billed by the hour: an Admin's to say too (an Admin may do everything but delete the workspace).
+  assert.equal((await call(admin, "PATCH", "routing", { allowHourly: true })).status, 200);
+  const hourly = (await query<{ mode: string; allow_hourly: boolean }>("SELECT mode, allow_hourly FROM bops.chat_routing WHERE user_id = $1 AND ws_id = 'ws_studio'", [owner])).rows[0];
+  assert.deepEqual(hourly, { mode: "mac", allow_hourly: true }, "the mode as it was");
+  assert.equal((await call(admin, "PATCH", "routing", { mode: "mac", allowHourly: false })).status, 200);
+  assert.equal((await call(admin, "PATCH", "routing", { allowHourly: "yes" })).status, 400);
+  assert.equal((await call(admin, "PATCH", "routing", {})).status, 400);
   assert.equal((await call(member, "PATCH", "routing", { mode: "auto" })).json.code, "admin_only");
   assert.equal((await call(admin, "PATCH", "routing", { mode: "moon" })).status, 400);
 });
