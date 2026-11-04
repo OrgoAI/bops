@@ -452,6 +452,14 @@ await check("web_fetch reads a page, marked as information, and refuses private 
   assert.deepEqual(t.first.include, ["web_search_call.action.sources"], "search results come back with their addresses");
 });
 
+await check("a page read with a token in its address is said in the chat without the token", async () => {
+  // A made-up token, as a file host's temporary download link carries one.
+  const withToken = `${site}/article?token=MADEUPtoken0000000000000002&raw=true`;
+  await turnWith(`what does this say? ${withToken}`, [toolCall("web_fetch", { url: withToken })], "It costs $19.99.");
+  assert.equal(last().text, `Read ${site}/article?token=•••&raw=true`);
+  assert.ok(!JSON.stringify(messages().filter((m) => m.role === "system")).includes("MADEUPtoken0000000000000002"), "in none of Bops' own rows (what the person typed is theirs)");
+});
+
 /** web_fetch's refusal of an address that isn't written down, on the user's own turn. */
 const NOT_READ = /^Not read: Bops opens only web addresses written down in Alex's messages, or what your tools found this turn \(search results, a page you read and its links, an email you got, or what an app, an API or a data lookup answered\)\. Use the exact address from there, or ask Alex for it\.$/;
 const htmlPage = (title, text) => `<!doctype html><html><head><title>${title}</title></head><body><main><p>${text}</p></main></body></html>`;

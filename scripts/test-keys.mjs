@@ -659,7 +659,7 @@ await check("a GET that went out and failed leaves a red note no one approved: t
   await turnWith("who's cus_gone?", [toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "GET", path: "/v1/customers/cus_gone", query: null, body: null })], "Couldn't find them.");
   const note = messages().findLast((m) => m.appResult);
   assert.equal(note.text, "Boppy couldn't call it: Stripe answered 404");
-  assert.deepEqual([note.appResult.action, note.appResult.ok, note.appResult.unasked], ["Stripe GET /v1/customers/cus_gone", false, true]);
+  assert.deepEqual([note.appResult.action, note.appResult.ok, note.appResult.unasked, note.appResult.read], ["Stripe GET /v1/customers/cus_gone", false, true, true], "a read, said as one");
   // The next turn: what the bot is told of that note, and of the refund Alex approved before.
   answers.push(reply("Ok."));
   const n = asked.length;

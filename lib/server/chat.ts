@@ -1,5 +1,6 @@
 import "server-only";
 import { appsOpen } from "@/lib/apps-access";
+import { shownAddress } from "@/lib/plain-words";
 import { accessOf, adminAccess, appsLevelOf, levelOf, permits, type AccessLevel, type MemberAccess } from "@/lib/member-access";
 import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
@@ -2579,7 +2580,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         // Every page read is said in the chat, so what the bot sent out is plain to see. A routine's own page
         // (the one its job names, as asked or where it led) is read every run, as the user set it up: not said each time.
         const own = bg && [String(a.url ?? ""), got.url ?? ""].some((x) => jobKeys.has(addressKey(x) ?? ""));
-        if (got.url && !own) notes.push(`Read ${got.url}`);
+        // Said as the address reads to a person: never a token or password it carries (shownAddress).
+        if (got.url && !own) notes.push(`Read ${shownAddress(got.url)}`);
         if (got.url) bring(got.text);
         if (got.url) readFrom.add(`A web page on ${hostOf(got.url)}`);
         return got.text;
@@ -2710,7 +2712,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             }
             // A GET that went out and didn't work: a red note, like a write's. No one was asked (unasked): never
             // read as the user's approval.
-            if (r.failed) addMessage({ chatId, role: "system", text: `${b.name} couldn't call it: ${r.failed.why.slice(0, 160)}`, appResult: { action: r.failed.did.replace(/^Called /, ""), ok: false, output: r.text, unasked: true } });
+            // `read`: it was a read (one that never asks), which the chat says with the bot's other reads.
+            if (r.failed) addMessage({ chatId, role: "system", text: `${b.name} couldn't call it: ${r.failed.why.slice(0, 160)}`, appResult: { action: r.failed.did.replace(/^Called /, ""), ok: false, output: r.text, unasked: true, ...(r.failed.read ? { read: true as const } : {}) } });
             if (r.did) {
               called.push(r.did);
               notes.push(r.did);

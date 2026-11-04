@@ -482,7 +482,8 @@ export function plainReason(v: unknown): string | undefined {
  * the web rule). `failed`: the call went out but didn't work (Orgo didn't send it, or the service said no with
  * a 4xx or 5xx), with what was called and why, for a red note in the chat.
  */
-export type CallApiDone = { text: string; did?: string; brought?: string; failed?: { did: string; why: string } };
+/** `failed.read`: the call was a read (one that never asks: a GET the service's reads cover), so a failed one is a read that didn't work. */
+export type CallApiDone = { text: string; did?: string; brought?: string; failed?: { did: string; why: string; read?: true } };
 
 /** The most of a write's query and body the approval card shows. A longer one is refused: the user approves all of what's sent, or none. */
 const SHOW_CAP = 4000;
@@ -549,11 +550,11 @@ export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, op
       const r = await callKey({ name, method, path, query: q.v as Record<string, unknown> | null, body: body.v, workspaceId: keyProjectFor(all, workspaceOf(b), name) });
       used(action, r.status >= 400 ? "failed" : "ok", approvedBy);
       // Orgo sent it, but the service said no (a refund already made, a page not found): not done.
-      if (r.status >= 400) return { text: answerForBot(p.label, r), brought: answerTextOf(r), failed: { did, why: `${p.label} answered ${r.status}` } };
+      if (r.status >= 400) return { text: answerForBot(p.label, r), brought: answerTextOf(r), failed: { did, why: `${p.label} answered ${r.status}`, ...(asks ? {} : { read: true as const }) } };
       return { text: answerForBot(p.label, r), did, brought: answerTextOf(r) };
     } catch (e) {
       used(action, "failed", approvedBy);
-      return { text: `Failed: ${(e as Error).message}`, failed: { did, why: (e as Error).message } };
+      return { text: `Failed: ${(e as Error).message}`, failed: { did, why: (e as Error).message, ...(asks ? {} : { read: true as const }) } };
     }
   };
   if (!asks) return run();
