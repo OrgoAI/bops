@@ -601,6 +601,8 @@ await check("a POST asks the user, every time, even on Just do it: the chat turn
   // A task's step says who: "Declined by Ada", or "Declined by you" for the owner's own no.
   assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1, member: { userId: "user_ada", name: "Ada" } } }), "Declined by Ada: Ada said no. Don't do it, and don't do it another way.");
   assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1 } }), "Declined by you: Alex said no. Don't do it, and don't do it another way.");
+  // A name is said as it is, whatever it holds ($& and the like mean nothing in it).
+  assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1, member: { userId: "user_x", name: "Ada $&" } } }), "Declined by Ada $&: Ada $& said no. Don't do it, and don't do it another way.");
   assert.equal(brokerCalls().length, k);
   S.update(() => (S.bot("boppy").autoApprove = undefined));
 });

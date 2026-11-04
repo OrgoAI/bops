@@ -132,7 +132,11 @@ export function declined(a: Pick<AppApproval, "reply">): string {
 export const answeredBy = (a: Pick<AppApproval, "reply">) => a.reply?.member?.name?.trim() || ownerName();
 
 /** A task's step for a no: "Declined by <name>:" for a member's or an Admin's, "Declined by you:" for the owner's. */
-export const declinedStep = (a: Pick<AppApproval, "reply">) => declined(a).replace(/^Declined:/, a.reply?.member ? `Declined by ${answeredBy(a)}:` : "Declined by you:");
+export const declinedStep = (a: Pick<AppApproval, "reply">) => {
+  const by = a.reply?.member ? `Declined by ${answeredBy(a)}:` : "Declined by you:";
+  // A callback, so the name is put in as it is ("$&" in a name is no pattern).
+  return declined(a).replace(/^Declined:/, () => by);
+};
 
 const mine = (a: AppApproval, me = stateDevice()) => (a.askedBy ?? null) === (me ?? null);
 
