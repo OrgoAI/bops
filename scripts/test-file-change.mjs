@@ -329,6 +329,69 @@ await check("a task has change_files too, and each change it makes is one card s
   assert.equal(gh.calls.length, n, "nothing sent");
 });
 
+await check("a task pauses at its change on one card; Allow once resumes it and saves exactly that change; Stop first and nothing is written", async () => {
+  const CT = await import(`${root}/lib/server/computer-task.ts`);
+  let n = 0;
+  const task = (signal = new AbortController().signal) => {
+    const id = `ses_task_${++n}`;
+    S.update((s) => s.sessions.push({ id, botId: "boppy", chatId, title: "Site change", goal: "Change the site", status: "queued", replies: [], createdAt: Date.now() }));
+    return { sessionId: id, computerId: "fake", display: 100, model: "gpt-test", effort: "low", instructions: "test", apps: false, signal, timeoutMs: 5000, idleMs: 5000, step: () => {} };
+  };
+  const pause = async (t) => {
+    answers.push(calling(toolCall("change_files", change())));
+    const e = await CT.computerTurn(t).then(() => null, (x) => x);
+    assert.ok(e instanceof P.Paused, `paused at the card (${e})`);
+    return S.getState().appApprovals.find((a) => a.id === e.askId);
+  };
+  // Allow once: the same change, written.
+  freshRepo();
+  const t1 = task();
+  const a1 = await pause(t1);
+  assert.equal(a1.threadId, t1.sessionId);
+  assert.deepEqual(writes(), []);
+  answers.push(reply("Saved the draft."));
+  await CT.computerTurn({ ...t1, resume: { ...a1, reply: { reply: "once", at: Date.now() } } });
+  assert.ok(writes().some((c) => c.path.includes("/git/refs")), "the branch made");
+  // Stop before the yes is acted on: nothing written.
+  freshRepo();
+  const t2 = task();
+  const a2 = await pause(t2);
+  const stop = new AbortController();
+  answers.push(reply("Saved."));
+  const resumed = CT.computerTurn({ ...t2, signal: stop.signal, resume: { ...a2, reply: { reply: "once", at: Date.now() } } });
+  stop.abort();
+  await resumed.then(() => {}, () => {});
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(writes(), [], "a stopped task writes nothing");
+  answers.length = 0;
+});
+
+await check("a task's write card: Bops' facts lead and the bot's words are labelled below; Always allow is refused on it, and one given on another card answers neither it nor another person's card", async () => {
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  freshRepo();
+  const asked = async (where, opts) => changeFiles("boppy", change(), where, opts).then(() => null, (x) => x);
+  const fromTask = await asked({ sessionId: "ses_card" }, { task: true });
+  assert.equal(fromTask.ask.reason, undefined, "no headline in the bot's words");
+  assert.match(fromTask.ask.preview, /\n\nIn the bot's words: Make the buttons the logo's orange, as a draft$/);
+  const resume = { engine: "responses", responseId: "resp_c", callId: "call_c", call: { name: "change_files", arguments: "{}" } };
+  const taskCard = P.askFor(fromTask.ask, { botId: "boppy", threadId: "ses_card" }, resume);
+  const chatAsk = (await asked({ chatId }, { chat: true })).ask;
+  const chatCard = P.askFor(chatAsk, { botId: "boppy", chatId }, { engine: "chat" });
+  const deeCard = P.askFor((await asked({ chatId, member: "Dee" }, { chat: true })).ask, { botId: "boppy", chatId }, { engine: "chat" });
+  try {
+    assert.equal(P.replyToAsk(taskCard.id, "always"), "A task's change is allowed once at a time: Allow once or Deny.");
+    assert.equal(P.replyToAsk(chatCard.id, "always"), undefined);
+    const now = (a) => S.getState().appApprovals.find((x) => x.id === a.id);
+    assert.equal(now(taskCard).reply, undefined, "the task's card still waits for its own answer");
+    assert.equal(now(deeCard).reply, undefined, "another person's card isn't answered by this Always allow");
+  } finally {
+    S.update((s) => {
+      delete s.bots.find((b) => b.id === "boppy").permissions;
+      s.appApprovals = (s.appApprovals ?? []).filter((a) => ![taskCard.id, chatCard.id, deeCard.id].includes(a.id));
+    });
+  }
+});
+
 /* ---------------- The card's diff ---------------- */
 
 await check("the card's diff: only the lines that change, each part where it is, so two edits far apart count as two lines each", async () => {

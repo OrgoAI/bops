@@ -355,9 +355,10 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
   if (!shown.length) return { text: `Nothing to change: ${n === 1 ? "the file already says" : "the files already say"} that on ${s.head ? branch : s.base}.` };
   // The repository and the branch first, so the words alone say where it goes (an older app or Bops Cloud shows no more of the card).
   const head = [`${repo}, branch ${branch}`, ...(s.head ? [] : [`New branch ${branch}, from ${s.base}.`])].join("\n");
-  const preview = [head, ...diffs].join("\n\n");
-  if (Buffer.byteLength(preview, "utf8") > PREVIEW_CAP) return { text: TOO_BIG };
   const reason = plainReason(a.reason);
+  // A task's card leads with Bops' own facts, never the bot's words (a page it read may have written them): those go last, labelled.
+  const preview = [head, ...diffs, ...(opts.task && reason ? [`In the bot's words: ${reason}`] : [])].join("\n\n");
+  if (Buffer.byteLength(preview, "utf8") > PREVIEW_CAP) return { text: TOO_BIG };
   const asker = forMember(where);
   const ask: AskSpec = {
     action: `Call ${p.label}`,
@@ -366,7 +367,7 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
     kind: "api",
     api: { key: name, label: p.label, method: "POST", path: `/repos/${repo}/git/commits`, change: { repo, branch, ...(s.head ? {} : { base: s.base! }), at: s.from, files: shown } },
     ...(asker ? { askedFor: asker } : {}),
-    ...(reason ? { reason } : {}),
+    ...(reason && !opts.task ? { reason } : {}),
   };
   // As call_api's writes: an Always allow for the service goes without asking (the owner's own turn only), never in a
   // task, whose browser reads pages anyone could have written: there every change is a card someone answers.

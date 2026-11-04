@@ -666,7 +666,7 @@ assert.match(asked.at(-1).instructions, /Anything that sends, changes, deletes o
   const admin = await noteOf({ userId: "user_ivy", email: "ivy@example.com", name: "Ivy" }, "Admin task");
   assert.equal(
     admin,
-    "Ivy, an Admin of this workspace, asked for this task. Do it as you would for the user, with the apps, keys and logins you have for it: their yes is enough for anything the user could say yes to, so never wait for the user's yes or ask the user to approve what they asked. A saved site login signs in only when it's set to sign in by itself. Still the user's alone: paying, deleting or moving the workspace, the user's own Mac, settings and memory, and setting up or changing routines, reminders, watches, skills and new bots.",
+    "Ivy, an Admin of this workspace, asked for this task. Do it as you would for the user, with the apps, keys and logins you have for it: their yes is enough for anything the user could say yes to, so never wait for the user's yes or ask the user to approve what they asked. A saved site login signs in only when it's set to sign in by itself. Still the user's alone: paying, and deleting the workspace or handing it to someone else.",
   );
   assert.equal(await noteOf(DEE, "Member task"), MEMBER_NOTE, "a Member's note, word for word");
   // A Member who tells an Admin's task more keeps a Member's rule: while it runs, their reply says their writes wait for

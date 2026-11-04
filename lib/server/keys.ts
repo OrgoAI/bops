@@ -565,7 +565,10 @@ export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, op
   const asker = forMember(where);
   // The bot's reason heads the card; what Bops says of the call itself (lib/permission.ts apiFacts) and Details are the truth.
   const reason = plainReason(a.reason);
-  const ask: AskSpec = { action: `Call ${p.label}`, resources: [`${method} ${path}`], preview: detail, kind: "api", api: { key: name, label: p.label, method, path }, ...(asker ? { askedFor: asker } : {}), ...(reason ? { reason } : {}) };
+  // A task's card leads with what Bops says of the call, never the bot's words, which a page it read may have written:
+  // those go below, labelled as the bot's.
+  const said = opts.task && reason ? `${detail ? "\n\n" : ""}In the bot's words: ${reason}` : "";
+  const ask: AskSpec = { action: `Call ${p.label}`, resources: [`${method} ${path}`], preview: `${detail}${said}`, kind: "api", api: { key: name, label: p.label, method, path }, ...(asker ? { askedFor: asker } : {}), ...(reason && !opts.task ? { reason } : {}) };
   // Never in a task without a card: its browser reads pages anyone could have written (repo-change.ts the same).
   if (!asker && !opts.task && allows(b, ask, { justDoIt: false })) return run("auto");
   used(action, "waiting");

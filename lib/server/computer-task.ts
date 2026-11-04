@@ -736,6 +736,9 @@ function orStop<T>(t: ComputerTurn, work: Promise<T>): Promise<T> {
  * needs their OK and hasn't it answers `pause`, with what to ask: the run pauses there (pauseAt).
  */
 async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard(), opts: { approved?: boolean; asked?: AppApproval } = {}): Promise<FunctionOutput | { pause: AskSpec }> {
+  // Stopped before it starts (a yes being resumed included): nothing of it runs. orStop can't take back work already
+  // begun, so the check comes before any is.
+  if (t.signal.aborted) return { type: "function_call_output", call_id: o.call_id, output: "Not run: the task was stopped first." };
   const s = session(t.sessionId)!;
   // A stranger's task has none of the owner's logins; anyone else's (a member's too) none of the CRM.
   const outside = strangersTask(t.sessionId);

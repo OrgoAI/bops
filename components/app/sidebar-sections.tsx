@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { favoriteCount, favoriteLabel, movedFavorite, nudgedFavorite, toggledFavorite, type FavoriteKind } from "@/lib/favorites";
 import { categoriesOpen } from "@/lib/memory-categories";
-import { alwaysScope, apiFacts, askHeadline } from "@/lib/permission";
+import { alwaysScope, apiFacts, askHeadline, taskWrite } from "@/lib/permission";
 import { plainTitle } from "@/lib/plain-words";
 import { answersAsk, canAct, REPLY_WAITS_LINE, writesThread } from "@/lib/shared";
 import { askKind } from "@/lib/asks";
@@ -335,9 +335,11 @@ function AskCard({ ask: a, botName, where, shared, onOpen }: { ask: AppApproval;
             <button disabled={busy} onClick={() => void decide("reject")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
               Deny
             </button>
-            <button disabled={busy} onClick={() => void decide("always")} title={scope} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-              Always allow
-            </button>
+            {!taskWrite(a) && (
+              <button disabled={busy} onClick={() => void decide("always")} title={scope} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+                Always allow
+              </button>
+            )}
             <button disabled={busy} onClick={() => void decide("once")} className={`${btn} bg-ink text-white`}>
               Allow once
             </button>
