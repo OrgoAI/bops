@@ -31,12 +31,12 @@ const NAME_BYTES = 240;
 const bytes = (t: string) => new TextEncoder().encode(t).length;
 
 /**
- * A file's name safe to put on a computer: its last part only, no control characters, no leading dots (a hidden
+ * A file's name safe to put on a computer: its last part only, no control, format or line-breaking characters, no leading dots (a hidden
  * file, or . and ..), at most NAME_BYTES with its extension kept, cut between characters (never inside one). Empty
  * when nothing is left.
  */
 export function cleanFileName(raw: string): string {
-  const last = (raw.split(/[\\/]/).pop() ?? "").normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, "").trim().replace(/^\.+/, "");
+  const last = (raw.split(/[\\/]/).pop() ?? "").normalize("NFC").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").trim().replace(/^\.+/, "");
   if (bytes(last) <= NAME_BYTES) return last;
   const dot = last.lastIndexOf(".");
   const ext = dot > 0 && last.length - dot <= 16 ? last.slice(dot) : "";
@@ -62,6 +62,12 @@ export function fileSize(bytes: number): string {
 }
 
 /**
+ * Where a file is, for the bot: ~/Desktop/'<name>', its name in shell quotes, so a name with spaces opens as one, one with
+ * $( or ` never runs, and nothing in it reads as words of the note around it (a teammate's file is named by their Bops).
+ */
+const quotedPath = (f: AddedFile) => `~/Desktop/'${f.name.replace(/'/g, `'\\''`)}'`;
+
+/**
  * What a bot is told about files the user added (in its chat, in a thread, in a task started from that message).
  * `readerHost`: the bot whose computer the one reading works on ("mac" for a task on this Mac); a file on that
  * computer is on "your computer's", any other on "<its bot>'s computer's" Desktop, so a bot on another computer (a
@@ -74,7 +80,7 @@ export function filesNote(files: readonly AddedFile[], who: string, readerHost?:
   return [...hosts.values()]
     .map((on) => {
       const one = on.length === 1;
-      const list = on.map((f) => `${f.path} (${fileSize(f.size)})`).join(", ");
+      const list = on.map((f) => `${quotedPath(f)} (${fileSize(f.size)})`).join(", ");
       const mine = !!readerHost && on[0].hostId === readerHost;
       return mine
         ? `[${who} added ${one ? "a file" : `${on.length} files`} to your computer's Desktop: ${list}. Open ${one ? "it" : "them"} there.]`

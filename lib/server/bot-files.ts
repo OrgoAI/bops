@@ -110,7 +110,7 @@ const unclaim = (computerId: string, name: string) =>
   orgo.bash(computerId, `f="$HOME/Desktop/"${sh(name)}; [ -f "$f" ] && [ ! -s "$f" ] && rm -f "$f"; true`, 30).catch(() => {});
 
 /** Why the computer didn't wake, as the user should hear it (no hours or credit left), else that it didn't. */
-const notAwake = (e: unknown, host: Bot) => {
+const notAwake = (e: unknown, host: { name: string }) => {
   const why = freeHoursUsed(e) ?? computerOutOfCredit(e);
   return why ? new AddFileError(why, 402) : new AddFileError(`${host.name}'s computer didn't wake up. Try again.`, 503);
 };
@@ -123,7 +123,13 @@ const TOUCH_AFTER_MS = 60_000;
  * which puts it on that computer even for a bot set to work on the Mac. Answers what was added (the message names
  * it by its id), or throws an AddFileError saying why not.
  */
-export async function addFile(b: Bot, rawName: string, size: number, body: ReadableStream<Uint8Array>, { screen = false } = {}): Promise<AddedFile> {
+export const addFile = (b: Bot, rawName: string, size: number, body: ReadableStream<Uint8Array>, { screen = false } = {}) => addFileTo(filesGoTo(b, { screen }), b.id, rawName, size, body);
+
+/**
+ * Add a file for the bot `botId` onto the computer `to` names (filesGoTo, or a shared workspace's for an Admin:
+ * lib/server/shared.ts sharedFilesTo), with the signed-in user's own Orgo key, or throw an AddFileError saying why not.
+ */
+export async function addFileTo(to: { computerId: string; host: { id: string; name: string } } | { why: string }, botId: string, rawName: string, size: number, body: ReadableStream<Uint8Array>): Promise<AddedFile> {
   const stream = Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]);
   const refuse = (e: AddFileError) => {
     stream.destroy();
@@ -133,7 +139,6 @@ export async function addFile(b: Bot, rawName: string, size: number, body: Reada
   if (!clean) throw refuse(new AddFileError("That file needs a name."));
   if (!Number.isSafeInteger(size) || size <= 0) throw refuse(new AddFileError("That file is empty."));
   if (size > FILE_MAX) throw refuse(new AddFileError("That file is too big. 2 GB at most.", 413));
-  const to = filesGoTo(b, { screen });
   if ("why" in to) throw refuse(new AddFileError(to.why, 409));
   let key: string;
   try {
@@ -181,7 +186,7 @@ export async function addFile(b: Bot, rawName: string, size: number, body: Reada
     const said = typeof done?.json.error === "string" ? ` Orgo said: ${done.json.error}` : "";
     throw await fail(new AddFileError(`The file didn't reach ${to.host.name}'s computer.${said}`, 502));
   }
-  const file: AddedFile = { id: id("file"), name: claimed, size, path: `~/Desktop/${claimed}`, botId: b.id, hostId: to.host.id, hostName: to.host.name };
+  const file: AddedFile = { id: id("file"), name: claimed, size, path: `~/Desktop/${claimed}`, botId, hostId: to.host.id, hostName: to.host.name };
   const now = Date.now();
   for (const [k, v] of added) if (now - v.at > KEEP_MS) added.delete(k);
   added.set(file.id, { ...file, at: now });

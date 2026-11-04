@@ -229,6 +229,11 @@ test("a message is shown as its chat shows it, one kept between us too", () => {
   );
   // "Between us" only keeps it out of the shared memory: a member given the bot reads it as the owner wrote it.
   assert.deepEqual(sharedMessage({ id: "m2", chatId: "bot:max", role: "user", text: "between us", at: 4, secret: true }, new Set(["max"])), { id: "m2", chatId: "bot:max", role: "user", text: "between us", at: 4 });
+  // A message's files: what they are and whose computer, as the chat shows them (never where they are or the ids).
+  const files = [{ id: "file_1", name: "Itinerary.pdf", size: 1200, path: "~/Desktop/Itinerary.pdf", botId: "max", hostId: "max", hostName: "Max" }];
+  assert.deepEqual(sharedMessage({ id: "m3", chatId: "bot:max", role: "user", text: "", at: 5, files }, new Set(["max"])), { id: "m3", chatId: "bot:max", role: "user", text: "", at: 5, files: [{ name: "Itinerary.pdf", size: 1200, hostName: "Max" }] });
+  // On the computer of a bot they aren't shown: whose it is isn't said.
+  assert.deepEqual(sharedMessage({ id: "m4", chatId: "bot:max", role: "user", text: "", at: 6, files: [{ ...files[0], hostId: "boss", hostName: "Boss" }] }, new Set(["max"]))?.files, [{ name: "Itinerary.pdf", size: 1200 }]);
 });
 
 test("a reply a bot drafted for the owner is shown read only: who, where, the words and whether it went, never the ids it goes by", () => {
@@ -640,6 +645,35 @@ test("a member's levels are in their fingerprint: moving a bot from Read to Writ
   assert.deepEqual([read.levels, write.levels], [{ a: "read" }, { a: "write" }]);
   assert.notEqual(sharedHash(read), sharedHash(write));
   assert.deepEqual({ ...read, levels: undefined }, { ...write, levels: undefined }, "nothing else changes");
+});
+
+test("cleanAct keeps a message's files with their own fields alone, each a Desktop file of its name, and words may be empty with them", () => {
+  const key = "k_12345678";
+  const file = { id: "file_1", name: "Itinerary (2).pdf", size: 1200, path: "~/Desktop/Itinerary (2).pdf", botId: "max" };
+  // What their Bops says of the host is dropped: the owner's side works it out.
+  assert.deepEqual(cleanAct({ key, act: { act: "chat", chatId: "bot:max", text: "", files: [{ ...file, hostId: "x", hostName: "Forged" }] } }), { key, act: { act: "chat", chatId: "bot:max", text: "", files: [file] } });
+  assert.deepEqual(cleanAct({ key, act: { act: "chat", chatId: "bot:max", text: " see this ", files: [file] } }), { key, act: { act: "chat", chatId: "bot:max", text: "see this", files: [file] } });
+  // None: as before.
+  assert.deepEqual(cleanAct({ key, act: { act: "chat", chatId: "bot:max", text: "hi", files: [] } }), { key, act: { act: "chat", chatId: "bot:max", text: "hi" } });
+  for (const files of [
+    [{ ...file, path: "~/.ssh/authorized_keys" }],
+    [{ ...file, name: "../x.pdf", path: "~/Desktop/../x.pdf" }],
+    [{ ...file, name: ".bashrc", path: "~/Desktop/.bashrc" }],
+    [{ ...file, name: "a\nb", path: "~/Desktop/a\nb" }],
+    [{ ...file, name: "line\u0007", path: "~/Desktop/line\u0007" }],
+    [{ ...file, name: "a\u2028b.pdf", path: "~/Desktop/a\u2028b.pdf" }],
+    [{ ...file, name: "invoice\u202efdp.exe", path: "~/Desktop/invoice\u202efdp.exe" }],
+    [{ ...file, name: "a\u0085b.pdf", path: "~/Desktop/a\u0085b.pdf" }],
+    [{ ...file, size: 0 }],
+    [{ ...file, size: 2 * 1024 ** 3 + 1 }],
+    [{ ...file, id: "bad id!" }],
+    [file, file],
+    Array.from({ length: 11 }, (_, i) => ({ ...file, id: `file_${i}` })),
+    "file_1",
+  ])
+    assert.equal(cleanAct({ key, act: { act: "chat", chatId: "bot:max", text: "x", files } }), null, JSON.stringify(files));
+  // No words and no files: nothing to send.
+  assert.equal(cleanAct({ key, act: { act: "chat", chatId: "bot:max", text: "" } }), null);
 });
 
 test("cleanAct keeps only an act's own fields, each checked", () => {

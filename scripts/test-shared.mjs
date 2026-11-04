@@ -573,6 +573,10 @@ await check("while a shared workspace is open, what its bots wait on the owner's
   for (const [method, path] of [["POST", "/api/keys"], ["PATCH", "/api/keys"], ["DELETE", "/api/keys/NOTION_API_KEY?scope=workspace"], ["POST", "/api/keys/reveal"]])
     assert.equal(callAllowed(method, path), true, `${method} ${path}`);
   assert.equal(callAllowed("POST", "/api/keysmith"), false);
+  // An Admin's files go: the route puts them on the shared bot's computer while one is open (lib/server/shared.ts sharedFilesTo).
+  assert.equal(callAllowed("POST", "/api/bots/files?botId=boppy&name=a.pdf"), true);
+  assert.equal(callAllowed("POST", "/api/bots/filesx"), false);
+  assert.match(readFileSync(`${root}/app/api/bots/files/route.ts`, "utf8"), /sharedOpen\(\)[\s\S]*sharedFilesTo\(botId\)/, "the files route takes the shared workspace's computer while one is open");
   const routes = ["route.ts", "[name]/route.ts", "reveal/route.ts"].map((f) => readFileSync(`${root}/app/api/keys/${f}`, "utf8"));
   assert.ok(routes.every((src) => /sharedOpen\(\)/.test(src)), "each keys route takes the shared workspace's path while one is open");
 });
@@ -2449,6 +2453,17 @@ await check("a bot's Keys card in a shared workspace: only for someone with Keys
   const none = await keysCopy({ keys: false });
   const st2 = viewState(own(), none.copy.openNow(), none.copy.data(), {}, []);
   assert.equal(BotKeys({ state: st2, bot: st2.bots[0], onAdd: noop, className: "" }), null);
+});
+
+await check("Try again sends a message as it went: its words, what it replied to and its files, each with only its own fields", async () => {
+  const { chatActOf } = await import(`${root}/lib/shared.ts`);
+  const file = { id: "file_1", name: "Itinerary.pdf", size: 1200, path: "~/Desktop/Itinerary.pdf", botId: "max" };
+  // Files alone (no words): they still go.
+  assert.deepEqual(chatActOf({ chatId: "bot:max", text: "", files: [{ ...file, hostId: "max", hostName: "Max" }] }), { act: "chat", chatId: "bot:max", text: "", files: [file] });
+  // Words, a reply and files.
+  assert.deepEqual(chatActOf({ chatId: "bot:max", text: "see this", replyTo: "m1", files: [file] }), { act: "chat", chatId: "bot:max", text: "see this", replyTo: "m1", files: [file] });
+  // Words alone, as before.
+  assert.deepEqual(chatActOf({ chatId: "bot:max", text: "hi", files: [] }), { act: "chat", chatId: "bot:max", text: "hi" });
 });
 
 console.log(`${passed} passed, ${failures} failed`);

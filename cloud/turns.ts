@@ -24,6 +24,7 @@ import {
   type ChatSendAnswer,
   type LiveTurn,
   type MemberActPayload,
+  type MemberFile,
   type RunnerClaim,
   type RunnerResume,
   type RunnerTurnEvent,
@@ -589,6 +590,21 @@ export function computerFor(blob: Record<string, unknown>, botId: string): strin
   return typeof id === "string" && id ? id.toLowerCase() : null;
 }
 
+/**
+ * A member's files (protocol.ts MemberFile) as the message keeps them (lib/added-files.ts AddedFile): each with the bot
+ * whose computer it's on, worked out from the owner's state (the bot's own, or the main bot's it shares), never from what
+ * the member's Bops said. One for a bot that's gone or works on the owner's Mac is dropped: no computer has it.
+ */
+export function hostFiles(blob: Record<string, unknown>, files: readonly MemberFile[]): Record<string, unknown>[] {
+  const bots = list(blob.bots).filter((b) => typeof b.id === "string");
+  return files.flatMap((f) => {
+    const b = bots.find((x) => x.id === f.botId);
+    if (!b || b.runsOn === "mac" || !computerFor(blob, f.botId)) return [];
+    const host = workBotOf(b, bots);
+    return [{ ...f, hostId: host.id, hostName: typeof host.name === "string" && host.name.trim() ? host.name.trim() : "The bot" }];
+  });
+}
+
 const nameOf = (blob: Record<string, unknown>, botId: string) => {
   const n = list(blob.bots).find((b) => b.id === botId)?.name;
   return typeof n === "string" && n.trim() ? n.trim() : "The bot";
@@ -651,6 +667,8 @@ export async function takeMessage(o: {
   id: string;
   text: string;
   replyTo?: string;
+  /** A member's files, kept on the message only when they may use the bots' computers (hostFiles). */
+  files?: readonly MemberFile[];
   member?: TurnMember;
   needComputer?: boolean;
   check: (blob: Record<string, unknown>) => { botId: string; wsId: string; mayUse: boolean; group?: boolean };
@@ -684,7 +702,8 @@ export async function takeMessage(o: {
     // Said without Use its computer: marked on their stamp (which only Bops Cloud writes), so a turn that reads the chat
     // later (the owner's, or someone's who may) takes their words as something said, never as what to do.
     const member = o.member ? { userId: o.member.userId, ...(o.member.email ? { email: o.member.email } : {}), name: o.member.name, ref: o.member.ref, ...(mayUse ? {} : { noUse: true }) } : undefined;
-    const message: Record<string, unknown> = { id: o.id, chatId: o.chatId, role: "user", text: o.text, at, ...(root ? { replyTo: root } : {}), ...(member ? { member } : {}) };
+    const files = mayUse && o.files?.length ? hostFiles(blob, o.files) : [];
+    const message: Record<string, unknown> = { id: o.id, chatId: o.chatId, role: "user", text: o.text, at, ...(root ? { replyTo: root } : {}), ...(files.length ? { files } : {}), ...(member ? { member } : {}) };
     const rows: Record<string, unknown>[] = [message];
     let turn: TurnRow | null = null;
     let where: Taken["where"] = "none";

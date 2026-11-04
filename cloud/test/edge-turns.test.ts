@@ -254,6 +254,32 @@ test("a member's message is written by Bops Cloud at once, both viewers hear it 
   for (const v of [ownerLive, memberLive, box]) v.close();
 });
 
+test("a member's files are kept on their message, each on the computer the owner's state says has it, and only with Use its computer", async () => {
+  const s = await setup();
+  // (The computer's runner listens, and answers: nothing is woken, and no turn is left owed for a later test's count.)
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  // Dana works on Max's computer: her file is on Max's, whatever their Bops said.
+  const file = { id: "file_1", name: "Itinerary.pdf", size: 1200, path: "~/Desktop/Itinerary.pdf", botId: "dana" };
+  const r = await act(s.writer, s.project, "key-files-0001", { act: "chat", chatId: "bot:dana", text: "", files: [{ ...file, hostId: "dana", hostName: "Forged" }] });
+  assert.equal(r.status, 202, await r.clone().text());
+  const answer = (await r.json()) as { messageId: string; turn: string };
+  const row = (await messages(s.owner)).find((m) => m.id === answer.messageId)!;
+  assert.deepEqual([row.text, row.files], ["", [{ ...file, hostId: "max", hostName: "Max" }]]);
+  assert.ok(answer.turn, "the bot's computer answers it");
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${answer.turn}/claim`, {})).status, 200);
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${answer.turn}/done`, { state: "done" })).status, 200);
+  box.close();
+  // A file for a bot that isn't in that chat: refused, nothing written.
+  const other = await act(s.writer, s.project, "key-files-0002", { act: "chat", chatId: "bot:max", text: "see this", files: [{ ...file, botId: "zed" }] });
+  assert.equal(other.status, 400);
+  // Without Use its computer: files go on a bot's computer, so it's refused.
+  const no = await act(s.noUse, s.project, "key-files-0003", { act: "chat", chatId: "bot:max", text: "see this", files: [{ ...file, botId: "max" }] });
+  assert.equal(no.status, 403);
+  assert.equal(((await no.json()) as { code?: string }).code, "member_no_computer");
+  const ids = (await messages(s.owner)).map((m) => m.id);
+  assert.ok(!ids.includes(`msg_m_${s.writer}_key-files-0002`) && !ids.includes(`msg_m_${s.noUse}_key-files-0003`));
+});
+
 test("the same key again adds nothing, a turn is claimed once and only by its own computer, and one chat answers one at a time", async () => {
   const s = await setup();
   const other = randomUUID();
