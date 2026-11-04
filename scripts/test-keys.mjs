@@ -1065,7 +1065,7 @@ await check("in a shared workspace: what orgo-web's bops-keys routes refuse, in 
 /** A turn whose model reads one customer a round (call_api GET), `n` rounds, then does what `then` queues. */
 const readsThen = (n, ...then) => answers.push(...Array.from({ length: n }, (_, i) => calling(toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "GET", path: `/v1/customers/cus_r${i + 1}`, query: null, body: null }))), ...then);
 
-await check("an Admin's turn that reads seven times before it writes still gets to the write, which asks, named as theirs: a turn with keys has 12 rounds of calls, and Bops never says Done. for it", async () => {
+await check("an Admin's turn that reads seven times before it writes still gets to the write, which asks, named as theirs: a turn with keys has 24 rounds of calls, and Bops never says Done. for it", async () => {
   const ann = { userId: "user_ann", email: "ann@example.com", name: "Ann", role: "admin" };
   const had = S.getState().workspaces;
   S.update((st) => (st.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, memberAccess: { "ann@example.com": { others: "none", bots: { boppy: "write" }, at: 1 } } }]));
@@ -1090,15 +1090,15 @@ await check("an Admin's turn that reads seven times before it writes still gets 
   }
 });
 
-await check("a turn still calling when its 12 rounds run out answers in the model's own words, told it's out of steps and given no tools: never a Done. from Bops over what it didn't do", async () => {
+await check("a turn still calling when its 24 rounds run out answers in the model's own words, told it's out of steps and given no tools: never a Done. from Bops over what it didn't do", async () => {
   const a0 = asked.length;
   const m0 = messages().length;
-  const words = "I read twelve customers and haven't refunded anything yet. Say go on and I'll do the refund.";
+  const words = "I read twenty-four customers and haven't refunded anything yet. Say go on and I'll do the refund.";
   try {
-    readsThen(12, reply(words));
+    readsThen(24, reply(words));
     await Chat.handleMessage(chatId, "read every customer, then refund ch_9");
     assert.deepEqual(messages().slice(m0).filter((m) => m.role === "bot").map((m) => m.text), [words], "its own words, not Done.");
-    assert.equal(asked.length, a0 + 13, "twelve rounds of calls, then one to answer");
+    assert.equal(asked.length, a0 + 25, "twenty-four rounds of calls, then one to answer");
     const last = asked.at(-1);
     assert.equal(last.tool_choice, "none", "no calls in the answer");
     assert.match(hear(last.input.findLast((x) => x.role === "developer")?.content ?? ""), /out of steps/i, "told why");
