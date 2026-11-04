@@ -156,11 +156,86 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
     return undefined;
   }
   if (a.hosting?.lost) return "Its computer is gone. Deploy a preview to give it a new home.";
+  // Production on GitHub (AppHosting.github): Publish pushes what the Preview serves there, linked first.
+  const gh = a.hosting?.github;
+  if (gh) {
+    if (!a.preview?.serving) return "The preview isn't live yet. Deploy a preview first.";
+    if (!gh.last) return "Link it to GitHub first, in the menu beside Publish.";
+    // (Whether GitHub has this preview already is the server's to say: Publish then sends nothing.)
+    return undefined;
+  }
   if (sites.some((x) => deploying(x))) return "It's publishing. Wait for it to finish.";
   if (!previews.some((x) => x?.serving)) return "The preview isn't live yet. Deploy a preview first.";
   if (sites.every((x) => !x.preview?.serving || x.preview.serving === x.serving)) return "What's published is the preview already.";
   if (!sites.some((x) => x.preview?.serving && canPublish(x))) return "Connect a domain first. Published sites live only on their own domain.";
   return undefined;
+}
+
+/** The GitHub production form as typed: its lists as one line each ("a, b", "client=cclc"). */
+type GhForm = { repo: string; branch: string; path: string; keep: string; workflow: string; inputs: string };
+
+/** The form as the route takes it (lib/hosted-apps.ts cleanGithubMirror checks it again). */
+export function ghMirrorOf(f: GhForm) {
+  const keep = f.keep.split(",").map((x) => x.trim()).filter(Boolean);
+  const inputs = Object.fromEntries(
+    f.inputs
+      .split(",")
+      .map((x) => x.split("=").map((y) => y.trim()))
+      .filter((kv) => kv.length === 2 && kv[0])
+      .map((kv) => [kv[0], kv[1]] as const),
+  );
+  return {
+    repo: f.repo.trim(),
+    branch: f.branch.trim() || "main",
+    path: f.path.trim(),
+    ...(keep.length ? { keep } : {}),
+    ...(f.workflow.trim() ? { dispatch: { workflow: f.workflow.trim(), ...(Object.keys(inputs).length ? { inputs } : {}) } } : {}),
+  };
+}
+
+/**
+ * Where an app's production is on GitHub: the repo, its branch and the app's folder in it, the files that stay in
+ * Ingot alone, and a workflow to run after a push (for one that doesn't start on a push).
+ */
+function GithubForm({ form, onChange, busy, onSave, onCancel, compact }: { form: GhForm; onChange: (f: GhForm) => void; busy: boolean; onSave: () => void; onCancel: () => void; compact?: boolean }) {
+  const field = (key: keyof GhForm, label: string, placeholder: string) => (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">{label}</span>
+      <input
+        data-gh-field={key}
+        value={form[key]}
+        placeholder={placeholder}
+        onChange={(e) => onChange({ ...form, [key]: e.target.value })}
+        className="h-8 rounded-[8px] bg-white px-2.5 text-[12.5px] leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] outline-none placeholder:text-[#B0B0AE] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+      />
+    </label>
+  );
+  return (
+    <div data-gh-form className={`${compact ? "pl-[26px] pr-2" : ""} pt-2`} onClick={(e) => e.stopPropagation()}>
+      <div className="flex flex-col gap-2.5 rounded-[12px] bg-[#F7F7F6] p-3">
+        <span className="text-[12.5px] font-semibold leading-4 text-ink">Publish to GitHub</span>
+        <span className="text-[12px] leading-[17px] text-[#6B6B6B]">
+          Ingot stays where it&apos;s worked on and previewed. Publish pushes what the Preview serves into this folder, with your GitHub key in Keys, and that repo&apos;s own workflow deploys it.
+        </span>
+        <div className="grid grid-cols-1 gap-2 @[420px]:grid-cols-3">
+          {field("repo", "Repo", "OrgoAI/orgo-brandlord")}
+          {field("branch", "Branch", "main")}
+          {field("path", "Folder in it", "formula (empty: the whole repo)")}
+        </div>
+        {field("keep", "Left alone both ways (files, or folders ending in /)", "proxy.ts, clients/other/")}
+        <div className="grid grid-cols-1 gap-2 @[420px]:grid-cols-2">
+          {field("workflow", "Workflow to run after a push (optional)", "deploy.yml")}
+          {field("inputs", "Its inputs", "client=cclc")}
+        </div>
+        <div className="flex items-center gap-2">
+          <Btn tag="gh-save" dark label="Save" doing="Saving…" busy={busy} why={form.repo.trim() ? undefined : "Which repo?"} onClick={onSave} />
+          <button onClick={onCancel} className="text-[12.5px] leading-4 text-[#6B6B6B] hover:text-ink">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** One line: its environment, state, where it is and what it serves; a Local's of a bot's copy (`bot`), with whose it is (`who`). */
@@ -285,6 +360,28 @@ export function AppEnvs({
     setBack(d ? { d } : "none");
   };
   const rollback = (d: AppDeploy) => run("rollback", () => act(app.name, { ws, action: "rollback", deployment: d.id, ...(site ? { site } : {}) }));
+  // Production on GitHub (lib/server/github-mirror.ts): where it is (the form while it's being set), linking it, or off.
+  const [ghForm, setGhForm] = useState<GhForm | null>(null);
+  const githubSet = (v: GhForm | null) => {
+    setMenu(false);
+    return run("github", async () => {
+      const r = await act(app.name, { ws, action: "github", github: v ? ghMirrorOf(v) : null });
+      if (r.app) setGhForm(null);
+      return r.app ? { ...r, said: v ? "Saved. Link it to GitHub next, in the menu beside Publish." : "Publish deploys on Orgo again." } : r;
+    });
+  };
+  // GitHub's changes into Ingot, GitHub's version winning where both changed a file (what Publish's conflict says to do).
+  const githubPull = () => {
+    setMenu(false);
+    return run("github", () => act(app.name, { ws, action: "githubPull" }));
+  };
+  const githubLink = () => {
+    setMenu(false);
+    return run("github", async () => {
+      const r = await act(app.name, { ws, action: "githubLink" });
+      return r.app ? { ...r, said: "Linked. From now on Publish pushes only what changed since, and brings in what changed on GitHub first." } : r;
+    });
+  };
   // Its computer gone: the Preview's and Published's projects went with it.
   const lost: EnvState | null = app.hosting?.lost ? { word: "Needs a new home", dot: DOTS.off, tip: "Its computer is gone, and its projects with it. Deploy a preview to give it a new home." } : null;
   const previewOf = (x: { preview?: PreviewSite }) => x.preview;
@@ -325,7 +422,13 @@ export function AppEnvs({
   const pending = shownSites.flatMap((x) => x.domains ?? []).find((d) => d.status === "pending" || d.status === "verifying");
   const noDomain = !shownSites.some((x) => hasDomain(x));
   const neverLive = !shownSites.some((x) => everLive(x));
-  const prodState: EnvState = lost ?? (noDomain && neverLive ? { word: "Not published", dot: DOTS.off } : (() => {
+  const gh = app.hosting?.github;
+  const ghWhere = gh ? `GitHub ${gh.repo} ${gh.branch}${gh.path ? `, ${gh.path}/` : ""}${gh.last ? `, at ${gh.last.sha.slice(0, 7)}` : ", not linked yet"}` : "";
+  const prodState: EnvState = gh
+    ? gh.last
+      ? { word: "On GitHub", dot: DOTS.on, tip: `Publish pushes what the Preview serves to ${gh.repo} ${gh.branch}, where its own workflow deploys it.` }
+      : { word: "Not linked", dot: DOTS.off, tip: "Link it to GitHub in the menu beside Publish." }
+    : lost ?? (noDomain && neverLive ? { word: "Not published", dot: DOTS.off } : (() => {
     const st = many && !site ? allSites(sites) : deployState(app);
     return st.word === "Not deployed yet" ? { ...st, word: "Not published" } : st;
   })());
@@ -361,8 +464,8 @@ export function AppEnvs({
     {
       env: "prod",
       state: prodState,
-      where: domain ? <UrlLink url={domain} /> : pending ? quiet(`${pending.domain}, waiting for DNS`) : quiet(noDomain && !neverLive ? "Live, no domain yet" : "No domain yet"),
-      at: app.serving,
+      where: gh ? quiet(ghWhere) : domain ? <UrlLink url={domain} /> : pending ? quiet(`${pending.domain}, waiting for DNS`) : quiet(noDomain && !neverLive ? "Live, no domain yet" : "No domain yet"),
+      at: gh ? (gh.last?.ingot ?? null) : app.serving,
     },
   ];
   const actions = (env: AppEnv, bot?: string) => {
@@ -382,11 +485,11 @@ export function AppEnvs({
     }
     if (env === "preview") return <Btn tag="deploy" label="Deploy" doing="Deploying…" busy={busy === "preview"} why={whyNotEnv(answer, app, "preview", sites)} onClick={() => void deploy()} />;
     // No domain and never live: connecting one comes first (Published lives on its domain only).
-    if (!lost && noDomain && neverLive && answer.enabled)
+    if (!gh && !lost && noDomain && neverLive && answer.enabled)
       return <Btn tag="connect-domain" dark label="Connect a domain" onClick={domainFlow} />;
     return (
       <>
-        <Btn tag="promote" dark label="Publish" doing="Publishing…" busy={busy === "promote" || busy === "reapply"} why={whyNotEnv(answer, app, "prod", sites)} onClick={() => void promote()} />
+        <Btn tag="promote" dark label={gh ? "Publish to GitHub" : "Publish"} doing={gh ? "Pushing…" : "Publishing…"} busy={busy === "promote" || busy === "reapply"} why={whyNotEnv(answer, app, "prod", sites)} onClick={() => void promote()} />
         <div ref={menuBox} className="relative flex shrink-0" onClick={(e) => e.stopPropagation()}>
           <button data-prod-menu aria-label="More for Published" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(!menu)} className="flex size-6 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
             <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
@@ -395,8 +498,29 @@ export function AppEnvs({
               <circle cx="9.5" cy="6" r="1.1" fill="currentColor" />
             </svg>
           </button>
-          {menu && (
+          {menu && gh && (
+            <div role="menu" aria-label="Published" className="absolute right-0 top-[calc(100%+4px)] z-20 flex min-w-[200px] flex-col rounded-[12px] bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_32px_-12px_#00000040]">
+              <button data-gh-link role="menuitem" onClick={() => void githubLink()} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+                {gh.last ? "Link to GitHub again, as it is now" : "Link to GitHub, as it is now"}
+              </button>
+              {gh.last && (
+                <button data-gh-pull role="menuitem" onClick={() => void githubPull()} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+                  Bring in GitHub&apos;s changes
+                </button>
+              )}
+              <button data-gh-edit role="menuitem" onClick={() => (setMenu(false), setGhForm({ repo: gh.repo, branch: gh.branch, path: gh.path, keep: (gh.keep ?? []).join(", "), workflow: gh.dispatch?.workflow ?? "", inputs: Object.entries(gh.dispatch?.inputs ?? {}).map(([k, v]) => `${k}=${v}`).join(", ") }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+                GitHub settings
+              </button>
+              <button data-gh-off role="menuitem" onClick={() => void githubSet(null)} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+                Publish on Orgo instead
+              </button>
+            </div>
+          )}
+          {menu && !gh && (
             <div role="menu" aria-label="Published" className="absolute right-0 top-[calc(100%+4px)] z-20 flex min-w-[180px] flex-col rounded-[12px] bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_32px_-12px_#00000040]">
+              <button data-gh-start role="menuitem" onClick={() => (setMenu(false), setGhForm({ repo: "", branch: "main", path: "", keep: "", workflow: "", inputs: "" }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+                Publish to GitHub instead
+              </button>
               <button data-rollback role="menuitem" disabled={!app.serving} onClick={() => void rollbackAsk()} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4] disabled:text-[#9A9A98]">
                 Roll back
               </button>
@@ -495,6 +619,7 @@ export function AppEnvs({
           )}
         </div>
       )}
+      {ghForm && <GithubForm form={ghForm} onChange={setGhForm} busy={busy === "github"} onSave={() => void githubSet(ghForm)} onCancel={() => setGhForm(null)} compact={compact} />}
       {error && (
         <span role="alert" className={`${PROBLEM} ${compact ? "pl-[26px]" : ""} whitespace-normal`}>
           {error}
