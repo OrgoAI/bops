@@ -143,8 +143,16 @@ function check(a: ChangeArgs): { ok: true; repo: string; branch: string; base: s
   return { ok: true, repo, branch, base, message, files };
 }
 
-/** Every line that differs between a file's text and its new one, whole: what the card shows under Details. */
-function diffOf(was: string | null, next: string): string[] {
+/** The most of a middle part compared line by line (lines taken out × lines put in); past it, the part shows whole. */
+const COMPARE_CELLS = 4_000_000;
+
+/**
+ * Every line that differs between a file's text and its new one, whole: what the card shows under Details. Only the
+ * lines that change (what's the same at the start, at the end and in between, by the longest run of lines the two
+ * share), each part of the change after "at line N" (N: where it is in the new text; none for one at the very top),
+ * its lines taken out, then the ones put in. A middle too big to compare shows whole, as one part.
+ */
+export function diffOf(was: string | null, next: string): string[] {
   // Lines, without the empty one after a last newline.
   const lines = (t: string) => (t.endsWith("\n") ? t.slice(0, -1) : t).split("\n");
   const a = was === null ? [] : lines(was);
@@ -153,8 +161,34 @@ function diffOf(was: string | null, next: string): string[] {
   while (s < a.length && s < b.length && a[s] === b[s]) s++;
   let e = 0;
   while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
-  const signed = (lines: string[], sign: string) => lines.map((l) => `${sign} ${l}`);
-  return [...(was !== null && s > 0 ? [`at line ${s + 1}`] : []), ...signed(a.slice(s, a.length - e), "-"), ...signed(b.slice(s, b.length - e), "+")];
+  const x = a.slice(s, a.length - e);
+  const y = b.slice(s, b.length - e);
+  // Which lines of the middle stay, by the longest run the two share (a table of how many from each point on).
+  const same: [number, number][] = [];
+  if (x.length && y.length && (x.length + 1) * (y.length + 1) <= COMPARE_CELLS) {
+    const w = y.length + 1;
+    const run = new Uint32Array((x.length + 1) * w);
+    for (let i = x.length - 1; i >= 0; i--)
+      for (let j = y.length - 1; j >= 0; j--) run[i * w + j] = x[i] === y[j] ? run[(i + 1) * w + j + 1] + 1 : Math.max(run[(i + 1) * w + j], run[i * w + j + 1]);
+    for (let i = 0, j = 0; i < x.length && j < y.length; )
+      if (x[i] === y[j]) same.push([i++, j++]);
+      else if (run[(i + 1) * w + j] >= run[i * w + j + 1]) i++;
+      else j++;
+  }
+  // The parts between the lines that stay: each its lines out, then in, after where it is.
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  for (const [si, sj] of [...same, [x.length, y.length] as [number, number]]) {
+    if (si > i || sj > j) {
+      const at = s + j + 1;
+      if (was !== null && at > 1) out.push(`at line ${at}`);
+      out.push(...x.slice(i, si).map((l) => `- ${l}`), ...y.slice(j, sj).map((l) => `+ ${l}`));
+    }
+    i = si + 1;
+    j = sj + 1;
+  }
+  return out;
 }
 
 /**
