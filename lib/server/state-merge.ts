@@ -147,14 +147,19 @@ function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolea
 
 const LEVELS = new Set(["none", "read", "write"]);
 
-/** What keepAppsLevels puts back, each with what it may be: Your Apps (MemberAccess.apps) and Use its computer (MemberAccess.computer). */
-const KEPT_ACCESS: [string, ReadonlySet<string>][] = [
-  ["apps", LEVELS],
-  ["computer", new Set(["use", "none"])],
+/**
+ * What keepAppsLevels puts back, each with what it may be: Your Apps (MemberAccess.apps), Use its computer
+ * (MemberAccess.computer), and what they may change (MemberAccess.can: an object, `{}` when every switch is off).
+ */
+const KEPT_ACCESS: [string, (v: unknown) => boolean][] = [
+  ["apps", (v) => typeof v === "string" && LEVELS.has(v)],
+  ["computer", (v) => v === "use" || v === "none"],
+  ["can", (v) => isObject(v)],
 ];
 
 /**
- * A person's Your Apps level (MemberAccess.apps) and Use its computer (MemberAccess.computer) put back where an older
+ * A person's Your Apps level (MemberAccess.apps), Use its computer (MemberAccess.computer) and what they may change
+ * (MemberAccess.can) put back where an older
  * Bops dropped them: its People sheet, or its own look at who's still there, rewrites a person's entry as
  * `{ others, bots }` and loses them (they read as none: access lost, never gained). For each entry of the merged
  * `merged` workspaces without one, what that person had in the first of `copies` (this side's, the other's, the one
@@ -181,7 +186,7 @@ export function keepAppsLevels(merged: unknown, copies: unknown[]): unknown {
         if ((map[key] as Blob)[field] !== undefined) continue;
         for (const copy of copies) {
           const had = entryIn(copy, w.id, key);
-          if (!had || !ok.has(had[field] as string) || (e.invite === true && had.invite !== true)) continue;
+          if (!had || !ok(had[field]) || (e.invite === true && had.invite !== true)) continue;
           map[key] = { ...(map[key] as Blob), [field]: had[field] };
           changed = true;
           break;

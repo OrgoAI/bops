@@ -19,6 +19,7 @@ import {
   type Team,
 } from "@/lib/chain";
 import { accessKey, levelOf, type AccessLevel, type MemberAccess } from "@/lib/member-access";
+import { mayChange } from "@/lib/shared";
 import { peopleShort, type PeopleRoom } from "@/lib/plan-includes";
 import { sharesComputer, workBot, workspaceOf, type AppState, type Bot } from "@/lib/types";
 import { Mascot } from "./mascot";
@@ -28,7 +29,7 @@ import { CloseButton, currentWorkspace, refreshState } from "./ui";
 /*
  * The team chart (lib/chain.ts): who each bot of the open workspace answers to, who may ask whom, and who
  * sees and uses each bot. A sheet of its own, opened from the workspace menu, the People sheet and a bot's
- * profile; the owner's only (never with a workspace shared with them open). The tree is drawn from the
+ * profile; the owner's, and in a workspace shared with someone theirs with the Org chart switch (an Admin always). The tree is drawn from the
  * state at once; a card dragged onto another, a line's popover, the switch and the bot's sheet each save
  * the whole chart at once (PATCH /api/workspaces { id, chain }), with an Undo for a few seconds, and put it
  * back when Bops says no. People's levels are the People sheet's own (PATCH /api/members).
@@ -298,16 +299,20 @@ function cantLead(t: Team, id: string, lead: string, name: (id: string) => strin
   return null;
 }
 
-/** People, from Bops (GET /api/members): null while not known, or when there are none to show (signed out, self hosted). */
-function usePeople(given?: ChartPerson[] | null) {
+/**
+ * People, from Bops (GET `source`: /api/members, or a shared workspace's for an Admin), null while not known, or when there
+ * are none to show (signed out, self hosted, a shared workspace's for someone who doesn't manage its people: `source` null).
+ */
+function usePeople(given?: ChartPerson[] | null, source: string | null = "/api/members") {
   const [read, setRead] = useState<ChartPerson[] | null>(null);
   // What the plan says about adding people, for the People part when there's nobody yet.
   const [room, setRoom] = useState<string | null>(null);
   const [again, setAgain] = useState(0);
   useEffect(() => {
     if (given !== undefined) return;
+    if (!source) return;
     let gone = false;
-    void fetch("/api/members", { cache: "no-store" })
+    void fetch(source, { cache: "no-store" })
       .then((r) => r.json())
       .then((j: { state?: string; people?: { id: string; name: string; email?: string; access: MemberAccess }[]; invites?: { email: string; access: MemberAccess }[]; seats?: PeopleRoom }) => {
         if (gone) return;
@@ -324,8 +329,8 @@ function usePeople(given?: ChartPerson[] | null) {
     return () => {
       gone = true;
     };
-  }, [given, again]);
-  return { people: given !== undefined ? given : read, room, reload: () => setAgain((n) => n + 1) };
+  }, [given, again, source]);
+  return { people: given !== undefined ? given : source ? read : null, room, reload: () => setAgain((n) => n + 1) };
 }
 
 /* ---------------- The sheet ---------------- */
@@ -342,14 +347,26 @@ type UndoTo = { chain: Chain; levels?: LevelChange[] };
 export function useChartEditor(state: AppState, givenPeople?: ChartPerson[] | null) {
   const wsId = currentWorkspace(state);
   const ws = state.workspaces?.find((w) => w.id === wsId);
-  // A change being saved, shown at once; Bops' copy comes back with the state.
+  // A change being saved, shown at once; Bops' copy comes back with the state. In a workspace shared with the user, the
+  // owner's Mac makes it a moment later (lib/server/change-relay.ts): shown until the copy has it (`sentKey`), or says why not.
   const [pending, setPending] = useState<Chain | null>(null);
+  const [sent, setSent] = useState<{ key: string; before: Chain | undefined } | null>(null);
+  const [toast, setToast] = useState<{ text: string; undo?: UndoTo; error?: boolean } | null>(null);
+  // Sent to the owner's Mac: done with it once the copy's chart is another, or the owner's Mac said why not (adjusted as
+  // it renders, as react.dev's "storing information from previous renders" does).
+  const sentFailed = sent ? state.shared?.changeActs?.find((x) => x.key === sent.key && x.state === "failed") : undefined;
+  if (sent && (sentFailed || ws?.chain !== sent.before)) {
+    setSent(null);
+    setPending(null);
+    if (sentFailed) setToast({ text: sentFailed.error ?? CHART_WORDS.failed, error: true });
+  }
   const chain = pending ?? ws?.chain ?? {};
   const t = teamIn({ bots: state.bots, workspaces: [{ id: wsId, chain }] }, wsId);
   const byId = new Map(state.bots.map((b) => [b.id, b]));
   const name = (id: string) => byId.get(id)?.name ?? id;
-  const [toast, setToast] = useState<{ text: string; undo?: UndoTo; error?: boolean } | null>(null);
-  const { people, room, reload } = usePeople(givenPeople);
+  // Who's in: the owner's People, or for an Admin of a shared workspace its own (as Team reads it).
+  const peopleSource = !state.shared ? "/api/members" : state.shared.role === "admin" ? "/api/workspaces/shared/people" : null;
+  const { people, room, reload } = usePeople(givenPeople, peopleSource);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A Mac or runner on the account on a Bops from before the chart (GET /api/workspaces?olderBops=1): said under it.
   const [older, setOlder] = useState(false);
@@ -386,10 +403,17 @@ export function useChartEditor(state: AppState, givenPeople?: ChartPerson[] | nu
     try {
       const res = await fetch("/api/workspaces", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: wsId, chain: next }) });
       ok = res.ok;
-      if (!ok && res.status === 403) {
+      const j = ((await res.json().catch(() => null)) ?? {}) as { error?: string; sent?: boolean; key?: string };
+      if (!ok && (res.status === 403 || res.status === 409)) {
         setPending(null);
-        say(CHART_WORDS.ownerOnly, { error: true });
+        say(state.shared && j.error ? j.error : CHART_WORDS.ownerOnly, { error: true });
         return false;
+      }
+      // Sent to the owner's Mac: shown as sent until the copy has it.
+      if (ok && j.sent && j.key) {
+        setSent({ key: j.key, before: ws?.chain });
+        if (o.undoable !== false) say(o.said ?? CHART_WORDS.saved, { undo: { chain: was, levels: o.levels } });
+        return true;
       }
     } catch {
       ok = false;
@@ -414,7 +438,8 @@ export function useChartEditor(state: AppState, givenPeople?: ChartPerson[] | nu
     const access = withLevel(accessOf(p), botId, level);
     const body = p.id ? { memberId: p.id, access } : p.invited ? { invite: p.email ?? p.key, access } : null;
     if (!body) return false;
-    const res = await fetch("/api/members", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+    if (!peopleSource) return false;
+    const res = await fetch(peopleSource, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
     return !!res?.ok;
   };
   const shown = async () => {
@@ -558,7 +583,8 @@ export function TeamChart({
     void save(withBot(chain, id, { lead: target === t.chief?.id ? undefined : target }));
   };
 
-  if (!ws || state.shared) return null;
+  // In a workspace shared with the user: theirs to see and change with the Org chart switch (an Admin always: cloud/member-access.ts Power).
+  if (!ws || !mayChange(state, "chart", { soon: true })) return null;
   const chief = t.chief ? byId.get(t.chief.id) : undefined;
   // What each card shows, which says how tall it is.
   const facts = new Map(t.bots.map((tb) => [tb.id, cardFacts(t, state, byId.get(tb.id), people, levelFor)]));

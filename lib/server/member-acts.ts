@@ -1,4 +1,5 @@
 import "server-only";
+import { cleanChange } from "@/cloud/change-routes";
 import { isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
@@ -10,6 +11,7 @@ import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
 import { compactThread, dismissWaiting, replyToSession, setWhere, stopSession } from "./sessions";
 import { compactChat } from "./chat-summary";
+import { changeRefused, doChange, refuseChange } from "./change-acts";
 import { addMessage, bot, chat, getState, ownerName, pullState, session, update } from "./store";
 import type { OrgoMember } from "./orgo";
 
@@ -63,6 +65,10 @@ function actOf(a: unknown): MemberAct | null {
     return short(x.botId, 120) && [x.text, x.was].every((v) => typeof v === "string" && v.length <= MEMBER_MAX_TEXT) ? { act: "persona", botId: x.botId as string, text: x.text as string, was: x.was as string } : null;
   if (x.act === "key") return short(x.botId, 120) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" ? { act: "key", botId: x.botId as string, name: x.name, on: x.on } : null;
   if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
+  if (x.act === "change") {
+    const call = cleanChange(x);
+    return call ? { act: "change", ...call } : null;
+  }
   return null;
 }
 
@@ -183,6 +189,8 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
   if (!ws) return "no such workspace";
   const access = accessFor(p, who, admin);
   if (!access) return "access from before they joined";
+  // An Admin, or a Member with the switch a power needs (member-access.ts POWER_OF, MemberAccess.can).
+  const me = { admin, ...(access.can ? { can: access.can } : {}) };
   const apps = appsOpen(getState()) && appsLevelOf(access) === "write";
   const threadOk = (id: string) => {
     const s = session(id);
@@ -201,9 +209,11 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     const h = ws.hostedApps?.[act.app];
     if (!h || !sitesOfHosting(h, act.app).includes(act.site ?? act.app)) return "no such app";
     // Publish, or going back on Published: the owner's and an Admin's (member-access.ts ADMIN_POWERS).
-    if (isPublish(act) && !adminMay("publish", admin)) return "not an Admin";
+    if (isPublish(act) && !adminMay("publish", me)) return "not an Admin";
     return null;
   }
+  // A change as the owner's window makes it (change-acts.ts): the power it needs, this workspace's bots and apps alone.
+  if (act.act === "change") return changeRefused(ws.id, act, admin ? "admin" : "member", access);
   // Compact: a chat's as saying something there, a thread's as replying in it.
   const as: MemberAct = act.act === "compact" ? ("chatId" in act ? { act: "chat", chatId: act.chatId, text: "" } : { act: "reply", sessionId: act.sessionId, text: "" }) : act;
   switch (as.act) {
@@ -216,11 +226,11 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     case "reply":
     case "dismiss":
       if (!threadOk(as.sessionId)) return "not at Write";
-      if (threadOwnersOnly(session(as.sessionId), admin)) return "on the owner's Mac";
+      if (threadOwnersOnly(session(as.sessionId), me)) return "on the owner's Mac";
       return !computer && onComputer(as.sessionId) ? "no computer" : null;
     case "where": {
       // An Admin's (member-access.ts ADMIN_POWERS), and only to the bot's computer: the owner's Mac is theirs to pick.
-      if (!adminMay("where", admin)) return "not an Admin";
+      if (!adminMay("where", me)) return "not an Admin";
       if (as.to !== "cloud") return "on the owner's Mac";
       if (!threadOk(as.sessionId)) return "not at Write";
       return session(as.sessionId)?.askWhere ? null : "not waiting";
@@ -237,7 +247,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     }
     // A bot's "How I work": an Admin's (member-access.ts ADMIN_POWERS.instructions), for a bot of this workspace.
     case "persona": {
-      if (!adminMay("instructions", admin)) return "not an Admin";
+      if (!adminMay("instructions", me)) return "not an Admin";
       const b = bot(as.botId);
       if (!b || workspaceOf(b) !== ws.id) return "no such bot";
       return (b.persona ?? "") === as.was ? null : "changed since";
@@ -247,7 +257,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
       if (!a) return "no such ask";
       if (!writes(ws, access, a.botId)) return "not at Write";
       // The owner's Connected apps or keys, or a thread on the owner's Mac: theirs, and an Admin's (member-access.ts askOwnersOnly).
-      const why = askOwnersOnly(a, a.threadId ? session(a.threadId) : undefined, admin);
+      const why = askOwnersOnly(a, a.threadId ? session(a.threadId) : undefined, me);
       if (why === "logins") return "the owner's apps or keys";
       if (why === "mac") return "on the owner's Mac";
       if (!computer && (a.threadId ? onComputer(a.threadId) : hasComputer(a.botId))) return "no computer";
@@ -282,7 +292,10 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
     noteMemberAct(p.wsId, act.app, keptAct(p, act, who, false, REFUSED[why] ?? "That didn't go."));
     return void console.warn(`[members] event ${eventId}: not done (${why})`);
   }
+  // A change that won't go: kept as why, so their window says so.
+  if (why && act.act === "change") refuseChange(p.wsId, p.key, who, why);
   if (why) return void console.warn(`[members] event ${eventId}: not done (${why})`);
+  if (act.act === "change") return void doChange(p.wsId, act, who, p.key).catch((e: Error) => console.warn(`[members] event ${eventId}: ${e.message}`));
   if (isAppAct(act)) {
     going.add(doing);
     void appEvent(p, act, who, eventId).finally(() => going.delete(doing));

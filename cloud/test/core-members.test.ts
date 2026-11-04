@@ -4,8 +4,9 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
-import { accessSummary, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
+import { accessSummary, adminMay, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, sameAccess, withEntry, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
 import { accessFor, adminGate, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
+import { CHANGES_MIN_VERSION, checkChange, cleanChange, THIS_WS } from "../change-routes.ts";
 import { ADMIN_POWERS_MIN_VERSION, KEYS_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
@@ -1299,7 +1300,7 @@ const actOwner: Record<string, unknown> = {
 /** What each act route test queued, as the owner's Mac would get it, and what was dropped. */
 const queued: { owner: string; kind: string; payload: MemberActPayload; dedupe: string; expires: Date }[] = [];
 const dropped: string[] = [];
-function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean; edits?: boolean; keysGate?: boolean } = {}) {
+function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEmail?: string; adminGate?: boolean; edits?: boolean; keysGate?: boolean; changesGate?: boolean } = {}) {
   queued.length = 0;
   dropped.length = 0;
   resetMembers({
@@ -1311,7 +1312,9 @@ function actFakes(opts: { on?: boolean; owner?: Record<string, unknown>; ownerEm
     // Whether the owner's Bops takes an Admin's acts (members.ts adminGate): no, unless the test says. `edits`: a change to
     // a bot's "How I work" (a newer Bops than the other acts need), as `adminGate` unless the test says.
     // `keysGate`: whether it takes a "key" act (KEYS_MIN_VERSION), no unless the test says.
-    adminGate: async (_owner, min) => (min === ADMIN_POWERS_MIN_VERSION ? (opts.adminGate ?? false) : min === KEYS_MIN_VERSION ? (opts.keysGate ?? false) : (opts.edits ?? opts.adminGate ?? false)),
+    // `changesGate`: whether it takes a "change" act and Members' switches (CHANGES_MIN_VERSION), no unless the test says.
+    adminGate: async (_owner, min) =>
+      min === ADMIN_POWERS_MIN_VERSION ? (opts.adminGate ?? false) : min === KEYS_MIN_VERSION ? (opts.keysGate ?? false) : min === CHANGES_MIN_VERSION ? (opts.changesGate ?? false) : (opts.edits ?? opts.adminGate ?? false),
   });
   roles["act-sam proj-act"] = { role: "member", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts", joinedAt: 1_700_000_000_000 };
   roles["act-tom proj-act"] = { role: "admin", ownerUserId: "act-owner", bopsWsId: "ws_act", name: "Acts" };
@@ -1436,7 +1439,7 @@ const whereOwner: Record<string, unknown> = {
   sessions: [...(actOwner.sessions as unknown[]), { id: "t-where", botId: "max", chatId: "bot:max", title: "Plan a trip", status: "queued", askWhere: true }, { id: "t-picked", botId: "max", chatId: "bot:max", title: "Picked", status: "queued" }],
 };
 
-test("over HTTP: an Admin answers the owner's own asks and a thread on the owner's Mac's asks, once the owner's Bops takes it; a Member never; telling a Mac thread more stays the owner's", async () => {
+test("over HTTP: an Admin answers the owner's own asks and a thread on the owner's Mac's asks, and tells a Mac thread more, once the owner's Bops takes it; a Member never", async () => {
   actFakes({ adminGate: true });
   const before = Date.now();
   for (const askId of ["ask-gmail", "ask-nokind", "ask-key", "ask-mac"]) {
@@ -1453,12 +1456,14 @@ test("over HTTP: an Admin answers the owner's own asks and a thread on the owner
     const r = await act("act-sam", { key: `k_mem_${askId.slice(4)}x`, act: { act: "answer", askId, reply: "once" } });
     assert.deepEqual([r.status, r.json.code], [403, "member_owner_only"], askId);
   }
-  // An Admin's reply or Nothing to add on the owner's Mac: still the owner's (it has their browsers and logins).
+  assert.equal(queued.length, 0);
+  // An Admin's reply or Nothing to add on the owner's Mac: theirs too (an Admin may do everything but delete the workspace).
   for (const a of [{ act: "reply", sessionId: "t-mac", text: "open Messages" }, { act: "dismiss", sessionId: "t-mac" }]) {
     const r = await act("act-tom", { key: `k_admmac_${a.act}`, act: a });
-    assert.deepEqual([r.status, r.json.code], [403, "member_owner_only"], a.act);
+    assert.equal(r.status, 202, a.act);
   }
-  assert.equal(queued.length, 0);
+  assert.equal(queued.length, 2);
+  assert.ok(queued.every((q) => q.payload.role === "admin"));
 });
 
 test("over HTTP: an Admin whose owner's Bops is too old to take it is told so (409 owner_bops_old), never queued; their other acts go as before", async () => {
@@ -1991,4 +1996,128 @@ test("Publish from Your Apps (a deploy or a rollback with env prod) is an Admin'
   // cleanAct: env prod kept on a deploy and a rollback; never on settings or a domain.
   assert.deepEqual(cleanAct({ key: "k_12345678", act: { act: "deploy", app: "shop", env: "prod" } }), { key: "k_12345678", act: { act: "deploy", app: "shop", env: "prod" } });
   assert.deepEqual(cleanAct({ key: "k_12345678", act: { act: "settings", app: "shop", port: 3000, env: "prod" } }), { key: "k_12345678", act: { act: "settings", app: "shop", port: 3000 } });
+});
+
+/* ---------------- What someone may change: Team's switches and the "change" act ---------------- */
+
+test("Team's switches are kept as sent (only known ones, only on), kept through a save of bots alone, and told apart from none", () => {
+  const a = cleanAccess({ others: "read", bots: {}, can: { chart: true, bots: true, nope: true, spend: false } });
+  assert.deepEqual(a?.can, { chart: true, bots: true });
+  // Every switch off is kept as off ({}), never as never set.
+  assert.deepEqual(cleanAccess({ others: "read", bots: {}, can: {} })?.can, {});
+  assert.equal(cleanAccess({ others: "read", bots: {} })?.can, undefined);
+  // A save that sends only bots keeps the switches; one that sends them changes them.
+  const kept = withEntry({ "a@x.com": { others: "read", bots: {}, can: { chart: true } } }, "a@x.com", { others: "write", bots: {} });
+  assert.deepEqual(kept?.["a@x.com"].can, { chart: true });
+  const off = withEntry(kept, "a@x.com", { others: "write", bots: {}, can: {} });
+  assert.deepEqual(off?.["a@x.com"].can, {});
+  assert.equal(sameAccess({ others: "read", bots: {}, can: { chart: true } }, { others: "read", bots: {} }), false);
+  assert.equal(sameAccess({ others: "read", bots: {}, can: { chart: true } }, { others: "read", bots: {}, can: { chart: true } }), true);
+});
+
+test("an Admin power: every Admin's (the owner's Mac's threads too); a Member's only with its switch, never people or waking", () => {
+  for (const p of ["ownerAsk", "macAsk", "macThread", "where", "workspace", "publish", "instructions", "people", "wake"] as const) assert.equal(adminMay(p, true), true, p);
+  assert.equal(adminMay("macThread", false), false);
+  assert.equal(adminMay("macThread", { admin: false, can: { mac: true } }), true);
+  assert.equal(adminMay("instructions", { admin: false, can: { bots: true } }), true);
+  assert.equal(adminMay("publish", { admin: false, can: { bots: true } }), false);
+  assert.equal(adminMay("people", { admin: false, can: { chart: true, bots: true, memory: true, workspace: true, appSecrets: true, spend: true, mac: true } }), false);
+});
+
+test("a change is checked against the workspace: its own id as @ws, a bot of its own, only the route's fields, the powers they need", () => {
+  const scope = { bots: new Set(["max"]), apps: new Set<string>() };
+  const ok = checkChange({ method: "PATCH", path: "/api/workspaces", body: { id: THIS_WS, chain: { bots: {} } } }, scope);
+  assert.ok(!("why" in ok) && ok.powers.join() === "chart");
+  assert.ok("why" in checkChange({ method: "PATCH", path: "/api/workspaces", body: { id: "ws_other", chain: {} } }, scope), "another workspace");
+  assert.ok("why" in checkChange({ method: "PATCH", path: "/api/workspaces", body: { id: THIS_WS, favorites: [] } }, scope), "a field it doesn't list");
+  assert.ok("why" in checkChange({ method: "DELETE", path: "/api/workspaces", body: { id: THIS_WS } }, scope), "never deletes the workspace");
+  assert.ok("why" in checkChange({ method: "PATCH", path: "/api/bots", body: { botId: "zed", name: "Z" } }, scope), "a bot not theirs");
+  const own = checkChange({ method: "PATCH", path: "/api/bots", body: { botId: "max", computer: "own" } }, scope);
+  assert.ok(!("why" in own) && own.powers.sort().join() === "bots,spend");
+  const mac = checkChange({ method: "PATCH", path: "/api/bots", body: { botId: "max", runsOn: "mac" } }, scope);
+  assert.ok(!("why" in mac) && mac.powers.sort().join() === "bots,mac");
+  // Made safe to queue: a known method, a path under /api/, an object body under the limit.
+  assert.equal(cleanChange({ method: "GET", path: "/api/bots", body: {} }), null);
+  assert.equal(cleanChange({ method: "PATCH", path: "/etc/passwd", body: {} }), null);
+  assert.equal(cleanChange({ method: "PATCH", path: "/api/bots", body: { x: "y".repeat(60_000) } }), null);
+});
+
+/** The owner's state with Sam given switches: Org chart and Bot settings (Sam sees Max at Write and Ivy at Read, not Zed). */
+const switchedOwner = (can: Record<string, true>, others = "none"): Record<string, unknown> => ({
+  ...actOwner,
+  workspaces: [{ ...(actOwner.workspaces as Record<string, unknown>[])[0], chain: { bots: { ivy: { lead: "max" } } }, memberAccess: { ...((actOwner.workspaces as Record<string, unknown>[])[0].memberAccess as Record<string, unknown>), "sam@example.com": { others, bots: { max: "write", ivy: "read" }, at: 1_700_000_001_000, computer: "use", can } } }],
+});
+const change = (body: Record<string, unknown>, method = "PATCH", path = "/api/workspaces") => ({ act: "change", method, path, body });
+
+test("over HTTP: an Admin's change goes to the owner's Mac, with the workspace as @ws, once the owner's Bops takes it; an older one says so", async () => {
+  actFakes({ adminGate: true, changesGate: true });
+  const r = await act("act-tom", { key: "k_chg_00001", act: change({ id: THIS_WS, chain: { bots: { max: { lead: "ivy" } } } }) });
+  assert.equal(r.status, 202);
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].payload.role, "admin");
+  assert.deepEqual(queued[0].payload.act, { act: "change", method: "PATCH", path: "/api/workspaces", body: { id: THIS_WS, chain: { bots: { max: { lead: "ivy" } } } } });
+  // Any bot's settings, theirs as an Admin's (every bot, Spending too).
+  assert.equal((await act("act-tom", { key: "k_chg_00002", act: change({ botId: "zed", computer: "own" }, "PATCH", "/api/bots") })).status, 202);
+  // Never what no route lists, and never another workspace.
+  const no = await act("act-tom", { key: "k_chg_00003", act: change({ id: "ws_else", chain: {} }) });
+  assert.deepEqual([no.status, no.json.code], [403, "member_owner_only"]);
+  // The owner's Bops too old: told so, nothing queued.
+  actFakes({ adminGate: true, changesGate: false });
+  const old = await act("act-tom", { key: "k_chg_00004", act: change({ id: THIS_WS, chain: {} }) });
+  assert.deepEqual([old.status, old.json.code], [409, "owner_bops_old"]);
+  assert.equal(queued.length, 0);
+});
+
+test("over HTTP: a Member's change needs its switch, a bot they have at Write, and for the org chart every bot", async () => {
+  // No switches: refused, saying who can give them.
+  actFakes({ adminGate: true, changesGate: true });
+  const none = await act("act-sam", { key: "k_mchg_0001", act: change({ id: THIS_WS, chain: {} }) });
+  assert.deepEqual([none.status, none.json.code], [403, "member_no_power"]);
+  assert.match(String(none.json.error), /Org chart in Team/);
+  // Bot settings on: Max's (Write) goes; Ivy's (Read) doesn't; Spending isn't theirs.
+  actFakes({ adminGate: true, changesGate: true, owner: switchedOwner({ bots: true }) });
+  assert.equal((await act("act-sam", { key: "k_mchg_0002", act: change({ botId: "max", autoApprove: true }, "PATCH", "/api/bots") })).status, 202);
+  assert.equal((await act("act-sam", { key: "k_mchg_0003", act: change({ botId: "ivy", autoApprove: true }, "PATCH", "/api/bots") })).status, 403);
+  const spend = await act("act-sam", { key: "k_mchg_0004", act: change({ botId: "max", computer: "own" }, "PATCH", "/api/bots") });
+  assert.deepEqual([spend.status, spend.json.code], [403, "member_no_power"]);
+  // Org chart on, but Zed hidden from them: refused (their chart would leave out a bot they can't see).
+  actFakes({ adminGate: true, changesGate: true, owner: switchedOwner({ chart: true }) });
+  const partial = await act("act-sam", { key: "k_mchg_0005", act: change({ id: THIS_WS, chain: {} }) });
+  assert.deepEqual([partial.status, partial.json.code], [403, "member_no_power"]);
+  // Seeing every bot (others at Read): it goes.
+  actFakes({ adminGate: true, changesGate: true, owner: switchedOwner({ chart: true }, "read") });
+  assert.equal((await act("act-sam", { key: "k_mchg_0006", act: change({ id: THIS_WS, chain: {} }) })).status, 202);
+  // Their switches count only once the owner's Bops takes them.
+  actFakes({ adminGate: true, changesGate: false, owner: switchedOwner({ chart: true }, "read") });
+  assert.equal((await act("act-sam", { key: "k_mchg_0007", act: change({ id: THIS_WS, chain: {} }) })).status, 409);
+});
+
+test("over HTTP: a Member with The owner's Mac on tells a thread there more, once the owner's Bops takes switches", async () => {
+  actFakes({ adminGate: true, changesGate: true, owner: switchedOwner({ mac: true }) });
+  assert.equal((await act("act-sam", { key: "k_mmac_0001", act: { act: "reply", sessionId: "t-mac", text: "open Messages" } })).status, 202);
+  actFakes({ adminGate: true, changesGate: false, owner: switchedOwner({ mac: true }) });
+  assert.equal((await act("act-sam", { key: "k_mmac_0002", act: { act: "reply", sessionId: "t-mac", text: "open Messages" } })).status, 403);
+});
+
+test("the slice says what someone may change: an Admin every switch, a Member theirs; the org chart only to one with it who sees every bot; their own changes' results", () => {
+  const owner = switchedOwner({ chart: true });
+  const ws = (owner.workspaces as Record<string, unknown>[])[0];
+  ws.changesDone = [
+    { key: "chg_a", by: "act-tom", ok: true, at: 1 },
+    { key: "chg_b", by: "act-sam", ok: false, error: "No.", at: 2 },
+  ];
+  const admin = sharedSlice(owner, "ws_act", { role: "admin", id: "act-tom", email: "tom@orgo.ai", changes: true });
+  assert.deepEqual(admin.can, ["chart", "bots", "memory", "workspace", "appSecrets", "spend", "mac"]);
+  assert.equal(admin.changes, true);
+  assert.deepEqual(admin.chain, { bots: { ivy: { lead: "max" } } });
+  assert.deepEqual(admin.changed, [{ key: "chg_a", ok: true }]);
+  const sam = sharedSlice(owner, "ws_act", { role: "member", id: "act-sam", email: "sam@example.com", joinedAt: 1_700_000_000_000, changes: true });
+  assert.deepEqual(sam.can, ["chart"]);
+  assert.equal(sam.chain, undefined, "not every bot: no chart");
+  assert.deepEqual(sam.changed, [{ key: "chg_b", ok: false, error: "No." }]);
+  const seesAll = sharedSlice(switchedOwner({ chart: true }, "read"), "ws_act", { role: "member", id: "act-sam", email: "sam@example.com", joinedAt: 1_700_000_000_000, changes: true });
+  assert.ok(seesAll.chain);
+  // No switches: nothing said of them.
+  const plain = sharedSlice(actOwner, "ws_act", { role: "member", id: "act-sam", email: "sam@example.com", joinedAt: 1_700_000_000_000, changes: true });
+  assert.equal(plain.can, undefined);
 });

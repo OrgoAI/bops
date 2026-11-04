@@ -1,4 +1,5 @@
 import { deleteWorkspace } from "@/lib/server/remove";
+import { relayChange } from "@/lib/server/change-relay";
 import { createWorkspace, deletePreview, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, setChain, setFavorites, switchWorkspace, syncWorkspaceNames, WorkspaceError } from "@/lib/server/workspaces";
 import { notReady } from "@/lib/server/ready";
 import { closeShared, sharedOpen } from "@/lib/server/shared";
@@ -61,6 +62,9 @@ export async function POST(request: Request) {
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
+  // A change in a workspace shared with the user: done by its owner's Mac, for someone allowed to (change-relay.ts).
+  const relayed = await relayChange(request);
+  if (relayed) return relayed;
   const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites, chain, computerName, chat } = (await request.json().catch(() => ({}))) as {
     id?: string;
     name?: string;

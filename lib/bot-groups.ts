@@ -162,6 +162,8 @@ function sharedGroups(state: GroupState): BotGroup[] {
     return [
       {
         key: g.key,
+        // Renamed by the key Bops Cloud sent it by: the owner's Mac finds the group (lib/server/change-acts.ts).
+        nameKey: g.key,
         name: own || (host ? GROUP_WORDS.computerOf(host.name) : GROUP_WORDS.sharedComputer),
         named: !!own,
         bots: rows,
