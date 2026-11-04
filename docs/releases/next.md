@@ -1,1 +1,3 @@
 - Admins can add files in a shared workspace's chats.
+- A bot gets more steps for a whole site change.
+- Updating a bot's computer never cuts off its reply.
