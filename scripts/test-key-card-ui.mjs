@@ -314,8 +314,14 @@ await test("a shared workspace's save answers the card once the bot's switch has
     assert.deepEqual(sent.findLast((x) => x.url === "/api/keys" && x.method === "POST").body, { name: "NOTION_API_KEY", value: VALUE, botIds: ["boppy"], scope: "workspace" });
     assert.deepEqual(m.answers, [], "not before the switch lands");
     assert.match(card.querySelector("[data-key-waits]").textContent, /^Saved\. Boppy can use it once the workspace's Bops lets it\./);
-    // The owner's Bops did it: the bot's keys say so, and the card answers.
-    await m.draw({ ...state, bots: state.bots.map((b) => ({ ...b, keys: ["NOTION_API_KEY"] })) });
+    // On its way: the window shows the bot with the key already (lib/server/shared-core.ts switchedKeys) while the switch
+    // waits for the owner's Bops: still not answered.
+    const on = state.bots.map((b) => ({ ...b, keys: ["NOTION_API_KEY"] }));
+    await m.draw({ ...state, bots: on, shared: { ...shared, keySends: [{ key: "k1", botId: "boppy", name: "NOTION_API_KEY", on: true, state: "waiting" }] } });
+    assert.deepEqual(m.answers, [], "a switch on its way isn't one that landed");
+    assert.match(card.querySelector("[data-key-waits]").textContent, /Waiting for the workspace's Mac to open\.$/);
+    // The owner's Bops did it: the bot has the key and nothing of it waits, and the card answers.
+    await m.draw({ ...state, bots: on, shared: { ...shared, keySends: [] } });
     assert.deepEqual(m.answers, ["once"]);
   } finally {
     await m.done();

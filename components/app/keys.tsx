@@ -919,10 +919,12 @@ export function KeyAskCard({
   const name = a.resources[0] ?? "";
   const b = state.bots.find((x) => x.id === a.botId);
   // Saved in a shared workspace: the bot's switch is an act the owner's Bops does (shared-keys.ts sharedSave), so the card
-  // answers once the bot's keys say it landed, never before, as the bot would go on without it. Meanwhile it says so, and
-  // Done goes on anyway (the switch not gone, or the owner's Bops shut).
+  // answers once it landed, never before, as the bot would go on without it: the bot has the key and no switch of it is
+  // still on its way (the window shows one on its way as done already: lib/server/shared-core.ts switchedKeys). Meanwhile
+  // it says so, and Go on without it answers anyway (the switch not gone, or the owner's Bops shut).
   const [waitTick, setWaitTick] = useState(false);
-  const ticked = !!b?.keys?.includes(name);
+  const sends = state.shared?.keySends?.filter((x) => x.name === name && x.botId === a.botId) ?? [];
+  const ticked = !!b?.keys?.includes(name) && !sends.some((x) => x.state !== "failed");
   const answered = useRef(false);
   useEffect(() => {
     if (!waitTick || !ticked || answered.current) return;
@@ -935,7 +937,6 @@ export function KeyAskCard({
     setNote(said ?? null);
     setWaitTick(true);
   };
-  const sends = state.shared?.keySends?.filter((x) => x.name === name && x.botId === a.botId) ?? [];
   const sendFailed = sends.at(-1)?.state === "failed" ? sends.at(-1) : undefined;
   const botName = b?.name ?? "The bot";
   const shared = !!state.shared;
