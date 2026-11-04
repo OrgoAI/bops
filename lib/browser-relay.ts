@@ -188,9 +188,11 @@ export function cleanInput(method: string, params: unknown): Record<string, unkn
         return null;
       }
       if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-      // Never this computer's own DevTools, Bops' or the relay's port: a page there acts on the browser past these rules.
+      // Never the ports of this computer's own DevTools, Bops or the relay, on any host: a page there acts on the browser
+      // past these rules, and too many names reach this computer to tell them apart (localhost., *.localhost, any 127
+      // address, an IPv4 in IPv6, a public name pointed here).
       const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
-      if (LOOPBACK.has(u.hostname) && (port === 3210 || port === 8897 || (port >= 9200 && port <= 9399))) return null;
+      if (port === 3210 || port === 8897 || (port >= 9200 && port <= 9399)) return null;
       return { url: u.href };
     }
     case "Page.reload":
@@ -225,8 +227,7 @@ async function tabsOf(port: number): Promise<Target[]> {
 
 /** The tabs a screen's browser may have for a person to open another, and that a viewer is told of: at most this many. */
 const TABS_MAX = 20;
-/** This computer, by any name a page address can give it. */
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "0.0.0.0"]);
+
 
 /** One of Chrome's DevTools address calls on a screen (a new tab, a switch, a close): it said yes, or why not. */
 async function devtools(port: number, path: string, method: "GET" | "PUT" = "GET"): Promise<void> {
@@ -308,6 +309,10 @@ class Screen {
   private seenNext = 0;
   /** The tab in front when someone took control: in front again once they hand back. */
   private botTab: string | null = null;
+  /** Putting the bot's tab in front after a hand back, until done. */
+  private restoring: Promise<void> | null = null;
+  /** Tab acts one at a time, so two new tabs at once never pass the cap together. */
+  private acting: Promise<void> = Promise.resolve();
   framesSent = 0;
   readonly display: number;
   private port: () => number | null;
@@ -465,17 +470,24 @@ class Screen {
     if (next && !was) this.botTab = this.last.tabs?.front ?? this.tab;
     if (this.watchers().length) this.relay.send({ t: "control", bots: this.watchers(), by: next?.who ?? null });
     if (next) this.relay.onControl(next.bot, this.display, next.who, was?.who ?? null);
-    else if (was)
+    else if (was) {
       // Handed back: the bot's own tab in front again first, then the bot goes on (its thread, and any step waiting).
-      void this.backToBotTab().finally(() => {
-        if (this.controller) return;
-        this.relay.onControl(was.bot, this.display, null, was.who);
-        for (const w of this.waiters.splice(0)) w();
-        this.sayDoing();
-      });
+      const restoring = this.backToBotTab()
+        .catch(() => {})
+        .finally(() => {
+          if (this.restoring === restoring) this.restoring = null;
+          if (this.controller) return;
+          this.relay.onControl(was.bot, this.display, null, was.who);
+          for (const w of this.waiters.splice(0)) w();
+          this.sayDoing();
+        });
+      this.restoring = restoring;
+    }
   }
 
   whenFree(): Promise<void> {
+    // Handed back but the bot's own tab not in front yet: once it is.
+    if (!this.controller && this.restoring) return this.restoring.then(() => this.whenFree());
     if (!this.controller) return Promise.resolve();
     const freed = new Promise<void>((r) => this.waiters.push(r));
     this.sayDoing();
@@ -511,7 +523,13 @@ class Screen {
   }
 
   /** A person's tab act: a new tab at a page, or a switch to or close of a tab this screen listed. The capture follows at once. */
-  private async tabAct(method: string, params: Record<string, unknown>) {
+  private tabAct(method: string, params: Record<string, unknown>): Promise<void> {
+    const run = this.acting.then(() => this.tabActNow(method, params));
+    this.acting = run.catch(() => {});
+    return run;
+  }
+
+  private async tabActNow(method: string, params: Record<string, unknown>) {
     const port = this.port();
     if (port === null) throw new Error("The page isn't there right now.");
     if (method === "Target.createTarget") {

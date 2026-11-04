@@ -87,7 +87,8 @@ await test("only the nine methods, each with its parameters checked, and only ht
   assert.deepEqual(cleanInput("Target.closeTarget", { targetId: "A1B2C3D4E5F6" }), { targetId: "A1B2C3D4E5F6" });
   for (const targetId of ["", "../json/close/x", "a b", 7, "F".repeat(65)]) assert.equal(cleanInput("Target.activateTarget", { targetId }), null, `${JSON.stringify(targetId)} is no tab id`);
   // Never a page on this computer's own DevTools, Bops' or the relay's port (they'd act on the browser past these rules).
-  for (const url of ["http://127.0.0.1:9300/json/close/AB12", "http://localhost:9222/json/list", "http://[::1]:9399/", "http://0.0.0.0:8897/", "http://127.0.0.1:3210/api/state"])
+  // Whatever name reaches it: localhost. and its subdomains, any 127 address, an IPv4 in IPv6, or a public name pointed here.
+  for (const url of ["http://127.0.0.1:9300/json/close/AB12", "http://localhost:9222/json/list", "http://[::1]:9399/", "http://0.0.0.0:8897/", "http://127.0.0.1:3210/api/state", "http://localhost.:9301/json/list", "http://a.localhost:9301/", "http://127.0.0.2:9301/", "http://[::ffff:127.0.0.1]:9301/", "http://2130706433:9301/", "http://here.example:9301/json/list"])
     for (const m of ["Page.navigate", "Target.createTarget"]) assert.equal(cleanInput(m, { url }), null, `${m} ${url} is refused`);
   assert.deepEqual(cleanInput("Target.createTarget", { url: "http://127.0.0.1:3000/" }), { url: "http://127.0.0.1:3000/" }, "an app on the computer still opens");
 });
