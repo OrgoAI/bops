@@ -200,4 +200,38 @@ await test("a read that didn't work says why in the opened list, as words anyone
   box.remove();
 });
 
+await test("a long block of code in a reply folds behind a quiet line that opens it; a short one shows as it is", async () => {
+  const { Rich } = await import(pathToFileURL(`${root}/components/app/chat-view.tsx`).href);
+  const long = Array.from({ length: 40 }, (_, i) => `const line${i} = ${i};`).join("\n");
+  const short = "npm run build\nnpm start";
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const r = createRoot(box);
+  await act(async () => (r.render(h(Rich, { text: `Here's what changed:\n\`\`\`ts\n${long}\n\`\`\`\nAnd to run it:\n\`\`\`\n${short}\n\`\`\`` })), await settle()));
+  const fold = box.querySelector("[data-code-fold]");
+  assert.ok(fold, "the long one folds");
+  assert.equal(fold.textContent.trim(), "40 lines of code");
+  assert.equal(fold.getAttribute("aria-expanded"), "false");
+  assert.ok(!box.textContent.includes("const line20"), "its lines out of sight until opened");
+  assert.equal([...box.querySelectorAll("pre")].map((p) => p.textContent).join("|"), short, "the short one shows as it is");
+  await click(fold);
+  assert.equal(fold.getAttribute("aria-expanded"), "true");
+  assert.ok(box.textContent.includes("const line20"), "opened: all of it");
+  await act(async () => r.unmount());
+  box.remove();
+  // 15 lines show, 16 fold, whatever the line endings.
+  const lines = (n, nl) => Array.from({ length: n }, (_, i) => `line ${i}`).join(nl);
+  for (const [n, nl, folded] of [[15, "\n", false], [16, "\n", true], [15, "\r\n", false], [16, "\r\n", true]]) {
+    const b2 = doc.createElement("div");
+    doc.body.appendChild(b2);
+    const r2 = createRoot(b2);
+    await act(async () => (r2.render(h(Rich, { text: `Here:${nl}\`\`\`${nl}${lines(n, nl)}${nl}\`\`\`` })), await settle()));
+    const f2 = b2.querySelector("[data-code-fold]");
+    assert.equal(!!f2, folded, `${n} lines, ${JSON.stringify(nl)}`);
+    if (f2) assert.equal(f2.textContent.trim(), `${n} lines of code`);
+    await act(async () => r2.unmount());
+    b2.remove();
+  }
+});
+
 console.log(`\napi calls ui: ${passed} passed`);
