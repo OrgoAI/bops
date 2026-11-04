@@ -144,6 +144,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
   // Watching: only while the tab shows.
   useEffect(() => {
     if (hidden) return;
+    const decoding = frames;
     const es = new EventSource(`/api/browser?${new URLSearchParams({ bot: bot.id, ...(project ? { project } : {}) })}`);
     const on = <T extends BrowserEvent["t"]>(t: T, f: (e: Extract<BrowserEvent, { t: T }>) => void) =>
       es.addEventListener(t, (m) => {
@@ -196,7 +197,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     return () => {
       es.close();
       // A frame still decoding is stale now: it frees itself when it's done.
-      frames.current++;
+      decoding.current++;
       clearTimeout(held.current.timer);
       held.current = {};
       setControl({ by: null, you: false });
