@@ -68,6 +68,8 @@ const ANY: Record<NonNullable<AppApproval["kind"]>, string> = {
   api: "whatever it sends",
   data: "whatever it looks up",
   brain: "whatever it runs",
+  // A key's card has no Always allow: only a save (or Done) answers it.
+  key: "whatever it is for",
 };
 
 /** What Always allow covers, as the card says it: "Always allow Max to send an email, whoever it's to and whatever it says." */

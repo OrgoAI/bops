@@ -2243,7 +2243,8 @@ export type AppApproval = {
   action: string;
   resources: string[];
   preview: string;
-  kind?: "app" | "email" | "api" | "data" | "brain";
+  /** `key`: a bot asking for one of the user's API keys (lib/server/keys.ts askForKey): its card is the Logins key form, and `resources` is the key's vault name. */
+  kind?: "app" | "email" | "api" | "data" | "brain" | "key";
   /**
    * A call to an API with one of the user's keys: the key, its service, the method and the whole path. `change`: a change
    * to files in one go (lib/server/repo-change.ts), which is several calls: where, and each file.

@@ -568,6 +568,13 @@ await check("while a shared workspace is open, what its bots wait on the owner's
   assert.match(src, /const answerer = threadAnswerer\(state, s, kind\);/);
   // A reply from the window never goes while a shared workspace is open (their own Bops has none of the owner's requests to answer either: test-members.mjs).
   assert.equal(callAllowed("POST", "/api/apps/approvals"), false, "a member's reply never leaves the window");
+  // Keys go: the keys routes act on the shared workspace's own keys while it's open (lib/server/shared-keys.ts), so someone
+  // with Keys adds, replaces, removes and switches them from Logins or a key card. Every other write still doesn't.
+  for (const [method, path] of [["POST", "/api/keys"], ["PATCH", "/api/keys"], ["DELETE", "/api/keys/NOTION_API_KEY?scope=workspace"], ["POST", "/api/keys/reveal"]])
+    assert.equal(callAllowed(method, path), true, `${method} ${path}`);
+  assert.equal(callAllowed("POST", "/api/keysmith"), false);
+  const routes = ["route.ts", "[name]/route.ts", "reveal/route.ts"].map((f) => readFileSync(`${root}/app/api/keys/${f}`, "utf8"));
+  assert.ok(routes.every((src) => /sharedOpen\(\)/.test(src)), "each keys route takes the shared workspace's path while one is open");
 });
 
 await check("while a shared workspace is open, the user's own news still chimes: the window is sent what of theirs is worth it", async () => {
@@ -1354,7 +1361,8 @@ await check("while one is open, every write to the app's server is answered View
   assert.equal(callAllowed("POST", "https://example.com/x"), true, "not the app's server");
   // The user's own vault, account and name are still theirs to change.
   for (const ok of ["/api/vault", "/api/account/checkout", "/api/owner", "/api/owner-email"]) assert.equal(callAllowed("POST", ok), true, ok);
-  assert.equal(callAllowed("POST", "/api/keys"), false, "keys are a workspace's too");
+  // Keys go: since a shared workspace has keys of its own, its keys routes act on those alone while it's open (below).
+  assert.equal(callAllowed("POST", "/api/keys"), true, "a shared workspace's own keys");
   // Reads the server answers from the user's own bot or workspace of that id: never the shared one's.
   for (const no of ["/api/memory?bot=boppy", "/api/memory/categories?ws=x", "/api/orbit/issues?ws=shared_p1", "/api/skills?ws=x", "/api/routines/suggestions?botId=boppy", "/api/vnc?bot=boppy&display=1", "/api/computer?bot=boppy", "/api/reader?bot=boppy", "/api/crm?ws=x", "/api/made-apps/app_x", "/api/hosted-apps?ws=x", "/api/domains?ws=x", "/api/domains/search?ws=x&q=acme", "/api/domains/6a6a6a6a-1111-4222-8333-444455556666?ws=x"])
     assert.equal(callAllowed("GET", no), false, no);

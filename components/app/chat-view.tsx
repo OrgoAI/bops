@@ -30,7 +30,7 @@ import { undash } from "./side-group";
 import { SelectIcon, TickBar, TickRow, TrashIcon, UndoLine, useMessageDeletes, type Gone } from "./message-deletes";
 import { num, privacyOf } from "@/lib/privacy";
 import { compactBlocked } from "@/lib/chat-summary";
-import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, oneLine, type ApiCall } from "./keys";
+import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, KeyAskCard, oneLine, type ApiCall } from "./keys";
 import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { AGENTS, aiOf, hasProfile, isCli, threadAgent, upper } from "@/lib/agents";
 import { AgentChip, AgentMark } from "./agent-marks";
@@ -3319,6 +3319,18 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
   const shownError = going ? null : (error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null));
   const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
   const answerer = askAnswerer(state, a);
+  // A bot asking for a key: the Logins form, answered by saving it (keys.tsx KeyAskCard).
+  if (a.kind === "key")
+    return (
+      <KeyAskCard state={state} approval={a} answerer={answerer} busy={busy} onAnswer={(reply) => void decide(reply)} className={className}>
+        {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
+        {shownError && (
+          <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+            {shownError}
+          </span>
+        )}
+      </KeyAskCard>
+    );
   return (
     <div className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${className}`}>
       <div className="flex items-start gap-2.5">

@@ -6,7 +6,10 @@
 // - Bops Cloud itself (cloud/server.ts) on it;
 // - a fake orgo-web: sign-in (who each made-up key is) and bops-role for two made-up users, "owner" and "sam"
 //   (sam: member, Write on the bot, Use its computer; or Orgo's Admin with TWO_PERSON_MEMBER_ROLE=admin), from
-//   scripts/fixtures/two-person.mjs;
+//   scripts/fixtures/two-person.mjs; a vault in memory for Keys (/api/secrets for the owner, the shared workspace's
+//   bops-keys routes for whoever has Keys there), whose values are never logged;
+// - a scripted model behind Bops Cloud's OpenAI proxy (BOPS_UPSTREAM_OPENAI): a message about a key gets the bot's
+//   ask_for_key card (lib/server/keys.ts), anything else "Ok.", so a chat turn runs with nothing real in it;
 // - a stand-in bot computer: a headless Chrome with its own temp profile and DevTools port, and the browser relay
 //   (lib/browser-relay.ts) exactly as a computer's runner runs it, signed in as that computer;
 // - a test site that Chrome opens (a page with a unique word, a button, a field and a ticker; a sign-in page for the
@@ -206,6 +209,78 @@ function pgBin(name) {
   throw new Error(`${name} isn't installed (brew install postgresql@16)`);
 }
 
+/**
+ * The fake orgo-web's vault (lib/server/keys.ts, lib/server/shared-keys.ts): the owner's /api/secrets, and the shared
+ * workspace's bops-keys routes for whoever has Keys there (the owner, or an Admin; a Member without Keys is refused as
+ * orgo-web refuses them). `vault`: "<workspace id or empty>:<name>" to { value, at }. Null for any other route. Never
+ * says a value back but on a reveal, and never logs one.
+ */
+function vaultRoute(vault, method, url, key, body) {
+  const owner = key === OWNER.key || key === COMPUTER.key;
+  const list = (ws) => [...vault.entries()].filter(([k]) => ws === undefined || k.startsWith(`${ws ?? ""}:`)).map(([k, v]) => ({ name: k.slice(k.indexOf(":") + 1), workspace_id: k.slice(0, k.indexOf(":")) || null, updated_at: new Date(v.at).toISOString() }));
+  const name = (n) => String(n ?? "").trim().toUpperCase().replace(/-/g, "_");
+  if (url.pathname === "/api/secrets" || url.pathname.startsWith("/api/secrets/")) {
+    if (!owner) return { status: 401, body: { error: "Invalid API key" } };
+    if (method === "GET" && url.pathname === "/api/secrets") return { status: 200, body: { secrets: list() } };
+    if (key !== OWNER.key) return { status: 403, body: { error: "Not for a computer's key" } };
+    if (method === "POST" && url.pathname === "/api/secrets") {
+      vault.set(`${body.workspace_id ?? ""}:${name(body.name)}`, { value: String(body.value ?? ""), at: Date.now() });
+      return { status: 200, body: { ok: true } };
+    }
+    const del = /^\/api\/secrets\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+    if (method === "DELETE" && del) return vault.delete(`${url.searchParams.get("workspace_id") ?? ""}:${name(del[1])}`) ? { status: 200, body: { ok: true } } : { status: 404, body: { error: "Secret not set" } };
+    return { status: 404, body: { error: "Not faked in the two-person stack" } };
+  }
+  const pk = /^\/api\/projects\/([^/]+)\/bops-keys(?:\/([A-Za-z0-9_-]+))?$/.exec(url.pathname);
+  if (!pk) return null;
+  if (!profileFor(key) || key === COMPUTER.key) return { status: 401, body: { error: "Invalid API key" } };
+  if (decodeURIComponent(pk[1]) !== PROJECT.id) return { status: 404, body: { error: "Not found" } };
+  if (key !== OWNER.key && SAM_ROLE !== "admin") return { status: 403, body: { error: "No Keys here", code: "KEYS_NOT_ALLOWED" } };
+  if (method === "GET" && !pk[2]) return { status: 200, body: { keys: list(PROJECT.id).map((k) => ({ name: k.name, updated_at: k.updated_at })) } };
+  if (method === "POST" && !pk[2]) return vault.set(`${PROJECT.id}:${name(body.name)}`, { value: String(body.value ?? ""), at: Date.now() }), { status: 200, body: { ok: true, name: name(body.name) } };
+  if (method === "DELETE" && pk[2]) return vault.delete(`${PROJECT.id}:${name(pk[2])}`) ? { status: 200, body: { ok: true } } : { status: 404, body: { error: "Not found", code: "KEY_NOT_FOUND" } };
+  return { status: 404, body: { error: "Not faked in the two-person stack" } };
+}
+
+/**
+ * The stack's model (POST /v1/responses through Bops Cloud's proxy): a chat turn whose latest words ask about a key, or
+ * the open issues, calls ask_for_key for GitHub (Notion when they say Notion; "again" or "card": to change it); its
+ * answer after the card is said plainly; anything else is "Ok.", and a structured answer is the schema's emptiest one.
+ */
+function scriptedModel(b) {
+  const out = (output) => ({ id: `resp_two_person_${randomBytes(6).toString("hex")}`, object: "response", model: "two-person-scripted", status: "completed", output, usage: { input_tokens: 1, output_tokens: 1, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } });
+  const say = (text) => out([{ id: `msg_${randomBytes(6).toString("hex")}`, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] }]);
+  const input = Array.isArray(b.input) ? b.input : [];
+  const empty = (schema) => {
+    if (!schema || typeof schema !== "object") return null;
+    const t = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (schema.enum) return schema.enum[0];
+    if (t.includes("null")) return null;
+    if (t.includes("object")) return Object.fromEntries(Object.entries(schema.properties ?? {}).map(([k, v]) => [k, empty(v)]));
+    if (t.includes("array")) return [];
+    if (t.includes("boolean")) return false;
+    if (t.includes("number") || t.includes("integer")) return 0;
+    return "";
+  };
+  if (b.text?.format?.type === "json_schema") return say(JSON.stringify(empty(b.text.format.schema)));
+  const asks = (b.tools ?? []).some((t) => t.name === "ask_for_key");
+  const last = input.at(-1);
+  if (asks && last?.type === "function_call_output") {
+    const o = String(last.output ?? "");
+    return say(/may use it now/.test(o) ? "Thanks, I can use it now." : /anymore/.test(o) ? "Done, that key is gone." : /^Declined/.test(o) ? "Ok, I'll leave it for now." : "I couldn't get the key just now.");
+  }
+  const words = (m) => (typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.map((c) => c.text ?? "").join(" ") : "");
+  const said = words([...input].reverse().find((m) => m.role === "user" && !/^\[Bops/.test(words(m))) ?? {});
+  // A Bops without the card (before ask_for_key): all a bot can do is say so.
+  const notion = /notion/i.test(said);
+  if (!asks && (b.tools ?? []).some((t) => t.name === "start_task") && /\bkey\b|issues/i.test(said)) return say(`I need a ${notion ? "Notion" : "GitHub"} key for that. Add one in Logins, Keys, then tell me.`);
+  if (asks && /\bkey\b|issues/i.test(said)) {
+    const args = { service: notion ? "NOTION_API_KEY" : "GITHUB_TOKEN", reason: notion ? "Read the team's notes in Notion" : "Read the open issues in the site's repository", change: /again|card/i.test(said) };
+    return out([{ id: `fc_${randomBytes(6).toString("hex")}`, type: "function_call", status: "completed", call_id: `call_${randomBytes(6).toString("hex")}`, name: "ask_for_key", arguments: JSON.stringify(args) }]);
+  }
+  return say("Ok.");
+}
+
 /** The environment every child starts from: this one without anything that could be a real key or point at a real service. */
 function cleanEnv() {
   const env = {};
@@ -354,11 +429,23 @@ async function serve() {
     const DB = `postgres://bops_app:bops-local@127.0.0.1:${ports.pg}/orgo_stack`;
 
     /* The fake orgo-web: who each made-up key is, each user's workspaces and role in the shared one. Anything else 404s, and is logged. */
-    const orgo = createServer((req, res) => {
+    const vault = new Map();
+    const orgo = createServer(async (req, res) => {
       const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
       const url = new URL(req.url, "http://orgo");
       const key = /^Bearer\s+(.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
-      req.resume();
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const body = (() => {
+        try {
+          return chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        } catch {
+          return {};
+        }
+      })();
+      if (url.pathname === "/v1/responses" && req.method === "POST") return send(200, scriptedModel(body));
+      const kept = vaultRoute(vault, req.method, url, key, body);
+      if (kept) return send(kept.status, kept.body);
       if (req.method === "GET" && url.pathname === "/api/user/profile") {
         const p = profileFor(key);
         return p ? send(200, p) : send(401, { error: "Invalid API key" });
@@ -429,7 +516,8 @@ async function serve() {
     say(`Bops Cloud on ${ports.cloud}`);
     const cloud = run("cloud", process.execPath, [join(root, "cloud", "server.ts")], {
       cwd: root,
-      env: { ...cleanEnv(), BOPS_DATABASE_URL: DB, BOPS_CLOUD_PORT: String(ports.cloud), BOPS_CLOUD_SECRET: randomBytes(32).toString("base64"), BOPS_ORGO_ORIGIN: ORGO, BOPS_CLOUD_PUBLIC_URL: urls.cloud },
+      // Its OpenAI is the scripted model on the fake orgo-web (a made-up key that only it takes).
+      env: { ...cleanEnv(), BOPS_DATABASE_URL: DB, BOPS_CLOUD_PORT: String(ports.cloud), BOPS_CLOUD_SECRET: randomBytes(32).toString("base64"), BOPS_ORGO_ORIGIN: ORGO, BOPS_CLOUD_PUBLIC_URL: urls.cloud, BOPS_UPSTREAM_OPENAI: ORGO, OPENAI_API_KEY: "sk-two-person-scripted-model" },
     });
     await waitFor("Bops Cloud", () => cloud.output().includes(`listening on 127.0.0.1:${ports.cloud}`), 60_000);
 

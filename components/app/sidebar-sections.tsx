@@ -322,20 +322,31 @@ function AskCard({ ask: a, botName, where, shared, onOpen }: { ask: AppApproval;
           <span className="truncate text-[11.5px] leading-[14px] text-[#9A9A98]">{meta}</span>
         </span>
       </button>
-      <span className="flex flex-wrap gap-1 pl-6">
-        <button disabled={busy} onClick={() => void decide("reject")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-          Deny
-        </button>
-        <button disabled={busy} onClick={() => void decide("always")} title={scope} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-          Always allow
-        </button>
-        <button disabled={busy} onClick={() => void decide("once")} className={`${btn} bg-ink text-white`}>
-          Allow once
-        </button>
-      </span>
-      <span title={scope} className="truncate pl-6 text-[11.5px] leading-[14px] text-[#9A9A98]">
-        {scope}
-      </span>
+      {/* A bot asking for a key: it's added on its card in the chat (keys.tsx KeyAskCard), never answered from here. */}
+      {a.kind === "key" ? (
+        <span className="flex flex-wrap gap-1 pl-6">
+          <button onClick={onOpen} className={`${btn} bg-ink text-white`}>
+            Add it in the chat
+          </button>
+        </span>
+      ) : (
+        <>
+          <span className="flex flex-wrap gap-1 pl-6">
+            <button disabled={busy} onClick={() => void decide("reject")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+              Deny
+            </button>
+            <button disabled={busy} onClick={() => void decide("always")} title={scope} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+              Always allow
+            </button>
+            <button disabled={busy} onClick={() => void decide("once")} className={`${btn} bg-ink text-white`}>
+              Allow once
+            </button>
+          </span>
+          <span title={scope} className="truncate pl-6 text-[11.5px] leading-[14px] text-[#9A9A98]">
+            {scope}
+          </span>
+        </>
+      )}
       {said && <span className="pl-6 text-[11.5px] leading-[14px] text-[#9A9A98]">{said}</span>}
       {shownError && (
         <span role="alert" className="pl-6 text-[11.5px] leading-[14px] text-[#B42318]">
