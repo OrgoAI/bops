@@ -99,7 +99,8 @@ export type GithubMirror = {
   path: string;
   keep?: string[];
   dispatch?: { workflow: string; inputs?: Record<string, string> };
-  last?: { sha: string; ingot: string; when: number };
+  /** (`keep`: the paths left alone when it was made: one taken off the list since needs a new Link.) */
+  last?: { sha: string; ingot: string; keep?: string[]; when: number };
 };
 
 const GH_REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
@@ -115,7 +116,10 @@ export function cleanGithubMirror(v: unknown): { ok: Omit<GithubMirror, "last"> 
   if (!GH_BRANCH.test(branch)) return { why: "That isn't a branch name." };
   const path = (typeof m?.path === "string" ? m.path.trim() : "").replace(/^\/+|\/+$/g, "");
   if (!GH_PATH.test(path)) return { why: "That isn't a folder in the repo." };
-  const keep = Array.isArray(m?.keep) ? [...new Set(m.keep.filter((k): k is string => typeof k === "string").map((k) => k.trim().replace(/^\/+/, "")).filter((k) => k && GH_PATH.test(k)))].slice(0, 50) : [];
+  const typed = Array.isArray(m?.keep) ? m.keep.filter((k): k is string => typeof k === "string").map((k) => k.trim().replace(/^\/+/, "")).filter(Boolean) : [];
+  const bad = typed.find((k) => !GH_PATH.test(k));
+  if (bad) return { why: `"${bad.slice(0, 80)}" can't be a path left alone (letters, digits, . _ - @ / and spaces; a folder ends in /).` };
+  const keep = [...new Set(typed)].slice(0, 50);
   const w = m?.dispatch;
   const workflow = typeof w?.workflow === "string" ? w.workflow.trim() : "";
   if (workflow && !/^[A-Za-z0-9_.-]{1,100}\.ya?ml$/.test(workflow)) return { why: "That isn't a workflow file, like deploy.yml." };

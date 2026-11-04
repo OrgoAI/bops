@@ -87,11 +87,12 @@ function makeGithub(files) {
       map.set(p, typeof v === "object" && v.link ? { sha: blob(B(v.link)), mode: "120000" } : { sha: blob(B(typeof v === "object" ? v.text : v)), mode: (typeof v === "object" && v.mode) || "100644" });
     return commit(map, parent);
   };
-  /** Someone commits on GitHub: some paths changed (null: deleted). */
+  /** Someone commits on GitHub: some paths changed (null: deleted; { link }: a symbolic link). */
   gh.push = (changes) => {
     const map = new Map(gh.commits.get(gh.head).files);
     for (const [p, v] of Object.entries(changes)) {
       if (v === null) map.delete(p);
+      else if (typeof v === "object" && v.link) map.set(p, { sha: blob(B(v.link)), mode: "120000" });
       else map.set(p, { sha: blob(B(v)), mode: "100644" });
     }
     gh.head = commit(map, gh.head);
@@ -119,7 +120,15 @@ function makeGithub(files) {
     }
     return out;
   };
-  gh.call = async ({ method, path, body, query }) => {
+  gh.call = async (c) => {
+    try {
+      return await gh.raw(c);
+    } catch (e) {
+      // What keys.ts callKey does when the broker didn't answer.
+      throw new (await import(`${root}/lib/server/keys.ts`)).KeysError(`GitHub didn't answer (${e.message}).`, 502);
+    }
+  };
+  gh.raw = async ({ method, path, body, query }) => {
     gh.calls.push(`${method} ${path.replace(/\/repos\/[^/]+\/[^/]+/, "")}`);
     const ok = (b, status = 200) => ({ status, contentType: "application/json", body: b, truncated: false, headers: {} });
     let m;
@@ -131,10 +140,19 @@ function makeGithub(files) {
     }
     if (method === "GET" && (m = /\/git\/blobs\/([0-9a-f]+)$/.exec(path))) return ok({ content: gh.blobs.get(m[1]).toString("base64"), encoding: "base64" });
     if (method === "GET" && (m = /\/contents\/?(.*)$/.exec(path))) {
-      const dir = m[1].split("/").map(decodeURIComponent).join("/");
-      const pre = dir ? `${dir}/` : "";
-      const entries = [...gh.commits.get(query.ref).files].filter(([p]) => p.startsWith(pre) && !p.slice(pre.length).includes("/"));
-      return ok(entries.map(([p, f]) => ({ name: p.slice(pre.length), path: p, sha: f.sha, size: gh.blobs.get(f.sha).length, type: "file", download_url: `https://raw.fake.example/${f.sha}?token=short-lived` })));
+      const at = m[1].split("/").map(decodeURIComponent).join("/");
+      const files = gh.commits.get(query.ref).files;
+      const link = (f) => `https://raw.fake.example/${f.sha}?token=short-lived`;
+      // A file's own entry: its bytes inline up to 1 MB (GitHub's rule), else its link alone; the broker cuts an answer over 512 KB.
+      if (files.has(at)) {
+        const f = files.get(at);
+        const b = gh.blobs.get(f.sha);
+        const body = b.length <= 1024 * 1024 ? { sha: f.sha, encoding: "base64", content: b.toString("base64"), download_url: link(f) } : { sha: f.sha, encoding: "none", content: "", download_url: link(f) };
+        return { ...ok(body), truncated: JSON.stringify(body).length > 512 * 1024 };
+      }
+      const pre = at ? `${at}/` : "";
+      const entries = [...files].filter(([p]) => p.startsWith(pre) && !p.slice(pre.length).includes("/"));
+      return ok(entries.map(([p, f]) => ({ name: p.slice(pre.length), path: p, sha: f.sha, size: gh.blobs.get(f.sha).length, type: "file", download_url: link(f) })));
     }
     if (method === "POST" && path.endsWith("/git/blobs")) return ok({ sha: blob(Buffer.from(body.content, "base64")) }, 201);
     if (method === "POST" && path.endsWith("/git/trees")) {
@@ -154,11 +172,14 @@ function makeGithub(files) {
       return ok({ sha: id }, 201);
     }
     if (method === "PATCH" && /\/git\/refs\/heads\//.test(path)) {
+      if (gh.beforeMove) gh.beforeMove();
       if (gh.moveFails || gh.commits.get(body.sha).parent !== gh.head) return ok({ message: "Update is not a fast forward" }, 422);
       gh.head = body.sha;
+      if (gh.answerLost) throw new Error("the broker timed out");
       return ok({ object: { sha: body.sha } });
     }
     if (method === "POST" && /\/actions\/workflows\/.+\/dispatches$/.test(path)) {
+      if (gh.dispatchThrows) throw new Error("429");
       gh.dispatched.push({ path, body });
       return { status: 204, contentType: null, body: null, truncated: false, headers: {} };
     }
@@ -190,8 +211,10 @@ function makeIngot(files) {
   make(new Map(Object.entries(files).map(([p, t]) => [p, { b: B(t), x: false }])));
   ig.api = {
     head: async () => ig.head,
-    log: async (_ws, _n, { limit = 50, before } = {}) => {
-      const newest = [...ig.order].reverse();
+    log: async (_ws, _n, { limit = 50, before, at } = {}) => {
+      // (A line here: `at`'s ancestors are the changesets before it.)
+      const upTo = at ? ig.order.slice(0, ig.order.indexOf(at) + 1) : ig.order;
+      const newest = [...upTo].reverse();
       const from = before ? newest.indexOf(before) + 1 : 0;
       const page = newest.slice(from, from + limit);
       return { changesets: page.map((id) => ({ id })), next: from + limit < newest.length ? page.at(-1) : null };
@@ -276,7 +299,7 @@ await check("not linked yet: nothing happens, and it says to link it", async () 
 await check("Link: only two sides with the same files (but kept paths, GitHub's links, .ingotignore), at both newest", async () => {
   reset(GH0, IG0);
   const last = await link();
-  assert.deepEqual({ ...last, when: 0 }, { sha: gh.head, ingot: ig.head, when: 0 });
+  assert.deepEqual({ ...last, when: 0 }, { sha: gh.head, ingot: ig.head, keep: KEEP, when: 0 });
   assert.deepEqual(writes(), []);
   reset(GH0, { ...IG0, "lib/look.ts": "teal", "extra.ts": "x" });
   await assert.rejects(link(), (e) => code("LINK_DIFFERS")(e) && e.extra.paths.join() === "extra.ts,lib/look.ts" && /Ingot and GitHub differ in extra\.ts, lib\/look\.ts/.test(e.message));
@@ -308,7 +331,7 @@ await check("Ingot's changes go to GitHub: one commit on top of the branch, its 
   assert.ok(!files.has("formula/.ingotignore"));
   assert.equal(gh.commits.get(gh.head).parent, before, "on top of the branch, never forced");
   assert.match(gh.commits.get(gh.head).message, new RegExp(`Ingot-Changeset: ${at}`));
-  assert.deepEqual({ ...done.last, when: 0 }, { sha: gh.head, ingot: at, when: 0 });
+  assert.deepEqual({ ...done.last, when: 0 }, { sha: gh.head, ingot: at, keep: KEEP, when: 0 });
   assert.equal(done.pushed.files, 3);
   assert.match(done.said, /Pushed 3 files to OrgoAI\/orgo-brandlord main .*GitHub deploys it/);
   assert.equal(ig.commits.length, 0, "nothing written to Ingot");
@@ -335,7 +358,7 @@ await check("GitHub's changes come into Ingot first; with nothing new in Ingot, 
   assert.equal(gh.head, head, "no commit on GitHub");
   assert.equal(done.pushed, null);
   assert.equal(done.brought, 3);
-  assert.deepEqual({ ...done.last, when: 0 }, { sha: head, ingot: ig.head, when: 0 }, "the point: GitHub's newest, and Ingot's changeset with its changes in");
+  assert.deepEqual({ ...done.last, when: 0 }, { sha: head, ingot: ig.head, keep: KEEP, when: 0 }, "the point: GitHub's newest, and Ingot's changeset with its changes in");
   assert.match(done.said, /Brought 3 changes from GitHub into Ingot first\. GitHub already has everything.*Deploy the newest to the preview/);
 });
 
@@ -444,12 +467,13 @@ await check("too big to send stops it before anything is written, but only a fil
 await check("GitHub's files of any size come down, checked: small ones inline, bigger ones by their folder's listing", async () => {
   reset(GH0, IG0);
   const last = await link();
-  gh.push({ "formula/clients/fourcorners/mid.pdf": "m".repeat(400_000), "formula/clients/fourcorners/big.pdf": "b".repeat(1_200_000) });
+  gh.push({ "formula/clients/fourcorners/mid.pdf": "m".repeat(370_000), "formula/clients/fourcorners/larger.pdf": "l".repeat(600_000), "formula/clients/fourcorners/big.pdf": "b".repeat(1_200_000) });
   const done = await publish(last.ingot, last);
-  assert.equal(ig.files().get("clients/fourcorners/mid.pdf").length, 400_000);
-  assert.equal(ig.files().get("clients/fourcorners/big.pdf").length, 1_200_000);
-  assert.ok(gh.calls.some((c) => c.startsWith("GET /contents/formula/clients/fourcorners")));
-  assert.equal(done.brought, 2);
+  assert.equal(ig.files().get("clients/fourcorners/mid.pdf").length, 370_000, "inline in its own entry");
+  assert.equal(ig.files().get("clients/fourcorners/larger.pdf").length, 600_000, "too big inline for the broker: by its folder's listing");
+  assert.equal(ig.files().get("clients/fourcorners/big.pdf").length, 1_200_000, "over 1 MB: its own entry's link");
+  assert.ok(gh.calls.includes("GET /contents/formula/clients/fourcorners"), "the listing, for the one that needed it");
+  assert.equal(done.brought, 3);
 });
 
 await check("the executable bit is a change of its own, either way", async () => {
@@ -528,6 +552,81 @@ await check("the whole repo as the folder, a nested folder, and a branch with a 
   await assert.rejects(linkMirror("ws_1", "app", CFG(undefined, { branch: "release/1" })), /no branch release\/1/);
 });
 
+await check("the paths left alone changed since the Link (one taken off): refused until linked again, nothing deleted on GitHub", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  const at0 = ig.head;
+  assert.deepEqual(last.keep, KEEP);
+  await assert.rejects(publish(ig.change({ "lib/look.ts": "x" }), last, { keep: ["proxy.ts", "clients/cclc"] }), (e) => code("RELINK")(e) && /link it again first/.test(e.message));
+  await assert.rejects(publish(at0, last, { keep: ["proxy.ts"] }), code("RELINK"));
+  assert.deepEqual(writes(), []);
+  assert.equal(gh.files().get("formula/clients/cclc/deck.ts"), "cclc deck");
+  // More left alone is fine.
+  const done = await publish(at0, last, { keep: [...KEEP, "notes/"] });
+  assert.equal(done.pushed, null);
+});
+
+await check("GitHub's changes came in, then the push failed: the point moves to them anyway, and nothing is undone after", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  const at = ig.change({ "AGENTS.md": "agents v2" });
+  gh.push({ "formula/lib/look.ts": "teal", "formula/old.ts": null });
+  // Another app puts look.ts back and old.ts back while this one publishes: the push is refused.
+  gh.beforeMove = () => {
+    gh.beforeMove = null;
+    gh.push({ "formula/lib/look.ts": "orange", "formula/old.ts": "old" });
+  };
+  const err = await publish(at, last).catch((e) => e);
+  assert.ok(code("GITHUB_MOVED")(err));
+  const point = err.extra.last;
+  assert.ok(point && point.ingot === ig.head && point.sha !== last.sha, "the point is GitHub's commit the changes were read at, and Ingot's with them in");
+  // The newest preview: GitHub's put-back comes in, Ingot's AGENTS.md goes up, teal is never pushed back.
+  const done = await publish(ig.head, point);
+  assert.equal(gh.files().get("formula/lib/look.ts"), "orange");
+  assert.equal(gh.files().get("formula/old.ts"), "old");
+  assert.equal(gh.files().get("formula/AGENTS.md"), "agents v2");
+  assert.equal(ig.files().get("lib/look.ts"), "orange");
+  assert.equal(done.brought, 2);
+});
+
+await check("a link on GitHub that became a file is GitHub's change (Ingot's copy never pushed); a file that became a link stops Ingot's change", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  gh.push({ "formula/CLAUDE.md": "claude's own file now" });
+  const done = await publish(ig.change({ "CLAUDE.md": "changed copy" }), last);
+  assert.equal(gh.files().get("formula/CLAUDE.md"), "claude's own file now", "GitHub's file stays");
+  assert.equal(ig.files().get("CLAUDE.md"), "claude's own file now", "and comes into Ingot");
+  assert.equal(done.brought, 1);
+  reset(GH0, IG0);
+  const l2 = await link();
+  gh.push({ "formula/old.ts": { link: "lib/look.ts" } });
+  await assert.rejects(publish(ig.change({ "old.ts": "changed in Ingot" }), l2), (e) => code("BOTH_CHANGED")(e) && e.extra.paths.join() === "old.ts");
+  const fine = await publish(ig.change({ "lib/look.ts": "x" }), l2).catch((e) => e);
+  assert.ok(code("BOTH_CHANGED")(fine), "still: old.ts changed in Ingot since the point");
+});
+
+await check("once the branch moved nothing fails it: a lost answer is checked on GitHub, a workflow that won't start is said", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  gh.answerLost = true;
+  const more = { dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc" } } };
+  gh.dispatchThrows = true;
+  const done = await publish(ig.change({ "lib/look.ts": "logo orange" }), last, more);
+  assert.equal(gh.files().get("formula/lib/look.ts"), "logo orange");
+  assert.equal(done.last.sha, gh.head);
+  assert.match(done.said, /Couldn't start deploy-formula\.yml on GitHub: run it there\./);
+});
+
+await check("a preview from before the point, whatever the log's order, is refused; its own history decides", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  const older = ig.order[0];
+  const newer = ig.change({ "lib/look.ts": "x" });
+  await assert.rejects(publish(older, { ...last, ingot: newer }), code("PREVIEW_BEHIND"));
+  const done = await publish(newer, last);
+  assert.equal(done.pushed.files, 1);
+});
+
 await check("kept paths: a file, a folder, and always .ingotignore", () => {
   assert.ok(keptPath(".ingotignore"));
   assert.ok(keptPath("proxy.ts", ["proxy.ts"]));
@@ -538,7 +637,8 @@ await check("kept paths: a file, a folder, and always .ingotignore", () => {
 });
 
 await check("the setting as the window sends it: cleaned, or why not", () => {
-  assert.deepEqual(cleanGithubMirror({ repo: "https://github.com/OrgoAI/orgo-brandlord.git", branch: "", path: "/formula/", keep: ["proxy.ts", " notes/ ", "proxy.ts", "../x"], dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc", "bad key": "x" } } }), {
+  assert.match(cleanGithubMirror({ repo: "a/b", keep: ["proxy.ts", "../x"] }).why, /"\.\.\/x" can't be a path left alone/, "a bad path is refused, never dropped without a word");
+  assert.deepEqual(cleanGithubMirror({ repo: "https://github.com/OrgoAI/orgo-brandlord.git", branch: "", path: "/formula/", keep: ["proxy.ts", " notes/ ", "proxy.ts"], dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc", "bad key": "x" } } }), {
     ok: { repo: "OrgoAI/orgo-brandlord", branch: "main", path: "formula", keep: ["proxy.ts", "notes/"], dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc" } } },
   });
   assert.match(cleanGithubMirror({ repo: "nope" }).why, /Which GitHub repo/);

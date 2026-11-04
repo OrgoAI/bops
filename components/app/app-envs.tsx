@@ -161,7 +161,7 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
   if (gh) {
     if (!a.preview?.serving) return "The preview isn't live yet. Deploy a preview first.";
     if (!gh.last) return "Link it to GitHub first, in the menu beside Publish.";
-    if (gh.last.ingot === a.preview.serving) return "GitHub has this preview already.";
+    // (Whether GitHub has this preview already is the server's to say: Publish then sends nothing.)
     return undefined;
   }
   if (sites.some((x) => deploying(x))) return "It's publishing. Wait for it to finish.";

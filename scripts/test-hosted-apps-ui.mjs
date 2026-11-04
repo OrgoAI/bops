@@ -3264,8 +3264,9 @@ await test("production on GitHub (AppHosting.github): Published says where on Gi
   const linked = envLine(envsOf({ app: on(gh({ ingot: id("c1"), sha: "a".repeat(40), when: min(5) })) }), "prod");
   assert.ok(linked.includes("GitHub OrgoAI/orgo-brandlord main, formula/, at aaaaaaa") && linked.includes('data-app-env-state="On GitHub"'), "where, and the commit it last pushed");
   assert.deepEqual(deployIn(linked, "Publish to GitHub"), { tip: null, disabled: false }, "the preview is newer: it goes");
+  // Whether GitHub has this preview already is the server's to say (Publish then sends nothing): never greyed for it here.
   const same = envLine(envsOf({ app: on(gh({ ingot: id("e5"), sha: "b".repeat(40), when: min(5) })) }), "prod");
-  assert.deepEqual(deployIn(same, "Publish to GitHub"), { tip: "GitHub has this preview already.", disabled: true });
+  assert.deepEqual(deployIn(same, "Publish to GitHub"), { tip: null, disabled: false });
   // The form as the route takes it.
   assert.deepEqual(E.ghMirrorOf({ repo: " OrgoAI/orgo-brandlord ", branch: "", path: "formula", keep: "proxy.ts, notes/ ,", workflow: "deploy-formula.yml", inputs: "client=cclc, bad" }), {
     repo: "OrgoAI/orgo-brandlord",

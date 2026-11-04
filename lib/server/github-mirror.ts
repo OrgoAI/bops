@@ -223,27 +223,38 @@ async function ghSide(gh: GitHub, repo: string, commit: string, folder: string):
   return { root, files, links, present: true };
 }
 
-/** The bytes of a file of GitHub at `commit`, checked against its blob id. A big one by GitHub's link, found in its folder's listing. */
+/**
+ * The bytes of a file of GitHub at `commit`, checked against its blob id: a small one inline; a bigger one by its own
+ * entry (over 1 MB GitHub sends its download link alone, small whatever the folder), else by its folder's listing
+ * (up to 1 MB its own entry carries the bytes, too big for the broker's answer).
+ */
 async function ghBytes(gh: GitHub, repo: string, folder: string, path: string, f: GitFile, commit: string): Promise<Buffer> {
-  let b: Buffer;
+  const check = (b: Buffer) => {
+    if (gitSha(b) !== f.sha) throw new MirrorError(`GitHub sent ${path} with other bytes than it listed.`, 502);
+    return b;
+  };
   if (f.size <= INLINE_DOWN) {
     const j = await gh.need(`read ${path}`, "GET", `/repos/${repo}/git/blobs/${f.sha}`);
-    b = Buffer.from(String(j.content ?? ""), "base64");
-  } else {
-    const full = (folder ? `${folder}/` : "") + path;
+    return check(Buffer.from(String(j.content ?? ""), "base64"));
+  }
+  const full = (folder ? `${folder}/` : "") + path;
+  let url = "";
+  const own = await gh.call("GET", `/repos/${repo}/contents/${segs(full)}`, undefined, { ref: commit });
+  const o = own.status === 200 && !own.truncated ? objOf(jsonOf(own)) : null;
+  if (o && o.sha === f.sha && o.encoding === "base64" && typeof o.content === "string" && o.content) return check(Buffer.from(o.content, "base64"));
+  if (o && o.sha === f.sha && typeof o.download_url === "string") url = o.download_url;
+  else {
     const dir = full.includes("/") ? full.slice(0, full.lastIndexOf("/")) : "";
     const base = full.slice(full.lastIndexOf("/") + 1);
     const j = (await gh.need(`find ${path}`, "GET", `/repos/${repo}/contents/${segs(dir)}`, undefined, { ref: commit }, true)) as unknown as { name?: unknown; sha?: unknown; download_url?: unknown }[];
     const e = j.find((x) => x.name === base && x.sha === f.sha);
-    const url = typeof e?.download_url === "string" ? e.download_url : "";
-    if (!url.startsWith("https://")) throw new MirrorError(`GitHub gave no way to download ${path}.`, 502);
-    // GitHub's own short-lived link (it carries its own access): fetched here, never kept or shown.
-    const r = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(5 * 60_000) }).catch(() => null);
-    if (!r?.ok) throw new MirrorError(`GitHub didn't send ${path}.`, 502);
-    b = Buffer.from(await r.arrayBuffer());
+    url = typeof e?.download_url === "string" ? e.download_url : "";
   }
-  if (gitSha(b) !== f.sha) throw new MirrorError(`GitHub sent ${path} with other bytes than it listed.`, 502);
-  return b;
+  if (!url.startsWith("https://")) throw new MirrorError(`GitHub gave no way to download ${path}.`, 502);
+  // GitHub's own short-lived link (it carries its own access): fetched here, never kept or shown.
+  const r = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(5 * 60_000) }).catch(() => null);
+  if (!r?.ok) throw new MirrorError(`GitHub didn't send ${path}.`, 502);
+  return check(Buffer.from(await r.arrayBuffer()));
 }
 
 /** Each path whose file differs from `base` to `now` (added, changed, mode, or deleted), with what it is now (undefined: deleted). */
@@ -261,20 +272,14 @@ function massDelete(base: Files, d: Map<string, GitFile | undefined>, side: stri
     throw new MirrorError(`${side} deleted ${gone} of the folder's ${base.size} files since they were last the same. That looks like a mistake, so nothing was published.`, 409, { code: "MASS_DELETE" });
 }
 
-/**
- * Whether Ingot changeset `at` is `mark` or newer on main (main is a line): read from the newest back, a page at a
- * time, until one of them is found.
- */
+/** Whether Ingot changeset `mark` is `at` or one of its ancestors (`at`'s own history, a page at a time; merges included). */
 async function atOrAfter(wsId: string, name: string, at: string, mark: string): Promise<boolean> {
   if (at === mark) return true;
   let before: string | undefined;
-  for (let page = 0; page < 5; page++) {
-    const log = await ingot.log(wsId, name, { limit: 200, ...(before ? { before } : {}) });
+  for (let page = 0; page < 10; page++) {
+    const log = await ingot.log(wsId, name, { at, limit: 200, ...(before ? { before } : {}) });
     if (!log) return false;
-    for (const c of log.changesets) {
-      if (c.id === at) return true;
-      if (c.id === mark) return false;
-    }
+    if (log.changesets.some((c) => c.id === mark)) return true;
     if (!log.next) return false;
     before = log.next;
   }
@@ -301,7 +306,7 @@ export async function linkMirror(wsId: string, name: string, cfg: GithubMirror):
     if (differ.length)
       throw new MirrorError(`Ingot and GitHub differ in ${list(differ)}. Make them the same first (or add them to the files left alone), then link.`, 409, { code: "LINK_DIFFERS", paths: differ.slice(0, 50), count: differ.length });
   }
-  return { sha, ingot: head, when: Date.now() };
+  return { sha, ingot: head, keep: cfg.keep ?? [], when: Date.now() };
 }
 
 export type MirrorDone = {
@@ -357,7 +362,8 @@ async function bringIn(
       batch.push(c);
       size += n;
     }
-    const r = await ingot.commit(wsId, name, { base, message: `From GitHub: ${real.length === 1 ? real[0].path : `${real.length} files`} changed on ${cfg.repo} ${cfg.branch} (${short(head)})`, changes: batch }, author);
+    // A big batch takes a while to send (Ingot's own limit for a write is 10 minutes).
+    const r = await ingot.commit(wsId, name, { base, message: `From GitHub: ${real.length === 1 ? real[0].path : `${real.length} files`} changed on ${cfg.repo} ${cfg.branch} (${short(head)})`, changes: batch }, author, undefined, Math.min(600_000, 15_000 + Math.ceil(size / 250)));
     if ("id" in r) {
       brought += batch.length;
       to = r.id;
@@ -369,20 +375,32 @@ async function bringIn(
   return { to: to ?? (await ingot.head(wsId, name)) ?? null, brought };
 }
 
-/** Both sides' folders and what changed on GitHub since the point, the folder checked to be there. */
+/**
+ * Both sides' folders and what changed on GitHub since the point, the folder checked to be there. GitHub's links (and
+ * submodules) are left alone while they're links; one that became a file, or went, since the point is GitHub's
+ * change (`unlinked`: Ingot's copy never counts as Ingot's); a file that became one is left alone (`linked`).
+ */
 async function readGithub(gh: GitHub, cfg: GithubMirror) {
   const last = cfg.last!;
+  // Linked with other paths left alone (one taken off the list since): the point says nothing of those. Link again.
+  const keep = cfg.keep ?? [];
+  if ((last.keep ?? []).some((k) => !keep.includes(k)))
+    throw new MirrorError("What's left alone changed since it was linked to GitHub, so link it again first (Link checks both sides have the same files). Nothing was published.", 409, { code: "RELINK" });
   const head = await ghHead(gh, cfg.repo, cfg.branch);
   const now = await ghSide(gh, cfg.repo, head, cfg.path);
   const base = last.sha === head ? now : await ghSide(gh, cfg.repo, last.sha, cfg.path);
   if (base.present && !now.present)
     throw new MirrorError(`${cfg.path}/ isn't a folder on ${cfg.branch} of ${cfg.repo} any more (moved or deleted?). Fix it on GitHub, or change the folder and link again. Nothing was published.`, 409, { code: "FOLDER_GONE" });
-  const links = new Set([...now.links, ...base.links]);
-  const skip = (p: string) => keptPath(p, cfg.keep) || links.has(p);
-  const filtered = (s: GhSide) => new Map([...s.files].filter(([p]) => !skip(p)));
+  const kept = (p: string) => keptPath(p, keep);
+  const skip = (p: string) => kept(p) || now.links.has(p);
+  const filtered = (x: GhSide) => new Map([...x.files].filter(([p]) => !skip(p)));
   const baseFiles = filtered(base);
   const nowFiles = filtered(now);
-  return { head, now, base, baseFiles, nowFiles, skip, theirs: changes(baseFiles, nowFiles) };
+  const theirs = changes(baseFiles, nowFiles);
+  const unlinked = new Set([...base.links].filter((p) => !now.links.has(p) && !kept(p)));
+  for (const p of unlinked) if (!now.files.has(p)) theirs.set(p, undefined);
+  const linked = [...now.links].filter((p) => !base.links.has(p) && !kept(p) && base.files.has(p));
+  return { head, now, base, baseFiles, nowFiles, skip, theirs, unlinked, linked };
 }
 
 /**
@@ -397,16 +415,21 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
   if (!(await atOrAfter(wsId, name, at, last.ingot)))
     throw new MirrorError("The preview is older than what GitHub has (its changes came into Ingot since). Deploy the newest to the preview first, then publish.", 409, { code: "PREVIEW_BEHIND" });
   const gh = github(wsId);
-  const prefix = cfg.path ? `${cfg.path}/` : "";
-  const g0 = await readGithub(gh, cfg);
-  const { head, now, baseFiles, skip, theirs } = g0;
+  const { head, now, base, baseFiles, skip, theirs, unlinked, linked } = await readGithub(gh, cfg);
   const oursNow = await ingotSide(wsId, name, at, skip);
   const ours = changes(baseFiles, oursNow.files);
+  // A link on GitHub that became a file or went: GitHub's to say; Ingot's copy of it was never Ingot's change.
+  for (const p of unlinked) ours.delete(p);
   massDelete(baseFiles, theirs, "GitHub");
   massDelete(baseFiles, ours, "Ingot");
 
-  // Both changed a file: fine when to the same bytes and mode (nothing to carry either way), else it stops.
+  // Both changed a file: fine when to the same bytes and mode (nothing to carry either way), else it stops. A file
+  // GitHub made a link of, which Ingot changed, too: the link is left alone, so Ingot's change would go nowhere.
   const both: string[] = [];
+  if (linked.length) {
+    const was = (await ingotSide(wsId, name, at, (p) => !linked.includes(p))).files;
+    for (const p of linked) if (!same(was.get(p), base.files.get(p))) both.push(p);
+  }
   for (const p of [...ours.keys()]) {
     if (!theirs.has(p)) continue;
     if (same(ours.get(p), theirs.get(p))) {
@@ -416,7 +439,7 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
   }
   // Newer work in Ingot (main past the preview) on a file GitHub changed: never written over.
   const newer = (headFiles: Files) => {
-    for (const [p, f] of theirs) if (!same(headFiles.get(p), baseFiles.get(p)) && !same(headFiles.get(p), f) && !both.includes(p)) both.push(p);
+    for (const [p, f] of theirs) if (!unlinked.has(p) && !same(headFiles.get(p), baseFiles.get(p)) && !same(headFiles.get(p), f) && !both.includes(p)) both.push(p);
     if (both.length)
       throw new MirrorError(`Both Ingot and GitHub changed ${list(both)} since they were last the same. Bring in GitHub's changes (in the menu beside Publish) to take GitHub's version, then make Ingot's change again. Nothing was published.`, 409, { code: "BOTH_CHANGED", paths: both });
   };
@@ -431,7 +454,30 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
 
   // 1. GitHub's changes into Ingot (checked again against whatever is on top then).
   const { to, brought } = await bringIn(wsId, name, cfg, author, gh, head, theirs, newer);
+  const keep = cfg.keep ?? [];
+  try {
+    return await pushUp(wsId, name, at, cfg, gh, { head, now, ours, bytes, to, brought, keep });
+  } catch (e) {
+    // GitHub's changes are in Ingot now: the point moves to them (GitHub's commit they were read at, and Ingot's
+    // changeset with them in), so the next Publish neither brings them in again nor takes them for Ingot's.
+    if (!brought || !to) throw e;
+    const err = e instanceof MirrorError ? e : new MirrorError("Orgo didn't reach GitHub. Try again.", 502);
+    err.extra = { ...err.extra, last: { sha: head, ingot: to, keep, when: Date.now() } };
+    throw err;
+  }
+}
 
+/** Publish's second half: Ingot's changes onto GitHub, one commit on top of the branch, its folder only; then its workflow. Nothing throws once the branch moved. */
+async function pushUp(
+  wsId: string,
+  name: string,
+  at: string,
+  cfg: GithubMirror,
+  gh: GitHub,
+  x: { head: string; now: GhSide; ours: Map<string, GitFile | undefined>; bytes: Map<string, Buffer>; to: string | null; brought: number; keep: string[] },
+): Promise<MirrorDone> {
+  const { head, now, ours, bytes, to, brought, keep } = x;
+  const prefix = cfg.path ? `${cfg.path}/` : "";
   // 2. Ingot's changes onto GitHub: one commit on top of the branch, its folder only.
   const entries: { path: string; mode: string; type: "blob"; sha: string | null }[] = [];
   for (const [p, f] of ours) {
@@ -452,7 +498,11 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
     const message = `Publish ${name} from Bops (Ingot ${short(at)})\n\n${changed.slice(0, 20).map((p) => `- ${p}`).join("\n")}${changed.length > 20 ? `\n- and ${changed.length - 20} more` : ""}\n\nIngot-Changeset: ${at}`;
     const commit = await gh.need("make the commit", "POST", `/repos/${cfg.repo}/git/commits`, { message, tree: String(tree.sha), parents: [head] });
     const sha = String(commit.sha);
-    const moved = await gh.call("PATCH", `/repos/${cfg.repo}/git/refs/heads/${segs(cfg.branch)}`, { sha, force: false });
+    // An answer lost on the way (the broker timed out) may still have moved it: GitHub is asked where it is.
+    const moved = await gh.call("PATCH", `/repos/${cfg.repo}/git/refs/heads/${segs(cfg.branch)}`, { sha, force: false }).catch(async (e) => {
+      if ((await ghHead(gh, cfg.repo, cfg.branch).catch(() => null)) === sha) return { status: 200 } as KeyAnswer;
+      throw e;
+    });
     if (moved.status === 422 || moved.status === 409)
       throw new MirrorError(`Someone pushed to ${cfg.branch} on GitHub while Bops was publishing, so nothing went there. Publish again.`, 409, { code: "GITHUB_MOVED", brought });
     if (moved.status >= 400) throw new MirrorError(`GitHub didn't move ${cfg.branch} to the new commit (${moved.status}). Nothing went live.`, 502, { brought });
@@ -463,8 +513,8 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
   // 3. Its workflow, when the push doesn't start one by itself.
   let ran = "";
   if (pushed && cfg.dispatch) {
-    const r = await gh.call("POST", `/repos/${cfg.repo}/actions/workflows/${encodeURIComponent(cfg.dispatch.workflow)}/dispatches`, { ref: cfg.branch, ...(cfg.dispatch.inputs ? { inputs: cfg.dispatch.inputs } : {}) });
-    ran = r.status === 204 || r.status === 200 ? ` Started ${cfg.dispatch.workflow} on GitHub.` : ` Couldn't start ${cfg.dispatch.workflow} on GitHub (${r.status}): run it there.`;
+    const r = await gh.call("POST", `/repos/${cfg.repo}/actions/workflows/${encodeURIComponent(cfg.dispatch.workflow)}/dispatches`, { ref: cfg.branch, ...(cfg.dispatch.inputs ? { inputs: cfg.dispatch.inputs } : {}) }).catch(() => null);
+    ran = r && (r.status === 204 || r.status === 200) ? ` Started ${cfg.dispatch.workflow} on GitHub.` : ` Couldn't start ${cfg.dispatch.workflow} on GitHub${r ? ` (${r.status})` : ""}: run it there.`;
   }
   const said = [
     brought ? `Brought ${brought} ${brought === 1 ? "change" : "changes"} from GitHub into Ingot first.` : "",
@@ -474,7 +524,7 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
     .filter(Boolean)
     .join(" ");
   // Ingot's side of the point: what came in from GitHub, when it did (a later preview has it); else what was published.
-  return { last: { sha: tip, ingot: to ?? at, when: Date.now() }, pushed, brought, said };
+  return { last: { sha: tip, ingot: to ?? at, keep, when: Date.now() }, pushed, brought, said };
 }
 
 /**
@@ -485,15 +535,15 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
 export async function mirrorPull(wsId: string, name: string, cfg: GithubMirror, author: string): Promise<MirrorDone> {
   if (!cfg.last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first, in the menu beside Publish.`, 409, { code: "NOT_LINKED" });
   const gh = github(wsId);
-  const { head, baseFiles, theirs } = await readGithub(gh, cfg);
+  const { head, baseFiles, theirs, unlinked } = await readGithub(gh, cfg);
   massDelete(baseFiles, theirs, "GitHub");
   const ingotHead = await ingot.head(wsId, name);
   if (!ingotHead) throw new MirrorError(`Ingot has no repo ${name}.`, 409);
   const headFiles = (await ingotSide(wsId, name, ingotHead, (p) => !theirs.has(p))).files;
-  const took = [...theirs.keys()].filter((p) => !same(headFiles.get(p), baseFiles.get(p)) && !same(headFiles.get(p), theirs.get(p))).sort();
+  const took = [...theirs.keys()].filter((p) => !unlinked.has(p) && !same(headFiles.get(p), baseFiles.get(p)) && !same(headFiles.get(p), theirs.get(p))).sort();
   const { to, brought } = await bringIn(wsId, name, cfg, author, gh, head, theirs, () => {});
   const said = brought
     ? `Brought ${brought} ${brought === 1 ? "change" : "changes"} from GitHub into Ingot.${took.length ? ` Took GitHub's version of ${list(took)} (Ingot's is in its history: make that change again).` : ""} Deploy the newest to the preview to see them there.`
     : "Ingot has everything GitHub has already.";
-  return { last: { sha: head, ingot: to ?? ingotHead, when: Date.now() }, pushed: null, brought, took, said };
+  return { last: { sha: head, ingot: to ?? ingotHead, keep: cfg.keep ?? [], when: Date.now() }, pushed: null, brought, took, said };
 }

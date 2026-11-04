@@ -1848,7 +1848,13 @@ const asAppError = (e: unknown) => (e instanceof MirrorError ? new HostedAppErro
 
 /** The GitHub setting as `cfg` ran with is still the app's (nothing changed or linked it meanwhile): only then is its point kept. */
 const sameMirror = (h: AppHosting | undefined, cfg: NonNullable<AppHosting["github"]>) =>
-  !!h?.github && h.github.repo === cfg.repo && h.github.branch === cfg.branch && h.github.path === cfg.path && h.github.last?.sha === cfg.last?.sha && h.github.last?.ingot === cfg.last?.ingot;
+  !!h?.github &&
+  h.github.repo === cfg.repo &&
+  h.github.branch === cfg.branch &&
+  h.github.path === cfg.path &&
+  (h.github.keep ?? []).join("\n") === (cfg.keep ?? []).join("\n") &&
+  h.github.last?.sha === cfg.last?.sha &&
+  h.github.last?.ingot === cfg.last?.ingot;
 
 /**
  * Publish an app whose production is on GitHub: the changeset its Preview serves, carried to GitHub
@@ -1865,6 +1871,10 @@ async function publishToGithub(wsId: string, name: string, now: AppHosting, at: 
   if (!serving) throw new HostedAppError("The preview isn't live yet. Deploy a preview first.", 409, { code: "NO_PREVIEW" });
   if (typeof at === "string" && at !== serving) throw new HostedAppError("The preview changed since you looked. Look again.", 409, { code: "PREVIEW_MOVED" });
   const done = await mirrorPublish(wsId, name, serving, cfg, authorOf(undefined)).catch((e) => {
+    // GitHub's changes came into Ingot before it failed: that much is kept (the point moves to them), still ours.
+    const last = e instanceof MirrorError ? (e.extra?.last as NonNullable<AppHosting["github"]>["last"] | undefined) : undefined;
+    if (last && ours()) keepHosting(wsId, name, (h) => (h?.github && sameMirror(h, cfg) ? { ...h, github: { ...h.github, last } } : h));
+    if (e instanceof MirrorError && e.extra) delete e.extra.last;
     throw asAppError(e);
   });
   held(ours);
@@ -1896,7 +1906,9 @@ export async function setGithubMirror(wsId: string, name: string, v: unknown): P
       keepHosting(wsId, name, (x) => {
         if (!x) return x;
         const was = x.github;
-        const same = was && was.repo === c.ok.repo && was.branch === c.ok.branch && was.path === c.ok.path;
+        // The same folder, with every path it left alone still left alone (more is fine): its point holds. Else Link again.
+        const keeps = (was?.keep ?? []).every((k) => (c.ok.keep ?? []).includes(k));
+        const same = was && was.repo === c.ok.repo && was.branch === c.ok.branch && was.path === c.ok.path && keeps;
         return { ...x, github: { ...c.ok, ...(same && was?.last ? { last: was.last } : {}) } };
       });
     }
