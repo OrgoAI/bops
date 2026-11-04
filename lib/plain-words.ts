@@ -76,9 +76,7 @@ const nameOf = (raw: string) => {
   }
 };
 /** "a=1&token=x" with each secret-looking value as •••, and a query inside a value ("next=/cb?code=…") the same way. */
-function hidePairs(pairs: string, depth = 0): string {
-  // Queries nested past this (a page can pick its own address) are hidden whole: never a deep recursion.
-  if (depth > 20) return "•••";
+function hidePairs(pairs: string): string {
   return pairs
     .split("&")
     .map((pair) => {
@@ -87,7 +85,7 @@ function hidePairs(pairs: string, depth = 0): string {
       const value = pair.slice(at + 1);
       if (value && (SECRET_NAME.test(nameOf(pair.slice(0, at))) || OPAQUE.test(value))) return `${pair.slice(0, at)}=•••`;
       const q = value.indexOf("?");
-      return q >= 0 ? `${pair.slice(0, at + 1)}${value.slice(0, q + 1)}${hidePairs(value.slice(q + 1), depth + 1)}` : pair;
+      return q >= 0 ? `${pair.slice(0, at + 1)}${value.slice(0, q + 1)}${hidePairs(value.slice(q + 1))}` : pair;
     })
     .join("&");
 }

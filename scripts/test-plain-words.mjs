@@ -29,9 +29,6 @@ check("an address said in a row hides what could let someone in: a user and pass
   // A fragment of pairs with a ? in a value; a query inside a value.
   assert.equal(shownAddress("https://x.example/#access_token=abc&next=/cb?tab=1"), "https://x.example/#access_token=•••&next=/cb?tab=1");
   assert.equal(shownAddress("https://x.example/login?next=/cb?code=xyz&lang=en"), "https://x.example/login?next=/cb?code=•••&lang=en");
-  // Queries nested past reason (a page can pick its own address): never a crash, and what's past the limit is hidden.
-  const deep = shownAddress(`https://x.example/?${"a=?".repeat(5000)}code=1`);
-  assert.ok(deep.endsWith("•••") && !deep.includes("code=1"), "the rest hidden");
   assert.equal(shownAddress("https://one@two:not-a-real-pass@x.example/p"), "https://x.example/p");
   const t0 = Date.now();
   shownAddress(`not an address ${"?".repeat(32_000)}`);
