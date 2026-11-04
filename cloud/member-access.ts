@@ -40,7 +40,12 @@ export const ACCESS_LABELS: Record<AccessLevel, string> = { none: "None", read: 
  * workspaces.ts giveAppsRead), or dropped by an older Bops's save (lib/server/state-merge.ts keepAppsLevels puts it
  * back). Only with a bot: an entry is kept only while it shows one (workspaces.ts showsAny).
  */
-export type MemberAccess = { others: AccessLevel; bots: Record<string, AccessLevel>; at?: number; invite?: true; apps?: AccessLevel; computer?: ComputerUse };
+export type MemberAccess = { others: AccessLevel; bots: Record<string, AccessLevel>; at?: number; invite?: true; apps?: AccessLevel; computer?: ComputerUse; can?: Partial<Record<Power, true>> };
+/*
+ * What they may change (`can`), each a switch of its own in Team (Power, below): the org chart, bot settings, memory and
+ * skills, workspace settings, app secrets, spending, the owner's Mac. Only the ones turned on are kept; an Admin has
+ * every one whatever is kept (hasPower).
+ */
 /**
  * Use its computer (MemberAccess.computer): "use" lets what they say wake the bots' computers and run there, as their
  * administrator; "none", or missing (never set), doesn't.
@@ -129,7 +134,7 @@ export const levelOf = (access: MemberAccess, botId: string): AccessLevel =>
  */
 export function cleanAccess(v: unknown): MemberAccess | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
-  const o = v as { others?: unknown; bots?: unknown; apps?: unknown; computer?: unknown };
+  const o = v as { others?: unknown; bots?: unknown; apps?: unknown; computer?: unknown; can?: unknown };
   const others: AccessLevel = isAccessLevel(o.others) ? o.others : "none";
   const bots: Record<string, AccessLevel> = {};
   if (o.bots && typeof o.bots === "object" && !Array.isArray(o.bots)) {
@@ -145,7 +150,9 @@ export function cleanAccess(v: unknown): MemberAccess | null {
     }
   }
   // Your Apps and Use its computer: kept when they're one; anything else is left out (the server then keeps what it had).
-  return { others, bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(isComputerUse(o.computer) ? { computer: o.computer } : {}) };
+  // What they may change (member-access.ts Power): only known switches, only on; an object sent empty turns every one off.
+  const can = cleanPowers(o.can);
+  return { others, bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(isComputerUse(o.computer) ? { computer: o.computer } : {}), ...(can ? { can } : {}) };
 }
 
 /** A new invite's access before the owner changes it: every bot there now to read, and Your Apps to read; bots made later hidden; not their computers. */
@@ -231,7 +238,7 @@ export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(acces
  * SharedWsSlice.adminActs): an older one would drop what it doesn't know. Off (false): still the owner's alone.
  * - ownerAsk: answer an ask to use the owner's Connected apps or API keys (ownerOnlyAsk).
  * - macAsk: answer an ask of a thread on the owner's Mac (a previewed action, yes or no).
- * - macThread: tell a thread on the owner's Mac more (reply, Nothing to add): it has the owner's own browsers and logins. Off.
+ * - macThread: tell a thread on the owner's Mac more (reply, Nothing to add): it has the owner's own browsers and logins.
  * - where: pick where an undecided thread runs ("{bot}'s computer" only: never the owner's Mac).
  * - people: invite, remove and change people (orgo-web, and the bots a Member has: Bops Cloud).
  * - workspace: rename the workspace, and say where its chat is answered.
@@ -239,11 +246,20 @@ export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(acces
  * - publish: Publish an app, or roll back what's Published, from Your Apps (MemberAppAct env "prod"), with the owner's Bops
  *   at ADMIN_PUBLISH_MIN_VERSION. (An Admin's own words publish it in chat too: lib/server/chat.ts askedForProd.)
  * - instructions: change a bot's "How I work" (the "persona" act), with the owner's Bops at ADMIN_PUBLISH_MIN_VERSION too.
+ * An Admin has every one (the owner's 11-03 rule: an Admin may do everything but delete the workspace). A Member has one
+ * when its switch in Team is on (POWER_OF, MemberAccess.can), with the owner's Bops new enough to take switches (the
+ * caller passes `can` only then): people and waking a computer stay an Admin's (orgo-web says who manages people, Use
+ * its computer who may wake one).
  */
 export type AdminPower = "ownerAsk" | "macAsk" | "macThread" | "where" | "people" | "workspace" | "wake" | "publish" | "instructions";
-export const ADMIN_POWERS: Readonly<Record<AdminPower, boolean>> = { ownerAsk: true, macAsk: true, macThread: false, where: true, people: true, workspace: true, wake: true, publish: true, instructions: true };
-/** Never an Admin's, whatever: the side that does each refuses it (orgo-web, Bops Cloud, the owner's Mac). */
-export const OWNER_ALWAYS = ["deleteWorkspace", "transfer", "makeOwner", "billing", "allowHourly", "payment", "resize"] as const;
+export const ADMIN_POWERS: Readonly<Record<AdminPower, boolean>> = { ownerAsk: true, macAsk: true, macThread: true, where: true, people: true, workspace: true, wake: true, publish: true, instructions: true };
+/** Each Admin power's switch in Team (Power), which gives it to a Member too. None: an Admin's alone. */
+export const POWER_OF: Readonly<Partial<Record<AdminPower, Power>>> = { ownerAsk: "mac", macAsk: "mac", macThread: "mac", where: "bots", workspace: "workspace", publish: "appSecrets", instructions: "bots" };
+/**
+ * Never an Admin's, whatever: the side that does each refuses it (orgo-web, Bops Cloud, the owner's Mac). Deleting the
+ * workspace, and handing it over; paying (the owner's card) stays theirs, as orgo-web keeps it.
+ */
+export const OWNER_ALWAYS = ["deleteWorkspace", "transfer", "makeOwner", "billing", "payment"] as const;
 /**
  * Keys (protocol.ts SharedWsSlice.keys): add, replace, remove, see and copy the workspace's own keys, and pick which bots
  * use any key it sees. The owner's always; anyone else's as orgo-web says it (`keys`: WsAccess.keys), which is yes for an
@@ -254,25 +270,43 @@ export const OWNER_ALWAYS = ["deleteWorkspace", "transfer", "makeOwner", "billin
  */
 export const holdsKeys = (role: unknown, keys?: unknown) => role === "owner" || keys === true || (role === "admin" && keys === undefined);
 
-/** Whether `admin` (an Admin whose acts the owner's Bops takes) may do `power`. */
-export const adminMay = (power: AdminPower, admin: boolean) => admin && ADMIN_POWERS[power];
+/**
+ * Who's asking, for an Admin power: `true` an Admin whose acts the owner's Bops takes, `false` anyone else; or, with
+ * `can`, also a Member with that power's switch on (MemberAccess.can), passed only when the owner's Bops takes switches.
+ */
+export type PowerWho = boolean | { admin: boolean; can?: Partial<Record<Power, true>> };
+
+/** Whether `who` may do `power`: an Admin whose acts the owner's Bops takes, or a Member with its switch on (POWER_OF). */
+export const adminMay = (power: AdminPower, who: PowerWho) => {
+  const admin = typeof who === "boolean" ? who : who.admin;
+  if (admin && ADMIN_POWERS[power]) return true;
+  const sw = POWER_OF[power];
+  return typeof who !== "boolean" && !!sw && who.can?.[sw] === true;
+};
 
 /**
- * Why an ask is the owner's alone for this viewer (`admin`: an Admin whose acts the owner's Bops takes), or null when
- * they may answer it (with Write on its bot): "logins" for the owner's Connected apps or keys (ownerOnlyAsk), "mac" for
- * one of a thread on the owner's Mac. The same rule Bops Cloud, the owner's Mac and the viewer's window go by.
+ * Why an ask is the owner's alone for this viewer (`who`: adminMay), or null when they may answer it (with Write on its
+ * bot): "logins" for the owner's Connected apps or keys (ownerOnlyAsk), "mac" for one of a thread on the owner's Mac.
+ * The same rule Bops Cloud, the owner's Mac and the viewer's window go by.
  */
-export function askOwnersOnly(a: { kind?: unknown }, thread: { runsOn?: unknown } | undefined, admin: boolean): "logins" | "mac" | null {
-  if (ownerOnlyAsk(a.kind) && !adminMay("ownerAsk", admin)) return "logins";
-  if (thread?.runsOn === "mac" && !adminMay("macAsk", admin)) return "mac";
+export function askOwnersOnly(a: { kind?: unknown }, thread: { runsOn?: unknown } | undefined, who: PowerWho): "logins" | "mac" | null {
+  if (ownerOnlyAsk(a.kind) && !adminMay("ownerAsk", who)) return "logins";
+  if (thread?.runsOn === "mac" && !adminMay("macAsk", who)) return "mac";
   return null;
 }
 /** Whether telling a thread more (a reply, Nothing to add, Compact) is the owner's alone: one on the owner's Mac (macThread). */
-export const threadOwnersOnly = (thread: { runsOn?: unknown } | undefined, admin: boolean) => thread?.runsOn === "mac" && !adminMay("macThread", admin);
+export const threadOwnersOnly = (thread: { runsOn?: unknown } | undefined, who: PowerWho) => thread?.runsOn === "mac" && !adminMay("macThread", who);
 
 /** Whether two entries give the same: the bots, `others`, Your Apps and Use its computer (never when they were set). */
 export const sameAccess = (a: MemberAccess, b: MemberAccess) =>
-  a.others === b.others && a.apps === b.apps && a.computer === b.computer && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
+  a.others === b.others &&
+  a.apps === b.apps &&
+  a.computer === b.computer &&
+  samePowers(a.can, b.can) &&
+  Object.keys(a.bots).length === Object.keys(b.bots).length &&
+  Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
+/** Whether two entries let them change the same things (MemberAccess.can): missing and `{}` differ (one an older Bops dropped). */
+const samePowers = (a: MemberAccess["can"], b: MemberAccess["can"]) => (!a || !b ? !a === !b : POWERS.every((p) => !!a[p] === !!b[p]));
 /**
  * Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). Your Apps
  * comes with a bot: with none, the person's window has nothing of the workspace to open, and a Bops from before deletes
@@ -291,9 +325,66 @@ export function withEntry(map: MemberAccessMap | undefined, key: string, access:
   const kept = map && Object.hasOwn(map, key) ? map[key] : undefined;
   const apps = isAccessLevel(clean?.apps) ? clean.apps : isAccessLevel(kept?.apps) ? kept.apps : undefined;
   const computer = isComputerUse(clean?.computer) ? clean.computer : isComputerUse(kept?.computer) ? kept.computer : undefined;
-  const withApps: MemberAccess | null = clean && { others: clean.others, bots: clean.bots, ...(apps ? { apps } : {}), ...(computer ? { computer } : {}) };
+  // What they may change: what was sent (`{}`: every switch off), else what was kept (a save that sends only bots keeps it).
+  const can = clean?.can ?? cleanPowers(kept?.can);
+  const withApps: MemberAccess | null = clean && { others: clean.others, bots: clean.bots, ...(apps ? { apps } : {}), ...(computer ? { computer } : {}), ...(can ? { can } : {}) };
   const keep: MemberAccess | null = withApps && showsAny(withApps) ? { ...withApps, at: how.at ?? now, ...(how.invite ? { invite: true as const } : {}) } : null;
   if (keep ? kept && sameAccess(keep, kept) && !!kept.invite === !!keep.invite && (how.at === undefined || kept.at === how.at) : !kept) return map;
   if (keep) return { ...map, [key]: keep };
   return Object.fromEntries(Object.entries(map ?? {}).filter(([k]) => k !== key));
+}
+
+/* ---------------- What they may change ---------------- */
+
+/*
+ * What someone other than the owner may change in a shared workspace, each its own switch in Team (the People sheet),
+ * beside which bots they see, Your Apps, Use its computer and Keys. An Admin has every one, whatever is kept for them;
+ * a Member has the ones the owner or an Admin turned on for them (MemberAccess.can). Only deleting the workspace and
+ * handing it to someone else stay the owner's, and no switch gives them.
+ *
+ * A change is done by the owner's Mac as the owner's own window would do it (the "change" act: cloud/protocol.ts
+ * MemberAct, Bops Cloud's check in cloud/members.ts, the owner's Mac in lib/server/member-acts.ts), through the
+ * same route the owner's window calls (CHANGE_ROUTES), for this workspace alone. Imported by Bops Cloud and, through
+ * lib/member-access.ts, the window and the Mac server, so it imports nothing.
+ */
+
+export type Power = "chart" | "bots" | "memory" | "workspace" | "appSecrets" | "spend" | "mac";
+export const POWERS: readonly Power[] = ["chart", "bots", "memory", "workspace", "appSecrets", "spend", "mac"];
+
+/** Each switch's name in Team, and what it lets them change (no dashes: the window shows these as they are). */
+export const POWER_WORDS: Readonly<Record<Power, { name: string; tip: string }>> = {
+  chart: { name: "Org chart", tip: "Who reports to whom, and which bots can ask each other." },
+  bots: { name: "Bot settings", tip: "The settings of the bots they have Write on: name, job, model, what it works on, its phone, email and channels, routines." },
+  memory: { name: "Memory and skills", tip: "What the bots remember, and the skills they use." },
+  workspace: { name: "Workspace settings", tip: "Its name, where its chat is answered, and what each group of bots is called." },
+  appSecrets: { name: "App secrets", tip: "Your Apps' variables and Preview passwords, Publish, going back on Published, and restoring an app." },
+  spend: { name: "Spending", tip: "What costs the plan more: a bot's own computer, a bigger computer, waking one billed by the hour." },
+  mac: { name: "The owner's Mac", tip: "Work on the owner's Mac and the owner's own apps and keys: answering what it asks, and telling it more." },
+};
+
+/** What the owner and an Admin have: every power. */
+export const ALL_POWERS: Readonly<Record<Power, true>> = Object.freeze(Object.fromEntries(POWERS.map((p) => [p, true])) as Record<Power, true>);
+
+export const isPower = (v: unknown): v is Power => typeof v === "string" && (POWERS as readonly string[]).includes(v);
+
+/** The powers kept for someone (MemberAccess.can), made safe: only known ones, only on. */
+export function cleanPowers(v: unknown): Partial<Record<Power, true>> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const out: Partial<Record<Power, true>> = {};
+  for (const [k, on] of Object.entries(v as Record<string, unknown>)) if (isPower(k) && on === true) out[k] = true;
+  return out;
+}
+
+/** Whether someone with `role` and what's kept for them (`can`) may use `power`: the owner and an Admin always; a Member when it's on. */
+export const hasPower = (power: Power, role: unknown, can?: unknown): boolean =>
+  role === "owner" || role === "admin" || (!!can && typeof can === "object" && !Array.isArray(can) && (can as Record<string, unknown>)[power] === true);
+
+/** Every power someone has, as hasPower says. */
+export const powersOf = (role: unknown, can?: unknown): Power[] => POWERS.filter((p) => hasPower(p, role, can));
+
+/** A short line for what someone may change, beside their bots in Team: nothing when none is on. */
+export function powersSummary(can?: Partial<Record<Power, true>>): string {
+  const on = POWERS.filter((p) => can?.[p] === true);
+  if (!on.length) return "";
+  return on.length === 1 ? `Can change ${POWER_WORDS[on[0]].name}` : `Can change ${on.length} things`;
 }

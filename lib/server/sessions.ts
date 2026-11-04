@@ -2174,7 +2174,7 @@ function memberNote(s: Session, admin: boolean): string {
   const owner = ownerName();
   const who = memberOf(s, session)?.name ?? "Someone";
   if (admin)
-    return `${who}, an Admin of this workspace, asked for this task. Do it as you would for ${owner}, with the apps, keys and logins you have for it: their yes is enough for anything ${owner} could say yes to, so never wait for ${owner}'s yes or ask ${owner} to approve what they asked. A saved site login signs in only when it's set to sign in by itself. Still ${owner}'s alone: paying, deleting or moving the workspace, ${owner}'s own Mac, settings and memory, and setting up or changing routines, reminders, watches, skills and new bots.`;
+    return `${who}, an Admin of this workspace, asked for this task. Do it as you would for ${owner}, with the apps, keys and logins you have for it: their yes is enough for anything ${owner} could say yes to, so never wait for ${owner}'s yes or ask ${owner} to approve what they asked. A saved site login signs in only when it's set to sign in by itself. Still ${owner}'s alone: paying, and deleting the workspace or handing it to someone else.`;
   return `${who}, someone ${owner} gave this bot to, asked for this task. Use the apps, keys and logins you have for it as you would for ${owner}. Anything that sends, changes, deletes or pays waits for ${owner}'s yes, and a saved site login signs in only when it's set to sign in by itself. Nothing else of ${owner}'s own: their Mac, settings or memory.`;
 }
 

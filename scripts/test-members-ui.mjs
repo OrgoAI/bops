@@ -54,6 +54,7 @@ globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({})
 
 const S = await import(pathToFileURL(`${root}/components/app/members.tsx`).href);
 const M = await import(pathToFileURL(`${root}/lib/members.ts`).href);
+const { POWERS } = await import(pathToFileURL(`${root}/lib/member-access.ts`).href);
 const A = await import(pathToFileURL(`${root}/lib/member-access.ts`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
@@ -135,7 +136,10 @@ await test("the picker: Every bot first, then each bot with its mascot, one line
     [...levels.matchAll(/<li>([\s\S]*?)<\/li>/g)].map(([, li]) => li.replace(/<[^>]+>/g, "").replace(/&#x27;/g, "'")),
     ["None: can't see this bot in Bops. On orgo.ai they still see its computer.", "Read: sees everything this bot does, including your chats with it.", "Write: can chat with this bot, have it do work, answer what it asks and stop it. Never your logins, keys or Macs."],
   );
-  assert.equal((html.match(/truncate/g) ?? []).length, 4, "every name is cut short, not wrapped");
+  // Every name is cut short: the four rows above, and each of What they can change (member-access.ts POWERS), all off.
+  assert.equal((html.match(/truncate/g) ?? []).length, 4 + POWERS.length, "every name is cut short, not wrapped");
+  const powers = [...html.matchAll(/data-power="([a-zA-Z]+)"[\s\S]*?aria-checked="true"[^>]*>([^<]+)</g)].map(([, p, on]) => `${p}: ${on}`);
+  assert.deepEqual(powers, POWERS.map((p) => `${p}: Off`), "every switch, off until turned on");
   assert.match(html, /aria-label="What they can do with Sam"/);
   // Single bots set apart: Every bot's level is only the new bots', lighter, and says so, to a screen reader too.
   const group = html.match(/<div role="radiogroup" aria-label="What they can do with bots you make later" aria-describedby="([^"]+)"[\s\S]*?<\/div>/);

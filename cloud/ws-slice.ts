@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
-import { accessOf, adminAccess, appsLevelOf, currentFor, holdsKeys, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
+import { groupKeyOf } from "./group-key.ts";
+import { accessOf, adminAccess, appsLevelOf, cleanPowers, currentFor, holdsKeys, isAccessLevel, levelOf, permits, powersOf, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
 import { KEY_NAME, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedWsSlice, type WsRole } from "./protocol.ts";
 
 /**
@@ -65,8 +66,12 @@ export function keep(v: unknown, spec: Spec): unknown {
 // Where its chat is answered (turns.ts mirrorOf), so an Admin's Settings shows the switch as it stands.
 const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true, chatAutoOff: true };
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
-/** An Admin's: its "How I work" too (Bot.persona), which they change (the "persona" act). Never a Member's. */
-const ADMIN_BOT: Spec = { ...BOT, persona: true };
+/**
+ * With Bot settings (member-access.ts Power "bots": an Admin always): its "How I work" (Bot.persona, the "persona" act),
+ * and whether it acts without asking first and has business data (Bot.autoApprove, Bot.dataOff), which they change (the
+ * "change" act). Never a Member's without it.
+ */
+const ADMIN_BOT: Spec = { ...BOT, persona: true, autoApprove: true, dataOff: true };
 /** With Keys (keysOf): the keys each bot may use too (Bot.keys: names only), which they switch (the "key" act). */
 const KEYS_BOT: Spec = { ...BOT, keys: true };
 const ADMIN_KEYS_BOT: Spec = { ...ADMIN_BOT, keys: true };
@@ -236,6 +241,8 @@ export type SliceViewer = {
   keys?: boolean;
   /** Whether the owner's Bops takes the "key" act (protocol.ts KEYS_MIN_VERSION): SharedWsSlice.keyActs. */
   keyActs?: boolean;
+  /** Whether the owner's Bops takes the "change" act (change-routes.ts CHANGES_MIN_VERSION): SharedWsSlice.changes. */
+  changes?: boolean;
 };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
@@ -255,7 +262,9 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
   const o = isObject(kept) && currentFor(kept, viewer.joinedAt) ? kept : {};
   const bots: Record<string, AccessLevel> = Object.create(null);
   if (isObject(o.bots)) for (const [id, level] of Object.entries(o.bots)) bots[id] = isAccessLevel(level) ? level : "none";
-  return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(usesComputer(o) ? { computer: "use" as const } : {}) };
+  // What they may change (member-access.ts Power), the switches turned on for them: an Admin has every one whatever is kept (hasPower).
+  const can = cleanPowers(o.can);
+  return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(usesComputer(o) ? { computer: "use" as const } : {}), ...(can ? { can } : {}) };
 }
 
 export { adminAccess };
@@ -449,7 +458,7 @@ export function computersOf(blob: Record<string, unknown>, ws: string, workspace
       const own = Object.hasOwn(names, nameKey) && typeof names[nameKey] === "string" ? (names[nameKey] as string).slice(0, 40) : undefined;
       const name = own || app || undefined;
       out.push({
-        key: `c${createHash("sha256").update(`${ws}:${nameKey}`).digest("hex").slice(0, 16)}`,
+        key: groupKeyOf(ws, nameKey),
         // The main bot shown on it stays with the computer's own group (it's never a row), as it always was.
         bots: app ? list : bots.filter((id) => main.has(id) || list.includes(id)),
         ...(name ? { name } : {}),
@@ -590,7 +599,12 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   // Keys: the keys the workspace sees and each bot's (names only), for someone who has it (keysOf).
   const keys = !!access && keysOf(viewer);
   const keyNames = keys ? keyNamesOf(s.workspace) : undefined;
-  const botSpec = viewer.role === "admin" ? (keys ? ADMIN_KEYS_BOT : ADMIN_BOT) : keys ? KEYS_BOT : BOT;
+  // What they may change (member-access.ts Power: an Admin every one), and whether they see every bot (the org chart is theirs only then).
+  const can = access ? powersOf(viewer.role, access.can) : undefined;
+  // A bot's settings to someone with Bot settings (an Admin always), once the owner's Bops takes a Member's (`changes`).
+  const settings = viewer.role === "admin" || (!!viewer.changes && !!can?.includes("bots"));
+  const botSpec = settings ? (keys ? ADMIN_KEYS_BOT : ADMIN_BOT) : keys ? KEYS_BOT : BOT;
+  const seesAll = !!access && seesEveryBot(access, list(blob.bots).flatMap((b) => (typeof b.id === "string" && wsOfBot(b) === ws ? [b.id] : [])));
   return {
     workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
     bots: all(s.bots, botSpec),
@@ -619,8 +633,26 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     // Keys (keysOf), what the workspace's bots see of keys, and whether the owner's Bops takes their "key" act: part of
     // the fingerprint, so being given Keys, a key added or the owner updating gives them a new one.
     ...(keys ? { keys: true as const, ...(keyNames ? { keyNames } : {}), ...(viewer.keyActs ? { keyActs: true as const } : {}) } : {}),
+    // What they may change (member-access.ts Power), whether the owner's Bops takes it, and how their last changes went (changedFor).
+    // Part of the fingerprint: a switch turned on or off, the owner updating, or a change done gives them a new one.
+    ...(can?.length ? { can, ...(viewer.changes ? { changes: true as const } : {}), ...changedFor(s.workspace, viewer) } : {}),
+    // The org chart, to someone who may change it and sees every bot (one who doesn't would see ids of bots hidden from them).
+    ...(can?.includes("chart") && seesAll && isObject(s.workspace?.chain) ? { chain: s.workspace.chain as Record<string, unknown> } : {}),
   };
 }
+
+/** What the owner's Mac did with `viewer`'s last changes (Workspace.changesDone: by who made them), or nothing. */
+function changedFor(workspace: Record<string, unknown> | null, viewer: SliceViewer): { changed?: { key: string; ok: boolean; error?: string }[] } {
+  const done = Array.isArray(workspace?.changesDone) ? (workspace.changesDone as unknown[]) : [];
+  const mine = done.flatMap((d) => {
+    if (!isObject(d) || d.by !== viewer.id || typeof d.key !== "string" || typeof d.ok !== "boolean") return [];
+    return [{ key: d.key, ok: d.ok, ...(typeof d.error === "string" ? { error: d.error.slice(0, 300) } : {}) }];
+  });
+  return mine.length ? { changed: mine } : {};
+}
+
+/** Whether someone sees every bot of the workspace, the ones made later too (an Admin always): who may change the org chart. */
+export const seesEveryBot = (access: MemberAccess, botIds: readonly string[]) => access.others !== "none" && botIds.every((id) => levelOf(access, id) !== "none");
 
 /**
  * The Orgo computer each of the `shown` bots works on (hostOf: its own, or the main bot's it shares), by bot id: for an

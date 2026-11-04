@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { trackEvent } from "@/lib/analytics";
-import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, computerSummary, fitComputer, inviteDefault, isAccessLevel, levelOf, usesComputer, writesAny, type AccessLevel, type MemberAccess } from "@/lib/member-access";
+import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, computerSummary, fitComputer, inviteDefault, isAccessLevel, levelOf, POWER_WORDS, POWERS, powersSummary, usesComputer, writesAny, type AccessLevel, type MemberAccess, type Power } from "@/lib/member-access";
 import { appsOwnShown } from "@/lib/apps-access";
 import {
   ACCESS_TIPS,
@@ -398,7 +398,7 @@ function useOlderBops(ask: boolean) {
 /** A person's line under their name: their bots, then Your Apps where the sheet shows it. */
 function useSummary() {
   const { shown } = useContext(AppsScope);
-  return (access: MemberAccess, ids: string[]) => [accessSummary(access, ids), shown && appsSummary(access), computerSummary(access)].filter(Boolean).join(" · ");
+  return (access: MemberAccess, ids: string[]) => [accessSummary(access, ids), shown && appsSummary(access), computerSummary(access), powersSummary(access.can)].filter(Boolean).join(" · ");
 }
 
 /**
@@ -487,6 +487,8 @@ export function BotAccess({ bots, value, onChange, disabled, invite }: { bots: B
       <span data-computer-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
         {invite ? COMPUTER_WORDS.afterJoin : writes ? COMPUTER_WORDS.legend : computerOn ? COMPUTER_WORDS.onWithoutWrite : COMPUTER_WORDS.needsWrite}
       </span>
+      {/* What they may change: each a switch of its own (lib/member-access.ts MemberAccess.can, Power). */}
+      <PowerRows can={value.can} onChange={(can) => onChange({ ...value, can })} disabled={disabled} />
       <ul data-access-levels className="flex flex-col gap-0.5 px-1 text-[12px] leading-4 text-[#6B6B6B]">
         {ACCESS_LEVELS.map((level) => (
           <li key={level}>
@@ -501,6 +503,75 @@ export function BotAccess({ bots, value, onChange, disabled, invite }: { bots: B
         </span>
       )}
     </div>
+  );
+}
+
+/** What PowerRows says (no dashes: shown as they are). */
+export const POWER_SHEET_WORDS = {
+  title: "What they can change",
+  admin: "An Admin can change all of this.",
+  legend: "Only the owner can delete the workspace.",
+};
+
+/** `can` with one switch on or off: always an object, so every switch off is kept as off (`{}`), not as never set. */
+export const withPower = (can: Partial<Record<Power, true>> | undefined, power: Power, on: boolean): Partial<Record<Power, true>> => {
+  const next: Partial<Record<Power, true>> = { ...(can ?? {}) };
+  if (on) next[power] = true;
+  else delete next[power];
+  return next;
+};
+
+/**
+ * What someone may change (lib/member-access.ts MemberAccess.can: the org chart, bot settings, memory and skills, workspace
+ * settings, app secrets, spending, the owner's Mac), each Off or On as Use its computer is, saying on hover what it covers.
+ * `locked`: an Admin's, every one on.
+ */
+export function PowerRows({ can, onChange, disabled, locked }: { can?: Partial<Record<Power, true>>; onChange?: (next: Partial<Record<Power, true>>) => void; disabled?: boolean; locked?: boolean }) {
+  return (
+    <div data-powers className="flex flex-col gap-1">
+      <span className="px-1 text-[12px] font-medium leading-4 text-[#3A3A38]">{POWER_SHEET_WORDS.title}</span>
+      <div className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+        {POWERS.map((power) => {
+          const on = locked || can?.[power] === true;
+          return (
+            <div key={power} data-power={power} className="flex h-[30px] shrink-0 items-center gap-2">
+              <PowerMark />
+              <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-ink" data-tip={POWER_WORDS[power].tip}>
+                {POWER_WORDS[power].name}
+              </span>
+              <div role="radiogroup" aria-label={POWER_WORDS[power].name} data-tip={locked ? POWER_SHEET_WORDS.admin : undefined} className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[2px] ${disabled || locked ? "opacity-50" : ""}`}>
+                {[false, true].map((value) => (
+                  <button
+                    key={String(value)}
+                    type="button"
+                    role="radio"
+                    aria-checked={on === value}
+                    disabled={disabled || locked}
+                    data-tip={locked ? POWER_SHEET_WORDS.admin : POWER_WORDS[power].tip}
+                    onClick={() => on !== value && onChange?.(withPower(can, power, value))}
+                    className={`rounded-full px-2 py-0.5 text-[11.5px] leading-4 ${on === value ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+                  >
+                    {value ? COMPUTER_WORDS.on : COMPUTER_WORDS.off}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <span data-powers-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
+        {locked ? `${POWER_SHEET_WORDS.admin} ${POWER_SHEET_WORDS.legend}` : POWER_SHEET_WORDS.legend}
+      </span>
+    </div>
+  );
+}
+
+/** A power's mark, as big as a bot's: a pencil. */
+function PowerMark() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+      <path d="M3 13l.6-2.6L10.8 3.2a1.2 1.2 0 0 1 1.7 0l.3.3a1.2 1.2 0 0 1 0 1.7L5.6 12.4 3 13z" fill="none" stroke="#9A9A98" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -1173,10 +1244,11 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
           </span>
         </div>
       )}
-      {/* An Admin always has Keys: shown on and locked. */}
+      {/* An Admin always has Keys, and may change everything but delete the workspace: shown on and locked. */}
       {admin && (
-        <div className="pl-12 pt-2">
+        <div className="flex flex-col gap-2 pl-12 pt-2">
           <KeysRow on locked />
+          <PowerRows locked />
         </div>
       )}
       {error && (

@@ -2114,7 +2114,8 @@ await check("every card kind, for every role: live buttons for whoever may answe
     elsewhere: { owner: "you", memberRead: 3, memberWrite: 3, memberAdminsAct: 3, memberNoComputer: 3, admin: 3, adminOld: 3, adminOldCloud: 3 },
     sign_in: { owner: "you", memberRead: 7, memberWrite: 0, memberAdminsAct: 1, memberNoComputer: 0, admin: "you", adminOld: "you", adminOldCloud: "you" },
     payment: { owner: "you", memberRead: 4, memberWrite: 4, memberAdminsAct: 4, memberNoComputer: 4, admin: 4, adminOld: 4, adminOldCloud: 4 },
-    mac: { owner: "you", memberRead: 7, memberWrite: 5, memberAdminsAct: 5, memberNoComputer: 5, admin: 5, adminOld: 5, adminOldCloud: 5 },
+    // A thread on the owner's Mac: an Admin's too, once the owner's Bops takes their acts (member-access.ts ADMIN_POWERS.macThread).
+    mac: { owner: "you", memberRead: 7, memberWrite: 5, memberAdminsAct: 5, memberNoComputer: 5, admin: "you", adminOld: 5, adminOldCloud: 5 },
   };
   const card = (html) => {
     const c = html.slice(html.indexOf("rounded-2xl bg-[#FBFFE0]"));
