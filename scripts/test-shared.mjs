@@ -1191,12 +1191,12 @@ await check("a New tab carried over, a watch's Edit and its sheet, clicking into
   assert.ok(!/Change what bank\.test is watched for|>Edit<|take over when you need to|group\/screen[^"]*cursor-pointer/.test(computer), text(computer).slice(0, 600));
   // A watch's suggestions read a bot's screen by its id: the user's own bot of that id, so the read never goes.
   assert.equal(callAllowed("GET", "/api/watches?botId=boppy&display=100"), false);
-  // The bot's profile: it never works on the viewer's own Mac; the Memory and Phone tabs say the owner's.
+  // The bot's profile: it never works on the viewer's own Mac; the Skills and Memory tabs say the owner's.
   const panel = (section, state = st) => text(renderToStaticMarkup(h(BotPanel, { state: { ...state, vault: [] }, bot: state.bots[0], section, onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop })));
   assert.doesNotMatch(panel("skills"), /Works on (your|the owner's) Mac/, "runsOn auto, on the viewer's Mac app");
   const onMac = viewState({ ...own(), host: "mac" }, { ...listed, role: "member", wsId: WS }, { ...c, state: { ...c.state, bots: [{ ...c.state.bots[0], runsOn: "mac" }] } }, {});
   assert.match(panel("skills", onMac), /Works on the owner's Mac/);
-  for (const section of ["skills", "memory", "phone"]) assert.deepEqual(yous(renderToStaticMarkup(h(BotPanel, { state: { ...st, vault: [] }, bot: st.bots[0], section, onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop }))), [], section);
+  for (const section of ["skills", "memory"]) assert.deepEqual(yous(renderToStaticMarkup(h(BotPanel, { state: { ...st, vault: [] }, bot: st.bots[0], section, onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop }))), [], section);
   // A helper's task is the bot's own words, as it wrote them; Bops' own lines in a bot's voice are the owner's.
   const c2 = cloudState();
   c2.state.sessions = [{ ...c2.state.sessions[0], title: "Weekly report", steps: [{ at: 1, tool: "helper", detail: "brought in a helper for You are a research helper. Check your calendar access first" }, { at: 2, tool: "find_app_actions", detail: 'looked for "your invoices" in your apps' }] }];
