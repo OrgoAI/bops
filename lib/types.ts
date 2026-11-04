@@ -2278,8 +2278,11 @@ export type FileChange = {
   branch: string;
   base?: string;
   at: string;
-  /** `image`: a picture from the chat goes there, byte for byte: the copy the card shows (an upload on this Mac, `id`), and the link a person wrote it at (`url`) when it came from one. */
-  files: { path: string; op: "add" | "change" | "delete"; bytes?: number; mode?: "100755"; image?: { id?: string; url?: string } }[];
+  /**
+   * `image`: a picture from the chat goes there, byte for byte: the copy the card shows (an upload on this Mac, `id`), the
+   * link a person wrote it at (`url`) when it came from one, and its size in pixels (`w`, `h`) as its own header says.
+   */
+  files: { path: string; op: "add" | "change" | "delete"; bytes?: number; mode?: "100755"; image?: { id?: string; url?: string; w?: number; h?: number } }[];
 };
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */

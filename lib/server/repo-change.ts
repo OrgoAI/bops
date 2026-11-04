@@ -2,7 +2,7 @@ import "server-only";
 import { workspaceOf, type AccessUse, type FileChange } from "@/lib/types";
 import { forMember, logUse, viaOf, type UseWhere } from "./access-sync";
 import { callKey, keyName, keyProjectFor, keyProvider, listKeys, plainReason, usableKeys, type KeyAnswer, type KeyMethod, type KeyProvider, type VaultKey } from "./keys";
-import { chatPictures, linkedByPerson, linkedPicture, uploadBytes, type Picture } from "./chat-pictures";
+import { chatPictures, linkedByPerson, linkedPicture, pixelSize, uploadBytes, type Picture } from "./chat-pictures";
 import { allows, NeedsOk, type AskSpec } from "./permission";
 import { onRunner } from "./persist";
 import { PICTURE_MAX } from "./safe-fetch";
@@ -394,8 +394,10 @@ export async function changeFiles(botId: string, a: ChangeArgs, where: UseWhere,
       const pic = pics.got.get(f.path);
       if (pic) {
         if (old?.equals(pic.bytes)) continue;
-        shown.push({ path: f.path, op: j ? "change" : "add", bytes: pic.bytes.length, ...mode, image: { ...(pic.id ? { id: pic.id } : {}), ...(pic.url ? { url: pic.url } : {}) } });
-        diffs.push(`${f.path}: ${j ? "changed" : "added"}, ${sizeOf(pic.bytes.length)}, ${pic.from}`);
+        // On the card: its thumbnail, name, size and pixel size, never a text diff; its words count toward the card's cap, not its bytes.
+        const px = pixelSize(pic.bytes);
+        shown.push({ path: f.path, op: j ? "change" : "add", bytes: pic.bytes.length, ...mode, image: { ...(pic.id ? { id: pic.id } : {}), ...(pic.url ? { url: pic.url } : {}), ...(px ?? {}) } });
+        diffs.push(`${f.path}: ${j ? "changed" : "added"}, ${sizeOf(pic.bytes.length)}${px ? `, ${px.w} × ${px.h}` : ""}, ${pic.from}`);
         continue;
       }
       if (!("text" in f)) continue;

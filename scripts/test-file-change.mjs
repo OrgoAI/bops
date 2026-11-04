@@ -210,6 +210,15 @@ process.env.BOPS_ORGO_ORIGIN = `http://127.0.0.1:${PORT}`;
 /* ---------------- A site with pictures on it (a link a person pastes) ---------------- */
 
 const PNG = (n) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), randomBytes(n)]);
+/** A PNG that says its size in pixels (its IHDR), then `n` more bytes. */
+const PNG_OF = (w, h, n) => {
+  const ihdr = Buffer.alloc(25);
+  ihdr.writeUInt32BE(13, 0);
+  ihdr.write("IHDR", 4, "latin1");
+  ihdr.writeUInt32BE(w, 8);
+  ihdr.writeUInt32BE(h, 12);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr, randomBytes(n)]);
+};
 /** What the site serves at each path: its type and bytes. */
 const site = new Map([["/logo.png", { type: "image/png", bytes: PNG(400) }], ["/about.html", { type: "text/html", bytes: Buffer.from("<p>About</p>") }]]);
 const siteHits = [];
@@ -590,7 +599,8 @@ await check("a member's turn always asks, named as theirs, even with an Always a
 /** A picture file of a change: in place of text, one of the chat's (its number) or a link. */
 const picture = (path, over) => ({ path, text: null, delete: null, image: null, imageUrl: null, ...over });
 /** The bytes of the blob the stand-in GitHub keeps at `path` on `ref`. */
-const blobAt = (ref, p) => gh.blobs.get(gh.trees.get(gh.commits.get(gh.refs.get(ref))?.tree)?.[p]);
+/** The bytes of file `p` on branch `ref` (a tree's entry is its blob and its mode). */
+const blobAt = (ref, p) => gh.blobs.get(gh.trees.get(gh.commits.get(gh.refs.get(ref))?.tree)?.[p]?.sha);
 
 await check("a picture a person attached goes in byte for byte: its number is said to the bot, the card shows its copy, and the blob is the attachment's exact bytes as base64 only Bops makes", async () => {
   freshRepo();
@@ -612,6 +622,24 @@ await check("a picture a person attached goes in byte for byte: its number is sa
   assert.equal(blob.body.encoding, "base64");
   assert.equal(sha256(Buffer.from(blob.body.content, "base64")), sha256(logo), "the attachment's exact bytes");
   assert.equal(sha256(blobAt("site/favicon", "public/favicon.png")), sha256(logo));
+});
+
+await check("a picture far bigger than the card's words goes on it as one line, its thumbnail, name, size and pixel size, never a diff: it counts toward the card's cap by its words, not its bytes", async () => {
+  freshRepo();
+  const logo = PNG_OF(512, 384, 200 * 1024);
+  const up = Up.saveUpload(`data:image/png;base64,${logo.toString("base64")}`);
+  const said = S.addMessage({ chatId, role: "user", text: "Here's the big logo", images: [{ id: up.id, type: up.type }], at: Date.now() });
+  const n = (await import(`${root}/lib/server/chat-pictures.ts`)).chatPictures(chatId).length;
+  const { apr } = await asking(change({ branch: "site/big-logo", message: "Use the big logo", reason: "Use the big logo", files: [picture("public/logo.png", { image: n })] }));
+  assert.ok(apr, "asked, not refused as too big to show");
+  assert.deepEqual(apr.api.change.files, [{ path: "public/logo.png", op: "add", bytes: logo.length, image: { id: up.id, w: 512, h: 384 } }]);
+  assert.match(apr.preview, new RegExp(`public/logo\\.png: added, 200\\.0 KB, 512 × 384, picture ${n} from the chat`));
+  assert.ok(Buffer.byteLength(apr.preview) < 1024, "words only, never the bytes");
+  const n0 = asked.length;
+  P.replyToAsk(apr.id, "reject");
+  await until(() => asked.length === n0 + 1, "the turn to go on from the no");
+  // (Gone again, so the chat has the one picture the next checks count.)
+  S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
 });
 
 await check("a picture number that doesn't exist is said plainly, and nothing goes out", async () => {

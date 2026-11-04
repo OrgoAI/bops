@@ -1220,12 +1220,18 @@ export function ApiAsk({ ask, detail, botName }: { ask: NonNullable<ReturnType<t
               ))}
               {change.files.map((f, i) => (
                 <div key={f.path} data-change-file className="flex flex-col gap-0.5">
-                  {/* Each file under its name: what happens to it and its size, as the facts line counts it. */}
+                  {/* Each file under its name: what happens to it and its size, as the facts line counts it. A picture from the
+                      chat: the copy that goes in, beside its name, with its size in pixels, in place of lines. */}
                   <div className="flex items-start gap-2 px-3 text-[12.5px] leading-[18px]">
+                    {f.image?.id && readAllowed(`/api/uploads/${f.image.id}`) && (
+                      // eslint-disable-next-line @next/next/no-img-element -- the picture that goes in, served by this app
+                      <img data-change-image src={`/api/uploads/${f.image.id}`} alt={`${f.path}, as it goes in`} className="size-10 shrink-0 rounded-md bg-white object-contain shadow-[0_0_0_1px_#0000000F]" />
+                    )}
                     <span className="min-w-0 flex-1 select-text font-mono text-[12px] text-ink [overflow-wrap:anywhere]">{f.path}</span>
                     <span className={`shrink-0 ${f.op === "delete" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
                       {FILE_OP[f.op]}
                       {f.bytes !== undefined ? ` · ${sizeOf(f.bytes)}` : ""}
+                      {f.image?.w && f.image.h ? ` · ${f.image.w} × ${f.image.h}` : ""}
                     </span>
                   </div>
                   {!!shown?.files[i].length && (

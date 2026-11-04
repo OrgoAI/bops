@@ -19,6 +19,40 @@ const ownWords = (m: { chatId: string; role: string; member?: { noUse?: boolean 
 /** A picture, its bytes in hand. */
 export type Picture = { type: string; bytes: Buffer };
 
+/**
+ * A picture's size in pixels, from its own header (PNG's IHDR, a JPEG's frame, GIF's screen, WebP's VP8/VP8L/VP8X), or
+ * null when it doesn't say: what a change card shows beside the file's size, never trusted for anything else.
+ */
+export function pixelSize(b: Buffer): { w: number; h: number } | null {
+  const ok = (w: number, h: number) => (w > 0 && h > 0 ? { w, h } : null);
+  if (b.length >= 24 && b.readUInt32BE(0) === 0x89504e47 && b.toString("latin1", 12, 16) === "IHDR") return ok(b.readUInt32BE(16), b.readUInt32BE(20));
+  if (b.length >= 10 && b.toString("latin1", 0, 4) === "GIF8") return ok(b.readUInt16LE(6), b.readUInt16LE(8));
+  if (b.length >= 30 && b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP") {
+    const kind = b.toString("latin1", 12, 16);
+    if (kind === "VP8 ") return ok(b.readUInt16LE(26) & 0x3fff, b.readUInt16LE(28) & 0x3fff);
+    if (kind === "VP8L") {
+      const v = b.readUInt32LE(21);
+      return ok((v & 0x3fff) + 1, ((v >> 14) & 0x3fff) + 1);
+    }
+    if (kind === "VP8X") return ok(b.readUIntLE(24, 3) + 1, b.readUIntLE(27, 3) + 1);
+    return null;
+  }
+  if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+    // The first start-of-frame marker (C0 to CF but C4, C8 and CC) holds the height, then the width.
+    for (let i = 2; i + 9 < b.length; ) {
+      if (b[i] !== 0xff) return null;
+      const m = b[i + 1];
+      if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) {
+        i += 2;
+        continue;
+      }
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return ok(b.readUInt16BE(i + 7), b.readUInt16BE(i + 5));
+      i += 2 + b.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
+
 /** The pictures people attached in chat `chatId`, oldest first: picture n is the n-th (1 the first). */
 export function chatPictures(chatId: string): { id: string; type: string; messageId: string }[] {
   return getState()
