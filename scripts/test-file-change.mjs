@@ -364,6 +364,15 @@ await check("a task pauses at its change on one card; Allow once resumes it and 
   await new Promise((r) => setTimeout(r, 100));
   assert.deepEqual(writes(), [], "a stopped task writes nothing");
   answers.length = 0;
+  // An Always allow (an older Bops's, or spread from another card) is no yes for a task's change: declined, nothing written.
+  freshRepo();
+  const t3 = task();
+  const a3 = await pause(t3);
+  answers.push(reply("I'll ask again."));
+  await CT.computerTurn({ ...t3, resume: { ...a3, reply: { reply: "always", at: Date.now() } } });
+  assert.deepEqual(writes(), [], "not written on an Always allow");
+  assert.match(JSON.stringify(asked.at(-1).input), /an Always allow doesn't count for a change a task makes/);
+  answers.length = 0;
 });
 
 await check("a task's write card: Bops' facts lead and the bot's words are labelled below; Always allow is refused on it, and one given on another card answers neither it nor another person's card", async () => {

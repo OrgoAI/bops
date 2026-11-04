@@ -7,6 +7,7 @@ import { sleptSince } from "./awake";
 import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { askFor, declined, declinedStep, NeedsOk, Paused, type AskSpec } from "./permission";
+import { taskWrite } from "@/lib/permission";
 import { shownAddress } from "@/lib/plain-words";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
@@ -302,6 +303,13 @@ async function answerPaused(t: ComputerTurn, a: AppApproval, call: { name: strin
       const owed = x.owed?.find((w) => w.id === callId);
       if (owed) owed.output = output;
     });
+  // An Always allow never answers a task's write (taskWrite): one from an older Bops, which still offered it or spread it
+  // from another card, is declined here, so the task asks again and someone answers that card itself.
+  if (a.reply?.reply === "always" && taskWrite(a)) {
+    const why = "Not done: an Always allow doesn't count for a change a task makes. Ask again: it needs Allow once on its own card.";
+    keep(why);
+    return { type: "function_call_output", call_id: callId, output: why };
+  }
   if (a.reply?.reply === "reject") {
     t.step("note", declinedStep(a));
     keep(declined(a));

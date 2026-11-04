@@ -216,6 +216,11 @@ await test("an older Bops's words: its lines as they came, the size in files alo
   assert.deepEqual(cut.files[0].map((r) => r.note ?? `${r.t} ${r.s}`), ["at line 3", "- x", "+ y", "  and 4 more lines"]);
   assert.equal(K.changeSize(change, cut), "1 file", "not counted from a cut list");
   assert.equal(K.changeOf(change, "something else entirely"), null);
+  // A task's card: the bot's words last, labelled (repo-change.ts), set apart from the diff, which still reads.
+  const task = K.changeOf(change, "acme/site, branch main\n\nsrc/a.txt: changed, 90 B\n- x\n+ y\n\nIn the bot's words: Make it orange");
+  assert.equal(task?.files.length, 1);
+  assert.equal(task?.changed, 2);
+  assert.equal(task?.said, "Make it orange");
   const html = chat([ask({ api: { key: "GITHUB_TOKEN", label: "GitHub", method: "POST", path: "/repos/acme/site/git/commits", change }, preview: "something else entirely" })]);
   assert.match(html.slice(html.indexOf("data-change-diff")), /<pre[^>]*>something else entirely<\/pre>/);
   assert.equal(K.changeSize({ ...change, files: [...change.files, { path: "b", op: "delete" }] }, K.changeOf(change, "acme/site, branch main\n\nsrc/a.txt: changed, 90 B\n- x\n+ y")), "2 files · 2 lines changed");
