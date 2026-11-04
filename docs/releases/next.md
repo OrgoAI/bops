@@ -1,1 +1,0 @@
-- Each app's bots get their own group in the sidebar.
