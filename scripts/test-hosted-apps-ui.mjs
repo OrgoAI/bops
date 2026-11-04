@@ -3253,5 +3253,30 @@ await test("the Preview tab's wiring (bops-app.tsx): its bot and chat, the owner
   assert.match(route, /picked, aboutApp, aboutApp \? picksOf\(picks, text\?\.trim\(\) \?\? ""\) : undefined, added\);/, "what Select picked, only with appNote");
 });
 
+await test("production on GitHub (AppHosting.github): Published says where on GitHub and at which commit, its button pushes there, linked first, and never asks for a domain", () => {
+  const gh = (last) => ({ repo: "OrgoAI/orgo-brandlord", branch: "main", path: "formula", ...(last ? { last } : {}) });
+  const on = (github, extra = {}) => shopApp({ preview: STAGING(), serving: null, live: null, domain: null, domains: [], hosting: { ...hosting("shop"), github }, ...extra });
+  const unlinked = envLine(envsOf({ app: on(gh()) }), "prod");
+  assert.ok(unlinked.includes("GitHub OrgoAI/orgo-brandlord main, formula/, not linked yet"), "where, not linked yet");
+  assert.ok(unlinked.includes('data-app-env-state="Not linked"'));
+  assert.deepEqual(deployIn(unlinked, "Publish to GitHub"), { tip: "Link it to GitHub first, in the menu beside Publish.", disabled: true });
+  assert.ok(!unlinked.includes("Connect a domain"), "no domain asked for: GitHub deploys it");
+  const linked = envLine(envsOf({ app: on(gh({ ingot: id("c1"), sha: "a".repeat(40), when: min(5) })) }), "prod");
+  assert.ok(linked.includes("GitHub OrgoAI/orgo-brandlord main, formula/, at aaaaaaa") && linked.includes('data-app-env-state="On GitHub"'), "where, and the commit it last pushed");
+  assert.deepEqual(deployIn(linked, "Publish to GitHub"), { tip: null, disabled: false }, "the preview is newer: it goes");
+  // Whether GitHub has this preview already is the server's to say (Publish then sends nothing): never greyed for it here.
+  const same = envLine(envsOf({ app: on(gh({ ingot: id("e5"), sha: "b".repeat(40), when: min(5) })) }), "prod");
+  assert.deepEqual(deployIn(same, "Publish to GitHub"), { tip: null, disabled: false });
+  // The form as the route takes it.
+  assert.deepEqual(E.ghMirrorOf({ repo: " OrgoAI/orgo-brandlord ", branch: "", path: "formula", keep: "proxy.ts, notes/ ,", workflow: "deploy-formula.yml", inputs: "client=cclc, bad" }), {
+    repo: "OrgoAI/orgo-brandlord",
+    branch: "main",
+    path: "formula",
+    keep: ["proxy.ts", "notes/"],
+    dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc" } },
+  });
+  assert.deepEqual(E.ghMirrorOf({ repo: "a/b", branch: "main", path: "", keep: "", workflow: "", inputs: "" }), { repo: "a/b", branch: "main", path: "" });
+});
+
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
 process.exit(failed ? 1 : 0);

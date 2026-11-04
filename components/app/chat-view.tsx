@@ -1510,13 +1510,14 @@ const reactionKey = (r: NonNullable<Message["reactions"]>[number]) => `${r.by}:$
 const QUICK_EMOJI = ["🔥", "🙏", "👀", "🎉"];
 
 /** The latest message in each chat and for each watch, worked out once per state (not once per message drawn). */
-const lastsCache = new WeakMap<Message[], { byChat: Map<string, string>; byWatch: Map<string, string> }>();
+/** The newest message said in each chat (a person's or a bot's: Bops' own notes after it don't count), and each watch's newest. */
+const lastsCache = new WeakMap<Message[], { saidByChat: Map<string, string>; byWatch: Map<string, string> }>();
 function lasts(all: Message[]) {
   let v = lastsCache.get(all);
   if (!v) {
-    v = { byChat: new Map(), byWatch: new Map() };
+    v = { saidByChat: new Map(), byWatch: new Map() };
     for (const x of all) {
-      v.byChat.set(x.chatId, x.id);
+      if (x.role !== "system") v.saidByChat.set(x.chatId, x.id);
       if (x.watch) v.byWatch.set(x.watch.id, x.id);
     }
     lastsCache.set(all, v);
@@ -1585,7 +1586,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   const said = saidBy(m, state);
   const outgoing = said === "you";
   // The bot's latest message can offer replies as buttons (see ASKING); tapping one sends it.
-  const newest = lasts(state.messages).byChat.get(m.chatId) === m.id;
+  // A reply's buttons stay through the notes after it (what it read, called), until someone says something.
+  const newestSaid = lasts(state.messages).saidByChat.get(m.chatId) === m.id;
   const mine = m.reactions?.find((r) => r.by === "owner");
   const setReaction = (r: { type?: Tapback; emoji?: string } | null) => {
     setPicking(false);
@@ -2037,7 +2039,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         {m.signIn && m.botId && <SignInAsk botId={m.botId} url={m.signIn.url} state={state} />}
         {replies}
         {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} state={state} />}
-        {newest && (!ro || writes) && !!m.options?.length && (
+        {newestSaid && (!ro || writes) && !!m.options?.length && (
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {m.options.map((o) => (
               <button
