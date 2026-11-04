@@ -132,6 +132,49 @@ function keep(d) {
   );
 }
 
+/**
+ * Two pages side by side (the script's sideBySide): `left` in its window on the left half of the screen, `right` (a
+ * page, or an address to open) in a window of its own on the right half, so one look at the screen shows both and a
+ * drag can go from one to the other. A right page in the same window as the left one opens again at its address in a
+ * window of its own, and its tab closes (anything not saved on it is lost). Resolves to both pages.
+ */
+async function sideBySide(browser, context, left, right) {
+  const cdp = await browser.newBrowserCDPSession();
+  try {
+    const windowOf = async (p) => {
+      const s = await context.newCDPSession(p);
+      try {
+        const { targetInfo } = await s.send("Target.getTargetInfo");
+        return (await cdp.send("Browser.getWindowForTarget", { targetId: targetInfo.targetId })).windowId;
+      } finally {
+        await s.detach().catch(() => {});
+      }
+    };
+    const leftWindow = await windowOf(left);
+    let other = typeof right === "string" ? null : right;
+    if (!other || (await windowOf(other)) === leftWindow) {
+      const opened = context.waitForEvent("page");
+      await cdp.send("Target.createTarget", { url: typeof right === "string" ? right : right.url(), newWindow: true });
+      const was = other;
+      other = await opened;
+      await other.waitForLoadState().catch(() => {});
+      if (was) await was.close();
+    }
+    const { width, height } = await left.evaluate(() => ({ width: screen.availWidth, height: screen.availHeight }));
+    const half = Math.floor(width / 2);
+    // A maximized window takes bounds only once it's back to normal.
+    const place = async (windowId, x, w) => {
+      await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+      await cdp.send("Browser.setWindowBounds", { windowId, bounds: { left: x, top: 0, width: w, height } });
+    };
+    await place(leftWindow, 0, half);
+    await place(await windowOf(other), half, width - half);
+    return { left, right: other };
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
 /** An error in the bot's terms: a click on something covered says what's on top, and what to do. */
 function said(e) {
   const m = String(e && e.message ? e.message : e).slice(0, 2000);
@@ -200,7 +243,7 @@ async function front(context) {
   setTimeout(() => done({ ok: false, error: `The script ran past ${limit / 1000} seconds and was stopped.` }), limit).unref();
   let run;
   try {
-    run = new AsyncFunction("page", "context", "screenshot", readFileSync(file, "utf8"));
+    run = new AsyncFunction("page", "context", "screenshot", "sideBySide", readFileSync(file, "utf8"));
   } catch (e) {
     return done({ ok: false, error: `The script doesn't parse: ${e.message}` });
   }
@@ -223,7 +266,7 @@ async function front(context) {
     return "(Bops sends you the screen with this script's answer.)";
   };
   try {
-    await done({ ok: true, value: shown(await run(page, context, screenshot)) });
+    await done({ ok: true, value: shown(await run(page, context, screenshot, (left, right) => sideBySide(browser, context, left, right))) });
   } catch (e) {
     await done({ ok: false, error: said(e) });
   }
