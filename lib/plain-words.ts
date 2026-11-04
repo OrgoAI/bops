@@ -76,7 +76,9 @@ const nameOf = (raw: string) => {
   }
 };
 /** "a=1&token=x" with each secret-looking value as •••, and a query inside a value ("next=/cb?code=…") the same way. */
-function hidePairs(pairs: string): string {
+function hidePairs(pairs: string, depth = 0): string {
+  // Queries nested past this (a page can pick its own address) are hidden whole: never a deep recursion.
+  if (depth > 20) return "•••";
   return pairs
     .split("&")
     .map((pair) => {
@@ -85,7 +87,7 @@ function hidePairs(pairs: string): string {
       const value = pair.slice(at + 1);
       if (value && (SECRET_NAME.test(nameOf(pair.slice(0, at))) || OPAQUE.test(value))) return `${pair.slice(0, at)}=•••`;
       const q = value.indexOf("?");
-      return q >= 0 ? `${pair.slice(0, at + 1)}${value.slice(0, q + 1)}${hidePairs(value.slice(q + 1))}` : pair;
+      return q >= 0 ? `${pair.slice(0, at + 1)}${value.slice(0, q + 1)}${hidePairs(value.slice(q + 1), depth + 1)}` : pair;
     })
     .join("&");
 }
@@ -97,7 +99,8 @@ function hidePairs(pairs: string): string {
  */
 export function shownAddress(address: string): string {
   // The user part runs to the authority's last @ (a password can hold one).
-  const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#\s]*@)?([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(address);
+  // The fragment takes any character (a line break too), so the match never fails late and backtracks.
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#\s]*@)?([^?#]*)(\?[^#]*)?(#[^]*)?$/i.exec(address);
   if (!m) return address.replace(/([?&#])([^=&#?\s]*)=([^&#\s]*)/g, (all, sep: string, name: string, value: string) => (value && (SECRET_NAME.test(nameOf(name)) || OPAQUE.test(value)) ? `${sep}${name}=•••` : all));
   const [, scheme, rest, query, hash] = m;
   // A fragment is pairs itself ("#access_token=…", a ? in a value or not) or a route with a query after it ("#/cb?code=…").
