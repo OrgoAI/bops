@@ -10,6 +10,10 @@ import { MAIN_WORKSPACE, siteOf, workBot, workspaceOf, type AppState, type Bot, 
  * row on top, never folded away (it runs the team), and its computer's group comes right under it, so it reads as that
  * bot's crew; a bot alone on its computer, or the only one sharing the main bot's, is a row as before. Its name is the
  * owner's (Workspace.computerNames, by computer id), else one from the apps on that computer, else its bot's.
+ *
+ * When a computer's bots work on two or more apps (Workspace.botSites), each app's bots are a group of their own
+ * (byApp), named by the owner (Workspace.computerNames, by groupNameKey: the computer's id and the app) or else for the
+ * app; bots on no site stay the computer's group. One app on it, or none: the computer's one group, as before.
  */
 
 /** How long a computer's name may be. */
@@ -40,8 +44,12 @@ export const GROUP_WORDS = {
 export type BotGroup = {
   /** Its own key (the computer's id; in a shared workspace the one Bops Cloud gave it): what's folded is kept by it. */
   key: string;
-  /** The computer's id, the owner's own only: what renaming it keeps the name by. */
+  /** The computer's id, the owner's own only. */
   computerId?: string;
+  /** What renaming it keeps the name by (groupNameKey), the owner's own only: the computer's id, or for one app's bots, the computer's id and the app. */
+  nameKey?: string;
+  /** The app its bots work on, when its computer's bots work on two or more (byApp). */
+  app?: string;
   name: string;
   /** The owner named it (Workspace.computerNames). */
   named: boolean;
@@ -67,6 +75,26 @@ export const cleanComputerName = (s: unknown): string =>
         .slice(0, MAX_COMPUTER_NAME)
         .trim()
     : "";
+
+/**
+ * The key a group's name is kept by (Workspace.computerNames): its computer's id, or, for one app's bots on a computer
+ * whose bots work on two or more apps (byApp), the computer's id and the app.
+ */
+export const groupNameKey = (computerId: string, app?: string) => (app ? `${computerId}/${app}` : computerId);
+
+/**
+ * One computer's bots split by the app each works on (`appOf`), when they work on two or more: each app's bots, and
+ * those on none, in the order their first bot comes. One app, or none: all of them together, as one.
+ */
+export function byApp<B>(bots: B[], appOf: (b: B) => string | undefined): { app?: string; bots: B[] }[] {
+  const parts = new Map<string, B[]>();
+  for (const b of bots) {
+    const app = appOf(b) ?? "";
+    parts.set(app, [...(parts.get(app) ?? []), b]);
+  }
+  if ([...parts.keys()].filter(Boolean).length < 2) return [{ bots }];
+  return [...parts].map(([app, list]) => (app ? { app, bots: list } : { bots: list }));
+}
 
 /** The apps of workspace `ws` on computer `computerId` (Workspace.hostedApps), in the order they were added. */
 export const appsOn = (ws: Pick<Workspace, "hostedApps"> | undefined, computerId: string): string[] =>
@@ -101,19 +129,24 @@ export function botGroups(state: GroupState): BotGroup[] {
   }
   const out: BotGroup[] = [];
   for (const [computerId, bots] of on) {
-    const rows = bots.filter((b) => !b.isMain);
-    if (rows.length < 2) continue;
     const h = workBot(bots[0], state.bots);
     const host = workspaceOf(h) === id ? h : undefined;
-    const own = ws?.computerNames && Object.hasOwn(ws.computerNames, computerId) ? cleanComputerName(ws.computerNames[computerId]) : "";
-    out.push({
-      key: computerId,
-      computerId,
-      name: own || defaultComputerName(ws, computerId, h.name),
-      named: !!own,
-      bots: rows.map((b) => b.id),
-      ...(host ? { host: { id: host.id, name: host.name, isMain: host.isMain } } : {}),
-    });
+    for (const part of byApp(bots.filter((b) => !b.isMain), (b) => siteOf(state, b)?.app)) {
+      const rows = part.bots;
+      if (rows.length < 2) continue;
+      const nameKey = groupNameKey(computerId, part.app);
+      const own = ws?.computerNames && Object.hasOwn(ws.computerNames, nameKey) ? cleanComputerName(ws.computerNames[nameKey]) : "";
+      out.push({
+        key: nameKey,
+        computerId,
+        nameKey,
+        ...(part.app ? { app: part.app } : {}),
+        name: own || (part.app ?? defaultComputerName(ws, computerId, h.name)),
+        named: !!own,
+        bots: rows.map((b) => b.id),
+        ...(host ? { host: { id: host.id, name: host.name, isMain: host.isMain } } : {}),
+      });
+    }
   }
   return out;
 }

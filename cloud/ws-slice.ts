@@ -411,6 +411,9 @@ function hostOf(b: Record<string, unknown>, bots: Record<string, unknown>[], dep
  * The computers the `shown` bots of workspace `ws` work on with two or more of them on one besides the main bot
  * (lib/bot-groups.ts groups them in the sidebar): each by a key of its own, a hash of the workspace and the computer's id (never the id), its bots
  * shown, the name the owner gave it (Workspace.computerNames) and its bot when that's one shown. Undefined: none.
+ * Where the bots shown on one computer work on two or more apps (Workspace.botSites), each app's are a group of their
+ * own, as the sidebar's (lib/bot-groups.ts byApp): keyed and named by the computer's id and the app (groupNameKey),
+ * named for the app when the owner gave it no name.
  */
 export function computersOf(blob: Record<string, unknown>, ws: string, workspace: Record<string, unknown> | null, shown: Record<string, unknown>[]): SharedGroup[] | undefined {
   const all = list(blob.bots);
@@ -425,19 +428,34 @@ export function computersOf(blob: Record<string, unknown>, ws: string, workspace
     hosts.set(h.computerId, h.id);
   }
   const names = isObject(workspace?.computerNames) ? workspace.computerNames : {};
+  const sites = isObject(workspace?.botSites) ? workspace.botSites : {};
+  const appOf = (id: string) => {
+    const x = Object.hasOwn(sites, id) ? sites[id] : undefined;
+    return isObject(x) && typeof x.app === "string" && x.app ? x.app : undefined;
+  };
   const out: SharedGroup[] = [];
   const main = new Set(shown.flatMap((b) => (b.isMain === true ? [b.id] : [])));
   for (const [computerId, bots] of on) {
-    // As the sidebar groups them: two or more besides the main bot, which keeps its own row.
-    if (bots.filter((id) => !main.has(id)).length < 2) continue;
-    const name = Object.hasOwn(names, computerId) && typeof names[computerId] === "string" ? (names[computerId] as string).slice(0, 40) : undefined;
     const host = hosts.get(computerId);
-    out.push({
-      key: `c${createHash("sha256").update(`${ws}:${computerId}`).digest("hex").slice(0, 16)}`,
-      bots,
-      ...(name ? { name } : {}),
-      ...(typeof host === "string" && ids.has(host) ? { host } : {}),
-    });
+    // As the sidebar groups them: two or more besides the main bot, which keeps its own row; one app's bots apart
+    // where they work on two or more (lib/bot-groups.ts byApp, whose order and keys these follow).
+    const rows = bots.filter((id) => !main.has(id));
+    const parts = new Map<string, string[]>();
+    for (const id of rows) parts.set(appOf(id) ?? "", [...(parts.get(appOf(id) ?? "") ?? []), id]);
+    const split = [...parts.keys()].filter(Boolean).length >= 2;
+    for (const [app, list] of split ? [...parts] : [["", rows] as [string, string[]]]) {
+      if (list.length < 2) continue;
+      const nameKey = app ? `${computerId}/${app}` : computerId;
+      const own = Object.hasOwn(names, nameKey) && typeof names[nameKey] === "string" ? (names[nameKey] as string).slice(0, 40) : undefined;
+      const name = own || app || undefined;
+      out.push({
+        key: `c${createHash("sha256").update(`${ws}:${nameKey}`).digest("hex").slice(0, 16)}`,
+        // The main bot shown on it stays with the computer's own group (it's never a row), as it always was.
+        bots: app ? list : bots.filter((id) => main.has(id) || list.includes(id)),
+        ...(name ? { name } : {}),
+        ...(typeof host === "string" && ids.has(host) ? { host } : {}),
+      });
+    }
   }
   return out.length ? out : undefined;
 }

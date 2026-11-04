@@ -21,23 +21,31 @@ export class GroupError extends Error {
 /** The computers workspace `wsId`'s bots work on (lib/types.ts workBot), by id. */
 const computersOf = (s: AppState, wsId: string) => new Set(s.bots.filter((b) => workspaceOf(b) === wsId).flatMap((b) => workBot(b, s.bots).computerId ?? []));
 
+/** Whether one of workspace `wsId`'s bots on computer `computerId` works on app `app` (Workspace.botSites). */
+const appOn = (s: AppState, wsId: string, computerId: string, app: string) =>
+  s.bots.some((b) => workspaceOf(b) === wsId && workBot(b, s.bots).computerId === computerId && siteOf(s, b)?.app === app);
+
 /**
- * Name one of workspace `wsId`'s computers (one its bots work on), or, with an empty name, give it its default back
- * (lib/bot-groups.ts defaultComputerName). Answers the name kept ("" for the default).
+ * Name one of workspace `wsId`'s computers (one its bots work on), or one app's bots on it (`<computer id>/<app>`,
+ * lib/bot-groups.ts groupNameKey: a group of their own where its bots work on two or more apps), or, with an empty
+ * name, give it its default back (lib/bot-groups.ts defaultComputerName, or the app's name). Answers the name kept
+ * ("" for the default).
  */
 export function setComputerName(wsId: string, computerId: unknown, name: unknown): string {
   const s = getState();
   const w = s.workspaces?.find((x) => x.id === wsId);
   if (!w) throw new GroupError("That workspace is gone.", 404);
-  if (typeof computerId !== "string" || !computersOf(s, wsId).has(computerId)) throw new GroupError("None of this workspace's bots work on that computer.", 404);
+  const [computer, app, ...more] = typeof computerId === "string" ? computerId.split("/") : [];
+  if (!computer || more.length || app === "" || !computersOf(s, wsId).has(computer) || (app !== undefined && !appOn(s, wsId, computer, app)))
+    throw new GroupError("None of this workspace's bots work on that computer.", 404);
   if (name !== undefined && name !== null && typeof name !== "string") throw new GroupError("Say its name.", 400);
   const kept = cleanComputerName(name);
   update((st) => {
     const x = st.workspaces?.find((y) => y.id === wsId);
     if (!x) return;
     const all = { ...(x.computerNames ?? {}) };
-    if (kept) all[computerId] = kept;
-    else delete all[computerId];
+    if (kept) all[computerId as string] = kept;
+    else delete all[computerId as string];
     if (Object.keys(all).length) x.computerNames = all;
     else delete x.computerNames;
   });
