@@ -331,6 +331,8 @@ await check("the card's diff: only the lines that change, each part where it is,
   // A new file: every line put in. Nothing changed: nothing.
   assert.deepEqual(diffOf(null, "a\nb\n"), ["+ a", "+ b"]);
   assert.deepEqual(diffOf(was, was), []);
+  // A very long new file: every line, with no limit hit on the way (the card then refuses it as too big, as before).
+  assert.equal(diffOf(null, "x\n".repeat(130_000)).length, 130_000);
 });
 
 /* ---------------- One ask ---------------- */

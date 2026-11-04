@@ -183,7 +183,9 @@ export function diffOf(was: string | null, next: string): string[] {
     if (si > i || sj > j) {
       const at = s + j + 1;
       if (was !== null && at > 1) out.push(`at line ${at}`);
-      out.push(...x.slice(i, si).map((l) => `- ${l}`), ...y.slice(j, sj).map((l) => `+ ${l}`));
+      // One at a time: a long part spread into push() would pass the engine's limit on arguments.
+      for (let k = i; k < si; k++) out.push(`- ${x[k]}`);
+      for (let k = j; k < sj; k++) out.push(`+ ${y[k]}`);
     }
     i = si + 1;
     j = sj + 1;
