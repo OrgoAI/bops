@@ -580,12 +580,13 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...t,
       ...(stopping.has(t.id) && !t.stopAsked ? { stopAsked: "Stopping" } : {}),
       ...(typeof t.title === "string" ? { title: onTheirMac(t.title) } : {}),
-      ...(typeof t.error === "string" ? { error: ownerVoice(t.error) } : {}),
+      // A thread stopped for the owner's credit says whose credit it is, as the chat does (ownerCredit).
+      ...(typeof t.error === "string" ? { error: ownerVoice(ownerCredit(t.error)) } : {}),
       replies: [...(Array.isArray(t.replies) ? t.replies : []).map((r) => (typeof r.note === "string" ? { ...r, note: ownerVoice(r.note) } : r)), ...mine],
       steps: (Array.isArray(t.steps) ? t.steps : []).map((st) => (typeof st.detail === "string" && BOPS_STEPS.has(st.tool) ? { ...st, detail: ownerVoice(st.detail, searched(st.detail)) } : st)),
     };
   });
-  const routines = (s.routines as unknown as Routine[]).map((r) => (typeof r.last?.error === "string" ? { ...r, last: { ...r.last, error: ownerVoice(r.last.error) } } : r));
+  const routines = (s.routines as unknown as Routine[]).map((r) => (typeof r.last?.error === "string" ? { ...r, last: { ...r.last, error: ownerVoice(ownerCredit(r.last.error)) } } : r));
   const watches = (s.watches ?? []) as unknown as Watch[];
   // And the owner's calls to a bot (their card: "You: …"), and a bot's line about the owner's credit.
   const messages = (data.messages as unknown as Message[]).map((raw) => {

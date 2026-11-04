@@ -6,7 +6,8 @@ import { openaiClient } from "./openai-client";
 import { sleptSince } from "./awake";
 import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
-import { askFor, declined, NeedsOk, Paused, type AskSpec } from "./permission";
+import { askFor, declined, declinedStep, NeedsOk, Paused, type AskSpec } from "./permission";
+import { shownAddress } from "@/lib/plain-words";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
@@ -297,7 +298,7 @@ async function answerPaused(t: ComputerTurn, a: AppApproval, call: { name: strin
       if (owed) owed.output = output;
     });
   if (a.reply?.reply === "reject") {
-    t.step("note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    t.step("note", declinedStep(a));
     keep(declined(a));
     return { type: "function_call_output", call_id: callId, output: declined(a) };
   }
@@ -342,7 +343,7 @@ function record(t: ComputerTurn, o: OutputItem, more: boolean) {
     if (text) t.step("note", text);
   } else if (o.type === "web_search_call") {
     const a = o.action as { type?: string; query?: string; url?: string } | undefined;
-    t.step("search", a?.type === "open_page" && a.url ? `read ${a.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
+    t.step("search", a?.type === "open_page" && a.url ? `read ${shownAddress(a.url).replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
   }
 }
 
@@ -531,7 +532,7 @@ const PAGE_TOOL = {
   type: "function",
   name: "page_script",
   description:
-    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. context.pages() lists the tabs (the receipt lists them once there are two or more): to work in another, call bringToFront() on it and use it (the next script's `page` is the tab in front); context.newPage() opens one. Close tabs you opened once you're done with them. A file the page downloads is saved to ~/Downloads, and the receipt gives its path; when a click starts a download, wait for it in the same script: const [d] = await Promise.all([page.waitForEvent('download'), <the click>]). To put a file into a page, give the page's file input that path with page.setInputFiles('input[type=file]', path) (or page.waitForEvent('filechooser'), then setFiles), never the system's file picker on the screen. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
+    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. context.pages() lists the tabs (the receipt lists them once there are two or more): to work in another, call bringToFront() on it and use it (the next script's `page` is the tab in front); context.newPage() opens one. Close tabs you opened once you're done with them. A file the page downloads is saved to ~/Downloads, and the receipt gives its path; when a click starts a download, wait for it in the same script: const [d] = await Promise.all([page.waitForEvent('download'), <the click>]). To put a file into a page, give the page's file input that path with page.setInputFiles('input[type=file]', path) (or page.waitForEvent('filechooser'), then setFiles), never the system's file picker on the screen. To see two pages at once, await sideBySide(a, b): a in a window on the left half of the screen, b (a page, or an address to open) on the right half, so one look at the screen shows both and you can drag from one to the other; a page in a's own window opens again at its address in a new one, so finish what you typed there first. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
   parameters: {
     type: "object",
     additionalProperties: false,

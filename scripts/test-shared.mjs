@@ -1092,6 +1092,18 @@ await check("the rest of what Bops says in the owner's voice reads as theirs: an
   const ct = text(chat);
   for (const said of ["Owner: Book the flight", "While their Mac was away, the owner called", "I'm out of AI credit, so I've stopped."]) assert.ok(ct.includes(said), `${said} | ${ct}`);
   assert.ok(!/You: |you called|Upgrade in Settings|couldn't finish Book flight/.test(ct), ct);
+  // A thread or a routine stopped for the owner's credit says whose credit it is, as the chat does, for a Member and an Admin.
+  const credit = "I'm out of Orgo credit, so I've stopped. Add credit in Settings to keep me going.";
+  const c2 = cloudState();
+  c2.state.sessions = [{ ...c2.state.sessions[0], id: "broke", status: "failed", error: credit }];
+  c2.state.routines = [{ ...c2.state.routines[0], last: { at: 1, status: "failed", error: credit } }];
+  for (const role of ["member", "admin"]) {
+    const v = viewState(own(), { ...listed, role, wsId: WS }, c2, {});
+    for (const said of [v.sessions.find((x) => x.id === "broke").error, v.routines[0].last.error]) {
+      assert.match(said, /It's the owner's credit: only they can add more\./, `${role}: ${said}`);
+      assert.doesNotMatch(said, /in Settings/, `${role}: ${said}`);
+    }
+  }
   // The owner's own stop waits on nobody.
   assert.equal(needsYou(state.sessions.find((x) => x.id === "stopped")), false);
   const sheetOf = (id) => renderToStaticMarkup(h(ThreadSheet, { state, session: state.sessions.find((x) => x.id === id), onClose: noop, onShowComputer: noop }));

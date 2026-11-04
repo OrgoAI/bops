@@ -315,6 +315,26 @@ await check("a task never has it: its key calls only read, and change_files refu
   assert.equal(gh.calls.length, n);
 });
 
+/* ---------------- The card's diff ---------------- */
+
+await check("the card's diff: only the lines that change, each part where it is, so two edits far apart count as two lines each", async () => {
+  const { diffOf } = await import(`${root}/lib/server/repo-change.ts`);
+  const body = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`);
+  const was = `${body.join("\n")}\n`;
+  const two = `${body.map((l, i) => (i === 4 ? "line five" : i === 89 ? "line ninety" : l)).join("\n")}\n`;
+  assert.deepEqual(diffOf(was, two), ["at line 5", "- line 5", "+ line five", "at line 90", "- line 90", "+ line ninety"]);
+  // Lines put in apart: each where it is in the new file; one at the very top needs no "at line".
+  const added = `${["import x", ...body.slice(0, 50), "new middle", ...body.slice(50)].join("\n")}\n`;
+  assert.deepEqual(diffOf(was, added), ["+ import x", "at line 52", "+ new middle"]);
+  // A line taken out: where it was, in the new file's numbers.
+  assert.deepEqual(diffOf(was, `${body.filter((_, i) => i !== 9).join("\n")}\n`), ["at line 10", "- line 10"]);
+  // A new file: every line put in. Nothing changed: nothing.
+  assert.deepEqual(diffOf(null, "a\nb\n"), ["+ a", "+ b"]);
+  assert.deepEqual(diffOf(was, was), []);
+  // A very long new file: every line, with no limit hit on the way (the card then refuses it as too big, as before).
+  assert.equal(diffOf(null, "x\n".repeat(130_000)).length, 130_000);
+});
+
 /* ---------------- One ask ---------------- */
 
 await check("two files, one call: exactly ONE ask; before it only reads went out; the card's facts, files and short diff", async () => {

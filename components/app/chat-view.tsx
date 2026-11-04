@@ -30,7 +30,7 @@ import { undash } from "./side-group";
 import { SelectIcon, TickBar, TickRow, TrashIcon, UndoLine, useMessageDeletes, type Gone } from "./message-deletes";
 import { num, privacyOf } from "@/lib/privacy";
 import { compactBlocked } from "@/lib/chat-summary";
-import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, KeyAskCard, oneLine, type ApiCall } from "./keys";
+import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, KeyAskCard, oneLine, quietCall, type ApiCall } from "./keys";
 import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { AGENTS, aiOf, hasProfile, isCli, threadAgent, upper } from "@/lib/agents";
 import { AgentChip, AgentMark } from "./agent-marks";
@@ -712,7 +712,7 @@ export function ChatView({
       inRun.add(m.id);
       continue;
     }
-    run = call && call.failed === undefined && !chip ? { calls: [call], at: m.at } : null;
+    run = call && quietCall(call) && !chip ? { calls: [call], at: m.at } : null;
     if (run) callRuns.set(m.id, run.calls);
   }
 
@@ -1490,13 +1490,14 @@ const reactionKey = (r: NonNullable<Message["reactions"]>[number]) => `${r.by}:$
 const QUICK_EMOJI = ["🔥", "🙏", "👀", "🎉"];
 
 /** The latest message in each chat and for each watch, worked out once per state (not once per message drawn). */
-const lastsCache = new WeakMap<Message[], { byChat: Map<string, string>; byWatch: Map<string, string> }>();
+/** The newest message said in each chat (a person's or a bot's: Bops' own notes after it don't count), and each watch's newest. */
+const lastsCache = new WeakMap<Message[], { saidByChat: Map<string, string>; byWatch: Map<string, string> }>();
 function lasts(all: Message[]) {
   let v = lastsCache.get(all);
   if (!v) {
-    v = { byChat: new Map(), byWatch: new Map() };
+    v = { saidByChat: new Map(), byWatch: new Map() };
     for (const x of all) {
-      v.byChat.set(x.chatId, x.id);
+      if (x.role !== "system") v.saidByChat.set(x.chatId, x.id);
       if (x.watch) v.byWatch.set(x.watch.id, x.id);
     }
     lastsCache.set(all, v);
@@ -1565,7 +1566,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   const said = saidBy(m, state);
   const outgoing = said === "you";
   // The bot's latest message can offer replies as buttons (see ASKING); tapping one sends it.
-  const newest = lasts(state.messages).byChat.get(m.chatId) === m.id;
+  // A reply's buttons stay through the notes after it (what it read, called), until someone says something.
+  const newestSaid = lasts(state.messages).saidByChat.get(m.chatId) === m.id;
   const mine = m.reactions?.find((r) => r.by === "owner");
   const setReaction = (r: { type?: Tapback; emoji?: string } | null) => {
     setPicking(false);
@@ -1972,7 +1974,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   if (m.role === "system")
     return (
       <div className={`flex w-full flex-col items-center gap-1.5 self-center py-0.5 ${enterClass}`}>
-        {api ? api.failed !== undefined ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
+        {api ? !quietCall(api) ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
         {chipList}
       </div>
     );
@@ -2017,7 +2019,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         {m.signIn && m.botId && <SignInAsk botId={m.botId} url={m.signIn.url} state={state} />}
         {replies}
         {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} state={state} />}
-        {newest && (!ro || writes) && !!m.options?.length && (
+        {newestSaid && (!ro || writes) && !!m.options?.length && (
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {m.options.map((o) => (
               <button
