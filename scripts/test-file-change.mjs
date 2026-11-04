@@ -642,6 +642,22 @@ await check("a picture far bigger than the card's words goes on it as one line, 
   S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
 });
 
+await check("a change with a picture is 12 MB at most in all, its text counted too: a picture just under it with some text is refused before anything is read", async () => {
+  freshRepo();
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const big = PNG_OF(64, 64, 12 * 1024 * 1024 - 64);
+  const up = Up.saveUpload(`data:image/png;base64,${big.toString("base64")}`);
+  const said = S.addMessage({ chatId, role: "user", text: "The big one", images: [{ id: up.id, type: up.type }], at: Date.now() });
+  try {
+    const n = (await import(`${root}/lib/server/chat-pictures.ts`)).chatPictures(chatId).length;
+    const r = await changeFiles("boppy", change({ files: [picture("public/big.png", { image: n }), { path: "notes.txt", text: "x".repeat(200) }] }), { chatId }, { chat: true });
+    assert.equal(r.text, "The change is too big with its pictures (12 MB at most in all).");
+    assert.deepEqual(gh.calls, [], "not even a read");
+  } finally {
+    S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
+  }
+});
+
 await check("a picture number that doesn't exist is said plainly, and nothing goes out", async () => {
   freshRepo();
   const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);

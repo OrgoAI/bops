@@ -174,7 +174,8 @@ type Got = Picture & { from: string; id?: string; url?: string };
  */
 async function picturesOf(files: FileIn[], chatId: string | undefined, owner: string, asked?: FileChange): Promise<{ ok: true; got: Map<string, Got> } | { ok: false; why: string }> {
   const got = new Map<string, Got>();
-  let all = 0;
+  // A change with pictures is 12 MB at most in all: its text too.
+  let all = files.reduce((n, f) => n + ("text" in f ? Buffer.byteLength(f.text, "utf8") : 0), 0);
   for (const f of files) {
     if (!("picture" in f)) continue;
     let p: Got;
@@ -209,7 +210,7 @@ async function picturesOf(files: FileIn[], chatId: string | undefined, owner: st
       }
     }
     all += p.bytes.length;
-    if (p.bytes.length > PICTURE_MAX || all > PICTURE_MAX) return { ok: false, why: "The pictures are too big for one change (12 MB at most in all)." };
+    if (p.bytes.length > PICTURE_MAX || all > PICTURE_MAX) return { ok: false, why: "The change is too big with its pictures (12 MB at most in all)." };
     got.set(f.path, p);
   }
   return { ok: true, got };
