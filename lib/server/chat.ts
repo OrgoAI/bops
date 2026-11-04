@@ -3119,7 +3119,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         text: reply,
         sessionIds: sessionIds.length ? sessionIds : undefined,
         replyTo: opts.replyTo,
-        options: tidy.options,
+        // Out of steps mid-work: Go on, as a button, so carrying on is one tap (its words, sent as the person's).
+        options: outOfSteps ? [...new Set([...(tidy.options ?? []), "Go on"])] : tidy.options,
         asked: asked.length ? asked : undefined,
         called: called.length ? called : undefined,
         drafts: drafts.length ? drafts : undefined,

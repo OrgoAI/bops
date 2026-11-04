@@ -5,3 +5,4 @@
 - When an Admin or teammate says no to a bot's request, the chat names them, not the owner.
 - A page a bot reads or opens is shown without any token or password in its address.
 - A read a bot makes on its own that doesn't work is counted with its other reads, not shown as a red error.
+- When a bot runs out of steps mid-work, a Go on button carries it on.

@@ -145,6 +145,14 @@ await test("another service, a change among reads, a failed write or a quarter o
   assert.deepEqual(lines(chat([read("r1", 1), chipped(read("r2", 2)), read("r3", 3)], thread)), ["Looked at a file on GitHub", "Looked at a file on GitHub", "Looked at a file on GitHub"], "a chip on a middle one");
 });
 
+await test("a bot's reply keeps its buttons (Go on) through the notes after it, until someone answers", () => {
+  const stopped = { ...said("b1", 1, "I checked the setup but haven't changed it yet."), options: ["Go on"] };
+  const goOn = (html) => /<button[^>]*>Go on<\/button>/.test(html);
+  assert.ok(goOn(chat([stopped])), "on the newest");
+  assert.ok(goOn(chat([stopped, read("r1", 2)])), "a note after it doesn't take the button away");
+  assert.ok(!goOn(chat([stopped, read("r1", 2), said("u1", 3, "go on", "user")])), "an answer does");
+});
+
 /* ---------------- Opened ---------------- */
 
 const { parseHTML } = await import("linkedom");
