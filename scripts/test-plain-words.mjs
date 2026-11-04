@@ -26,6 +26,9 @@ check("an address said in a row hides what could let someone in: a user and pass
   assert.equal(shownAddress("not quite an address ?token=madeup"), "not quite an address ?token=•••");
   // A query after a route in the fragment, a second @ in the user part, and a hostile string of ? (no slow match).
   assert.equal(shownAddress("https://x.example/app#/cb?code=abc&next=home"), "https://x.example/app#/cb?code=•••&next=home");
+  // A fragment of pairs with a ? in a value; a query inside a value.
+  assert.equal(shownAddress("https://x.example/#access_token=abc&next=/cb?tab=1"), "https://x.example/#access_token=•••&next=/cb?tab=1");
+  assert.equal(shownAddress("https://x.example/login?next=/cb?code=xyz&lang=en"), "https://x.example/login?next=/cb?code=•••&lang=en");
   assert.equal(shownAddress("https://one@two:not-a-real-pass@x.example/p"), "https://x.example/p");
   const t0 = Date.now();
   shownAddress(`not an address ${"?".repeat(32_000)}`);

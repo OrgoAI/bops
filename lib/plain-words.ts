@@ -75,17 +75,20 @@ const nameOf = (raw: string) => {
     return raw;
   }
 };
-/** "a=1&token=x" with each secret-looking value as •••. */
-const hidePairs = (pairs: string) =>
-  pairs
+/** "a=1&token=x" with each secret-looking value as •••, and a query inside a value ("next=/cb?code=…") the same way. */
+function hidePairs(pairs: string): string {
+  return pairs
     .split("&")
     .map((pair) => {
       const at = pair.indexOf("=");
       if (at < 0) return pair;
       const value = pair.slice(at + 1);
-      return value && (SECRET_NAME.test(nameOf(pair.slice(0, at))) || OPAQUE.test(value)) ? `${pair.slice(0, at)}=•••` : pair;
+      if (value && (SECRET_NAME.test(nameOf(pair.slice(0, at))) || OPAQUE.test(value))) return `${pair.slice(0, at)}=•••`;
+      const q = value.indexOf("?");
+      return q >= 0 ? `${pair.slice(0, at + 1)}${value.slice(0, q + 1)}${hidePairs(value.slice(q + 1))}` : pair;
     })
     .join("&");
+}
 
 /**
  * A web address as a row in the chat or a thread says it (a page a bot read, one a task opened): never a user name or
@@ -97,10 +100,10 @@ export function shownAddress(address: string): string {
   const m = /^([a-z][a-z0-9+.-]*:\/\/)(?:[^/?#\s]*@)?([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(address);
   if (!m) return address.replace(/([?&#])([^=&#?\s]*)=([^&#\s]*)/g, (all, sep: string, name: string, value: string) => (value && (SECRET_NAME.test(nameOf(name)) || OPAQUE.test(value)) ? `${sep}${name}=•••` : all));
   const [, scheme, rest, query, hash] = m;
-  // A fragment can carry a query after a route ("#/cb?code=…") or be one ("#access_token=…").
+  // A fragment is pairs itself ("#access_token=…", a ? in a value or not) or a route with a query after it ("#/cb?code=…").
   const fragment = (h: string) => {
     const q = h.indexOf("?");
-    if (q >= 0) return `${h.slice(0, q + 1)}${hidePairs(h.slice(q + 1))}`;
+    if (q >= 0 && !h.slice(0, q).includes("=")) return `${h.slice(0, q + 1)}${hidePairs(h.slice(q + 1))}`;
     return h.includes("=") ? hidePairs(h) : h;
   };
   return `${scheme}${rest}${query ? `?${hidePairs(query.slice(1))}` : ""}${hash ? `#${fragment(hash.slice(1))}` : ""}`;
