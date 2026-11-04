@@ -26,7 +26,7 @@ import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
 import { Fold } from "./fold";
 import { SaveSkillDialog } from "./skill-dialog";
-import { undash } from "./side-group";
+import { Chevron, undash } from "./side-group";
 import { SelectIcon, TickBar, TickRow, TrashIcon, UndoLine, useMessageDeletes, type Gone } from "./message-deletes";
 import { num, privacyOf } from "@/lib/privacy";
 import { compactBlocked } from "@/lib/chat-summary";
@@ -80,16 +80,36 @@ export function Rich({ text, botId }: { text: string; botId?: string }) {
   const blocks = dropCitations(text).split(/```[a-z0-9-]*\n?([\s\S]*?)```/g);
   return (
     <LinkedBy.Provider value={botId}>
-      {blocks.map((b, i) =>
-        i % 2 ? (
-          <pre key={i} className="my-1.5 overflow-x-auto whitespace-pre rounded-xl bg-black/[0.045] px-3 py-2 font-mono text-[12px] leading-[17px] [overflow-wrap:normal]">
-            {b.replace(/\n$/, "")}
-          </pre>
-        ) : (
-          <Prose key={i} text={b} />
-        ),
-      )}
+      {blocks.map((b, i) => (i % 2 ? <CodeBlock key={i} code={b.replace(/\n$/, "")} /> : <Prose key={i} text={b} />))}
     </LinkedBy.Provider>
+  );
+}
+
+/** Past this many lines a block of code folds: a whole file pasted into a report is for whoever asks for it. */
+const CODE_FOLD_LINES = 15;
+
+/** A block of code in a reply: a short one (a command, a diagram) as it is; a long one behind a quiet line that opens it. */
+function CodeBlock({ code }: { code: string }) {
+  const [open, setOpen] = useState(false);
+  const lines = code.split("\n").length;
+  const pre = (
+    <pre className="my-1.5 overflow-x-auto whitespace-pre rounded-xl bg-black/[0.045] px-3 py-2 font-mono text-[12px] leading-[17px] [overflow-wrap:normal]">{code}</pre>
+  );
+  if (lines <= CODE_FOLD_LINES) return pre;
+  return (
+    <div className="my-1.5">
+      <button
+        type="button"
+        data-code-fold
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex items-center gap-1.5 rounded-full bg-black/[0.045] px-3 py-1 text-[12px] leading-4 text-[#6B6B6B] outline-none hover:bg-black/[0.07] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+      >
+        {lines} lines of code
+        <Chevron open={open} />
+      </button>
+      {open && pre}
+    </div>
   );
 }
 
