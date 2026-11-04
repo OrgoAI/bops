@@ -336,6 +336,10 @@ function packagedServer() {
 }
 
 /** The Helper app's binary (Frameworks/<App> Helper.app), which runs in the background with no Dock icon; else the app's own. */
+/** What the Helper runs as Node: the packaged server, with no request time limit (see its spawn below). */
+const SERVER_BOOT =
+  "process.chdir = () => {}; const http = require('http'), make = http.createServer; http.createServer = (...a) => { const s = make.apply(http, a); s.requestTimeout = 0; return s; }; require(process.env.BOPS_SERVER_JS)";
+
 function nodeBinary() {
   const name = `${app.getName()} Helper`;
   const helper = path.join(path.dirname(process.execPath), "..", "Frameworks", `${name}.app`, "Contents", "MacOS", name);
@@ -363,8 +367,10 @@ async function spawnServer() {
     ? // Run as Node by the app's Helper binary (LSUIElement), not the app's own: run by the app's
       // binary, macOS listed the server in the Dock as a second app ("exec"). server.js changes into
       // its folder on start; keeping the working folder in Application Support is what lets the
-      // server write its state.
-      spawn(nodeBinary(), ["-e", "process.chdir = () => {}; require(process.env.BOPS_SERVER_JS)"], {
+      // server write its state. Its server lets a request take as long as it needs (requestTimeout 0,
+      // as Bops Cloud's does): a file added for a bot streams through it to storage at the uplink's
+      // speed (lib/server/bot-files.ts), and Node's default 5 minutes would cut a big one off.
+      spawn(nodeBinary(), ["-e", SERVER_BOOT], {
         cwd: packaged.home,
         env: {
           ...process.env,

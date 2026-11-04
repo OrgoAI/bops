@@ -1,6 +1,7 @@
 /** Shared shapes for the Bops app state, used by both the server and the UI. */
 
 import type { SharedKey } from "@/cloud/protocol";
+import type { AddedFile } from "./added-files";
 import type { AppHosting, AppsForMembers, IngotToken } from "./hosted-apps";
 import type { Chain } from "./chain";
 import type { ComputerSize } from "./bops-billing";
@@ -892,6 +893,8 @@ export type Message = {
   lookingAt?: string;
   /** Images attached to it (shown from /api/uploads/<id>; bots see them too). */
   images?: { id: string; type: string; w?: number; h?: number }[];
+  /** Files the user added with it, put where the bot works (lib/added-files.ts): the bot is told where they are. */
+  files?: AddedFile[];
   /** A picture the bot made (make_image): what it was asked to show, so it knows what it sent. */
   picture?: { prompt: string };
   /**
