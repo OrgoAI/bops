@@ -2451,5 +2451,16 @@ await check("a bot's Keys card in a shared workspace: only for someone with Keys
   assert.equal(BotKeys({ state: st2, bot: st2.bots[0], onAdd: noop, className: "" }), null);
 });
 
+await check("Try again sends a message as it went: its words, what it replied to and its files, each with only its own fields", async () => {
+  const { chatActOf } = await import(`${root}/lib/shared.ts`);
+  const file = { id: "file_1", name: "Itinerary.pdf", size: 1200, path: "~/Desktop/Itinerary.pdf", botId: "max" };
+  // Files alone (no words): they still go.
+  assert.deepEqual(chatActOf({ chatId: "bot:max", text: "", files: [{ ...file, hostId: "max", hostName: "Max" }] }), { act: "chat", chatId: "bot:max", text: "", files: [file] });
+  // Words, a reply and files.
+  assert.deepEqual(chatActOf({ chatId: "bot:max", text: "see this", replyTo: "m1", files: [file] }), { act: "chat", chatId: "bot:max", text: "see this", replyTo: "m1", files: [file] });
+  // Words alone, as before.
+  assert.deepEqual(chatActOf({ chatId: "bot:max", text: "hi", files: [] }), { act: "chat", chatId: "bot:max", text: "hi" });
+});
+
 console.log(`${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

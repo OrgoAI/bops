@@ -13,7 +13,7 @@ import { appCoders } from "@/lib/hosted-apps";
 import { appsShown } from "@/lib/apps-access";
 import { appsOwnShown } from "@/lib/apps-access";
 import { crmOpen } from "@/lib/crm-access";
-import { ANSWER_WAITS_LINE, REPLY_WAITS_LINE, askAnswerer, canAct, computerLine, isViewerOwn, ownerWho, readOnly, saidBy, saidName, screenAskMine, tellsThread, threadAnswerer, whereAnswerer, writesThread } from "@/lib/shared";
+import { ANSWER_WAITS_LINE, REPLY_WAITS_LINE, askAnswerer, canAct, chatActOf, computerLine, isViewerOwn, ownerWho, readOnly, saidBy, saidName, screenAskMine, tellsThread, threadAnswerer, whereAnswerer, writesThread } from "@/lib/shared";
 import { memberAct } from "./shared-act";
 import { MEMBER_STOP_MAX } from "@/cloud/protocol";
 import { CrmNote } from "./crm";
@@ -1930,7 +1930,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             via {CHANNEL_NAME[m.via]}
           </span>
         )}
-        {m.memberSend && <MemberSendLine send={m.memberSend} retry={(key) => void memberAct({ act: "chat", chatId: m.chatId, text: m.text, ...(m.replyTo ? { replyTo: m.replyTo } : {}) }, key)} />}
+        {m.memberSend && <MemberSendLine send={m.memberSend} retry={(key) => void memberAct(chatActOf(m), key)} />}
         {replies}
         {chipList}
       </div>
