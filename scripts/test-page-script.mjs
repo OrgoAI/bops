@@ -163,6 +163,9 @@ const [title, oldClosed, x] = JSON.parse(r.value);
 assert.deepEqual([title, oldClosed], ["Tab", true], "reopened in a window of its own, the tab closed");
 assert.ok(Math.abs(x - half) <= 16, `on the right: ${x}`);
 run(`for (const x of context.pages()) if ((await x.title()) === "Tab") await x.close(); return 1`);
+// The same page twice: it says so, and the page stays open.
+r = run(`const p = context.pages().find((x) => x.url().includes("Files")); try { await sideBySide(p, p); return "placed"; } catch (e) { return [e.message, p.isClosed()]; }`);
+assert.deepEqual(JSON.parse(r.value), ["sideBySide needs two different pages: pass another page, or an address to open.", false]);
 
 // Chrome is still up, with both tabs: a script disconnects, it never closes the browser.
 assert.equal(await alive(), 2);

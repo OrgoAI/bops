@@ -139,36 +139,52 @@ function keep(d) {
  * window of its own, and its tab closes (anything not saved on it is lost). Resolves to both pages.
  */
 async function sideBySide(browser, context, left, right) {
+  if (right === left) throw new Error("sideBySide needs two different pages: pass another page, or an address to open.");
   const cdp = await browser.newBrowserCDPSession();
   try {
-    const windowOf = async (p) => {
+    const targetOf = async (p) => {
       const s = await context.newCDPSession(p);
       try {
-        const { targetInfo } = await s.send("Target.getTargetInfo");
-        return (await cdp.send("Browser.getWindowForTarget", { targetId: targetInfo.targetId })).windowId;
+        return (await s.send("Target.getTargetInfo")).targetInfo.targetId;
       } finally {
         await s.detach().catch(() => {});
       }
     };
+    const windowOf = async (p) => (await cdp.send("Browser.getWindowForTarget", { targetId: await targetOf(p) })).windowId;
     const leftWindow = await windowOf(left);
     let other = typeof right === "string" ? null : right;
     if (!other || (await windowOf(other)) === leftWindow) {
-      const opened = context.waitForEvent("page");
-      await cdp.send("Target.createTarget", { url: typeof right === "string" ? right : right.url(), newWindow: true });
       const was = other;
-      other = await opened;
+      other = null;
+      const { targetId } = await cdp.send("Target.createTarget", { url: typeof right === "string" ? right : right.url(), newWindow: true });
+      // The page Chrome made for it, by its id (not the next page to open: a popup could beat it).
+      const seen = new Set([left, was]);
+      for (const until = Date.now() + 10_000; !other; await new Promise((r) => setTimeout(r, 100))) {
+        for (const p of context.pages()) if (!seen.has(p) && (seen.add(p), (await targetOf(p).catch(() => null)) === targetId)) other = p;
+        if (!other && Date.now() > until) throw new Error("The new window for the right-hand page didn't open.");
+      }
       await other.waitForLoadState().catch(() => {});
       if (was) await was.close();
     }
-    const { width, height } = await left.evaluate(() => ({ width: screen.availWidth, height: screen.availHeight }));
+    const { x, y, width, height } = await left.evaluate(() => ({ x: screen.availLeft, y: screen.availTop, width: screen.availWidth, height: screen.availHeight }));
     const half = Math.floor(width / 2);
-    // A maximized window takes bounds only once it's back to normal.
-    const place = async (windowId, x, w) => {
-      await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
-      await cdp.send("Browser.setWindowBounds", { windowId, bounds: { left: x, top: 0, width: w, height } });
+    // A maximized window takes bounds only once it's back to normal, and the window manager can still be placing a
+    // window (restoring its old size, or a new one where it likes) after Chrome says yes: set, read back, until it holds.
+    const place = async (windowId, at, w) => {
+      const want = { left: x + at, top: y, width: w, height };
+      for (let i = 0; i < 20; i++) {
+        const { bounds } = await cdp.send("Browser.getWindowBounds", { windowId });
+        if (bounds.windowState === "normal" && ["left", "top", "width", "height"].every((k) => Math.abs(bounds[k] - want[k]) <= 16)) return;
+        await cdp.send("Browser.setWindowBounds", { windowId, bounds: bounds.windowState === "normal" ? want : { windowState: "normal" } });
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      throw new Error("Chrome's windows didn't move side by side on this screen.");
     };
     await place(leftWindow, 0, half);
     await place(await windowOf(other), half, width - half);
+    // Each the tab in front in its window, so both show.
+    await left.bringToFront();
+    await other.bringToFront();
     return { left, right: other };
   } finally {
     await cdp.detach().catch(() => {});
