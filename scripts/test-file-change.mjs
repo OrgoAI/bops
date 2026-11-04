@@ -414,15 +414,25 @@ await check("a task's write card: Bops' facts lead and the bot's words are label
 
 /* ---------------- Drafts ---------------- */
 
-await check("a draft (a branch that isn't the default one) is saved at once, on the owner's turn, a member's and a task's: no card, the branch made from main", async () => {
-  const { changeFiles, isDraft } = await import(`${root}/lib/server/repo-change.ts`);
-  assert.equal(isDraft("site/orange-buttons", "main", [{ path: "src/look.ts" }]), true);
-  assert.equal(isDraft("main", "main", [{ path: "src/look.ts" }]), false, "the default branch goes live: it asks");
-  assert.equal(isDraft("site/x", "main", [{ path: ".github/workflows/ci.yml" }]), false, "GitHub's automation: it asks");
-  assert.equal(isDraft("site/x", "main", [{ path: ".github" }]), false);
-  assert.equal(isDraft("site/x", "", [{ path: "a.md" }]), false, "no default branch known: it asks");
+/** The repository lists its draft branches (.github/bops.json on main, as its people put it there). */
+const listDrafts = (drafts = ["site/"]) => theirCommit("main", ".github/bops.json", JSON.stringify({ drafts }));
+
+await check("a draft on a branch the repository lists, from main, is saved at once, on the owner's turn, a member's and a task's: no card", async () => {
+  const { changeFiles, isDraft, draftPrefixes } = await import(`${root}/lib/server/repo-change.ts`);
+  const on = (branch, base = null) => ({ branch, base });
+  assert.equal(isDraft(on("site/orange"), "main", ["site/"], [{ path: "src/look.ts" }]), true);
+  assert.equal(isDraft(on("site/orange", "main"), "main", ["site/"], [{ path: "src/look.ts" }]), true, "a new one from main");
+  assert.equal(isDraft(on("site/orange", "site/old"), "main", ["site/"], [{ path: "a.md" }]), false, "a new one from another branch asks");
+  assert.equal(isDraft(on("feature/x"), "main", ["site/"], [{ path: "a.md" }]), false, "a branch it doesn't list asks");
+  assert.equal(isDraft(on("site/x"), "main", [], [{ path: "a.md" }]), false, "a repository that lists none asks");
+  assert.equal(isDraft(on("Main"), "main", ["M", "Main/"], [{ path: "a.md" }]), false, "the default branch in any case asks");
+  assert.equal(isDraft(on("site/x"), "main", ["site/"], [{ path: ".github/workflows/ci.yml" }]), false, "GitHub's automation asks");
+  assert.equal(isDraft(on("site/x"), "", ["site/"], [{ path: "a.md" }]), false, "no default branch known: it asks");
+  assert.deepEqual(draftPrefixes('{"drafts":["site/","x","/root/","a/../b/",7,"preview/"]}'), ["site/", "preview/"], "each ends in /, nothing odd");
+  assert.deepEqual([draftPrefixes(null), draftPrefixes("not json"), draftPrefixes('{"drafts":"site/"}')], [[], [], []]);
   for (const [who, where, opts] of [["owner", { chatId }, { chat: true }], ["member", { chatId, member: "Dee" }, { chat: true }], ["task", { sessionId: "ses_draft" }, { task: true }]]) {
     freshRepo();
+    listDrafts();
     const asks = S.getState().appApprovals?.length ?? 0;
     const done = await changeFiles("boppy", change({ branch: "site/orange-buttons" }), where, opts);
     assert.equal(done.failed, undefined, `${who}: ${done.text}`);
@@ -434,15 +444,35 @@ await check("a draft (a branch that isn't the default one) is saved at once, on 
   }
 });
 
-await check("a draft that changes .github/ asks, a task's too, and the default branch asks: nothing written before the yes", async () => {
+await check("anything else asks, a task's too, nothing written before the yes: no list, a branch it doesn't list, one from another branch, .github/, the default branch", async () => {
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const asks = async (args, opts = { task: true }, where = { sessionId: "ses_ask" }) => {
+    const e = await changeFiles("boppy", args, where, opts).then((r) => r, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, `asked: ${args.branch} (${e?.text ?? e})`);
+  };
+  freshRepo();
+  await asks(change({ branch: "site/orange-buttons" }));
+  listDrafts();
+  gh.refs.set("site/old", gh.refs.get("main"));
+  await asks(change({ branch: "feature/orange" }));
+  await asks(change({ branch: "site/orange-buttons", base: "site/old" }));
+  await asks(change({ branch: "site/ci", files: [{ path: ".github/workflows/preview.yml", text: "on: push\n", delete: null }] }));
+  await asks(change({ branch: "site/ci", files: [{ path: ".github/bops.json", text: '{"drafts":["feature/"]}', delete: null }] }), { chat: true }, { chatId });
+  await asks(change());
+  assert.deepEqual(writes(), []);
+});
+
+await check("a task stopped while its draft is saving writes nothing more, and its branch never moves", async () => {
   const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
   freshRepo();
-  const ci = change({ branch: "site/ci", files: [{ path: ".github/workflows/preview.yml", text: "on: push\n", delete: null }] });
-  for (const [args, where, opts] of [[ci, { sessionId: "ses_ci" }, { task: true }], [ci, { chatId }, { chat: true }], [change(), { sessionId: "ses_live" }, { task: true }]]) {
-    const e = await changeFiles("boppy", args, where, opts).then(() => null, (x) => x);
-    assert.ok(e instanceof P.NeedsOk, `asked: ${args.branch}`);
-  }
+  listDrafts();
+  const stop = new AbortController();
+  stop.abort();
+  const r = await changeFiles("boppy", change({ branch: "site/stopped" }), { sessionId: "ses_stop" }, { task: true, signal: stop.signal });
+  assert.match(r.text, /^Not saved: stopped, the task was stopped first\. Nothing changed on site\/stopped\.$/);
   assert.deepEqual(writes(), []);
+  assert.equal(gh.refs.has("site/stopped"), false);
+  assert.match(readFileSync(`${root}/lib/server/computer-task.ts`, "utf8"), /changeFiles\([^)]*signal: t\.signal/, "a task passes its Stop");
 });
 
 /* ---------------- The card's diff ---------------- */

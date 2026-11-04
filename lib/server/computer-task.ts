@@ -805,7 +805,7 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
     } else if (o.name === "change_files" && !outside) {
       // The yes is to the card it showed (its commit and files): the writes go only as that card said.
       const change = opts.approved ? opts.asked?.api?.change : undefined;
-      const r = await orStop(t, changeFiles(s.botId, args as ChangeArgs, { sessionId: t.sessionId }, { task: true, approved: opts.approved, ...(change ? { asked: change } : {}) }));
+      const r = await orStop(t, changeFiles(s.botId, args as ChangeArgs, { sessionId: t.sessionId }, { task: true, approved: opts.approved, signal: t.signal, ...(change ? { asked: change } : {}) }));
       t.step("change_files", r.did?.length ? r.did.join("; ") : `tried to change files with ${String(args.key ?? "a key")}`);
       output = r.text;
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
