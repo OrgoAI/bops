@@ -2,4 +2,5 @@
 - A bot's menu: Phone and email opens its number and email.
 - Files a bot downloads from a website stay in its computer's Downloads under their own names, and it keeps track of its open tabs.
 - A change card counts only the lines that change, not everything between two edits.
+- When an Admin or teammate says no to a bot's request, the chat names them, not the owner.
 - A page a bot reads or opens is shown without any token or password in its address.
