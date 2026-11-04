@@ -319,10 +319,19 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       // Switched to Bops Cloud since it was queued: only Bops Cloud stamps a member's words there now (it would refuse this
       // Mac's row, MEMBER_STAMP), so it's dropped, and their window says it didn't go.
       if (cloudChatHere(p.wsId)) return void console.warn(`[members] event ${eventId}: not done (the workspace's chat goes through Bops Cloud now)`);
+      // Their files as this state has them (filesFor): only ones on the computer a bot of the chat works on now.
+      const files = filesFor(act.chatId, act.files);
+      // Files alone, none of them there anymore (the owner set the bot to work on this Mac meanwhile): nothing to say to
+      // the bot, so no empty message for it to answer; a note says why.
+      if (!act.text.trim() && !files) {
+        const c = chat(act.chatId);
+        addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: `${who.name} added ${act.files?.length === 1 ? "a file" : "files"} on a computer the bot doesn't work on now, so nothing was sent.` });
+        return void console.warn(`[members] event ${eventId}: not done (its files aren't on the bot's computer now)`);
+      }
       // Not let use its computer (Use its computer, as this state says it), for a bot that has one: their words stay,
-      // with a note, and nothing runs for them.
+      // with their files and a note, and nothing runs for them.
       if (!mayUse(p, who, admin) && chatUsesComputer(act.chatId)) {
-        addMessage({ chatId: act.chatId, role: "user", text: act.text, member: { ...said, noUse: true } });
+        addMessage({ chatId: act.chatId, role: "user", text: act.text, ...(files ? { files } : {}), member: { ...said, noUse: true } });
         const c = chat(act.chatId);
         const name = c?.botIds.length === 1 ? (bot(c.botIds[0])?.name ?? "The bot") : "The bots";
         addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: noUseNote(ownerName(), who.name, name) });
@@ -330,7 +339,7 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       }
       // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message. Their files are on the
       // bot's computer already: kept on the message, and the bot told where in their name (lib/added-files.ts filesNote).
-      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin), undefined, undefined, undefined, filesFor(act.chatId, act.files)).catch(warn);
+      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin), undefined, undefined, undefined, files).catch(warn);
       return;
     }
     case "reply": {
@@ -472,13 +481,17 @@ async function answerOne(p: MemberActPayload, who: MemberWho, chatId: string, me
 
 /**
  * A member's files for a chat as this state has it (Bops Cloud checked them against it too: cloud/members.ts filesFit):
- * each for a bot of the chat, on the computer that bot works on now. One that isn't is left out, never told to the bot.
+ * each for a bot of the chat, on the computer that bot works on now, named by that computer's bot as this state names
+ * it (never as the member's Bops sent it: it's shown to everyone, and told to the bot). One that isn't is left out,
+ * never told to the bot.
  */
 function filesFor(chatId: string, files: readonly AddedFile[] | undefined): AddedFile[] | undefined {
   const c = chat(chatId);
-  const kept = (files ?? []).filter((f) => {
+  const { host, bots } = getState();
+  const kept = (files ?? []).flatMap((f) => {
     const b = c?.botIds.includes(f.botId) ? bot(f.botId) : undefined;
-    return !!b && getState().host !== "mac" && b.runsOn !== "mac" && workBot(b, getState().bots).id === f.hostId;
+    const on = b && host !== "mac" && b.runsOn !== "mac" ? workBot(b, bots) : undefined;
+    return on && on.id === f.hostId ? [{ ...f, hostName: on.name?.trim() || b!.name?.trim() || f.hostName }] : [];
   });
   return kept.length ? kept : undefined;
 }

@@ -49,6 +49,7 @@ import {
   MEMBER_MAX_PERSONA,
   PERSONA_CHANGED,
   MEMBER_ACTS_A_MINUTE,
+  MEMBER_FILES_A_MINUTE,
   STORED_ACT_MS,
   MEMBER_MAX_NOTE,
   MEMBER_MAX_TEXT,
@@ -665,19 +666,35 @@ const THEIR_LOGINS = "This uses the owner's apps or keys. Only the owner can ans
 export const FILES_NO_COMPUTER = "The owner hasn't let you use this bot's computer, so you can't add files for it.";
 /** Files from someone else, while the owner's Bops is older than MEMBER_FILES_MIN_VERSION (OWNER_BOPS_OLD): it would drop them. */
 export const FILES_OWNER_OLD = "The owner's Bops needs an update before you can add files here.";
+/**
+ * What a Member (not an Admin) is told when they add a file (ADMIN_ONLY): orgo-web's file uploads take the owner and
+ * Admins only (its lib/files/authorize.ts authorizeComputerWrite: write access to the project, which its role "member"
+ * never has, Use its computer or not), so one from them would wake the owner's computer and claim a name on its Desktop
+ * for a refusal certain from the start. Until orgo-web takes a Member with Use its computer there, said first (filesMay).
+ */
+export const FILES_ADMINS_ONLY = "Only the owner and Admins can add files here for now.";
+/** Whether someone of this role may add files for the workspace's bots (FILES_ADMINS_ONLY): an Admin. */
+const filesMay = (role: string) => role === "admin";
+
+/** A bot's name in the owner's state, made plain for a file's `hostName` (protocol.ts MemberFile), or undefined. */
+const botName = (b: Record<string, unknown> | undefined) => (typeof b?.name === "string" && b.name.trim() ? b.name.trim().slice(0, 120).trim() : undefined);
 
 /**
- * Whether a message's files (cleanAct) fit the owner's state as `blob` has it: each for one of the chat's bots (`bots`,
+ * A message's files (cleanAct) as they fit the owner's state as `blob` has it: each for one of the chat's bots (`bots`,
  * botsTouched), on the computer that bot works on (its own, or the main bot's it shares: computer-scope.ts workBotOf), as
- * the member's Bops was told when it put it there (filesIn). One that doesn't (the owner moved the bot meanwhile) is
- * refused, so the bot is never told of a file somewhere it isn't.
+ * the member's Bops was told when it put it there (filesIn), and never for a bot that works on the owner's Mac now (it
+ * can't open them there). Each is named by that computer's bot as this state names it, never as the member's Bops sent
+ * it: everyone sees the name on the message, and the bot is told it. One that doesn't fit (the owner moved the bot
+ * meanwhile) is refused, so the bot is never told of a file somewhere it isn't.
  */
-function filesFit(blob: Record<string, unknown>, bots: readonly string[], files: readonly MemberFile[]) {
+function filesFit(blob: Record<string, unknown>, bots: readonly string[], files: readonly MemberFile[]): MemberFile[] {
   const all = list(blob.bots);
-  for (const f of files) {
+  return files.map((f) => {
     const b = bots.includes(f.botId) ? all.find((x) => x.id === f.botId) : undefined;
-    if (!b || workBotOf(b, all).id !== f.hostId) throw new HttpError(409, "A file you added isn't on that bot's computer anymore. Add it again.", { code: NOT_WAITING });
-  }
+    const host = b && blob.host !== "mac" && b.runsOn !== "mac" ? workBotOf(b, all) : undefined;
+    if (!host || host.id !== f.hostId) throw new HttpError(409, "A file you added isn't on that bot's computer anymore. Add it again.", { code: NOT_WAITING });
+    return { ...f, hostName: botName(host) ?? botName(b) ?? f.hostName };
+  });
 }
 
 /** Running, queued, or waiting on someone: a thread Stop still ends. */
@@ -821,14 +838,17 @@ function botsTouched(blob: Record<string, unknown>, slice: ReturnType<typeof sli
   }
 }
 
-/** One more act in this minute's count (bops.cloud_limits, as agent.ts counts sends), or a 429 past MEMBER_ACTS_A_MINUTE. */
-async function countAct(userId: string) {
+/**
+ * One more act in this minute's count (bops.cloud_limits, as agent.ts counts sends), or a 429 past MEMBER_ACTS_A_MINUTE.
+ * `what` "file": a file added (filesIn), on a count of its own (MEMBER_FILES_A_MINUTE).
+ */
+async function countAct(userId: string, what: "act" | "file" = "act") {
   const windowStart = Math.floor(Date.now() / 60_000) * 60_000;
   const r = await query(
     `INSERT INTO bops.cloud_limits (key, window_start, count) VALUES ($1, to_timestamp($2::float8 / 1000), 1)
      ON CONFLICT (key, window_start) DO UPDATE SET count = cloud_limits.count + 1 WHERE cloud_limits.count < $3
      RETURNING count`,
-    [`member:act:${userId}`, windowStart, MEMBER_ACTS_A_MINUTE],
+    [`member:${what}:${userId}`, windowStart, what === "file" ? MEMBER_FILES_A_MINUTE : MEMBER_ACTS_A_MINUTE],
   );
   sweepActs();
   if (r.rowCount) return;
@@ -876,7 +896,7 @@ let routed: (owner: string, ws: string) => Promise<boolean> = realRouted;
  */
 const realStoredFirst = async (owner: string, ws: string) => (await macNewEnough(owner)) && (chatAutoFor(owner) || (await routedWorkspaces(null, owner)).has(ws));
 let storedFirst: (owner: string, ws: string) => Promise<boolean> = realStoredFirst;
-let count: (userId: string) => Promise<void> = countAct;
+let count: (userId: string, what?: "act" | "file") => Promise<void> = countAct;
 /** How a computer is woken for an answer Bops Cloud wrote (turns.ts wakeComputer). */
 let wake: typeof wakeComputer = (...a) => wakeComputer(...a);
 /** Bops Cloud answers a computer's runner's ask itself while the owner's Mac is away (answerOnComputer). */
@@ -960,13 +980,16 @@ const actIn: Route = {
       if (!may) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
       // The owner's app work: Your Apps at Write too (the owner's Mac would drop it otherwise).
       if (appWorkRefused(blob, viewer, access, threadsOfAct(slice, body.act))) throw new HttpError(403, APP_WORK, { code: MEMBER_APPS_READ_ONLY });
-      // Files with a message: each for a bot of this chat, on the computer it works on now (filesFit).
-      if (body.act.act === "chat" && body.act.files) filesFit(blob, bots, body.act.files);
+      // Files with a message: each for a bot of this chat, on the computer it works on now, named as this state names it (filesFit).
+      const chatAct = body.act;
+      if (chatAct.act === "chat" && chatAct.files) chatAct.files = filesFit(blob, bots, chatAct.files);
     }
     // Whether their words may wake the bots' computers and run there (Use its computer), as the same state says it.
     const computer = computerUseOf(slice.workspace, viewer);
-    // Files went on a bot's computer, which takes Use its computer, and the owner's Bops new enough to tell the bot (an older one drops them).
+    // Files went on a bot's computer, which takes an Admin (FILES_ADMINS_ONLY) and Use its computer, and the owner's Bops
+    // new enough to tell the bot (an older one drops them).
     if (body.act.act === "chat" && body.act.files) {
+      if (!filesMay(role.role)) throw new HttpError(403, FILES_ADMINS_ONLY, { code: ADMIN_ONLY });
       if (!computer) throw new HttpError(403, FILES_NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
       if (!(await adminGate(target.account, MEMBER_FILES_MIN_VERSION))) throw new HttpError(409, FILES_OWNER_OLD, { code: OWNER_BOPS_OLD });
     }
@@ -1458,13 +1481,16 @@ const NOT_AWAKE: Partial<Record<WakeRefusal, (owner: string, host: string) => st
 
 /**
  * POST /v1/ws/<project>/files {botId, screen?}: where a file someone adds for a bot goes (lib/server/shared.ts
- * sharedFileTarget), for an Admin or a member with Write on the bot and Use its computer (who may have it answer on that
- * computer already): the computer it works on (its own, or the main bot's it shares), woken as a message to it would
- * wake it, with the owner's say on one billed by the hour (MemberFileTarget). Their own Bops then puts the file there
- * with their own Orgo key, which orgo-web checks too, and their message names it (cleanAct, filesFit). `screen`: dropped
- * on that computer's screen, which only an Admin is shown (SharedWsSlice.screens) and takes control of, so it goes there
- * even for a bot set to work on the owner's Mac. Never the owner's own (their Bops puts files on their computers itself),
- * and only once the owner's Bops tells the bot about them (MEMBER_FILES_MIN_VERSION), so none is put there for nothing.
+ * sharedFileTarget), for an Admin (every bot at Write, and Use its computer): the computer it works on (its own, or the
+ * main bot's it shares), woken as a message to it would wake it, with the owner's say on one billed by the hour
+ * (MemberFileTarget). Their own Bops then puts the file there with their own Orgo key, which orgo-web checks too, and
+ * their message names it (cleanAct, filesFit). A Member is told why not before anything is woken (FILES_ADMINS_ONLY:
+ * orgo-web's uploads would refuse them). `screen`: dropped on that computer's screen, which only an Admin is shown
+ * (SharedWsSlice.screens) and takes control of, so it goes there even for a bot set to work on the owner's Mac. Never
+ * the owner's own (their Bops puts files on their computers itself), never a computer of another of the owner's
+ * workspaces (a main bot on the free Bops computer another workspace's main bot has: that computer is in that
+ * workspace's Orgo project, which the caller isn't in), and only once the owner's Bops tells the bot about them
+ * (MEMBER_FILES_MIN_VERSION), so none is put there for nothing. Counted on a count of their own (MEMBER_FILES_A_MINUTE).
  */
 const filesIn: Route = {
   method: "POST",
@@ -1477,9 +1503,10 @@ const filesIn: Route = {
     if (!b || !anId(b.botId) || (b.screen !== undefined && typeof b.screen !== "boolean")) throw new HttpError(400, "Send {botId, screen?}");
     const botId = b.botId;
     const screen = b.screen === true;
-    await count(user!.id);
+    await count(user!.id, "file");
     const { access: role, target } = await watchable(user!, bearer(req), projectId, { fresh: true });
     if (role.role === "owner") throw new HttpError(403, "This is your own workspace. Add files from your Bops.", { code: OWN_WORKSPACE });
+    if (!filesMay(role.role)) throw new HttpError(403, FILES_ADMINS_ONLY, { code: ADMIN_ONLY });
     const blob = await ownerState(target.account);
     const viewer = viewerOf(user!, role);
     const slice = sliceOf(blob, target.ws, viewer);
@@ -1487,7 +1514,6 @@ const filesIn: Route = {
     const access = viewerAccess(slice.workspace, viewer);
     if (!permits(levelOf(access, botId), "write")) throw new HttpError(403, "You can watch this bot, not add files for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
     if (!computerUseOf(slice.workspace, viewer)) throw new HttpError(403, FILES_NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
-    if (screen && role.role !== "admin") throw new HttpError(403, "Only the owner or an Admin can drop files on this computer's screen.", { code: ADMIN_ONLY });
     if (!(await adminGate(target.account, MEMBER_FILES_MIN_VERSION))) throw new HttpError(409, FILES_OWNER_OLD, { code: OWNER_BOPS_OLD });
     const all = list(blob.bots);
     const bot = all.find((x) => x.id === botId)!;
@@ -1500,7 +1526,9 @@ const filesIn: Route = {
     const computerId = typeof host.computerId === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(host.computerId) ? host.computerId : null;
     const hostId = typeof host.id === "string" ? host.id : null;
     if (!computerId || !hostId) throw new HttpError(409, `${name} has no computer yet.`, { code: NOT_WAITING });
-    const hostName = typeof host.name === "string" && host.name.trim() ? host.name.trim() : name;
+    // The free Bops computer another workspace's main bot has (computer-scope.ts workBotOf): in that workspace's Orgo project.
+    if (wsOfBot(host) !== target.ws) throw new HttpError(403, `${name} works on a computer in another of ${owner}'s workspaces, so only ${owner} can add files to it.`, { code: MEMBER_OWNER_ONLY });
+    const hostName = botName(host) ?? name;
     const w = await wake(target.account, computerId.toLowerCase(), target.ws, { owner, bot: hostName });
     // (Waking not set up on this Bops Cloud at all: Orgo wakes it for the file's first step, as for the owner.)
     if (!w.ok && w.state !== "unset") {
@@ -1557,7 +1585,7 @@ export function resetMembers(
     queue?: Queue;
     isOn?: (owner: string) => boolean;
     drop?: (projectId: string, userId: string) => Promise<void>;
-    count?: (userId: string) => Promise<void>;
+    count?: (userId: string, what?: "act" | "file") => Promise<void>;
     cancel?: (projectId: string, userId: string) => Promise<void>;
     routed?: (owner: string, ws: string) => Promise<boolean>;
     storedFirst?: (owner: string, ws: string) => Promise<boolean>;

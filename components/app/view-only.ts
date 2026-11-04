@@ -40,8 +40,8 @@ const ALLOWED = [
   // have Keys there; a bot's switch is an act through Bops Cloud), never the user's own vault or bots.
   /^\/api\/keys(\/|\?|$)/,
   // A file added in a chat or dropped on a bot's screen (attachments.tsx sendFile): while a shared workspace is open it goes
-  // on the owner's computer Bops Cloud names for that bot (lib/server/shared.ts sharedFileTarget), for someone with Write
-  // and Use its computer, with the user's own Orgo key; never on the user's own bot of that id.
+  // on the owner's computer Bops Cloud names for that bot (lib/server/shared.ts sharedFileTarget), for an Admin, with the
+  // user's own Orgo key; never on the user's own bot of that id. (attachments.tsx sendFile asks sendRefused: XMLHttpRequest.)
   /^\/api\/bots\/files(\?|$)/,
 ];
 
@@ -124,3 +124,12 @@ export function viewOnly(line: string | null) {
 
 /** Whether a read that doesn't go through fetch (a screen's EventSource, an image's src) may go now: always, unless a shared workspace is open and it's one of OWN_READS. */
 export const readAllowed = (url: string) => !g.bopsViewOnly?.line || callAllowed("GET", url);
+
+/**
+ * Why a write that doesn't go through fetch (a file's upload, which XMLHttpRequest sends for its progress:
+ * attachments.tsx sendFile) can't go now, the same line a fetch would be refused with; null when it may.
+ */
+export function sendRefused(method: string, url: string): string | null {
+  const line = g.bopsViewOnly?.line;
+  return line && !callAllowed(method, url) ? line : null;
+}

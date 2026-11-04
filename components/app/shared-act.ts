@@ -10,10 +10,11 @@ import { post } from "./ui";
  * (`error`) is also shown where it was done: under their message or reply, which the window's state carries
  * (Message.memberSend) until the owner's Bops has written it.
  */
-export async function memberAct(act: MemberAct, key = crypto.randomUUID().replace(/-/g, "")): Promise<{ ok: boolean; error?: string }> {
+export async function memberAct(act: MemberAct, key = crypto.randomUUID().replace(/-/g, "")): Promise<{ ok: boolean; error?: string; unsent?: boolean }> {
   const res = await post("/api/workspaces/shared", { act, key }).catch(() => null);
-  if (!res) return { ok: false, error: "Couldn't reach Bops. Try again." };
+  // (`unsent`: nothing of it was kept to try again under their message: Bops not reached, or it refused it first.)
+  if (!res) return { ok: false, error: "Couldn't reach Bops. Try again.", unsent: true };
   if (res.ok) return { ok: true };
-  const body = (await res.json().catch(() => ({}))) as { error?: string };
-  return { ok: false, error: body.error || "That didn't go. Try again." };
+  const body = (await res.json().catch(() => ({}))) as { error?: string; unsent?: unknown };
+  return { ok: false, error: body.error || "That didn't go. Try again.", ...(body.unsent === true ? { unsent: true } : {}) };
 }

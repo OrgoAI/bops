@@ -207,17 +207,29 @@ export function sharedAdminOpen({ anyRole = false } = {}): {
 }
 
 /**
+ * The user's role in the shared workspace open now ("admin" or "member": lib/server/bot-files.ts SharedAs, which says
+ * Orgo's refusals as theirs), else null.
+ */
+export function sharedRole(): "admin" | "member" | null {
+  const role = openNow()?.at.role;
+  return role === "admin" || role === "member" ? role : null;
+}
+
+/**
  * Where a file the user adds for a bot of the shared workspace open goes (app/api/bots/files): Bops Cloud's answer to
- * POST /v1/ws/<project>/files (cloud/members.ts filesIn), which checks they may (Write on the bot and Use its computer;
- * a drop on its screen, `screen`, an Admin's alone) and names the owner's computer it works on, woken as a message would
- * wake it (lib/server/bot-files.ts sharedTarget reads it). Never a computer of the user's own bot of that id. Null when
- * Bops Cloud couldn't be reached.
+ * POST /v1/ws/<project>/files (cloud/members.ts filesIn), which checks they may (an Admin, the bot at Write, on a
+ * computer of this workspace) and names the owner's computer it works on, woken as a message would wake it
+ * (lib/server/bot-files.ts sharedTarget reads it). Never a computer of the user's own bot of that id. Bops Cloud saying
+ * they may no longer see the workspace drops the copy, as an act's answer does (shared-core.ts actWith). Null when Bops
+ * Cloud couldn't be reached.
  */
 export async function sharedFileTarget(botId: string, { screen = false } = {}): Promise<{ status: number; json: Record<string, unknown> } | null> {
   const o = sharedAdminOpen({ anyRole: true });
   if (!o) return { status: 409, json: { error: "Open the workspace again." } };
   if (!o.botIds.includes(botId)) return { status: 404, json: { error: "That bot isn't in this workspace anymore." } };
-  return o.cloud("POST", "files", { botId, ...(screen ? { screen: true } : {}) });
+  const got = await o.cloud("POST", "files", { botId, ...(screen ? { screen: true } : {}) });
+  if (got && ((got.status === 404 && got.json.error === "No such workspace") || got.status === 401)) openNow()?.copy.gone();
+  return got;
 }
 
 /**

@@ -571,17 +571,19 @@ export function ChatView({
   // Images and files about to go with the next message (the + button, pasting, or dropping them on the chat). A file
   // goes where the chat's bot works: in a group, the main bot's (else its first bot's) computer.
   const fileBot = solo ?? members.find((m) => m.isMain) ?? members[0];
-  // In a workspace shared with the user, that computer is the owner's: a file goes there for someone with Write on the
-  // chat's bots and Use its computer, as their words would run there (Bops Cloud checks it again: cloud/members.ts
-  // filesIn), and a picture goes as a file too, since one for the model to look at would stay on this Mac. Without
-  // them, adding one says why.
+  // In a workspace shared with the user, that computer is the owner's: a file goes there for an Admin, who has Write on
+  // the chat's bots and Use its computer (Bops Cloud checks it again: cloud/members.ts filesIn; Orgo's uploads take no
+  // Member yet: FILES_ADMINS_ONLY), and a picture goes as a file too, since one for the model to look at would stay on
+  // this Mac. Anyone else adding one is told why.
   const filesWhy = !state.shared
     ? null
     : !canAct(state, c.botIds)
       ? "You can watch these bots, not add files for them."
-      : state.shared.computer !== true
-        ? "The owner hasn't let you use this bot's computer, so you can't add files for it."
-        : null;
+      : state.shared.role !== "admin"
+        ? "Only the owner and Admins can add files here for now."
+        : state.shared.computer !== true
+          ? "The owner hasn't let you use this bot's computer, so you can't add files for it."
+          : null;
   const attach = useAttachments(() => (filesWhy ? undefined : fileBot?.id), { asFiles: () => !!state.shared });
   // What the Preview tab's Select and Draw put in the box (composer-bridge.tsx), never sent by themselves: its
   // pictures' keys in the tray and its lines in the draft (each with where it is in the page's code, never shown), so
@@ -630,6 +632,17 @@ export function ChatView({
     sending.current.set(chatId, mineGoes);
     await mineGoes.finally(() => sending.current.get(chatId) === mineGoes && sending.current.delete(chatId));
   };
+  // The chat showing now, so words put back after a refusal (backInBox) go only into the box they came from.
+  const showing = useRef(c.id);
+  useEffect(() => {
+    showing.current = c.id;
+  });
+  // Words that didn't go, with nothing of them kept to try again: back in the box while it's still empty, with what they replied to.
+  const backInBox = (chatId: string, text: string, was: Message | null) => {
+    if (showing.current !== chatId) return;
+    if (text) setDraft((d) => (d.trim() ? d : text));
+    if (was) setReplying((r) => r ?? was);
+  };
   // The files that didn't make it, under the box.
   const sayFailed = (failed: { name: string; error: string }[]) =>
     failed.length && setMicError(failed.length === 1 ? `${failed[0].name} didn't go: ${failed[0].error}` : `${failed.length} of them didn't go: ${failed[0].error}`);
@@ -643,7 +656,8 @@ export function ChatView({
       if (attaching.some((a) => a.kind === "image")) return setMicError("Pictures can't be sent in a shared workspace.");
       const items = attaching;
       const chatId = c.id;
-      const replyTo = replying?.id;
+      const was = replying;
+      const replyTo = was?.id;
       setDraft("");
       setReplying(null);
       attach.release(tray.map((a) => a.key));
@@ -659,6 +673,8 @@ export function ChatView({
         if (text || files.length) {
           const r = await memberAct({ act: "chat", chatId, text, ...(replyTo ? { replyTo } : {}), ...(files.length ? { files } : {}) });
           if (!r.ok && r.error) setMicError(r.error);
+          // (Refused before it was kept to try again under their message: a file not ready anymore, Bops not reached.)
+          if (!r.ok && r.unsent) backInBox(chatId, text, was);
         }
         setPending((p) => p.filter((x) => x.id !== mine.id));
       });
@@ -672,6 +688,7 @@ export function ChatView({
     fromApp.current = { keys: new Set(), lines: new Map() };
     // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
     const previews = tray.flatMap((a) => (a.preview ? [a.preview] : []));
+    const was = replying;
     setDraft("");
     setReplying(null);
     attach.release(tray.map((a) => a.key));
@@ -701,8 +718,11 @@ export function ChatView({
       const res = await post(`/api/chats/${encodeURIComponent(chatId)}/messages`, { text, replyTo, images: images.length ? images : undefined, files: files.length ? files : undefined, lookingAt, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) })
         .finally(drop)
         .catch(() => null);
-      // Not taken (a file not ready anymore, Bops Cloud not reached): said under the box, never gone without a word.
-      if (!res?.ok) setMicError(((await res?.json().catch(() => null)) as { error?: string } | null)?.error ?? "That didn't send. Try again.");
+      // Not taken (a file not ready anymore, Bops Cloud not reached): said under the box, and the words put back, never gone without a word.
+      if (!res?.ok) {
+        setMicError(((await res?.json().catch(() => null)) as { error?: string } | null)?.error ?? "That didn't send. Try again.");
+        backInBox(chatId, text, was);
+      }
     };
     await inTurn(chatId, go);
   };
@@ -1130,6 +1150,8 @@ export function ChatView({
               onPaste={(e) => {
                 const files = filesOf(e.clipboardData);
                 if (!files.length) return;
+                // Words copied with a picture of them (cells from a sheet, a paragraph from a document): pasted as words where files can't go.
+                if (filesWhy && e.clipboardData.types.includes("text/plain")) return;
                 e.preventDefault();
                 if (filesWhy) return setMicError(filesWhy);
                 attach.add(files);

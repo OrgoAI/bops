@@ -908,7 +908,8 @@ export const MESSAGES_PER_CHAT = 200;
  */
 export type MemberAct =
   // `files`: put on the Desktop of the computer a bot of the chat works on first (MemberFile), with the owner's Bops at
-  // MEMBER_FILES_MIN_VERSION (OWNER_BOPS_OLD) and Use its computer (MEMBER_NO_COMPUTER). With files, `text` may be empty.
+  // MEMBER_FILES_MIN_VERSION (OWNER_BOPS_OLD), by an Admin (ADMIN_ONLY: orgo-web's uploads take no Member yet) with Use its
+  // computer (MEMBER_NO_COMPUTER). With files, `text` may be empty.
   | { act: "chat"; chatId: string; text: string; replyTo?: string; files?: MemberFile[] }
   | { act: "reply"; sessionId: string; text: string }
   | { act: "compact"; chatId: string }
@@ -1052,6 +1053,12 @@ export const NOT_WAITING = "not_waiting";
 export const OWN_WORKSPACE = "own_workspace";
 /** How many acts one member may send a minute, across every workspace shared with them. */
 export const MEMBER_ACTS_A_MINUTE = 30;
+/**
+ * How many files one member may add a minute (POST /v1/ws/<projectId>/files, one for each), across every workspace
+ * shared with them: counted apart from their acts, so the files of a message never use up the act that sends it. Four
+ * full message boxes (ATTACH_MAX each).
+ */
+export const MEMBER_FILES_A_MINUTE = 40;
 /** The most a member's message or reply may say, and a note with Deny. */
 export const MEMBER_MAX_TEXT = 8000;
 export const MEMBER_MAX_NOTE = 2000;
@@ -1081,10 +1088,13 @@ const fileId = (v: unknown): v is string => typeof v === "string" && v.length > 
  */
 const plainFileName = (name: string) =>
   name.length > 0 && name.trim() === name && !name.startsWith(".") && !/[\\/\u0000-\u001f\u007f]/.test(name) && new TextEncoder().encode(name).length <= 250;
+/** A bot's name as a file's `hostName` carries it: one line, no control character, words at both ends. */
+const plainHostName = (v: unknown): v is string => fileId(v) && v.trim() === v && !/[\u0000-\u001f\u007f]/.test(v);
 /**
  * A message's files as a member's Bops sent them (MemberAct chat `files`), each whole and checked: a plain name on the
- * Desktop (`path` exactly ~/Desktop/<name>), a size Orgo takes, its ids, every id once, MEMBER_FILES_MAX at most. None
- * sent: []. Null when any isn't one. Which bots they're for is checked against the owner's state (cloud/members.ts).
+ * Desktop (`path` exactly ~/Desktop/<name>), a size Orgo takes, its ids, a bot's name on one line, every id once,
+ * MEMBER_FILES_MAX at most. None sent: []. Null when any isn't one. Which bots they're for is checked against the
+ * owner's state, which names the bot whose computer each is on (cloud/members.ts filesFit, lib/server/member-acts.ts).
  */
 export function cleanMemberFiles(v: unknown): MemberFile[] | null {
   if (v === undefined || v === null) return [];
@@ -1093,7 +1103,7 @@ export function cleanMemberFiles(v: unknown): MemberFile[] | null {
   for (const f of v) {
     if (!f || typeof f !== "object" || Array.isArray(f)) return null;
     const x = f as Record<string, unknown>;
-    if (!fileId(x.id) || !fileId(x.botId) || !fileId(x.hostId) || !fileId(x.hostName)) return null;
+    if (!fileId(x.id) || !fileId(x.botId) || !fileId(x.hostId) || !plainHostName(x.hostName)) return null;
     if (typeof x.name !== "string" || !plainFileName(x.name) || x.path !== `~/Desktop/${x.name}`) return null;
     if (typeof x.size !== "number" || !Number.isSafeInteger(x.size) || x.size < 1 || x.size > MEMBER_FILE_BYTES) return null;
     out.push({ id: x.id, name: x.name, size: x.size, path: `~/Desktop/${x.name}`, botId: x.botId, hostId: x.hostId, hostName: x.hostName });

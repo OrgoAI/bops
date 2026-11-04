@@ -1,7 +1,7 @@
 import { refused } from "@/lib/api-guard";
 import { addFile, addFileTo, AddFileError, sharedTarget } from "@/lib/server/bot-files";
 import { notReady } from "@/lib/server/ready";
-import { sharedFileTarget, sharedOpen } from "@/lib/server/shared";
+import { sharedFileTarget, sharedOpen, sharedRole } from "@/lib/server/shared";
 import { bot } from "@/lib/server/store";
 
 export const dynamic = "force-dynamic";
@@ -13,9 +13,10 @@ export const dynamic = "force-dynamic";
  * { file } for the message it goes with.
  *
  * In a workspace shared with the user, its bots and their computers are the owner's: the computer is the one Bops
- * Cloud names for that bot (lib/server/shared.ts sharedFileTarget, never the user's own bot of that id), for someone
- * with Write on it and Use its computer (an Admin has both; a drop on its screen, an Admin's alone), and the file goes
- * with the user's own Orgo key, which Orgo checks too. A refusal says why in Bops Cloud's or Orgo's words, made plain.
+ * Cloud names for that bot (lib/server/shared.ts sharedFileTarget, never the user's own bot of that id), for an Admin
+ * (who has Write on every bot and Use its computer; Orgo's uploads take no Member yet), and the file goes with the
+ * user's own Orgo key, which Orgo checks too. A refusal says why in Bops Cloud's or Orgo's words, made plain, as theirs
+ * in their role there.
  *
  * proxy.ts leaves this path to its route, which streams the body instead of Next copying it for the proxy (which
  * keeps 10 MB at most), so the same guard (lib/api-guard.ts) runs here first.
@@ -27,6 +28,7 @@ export async function POST(request: Request) {
   const botId = q.get("botId") ?? "";
   const screen = q.get("to") === "screen";
   const shared = sharedOpen();
+  const role = shared ? sharedRole() : null;
   const b = shared ? undefined : bot(botId);
   if (!shared && !b) return Response.json({ error: "no such bot" }, { status: 404 });
   const size = Number(request.headers.get("content-length") ?? NaN);
@@ -34,7 +36,7 @@ export async function POST(request: Request) {
   try {
     const file = b
       ? await addFile(b, q.get("name") ?? "", size, request.body, { screen })
-      : await addFileTo(q.get("name") ?? "", size, request.body, async () => sharedTarget(await sharedFileTarget(botId, { screen })), { shared: true });
+      : await addFileTo(q.get("name") ?? "", size, request.body, async () => sharedTarget(await sharedFileTarget(botId, { screen })), { shared: { role: role ?? "member" } });
     return Response.json({ file });
   } catch (e) {
     const status = e instanceof AddFileError ? e.status : 500;

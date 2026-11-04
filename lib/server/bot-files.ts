@@ -60,12 +60,14 @@ export type FileTarget = MemberFileTarget;
 
 /** Bops Cloud's words when it doesn't name a computer for a shared workspace's bot (sharedTarget), by what it said. */
 const CLOUD_OLD = "Teammates can't add files here until Bops Cloud updates.";
+const GONE_FROM_WS = "You're not in this workspace anymore.";
 
 /**
  * The computer a file for a bot of the workspace shared with the user goes on, from what Bops Cloud answered
  * (POST /v1/ws/<project>/files: lib/server/shared.ts sharedFileTarget), or an AddFileError with its words: not theirs
- * to add (no Write, no Use its computer, a drop on a screen they aren't shown), the owner's Bops too old, no computer,
- * or one that won't wake. A Bops Cloud from before has no such route ("Not found"), which says so.
+ * to add (a Member, no Write, a computer of another of the owner's workspaces), the owner's Bops too old, no computer,
+ * or one that won't wake. A Bops Cloud from before has no such route ("Not found"), which says so; the user taken out
+ * of the workspace ("No such workspace") is told that, never that the bot left.
  */
 export function sharedTarget(got: { status: number; json: Record<string, unknown> } | null): FileTarget {
   if (!got) throw new AddFileError("Couldn't reach Bops Cloud. Try again.", 502);
@@ -73,25 +75,35 @@ export function sharedTarget(got: { status: number; json: Record<string, unknown
   const said = typeof j.error === "string" && j.error.trim() ? j.error.trim() : "";
   if (got.status === 200) {
     const ok = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(v);
-    if (ok(j.computerId) && ok(j.botId) && ok(j.hostId) && typeof j.hostName === "string" && j.hostName.trim())
-      return { computerId: j.computerId, botId: j.botId, hostId: j.hostId, hostName: j.hostName.trim().slice(0, 120) };
+    const hostName = typeof j.hostName === "string" ? j.hostName.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 120).trim() : "";
+    if (ok(j.computerId) && ok(j.botId) && ok(j.hostId) && hostName) return { computerId: j.computerId, botId: j.botId, hostId: j.hostId, hostName };
     throw new AddFileError("The file couldn't be added. Try again.", 502);
   }
   if (got.status === 404 && said === "Not found") throw new AddFileError(CLOUD_OLD, 409);
+  if ((got.status === 404 && said === "No such workspace") || got.status === 401) throw new AddFileError(GONE_FROM_WS, 404);
   if (got.status === 404) throw new AddFileError("That bot isn't in this workspace anymore.", 404);
   throw new AddFileError(said || "The file couldn't be added. Try again.", got.status >= 400 && got.status < 500 ? got.status : 502);
 }
 
 /**
+ * In a workspace shared with the user, their role there (lib/server/shared.ts sharedRole): Orgo's refusals are said as
+ * theirs (orgoNo), and nothing of the user's own billing is touched. Unset: the user's own workspace.
+ */
+export type SharedAs = { role: "admin" | "member" };
+
+/**
  * Orgo turning a file down (its uploads, or the command on the computer first), said plainly, or null for Orgo's own
  * words: the owner keeping the user off this computer (bops_owner_only), a key for another workspace, a locked
- * computer, and in a shared workspace Orgo letting only its owner and Admins add files (its own "Access denied").
+ * computer, and in a shared workspace any other refusal: for a Member, that Orgo lets only the owner and Admins add
+ * files (its uploads take write access to the project, which a Member never has); for an Admin, who has it, that Orgo
+ * didn't let them reach that computer (one outside the workspace's project, a key that may not use computers).
  */
-function orgoNo(status: number, code: string | undefined, hostName: string, shared: boolean): AddFileError | null {
+function orgoNo(status: number, code: string | undefined, hostName: string, shared: SharedAs | undefined): AddFileError | null {
   if (code === "bops_owner_only") return new AddFileError("The owner hasn't let you use this computer, so files can't go on it.", 403);
   if (code === "workspace_scope_mismatch") return new AddFileError("Your Orgo key only works in another workspace. Sign in to Orgo again in Bops.", 403);
   if (status === 402) return new AddFileError(`${hostName}'s computer is locked on Orgo right now, so files can't go on it.${shared ? " The owner can unlock it on Orgo." : " Check your plan on Orgo."}`, 402);
-  if (status === 403 && shared) return new AddFileError("Orgo lets only the owner and Admins of this workspace add files to its computers.", 403);
+  if (status === 403 && shared?.role === "member" && !code) return new AddFileError("Orgo lets only the owner and Admins of this workspace add files to its computers.", 403);
+  if (status === 403 && shared) return new AddFileError(`Orgo didn't let you reach ${hostName}'s computer, so files can't go on it.`, 403);
   return null;
 }
 
@@ -164,7 +176,7 @@ const fromOrgo = (e: unknown): Pick<OrgoError, "status" | "code"> | null =>
  * own computer: a shared one's owner's credit is never the user's, so their own Bops isn't told it ran out), Orgo
  * refusing it (orgoNo), else that it didn't wake.
  */
-const notAwake = (e: unknown, hostName: string, shared: boolean) => {
+const notAwake = (e: unknown, hostName: string, shared: SharedAs | undefined) => {
   const why = shared ? undefined : (freeHoursUsed(e) ?? computerOutOfCredit(e));
   if (why) return new AddFileError(why, 402);
   const o = fromOrgo(e);
@@ -190,10 +202,10 @@ export function addFile(b: Bot, rawName: string, size: number, body: ReadableStr
 /**
  * Add a file at the computer `where` names (asked once the file's name and size are fine; it throws an AddFileError to
  * refuse): `size` bytes from `body`, named `rawName`. `shared`: that computer is the owner's, in a workspace shared with
- * the user (sharedTarget), so Orgo's refusals are said as theirs and nothing of the user's own billing is touched.
- * Answers what was added, or throws an AddFileError saying why not.
+ * the user (sharedTarget), with their role there (SharedAs), so Orgo's refusals are said as theirs and nothing of the
+ * user's own billing is touched. Answers what was added, or throws an AddFileError saying why not.
  */
-export async function addFileTo(rawName: string, size: number, body: ReadableStream<Uint8Array>, where: () => Promise<FileTarget>, { shared = false } = {}): Promise<AddedFile> {
+export async function addFileTo(rawName: string, size: number, body: ReadableStream<Uint8Array>, where: () => Promise<FileTarget>, { shared }: { shared?: SharedAs } = {}): Promise<AddedFile> {
   const stream = Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]);
   const refuse = (e: AddFileError) => {
     stream.destroy();

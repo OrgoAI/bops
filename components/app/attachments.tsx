@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type DragEvent } from "react"
 import { createPortal } from "react-dom";
 import { ATTACH_MAX, FILE_MAX, fileSize, isPicture, type AddedFile } from "@/lib/added-files";
 import type { Message } from "@/lib/types";
-import { readAllowed } from "./view-only";
+import { readAllowed, sendRefused } from "./view-only";
 
 /**
  * Images and files in chat: attaching them (the + button, pasting, dropping), the tray of what's about to be
@@ -40,15 +40,19 @@ export const STOPPED = "stopped";
 /**
  * Put `file` on the Desktop of the computer bot `botId` works on (POST /api/bots/files, the bytes as they are),
  * saying how much has gone up. `screen`: dropped on that computer's own screen. `signal` stops it (the upload too,
- * so nothing arrives), rejecting with STOPPED. Answers the added file, or throws with what went wrong in words.
+ * so nothing arrives), rejecting with STOPPED. Held to the window's guard as a fetch is (view-only.ts sendRefused:
+ * XMLHttpRequest isn't wrapped). Answers the added file, or throws with what went wrong in words.
  */
 export function sendFile(botId: string, file: File, onProgress?: (part: number) => void, { signal, screen = false }: { signal?: AbortSignal; screen?: boolean } = {}): Promise<AddedFile> {
   return new Promise((resolve, reject) => {
     if (file.size > FILE_MAX) return reject(new Error("Too big. 2 GB at most."));
     if (!file.size) return reject(new Error("That file is empty."));
     if (signal?.aborted) return reject(new Error(STOPPED));
+    const url = `/api/bots/files?botId=${encodeURIComponent(botId)}&name=${encodeURIComponent(file.name)}${screen ? "&to=screen" : ""}`;
+    const no = sendRefused("POST", url);
+    if (no) return reject(new Error(no));
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/bots/files?botId=${encodeURIComponent(botId)}&name=${encodeURIComponent(file.name)}${screen ? "&to=screen" : ""}`);
+    xhr.open("POST", url);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
     xhr.onload = () => {
@@ -103,6 +107,17 @@ async function prepare(file: File): Promise<{ dataUrl: string; type: string; w: 
 }
 
 /**
+ * How a file added to the message box goes (useAttachments): a picture the model can look at as one ("image"); any other
+ * file (a PDF, a sheet, a HEIC photo) where `botId` works ("file"); none without a bot to put it with (null). A picture
+ * in another format goes as one only without a bot. `onlyFiles`: every one as a file, a picture too (a workspace shared
+ * with the user, where a picture for the model would stay on this Mac).
+ */
+export function attachKind(type: string, botId: string | undefined, onlyFiles = false): "image" | "file" | null {
+  if (!onlyFiles && (isPicture(type) || (type.startsWith("image/") && !botId))) return "image";
+  return botId ? "file" : null;
+}
+
+/**
  * The images and files about to be sent with a message: each starts uploading as soon as it's added (a file to
  * where `target()` works: the chat's bot, or the group's main bot). A file is for its bot's chats only (ChatView
  * shows and sends only those); taking one out (×) stops its upload. `asFiles()`: every one goes as a file, a picture
@@ -137,14 +152,13 @@ export function useAttachments(target?: () => string | undefined, { asFiles }: {
     const botId = to.current?.();
     const onlyFiles = !!filesOnly.current?.();
     // Ten at most: one past that is not added, or uploaded.
-    const fresh = [...files].filter((f) => (!onlyFiles && (isPicture(f.type) || f.type.startsWith("image/"))) || !!botId).slice(0, Math.max(0, ATTACH_MAX - live.current.length));
+    const fresh = [...files].filter((f) => attachKind(f.type, botId, onlyFiles)).slice(0, Math.max(0, ATTACH_MAX - live.current.length));
     const keys: string[] = [];
     const set = (key: string, patch: Partial<Attachment>) => setItems((xs) => xs.map((x) => (x.key === key ? { ...x, ...patch } : x)));
     for (const file of fresh) {
       const key = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       keys.push(key);
-      // A picture the model can look at goes as one; any other file (a PDF, a sheet, a HEIC photo) where the bot works.
-      const picture = !onlyFiles && (isPicture(file.type) || (file.type.startsWith("image/") && !botId));
+      const picture = attachKind(file.type, botId, onlyFiles) === "image";
       const preview = picture ? URL.createObjectURL(file) : undefined;
       const stop = picture ? undefined : new AbortController();
       if (stop) stops.current.set(key, stop);

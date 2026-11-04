@@ -42,7 +42,8 @@ export async function POST(request: Request) {
     // Bops Cloud checks the act itself (cloud/members.ts cleanAct); the key only needs to be one it takes.
     const key = typeof body.key === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(body.key) ? body.key : randomUUID().replace(/-/g, "");
     const act = withFiles(body.act as MemberAct);
-    if (!act) return Response.json({ error: "A file you added isn't ready anymore. Add it again." }, { status: 409 });
+    // (`unsent`: nothing of it is kept to try again, so the window puts the words back in the box.)
+    if (!act) return Response.json({ error: "A file you added isn't ready anymore. Add it again.", unsent: true }, { status: 409 });
     const r = await actShared(act, key);
     return r.ok ? Response.json(r) : Response.json({ error: r.error, ...(r.code ? { code: r.code } : {}) }, { status: r.status || 502 });
   }
