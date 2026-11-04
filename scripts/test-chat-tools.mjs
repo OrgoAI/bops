@@ -2039,7 +2039,7 @@ await check("files added with a message (lib/server/bot-files.ts): kept on it, a
   answers.length = 0;
   answers.push(reply("Reading it now."));
   let n = asked.length;
-  const files = [{ id: "file_t1", name: "plan.pdf", size: 2048, where: "computer", path: "~/Desktop/plan.pdf", botId: "boppy" }];
+  const files = [{ id: "file_t1", name: "plan.pdf", size: 2048, path: "~/Desktop/plan.pdf", botId: "boppy", hostId: "boppy", hostName: "Boppy" }];
   const mine = await Chat.handleMessage(chatId, "what does this say?", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, files);
   assert.deepEqual(mine.files, files, "kept on the message");
   const note = "[Alex added a file to your computer's Desktop: ~/Desktop/plan.pdf (2 KB). Open it there.]";

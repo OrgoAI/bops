@@ -586,7 +586,13 @@ export function ChatView({
     const t = setTimeout(() => setMicError(null), 6000);
     return () => clearTimeout(t);
   }, [micError]);
-  const attaching = attach.items.filter((a) => a.status !== "failed");
+  // What's in this chat's box: images, and the files added for one of its bots (a file added in another chat stays
+  // there, still uploading, for when you go back).
+  const tray = attach.items.filter((a) => a.kind === "image" || (!!a.botId && c.botIds.includes(a.botId)));
+  const attaching = tray.filter((a) => a.status !== "failed");
+  // Messages go to the server in the order they were sent, each after the one before (one waiting on a big file holds
+  // the next back, so the bot never answers the next before the file's there).
+  const sending = useRef(new Map<string, Promise<unknown>>());
   const send = async () => {
     const text = draft.trim();
     if (!text && !attaching.length) return;
@@ -611,10 +617,10 @@ export function ChatView({
     const aboutApp = items.some((a) => fromApp.current.keys.has(a.key)) || [...fromApp.current.lines.keys()].some((l) => text.includes(l));
     fromApp.current = { keys: new Set(), lines: new Map() };
     // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
-    const previews = attach.items.flatMap((a) => (a.preview ? [a.preview] : []));
+    const previews = tray.flatMap((a) => (a.preview ? [a.preview] : []));
     setDraft("");
     setReplying(null);
-    attach.clear();
+    attach.release(tray.map((a) => a.key));
     const pics = items.flatMap((a) => (a.preview ? [a.preview] : []));
     const filed = items.filter((a) => a.kind === "file").map((a) => ({ name: a.name, size: a.size }));
     const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), previews: pics.length ? pics : undefined, files: filed.length ? filed : undefined };
@@ -624,15 +630,27 @@ export function ChatView({
     };
     setPending((p) => [...p, mine]);
     setSent((s) => [...s.slice(-19), { chatId: c.id, text, at: mine.at }]);
-    // Shows at once; goes once its images and files have finished uploading (usually they already have).
-    const got = await Promise.all(items.map((a) => a.done));
-    const images = got.flatMap((x) => (x && "pic" in x ? [x.pic] : []));
-    const files = got.flatMap((x) => (x && "file" in x ? [x.file.id] : []));
-    if (!text && !images.length && !files.length) return drop();
     // Only a pick the bot can run now goes; one that can't anymore is let go (boxAgents).
     const pick = solo && agentPicks[c.id] ? boxAgents(state, solo, agentPicks[c.id], boxKeys).picked?.id : undefined;
     if (agentPicks[c.id] && !pick) dropPick();
-    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined, files: files.length ? files : undefined, lookingAt: looking?.id, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) }).finally(drop);
+    const chatId = c.id;
+    const replyTo = replying?.id;
+    const lookingAt = looking?.id;
+    // Shows at once; goes once its images and files have finished uploading (usually they already have), after the
+    // message sent before it. One that didn't make it says so under the box.
+    const go = async () => {
+      const got = await Promise.all(items.map((a) => a.done));
+      const images = got.flatMap((x) => (x && "pic" in x ? [x.pic] : []));
+      const files = got.flatMap((x) => (x && "file" in x ? [x.file.id] : []));
+      const failed = got.flatMap((x) => (x && "failed" in x ? [x.failed] : []));
+      if (failed.length) setMicError(failed.length === 1 ? `${failed[0].name} didn't go: ${failed[0].error}` : `${failed.length} of them didn't go: ${failed[0].error}`);
+      if (!text && !images.length && !files.length) return drop();
+      await post(`/api/chats/${encodeURIComponent(chatId)}/messages`, { text, replyTo, images: images.length ? images : undefined, files: files.length ? files : undefined, lookingAt, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) }).finally(drop);
+    };
+    const before = sending.current.get(chatId) ?? Promise.resolve();
+    const mineGoes = before.catch(() => {}).then(go);
+    sending.current.set(chatId, mineGoes);
+    await mineGoes.finally(() => sending.current.get(chatId) === mineGoes && sending.current.delete(chatId));
   };
   const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])];
   // Sent messages the server's state doesn't have yet.
@@ -1024,7 +1042,7 @@ export function ChatView({
             }}
             className={`flex flex-col rounded-[22px] bg-white py-2 ${state.shared ? "pl-4" : "pl-2"} pr-2 shadow-[0_0_0_1px_#E2E2DF]`}
           >
-            <AttachmentTray items={attach.items} onRemove={attach.remove} />
+            <AttachmentTray items={tray} onRemove={attach.remove} />
             <div className="flex items-end gap-2">
             {/* No pictures in a shared workspace: they'd stay on this Mac (view-only.ts uploads). */}
             {!state.shared && (
@@ -1850,7 +1868,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             {balloons}
             <div className={`flex flex-col gap-1 ${outgoing ? "items-end" : "items-start"}`}>
               {!!m.images?.length && <MessageImages images={m.images} align={outgoing ? "end" : "start"} />}
-              {!!m.files?.length && <MessageFiles files={m.files} botName={state.bots.find((x) => x.id === m.files![0].botId)?.name} align={outgoing ? "end" : "start"} />}
+              {!!m.files?.length && <MessageFiles files={m.files} align={outgoing ? "end" : "start"} />}
               {m.text && (
                 <div className={`select-text whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${outgoing ? "bg-ink text-white" : "bg-white text-ink shadow-[0_0_0_1px_#E2E2DF]"}`}><AddressBreaks text={m.text} /></div>
               )}

@@ -8,8 +8,9 @@ export const dynamic = "force-dynamic";
 
 /**
  * Add a file for a bot (lib/server/bot-files.ts): POST /api/bots/files?botId=…&name=…, the file's bytes as the
- * body, its length in Content-Length. It goes on the Desktop of the computer the bot works on (or, for a bot that
- * works on this Mac, in the user's folder here). Answers { file } for the message it goes with.
+ * body, its length in Content-Length. It goes on the Desktop of the computer the bot works on. `to=screen`: dropped
+ * on that computer's screen (useScreenDrop), so it goes there even for a bot set to work on the Mac. Answers
+ * { file } for the message it goes with.
  *
  * proxy.ts leaves this path to its route, which streams the body instead of Next copying it for the proxy (which
  * keeps 10 MB at most), so the same guard (lib/api-guard.ts) runs here first. Never in a shared workspace: its
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
   const size = Number(request.headers.get("content-length") ?? NaN);
   if (!request.body) return Response.json({ error: "That file is empty." }, { status: 400 });
   try {
-    return Response.json({ file: await addFile(b, q.get("name") ?? "", size, request.body) });
+    return Response.json({ file: await addFile(b, q.get("name") ?? "", size, request.body, { screen: q.get("to") === "screen" }) });
   } catch (e) {
     const status = e instanceof AddFileError ? e.status : 500;
     return Response.json({ error: e instanceof AddFileError ? e.message : "The file couldn't be added. Try again." }, { status });

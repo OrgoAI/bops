@@ -44,12 +44,17 @@ globalThis.document = { hidden: false, addEventListener() {}, removeEventListene
 
 /** A stand-in XMLHttpRequest: what was sent, and the answer each test sets. */
 const xhrs = [];
-let answer = { status: 200, body: { file: { id: "file_1", name: "plan.pdf", size: 4, where: "computer", path: "~/Desktop/plan.pdf", botId: "max" } } };
+const PLAN = { id: "file_1", name: "plan.pdf", size: 4, path: "~/Desktop/plan.pdf", botId: "max", hostId: "max", hostName: "Max" };
+let answer = { status: 200, body: { file: PLAN } };
 class FakeXHR {
   constructor() {
     this.headers = {};
     this.upload = {};
     xhrs.push(this);
+  }
+  abort() {
+    this.aborted = true;
+    this.onabort?.();
   }
   open(method, url) {
     this.method = method;
@@ -61,6 +66,7 @@ class FakeXHR {
   send(body) {
     this.body = body;
     queueMicrotask(() => {
+      if (this.aborted) return;
       if (answer === "down") return this.onerror?.();
       this.upload.onprogress?.({ lengthComputable: true, loaded: 2, total: 4 });
       this.upload.onprogress?.({ lengthComputable: true, loaded: 4, total: 4 });
@@ -74,7 +80,7 @@ globalThis.XMLHttpRequest = FakeXHR;
 
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
-const { AttachmentTray, MessageFiles, ScreenDrops, sendFile } = await import(`${root}/components/app/attachments.tsx`);
+const { AttachmentTray, MessageFiles, ScreenDrops, sendFile, STOPPED } = await import(`${root}/components/app/attachments.tsx`);
 
 let passed = 0;
 let failed = 0;
@@ -116,7 +122,20 @@ await check("sendFile: too big says so before anything goes; the server's words 
   await assert.rejects(sendFile("max", new File(["x"], "a.txt")), /Couldn't add this file/);
   answer = "down";
   await assert.rejects(sendFile("max", new File(["x"], "a.txt")), /Couldn't reach Bops/);
-  answer = { status: 200, body: { file: { id: "file_1", name: "plan.pdf", size: 4, where: "computer", path: "~/Desktop/plan.pdf", botId: "max" } } };
+  answer = { status: 200, body: { file: PLAN } };
+});
+
+await check("sendFile: stopped (the file taken out) stops the upload and says only that; a screen drop says so in the address", async () => {
+  xhrs.length = 0;
+  const stop = new AbortController();
+  const going = sendFile("max", new File(["abcd"], "a.pdf"), undefined, { signal: stop.signal });
+  stop.abort();
+  await assert.rejects(going, (e) => e.message === STOPPED);
+  assert.ok(xhrs[0].aborted, "the request itself stopped");
+  await assert.rejects(sendFile("max", new File(["x"], "b.pdf"), undefined, { signal: stop.signal }), (e) => e.message === STOPPED, "already stopped: never sent");
+  assert.equal(xhrs.length, 1);
+  await sendFile("max", new File(["abcd"], "c.pdf"), undefined, { screen: true });
+  assert.match(xhrs.at(-1).url, /&to=screen$/);
 });
 
 await check("the message box: a file's tile says its name and how far it is, then its size and where, or why not", () => {
@@ -124,8 +143,7 @@ await check("the message box: a file's tile says its name and how far it is, the
   const row = (a) => text(renderToStaticMarkup(h(AttachmentTray, { items: [a], onRemove: () => {} })));
   assert.match(row({ ...base, status: "uploading", progress: 0.42 }), /Q3 report\.pdf Uploading 42%/);
   assert.match(row({ ...base, status: "uploading", progress: 1 }), /Putting it on its computer…/);
-  assert.match(row({ ...base, status: "ready", progress: 1, file: { where: "computer" } }), /Q3 report\.pdf 3\.2 MB · on its computer/);
-  assert.match(row({ ...base, status: "ready", file: { where: "mac" } }), /3\.2 MB · on your Mac/);
+  assert.match(row({ ...base, status: "ready", progress: 1, file: PLAN }), /Q3 report\.pdf 3\.2 MB · on Max's computer/);
   assert.match(row({ ...base, status: "failed", error: "Too big. 2 GB at most." }), /Too big\. 2 GB at most\./);
   const html = renderToStaticMarkup(h(AttachmentTray, { items: [{ ...base, status: "ready" }], onRemove: () => {} }));
   assert.match(html, /aria-label="Remove Q3 report\.pdf"/);
@@ -136,14 +154,13 @@ await check("a sent message's files: name, size, and where they are", () => {
   const html = renderToStaticMarkup(
     h(MessageFiles, {
       files: [
-        { name: "plan.pdf", size: 2048, where: "computer" },
-        { name: "b.csv", size: 10, where: "mac" },
+        { name: "plan.pdf", size: 2048, hostName: "Max" },
+        { name: "b.csv", size: 10, hostName: "Rex" },
       ],
-      botName: "Max",
     }),
   );
   assert.match(text(html), /plan\.pdf 2 KB · on Max's computer's Desktop/);
-  assert.match(text(html), /b\.csv 10 bytes · on your Mac/);
+  assert.match(text(html), /b\.csv 10 bytes · on Rex's computer's Desktop/);
   assert.match(text(renderToStaticMarkup(h(MessageFiles, { files: [{ name: "c.txt", size: 5 }] }))), /^c\.txt 5 bytes$/, "a pending one, before it's sent: no where yet");
   assert.equal(renderToStaticMarkup(h(MessageFiles, { files: [] })), "");
 });
@@ -178,6 +195,11 @@ await check("the chat's box takes any file, and the message names the files it a
   assert.match(chat, /aria-label="Add images or files"/);
   assert.match(chat, /files: files\.length \? files : undefined/, "the message names them by id");
   assert.match(chat, /useAttachments\(\(\) => \(state\.shared \? undefined : fileBot\?\.id\)\)/, "never in a shared workspace");
+  assert.match(chat, /const tray = attach\.items\.filter\(\(a\) => a\.kind === "image" \|\| \(!!a\.botId && c\.botIds\.includes\(a\.botId\)\)\)/, "a file shows and goes only in its bot's chats");
+  assert.match(chat, /<AttachmentTray items=\{tray\}/);
+  assert.match(chat, /attach\.release\(tray\.map/, "sending lets go only this chat's");
+  assert.match(chat, /didn't go: \$\{failed\[0\]\.error\}/, "one that failed after Send says so");
+  assert.match(chat, /const mineGoes = before\.catch\(\(\) => \{\}\)\.then\(go\)/, "each message after the one before");
   const computer = readFileSync(`${root}/components/app/computer.tsx`, "utf8");
   assert.match(computer, /useScreenDrop\(hasComputer && !mac \? b\.id : undefined\)/, "a cloud computer's screen only");
 });

@@ -456,6 +456,12 @@ function deeds(m: Message) {
   return out.length ? `\n[What was done: ${out.join("; ")}]` : "";
 }
 
+/** The bot whose computer bot `id` works on (its own, or the main bot's it shares): where files added for it are. */
+const filesHostOf = (botId: string | undefined) => {
+  const b = botId ? bot(botId) : undefined;
+  return b ? workComputer(b).id : undefined;
+};
+
 /** How many of a chat's most recent messages with images send the images themselves (older ones just say so). */
 const IMAGES_SHOWN = 3;
 
@@ -530,6 +536,8 @@ function history(chatId: string, selfId: string | undefined, opts: { unattended?
   const owner = ownerName();
   const name = (by: string | undefined) => (by === "owner" || !by ? owner : (bot(by)?.name ?? "Bot"));
   const brief = (t: string) => (t.length > 80 ? `${t.slice(0, 80)}…` : t);
+  // The computer the bot reading this works on: files added on it are on "your computer's" Desktop, others named.
+  const readerHost = filesHostOf(selfId);
   const ownerLast = opts.unattended ? all.findLastIndex(fromOwner) : -1;
   const said = all.filter((m, i) => heard(m) && !(opts.unattended && fromOutside(m) && i > ownerLast));
   const read = windowOf(chatId, said);
@@ -584,8 +592,8 @@ function history(chatId: string, selfId: string | undefined, opts: { unattended?
       const did = m.role === "bot" ? deeds(m) : "";
       // What Select picked on an app's page, in the owner's words: where each is in the page's code (Message.picks).
       const code = m.picks?.length ? ` [Bops: in the page's code, ${m.picks.map((p) => `${p.line} is ${p.code}`).join("; ")}]` : "";
-      // Files the user added with it (Message.files): where they are, for the bot to open.
-      const filed = m.role === "user" && m.files?.length ? ` ${filesNote(m.files, m.member?.name ?? owner)}` : "";
+      // Files the user added with it (Message.files): where they are, for the bot to open (on its computer, or another's).
+      const filed = m.role === "user" && m.files?.length ? ` ${filesNote(m.files, m.member?.name ?? owner, readerHost)}` : "";
       const text = `${m.via === "sms" ? "[by text message] " : m.via ? `[in ${m.via[0].toUpperCase()}${m.via.slice(1)}] ` : ""}${quote}${m.text}${filed}${code}${reacted}${did}`;
       // The user's images, as images the model can look at (recent ones; older ones are just mentioned).
       if (m.role === "user" && m.images?.length) {
@@ -652,8 +660,9 @@ export async function handleMessage(
   // Into the shared memory (unless the user wants it kept from someone), and remembered if it's a lasting fact. A
   // member's words go in as theirs, so nothing they say about themselves is taken for the owner.
   const words = member ? `${member.name} said: ${text}` : text;
-  // Files added with it, where the bot can open them: what it's told (here and in a thread it goes to).
-  const filed = files?.length ? filesNote(files, member?.name ?? ownerName()) : "";
+  // Files added with it, where the bot can open them: what it's told (here and in a thread it goes to: one of this
+  // chat's bot's, in a bot's own chat; in a group, any bot's, so the note names the computer they're on).
+  const filed = files?.length ? filesNote(files, member?.name ?? ownerName(), c.kind === "bot" ? filesHostOf(c.botIds[0]) : undefined) : "";
   // (A bot's own chat goes to its memory scope: its own bank while it keeps its memory to itself. A group's, the team's.)
   rememberMessage(c.kind === "bot" ? scopeOf(c.botIds[0]) : wsOf(c.botIds[0]), chatId, mine.id, `${words}${images?.length ? ` [attached ${images.length} image${images.length === 1 ? "" : "s"}]` : ""}${files?.length ? ` [added ${files.map((f) => f.name).join(", ")}]` : ""}`.trim(), { chat: chatName(chatId) }, member);
   // A follow-up to work already under way goes into that thread instead of starting another (not one
@@ -2855,10 +2864,11 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // A task started from a message with images: it gets where the images are (files on the user's Mac;
     // a cloud computer can't open them, so the goal has to say what's in them).
     const pics = (answering?.images ?? []).map((i) => uploadPath(i.id)?.path).filter(Boolean) as string[];
-    // And the files added with it, where they are (on the computer the task works on, or this Mac).
-    const addedNote = answering?.files?.length ? `\n\n${filesNote(answering.files, answering.member?.name ?? owner)}` : "";
-    const withImages = (goal: string) =>
-      (pics.length ? `${goal}\n\n${pics.length === 1 ? "An image" : `${pics.length} images`} attached by ${owner} (files on their Mac; a cloud computer can't open them): ${pics.join(", ")}` : goal) + addedNote;
+    // And the files added with it: on the computer the task works on (`host`: the bot whose computer that is, or
+    // "mac"), or on another bot's, named.
+    const withImages = (goal: string, host: string | undefined) =>
+      (pics.length ? `${goal}\n\n${pics.length === 1 ? "An image" : `${pics.length} images`} attached by ${owner} (files on their Mac; a cloud computer can't open them): ${pics.join(", ")}` : goal) +
+      (answering?.files?.length ? `\n\n${filesNote(answering.files, answering.member?.name ?? owner, host)}` : "");
     const sessionIds: string[] = [];
     // Parts started together in this turn (start_task part_of), by their name: one group each.
     const groups = new Map<string, { id: string; title: string }>();
@@ -2930,7 +2940,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           const w = appWork(botId, { app: a.app ?? own?.app ?? null, name: a.name ?? null, change: a.change ?? "", deploy });
           // (The site it works on: the Local it runs and checks.)
           const app = { wsId: workspaceOf(b), name: w.name, site: w.site };
-          const task = startSession({ botId, goal: withImages(w.goal), title: w.title, chatId, sentVia: "you", where: "cloud", app: deploy ? { ...app, deployAfter: true } : app });
+          const task = startSession({ botId, goal: withImages(w.goal, filesHostOf(botId)), title: w.title, chatId, sentVia: "you", where: "cloud", app: deploy ? { ...app, deployAfter: true } : app });
           // Asked of a task already on the app (sessions.ts foldInto): that one puts it live after, too.
           if (deploy) askDeploy(task.id, app);
           sessionIds.push(task.id);
@@ -3019,14 +3029,14 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           const named = member || opts.outside ? undefined : agentNamed(b, getState(), args.agent);
           if (args.agent && !named && !member) notes.push(`No agent called "${args.agent}", so "${args.title}" runs on ${b.name}'s Default`);
           const picks = member || opts.outside ? [] : [ownerPick(chatId), named?.id];
-          sessionIds.push(startSession({ botId, goal: withImages(args.goal), title: args.title, chatId, sentVia: "you", ...place, group: groupOf(args.part_of), ...(procedure ? { procedure } : {}), agents: picks }).id);
+          sessionIds.push(startSession({ botId, goal: withImages(args.goal, place.where === "mac" ? "mac" : filesHostOf(botId)), title: args.title, chatId, sentVia: "you", ...place, group: groupOf(args.part_of), ...(procedure ? { procedure } : {}), agents: picks }).id);
         }
       }
       // Only to a teammate it was offered (handTo: under it on the team chart, and on a member's turn a bot they have
       // at Write), whatever the model says (workRefused said why and noted it).
       if (item.name === "hand_off" && args.bot_id && !handTo.some((o) => o.id === args.bot_id)) continue;
       else if (item.name === "hand_off" && args.bot_id) {
-        const s = startSession({ botId: args.bot_id, goal: withImages(args.goal), title: args.title, chatId, sentVia: botId, viaBot: true, ...place });
+        const s = startSession({ botId: args.bot_id, goal: withImages(args.goal, place.where === "mac" ? "mac" : filesHostOf(args.bot_id)), title: args.title, chatId, sentVia: botId, viaBot: true, ...place });
         sessionIds.push(s.id);
         addMessage({ chatId: botChatId(args.bot_id), role: "system", from: botId, text: `${b.name} handed this to ${bot(args.bot_id)?.name}`, sessionIds: [s.id] });
       }
