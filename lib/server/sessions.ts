@@ -30,7 +30,7 @@ import { applyDesktop } from "./desktop";
 import { computerBriefing } from "./briefing";
 import { ASKING, tidyAnswer, withBriefing, WRITING } from "./style";
 import { accountsOf, APP_TOOLS, appsKeyFor, bopsAddress, composioOn, findAppActions, runAppAction } from "./composio";
-import { askFor, declined, NeedsOk, Paused, stopAsks, takeAnswer, type AskSpec } from "./permission";
+import { askFor, declined, declinedStep, NeedsOk, Paused, stopAsks, takeAnswer, type AskSpec } from "./permission";
 import { appsNote, placesNote } from "./skills";
 import { copySkillsToComputer, countUse, findSkill, skillsFor, skillsIndexNote, skillsNote, skillText } from "./workspace-skills";
 import { appMcp, appsComputerGone, askDeploy, changeCardAfterTask, deployAfterTask, previewAfterTask, readyAppForTask } from "./hosted-apps";
@@ -3628,7 +3628,7 @@ async function answerPausedCall(sessionId: string, agentSessionId: string, a: Ap
   const r = a.resume;
   const call = { call_id: r.callId, turn_id: r.turnId };
   if (a.reply?.reply === "reject") {
-    step(sessionId, "note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    step(sessionId, "note", declinedStep(a));
     return void (await toolResult(agentSessionId, call, declined(a)));
   }
   const output = await agentTool(sessionId, a.botId, r.call.name, argsOf(r.call), { approved: true }).catch((e: Error) => `Failed: ${e.message}`);

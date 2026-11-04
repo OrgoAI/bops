@@ -590,6 +590,20 @@ await check("a POST asks the user, every time, even on Just do it: the chat turn
   assert.equal(outputOf(asked[a1 + 1]), "Declined: Archive the customer instead");
   assert.equal(messages().at(-1).text, "Boppy didn't do it: Archive the customer instead");
   assert.equal(brokerCalls().length, k);
+  // A no from someone else (an Admin or a member answering in their own Bops) is said as theirs, never the owner's.
+  answers.push(calling(toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "DELETE", path: "/v1/customers/cus_3", query: null, body: null })), reply("Ok, I won't."));
+  const a2 = asked.length;
+  await Chat.handleMessage(chatId, "delete cus_3");
+  assert.equal(P.replyToAsk(S.getState().appApprovals.at(-1).id, "reject", undefined, { userId: "user_ada", name: "Ada" }), undefined);
+  await until(() => asked.length === a2 + 2 && messages().some((m) => m.text === "Ok, I won't."), "the turn to go on from Ada's no");
+  assert.equal(outputOf(asked[a2 + 1]), "Declined: Ada said no. Don't do it, and don't do it another way.");
+  assert.equal(messages().filter((m) => m.role === "system").at(-1).text, "Boppy didn't do it: Ada said no. Don't do it, and don't do it another way.");
+  // A task's step says who: "Declined by Ada", or "Declined by you" for the owner's own no.
+  assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1, member: { userId: "user_ada", name: "Ada" } } }), "Declined by Ada: Ada said no. Don't do it, and don't do it another way.");
+  assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1 } }), "Declined by you: Alex said no. Don't do it, and don't do it another way.");
+  // A name is said as it is, whatever it holds ($& and the like mean nothing in it).
+  assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1, member: { userId: "user_x", name: "Ada $&" } } }), "Declined by Ada $&: Ada $& said no. Don't do it, and don't do it another way.");
+  assert.equal(brokerCalls().length, k);
   S.update(() => (S.bot("boppy").autoApprove = undefined));
 });
 

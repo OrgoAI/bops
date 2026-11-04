@@ -6,7 +6,7 @@ import { openaiClient } from "./openai-client";
 import { sleptSince } from "./awake";
 import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
-import { askFor, declined, NeedsOk, Paused, type AskSpec } from "./permission";
+import { askFor, declined, declinedStep, NeedsOk, Paused, type AskSpec } from "./permission";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
@@ -297,7 +297,7 @@ async function answerPaused(t: ComputerTurn, a: AppApproval, call: { name: strin
       if (owed) owed.output = output;
     });
   if (a.reply?.reply === "reject") {
-    t.step("note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    t.step("note", declinedStep(a));
     keep(declined(a));
     return { type: "function_call_output", call_id: callId, output: declined(a) };
   }

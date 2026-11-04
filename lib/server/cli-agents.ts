@@ -880,11 +880,13 @@ export async function approveTool(botId: string, sessionId: string, args: Record
       },
     );
     if (typeof answer !== "string" && answer.reply !== "reject") return JSON.stringify({ behavior: "allow" });
+    // Named as whoever answered (an Admin or a member in their own Bops), the owner otherwise.
+    const who = typeof answer !== "string" ? answer.member?.name?.trim() || owner : owner;
     const why =
       typeof answer !== "string"
         ? answer.message
-          ? `${owner} said no: ${answer.message}`
-          : `${owner} said no. Don't do it, and don't do it another way.`
+          ? `${who} said no: ${answer.message}`
+          : `${who} said no. Don't do it, and don't do it another way.`
         : answer === "late"
           ? `${owner} didn't answer in time, so it wasn't done. Don't do it another way: say in your answer what you needed.`
           : "This task was stopped.";
