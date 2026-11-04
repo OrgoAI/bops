@@ -77,7 +77,53 @@ export type AppHosting = {
    * it when the app passes to it). None while only its own bot works on it. They stay on the computer it leaves.
    */
   copies?: string[];
+  /**
+   * Its production is on GitHub (lib/server/github-mirror.ts): Ingot stays where it's worked on and previewed, and
+   * Publish puts what the Preview serves into `path` of `repo`'s `branch` with the owner's GITHUB_TOKEN, where that
+   * repo's own workflow deploys it. Unset, Publish deploys on Orgo as ever.
+   */
+  github?: GithubMirror;
 };
+
+/**
+ * Where an app's production lives on GitHub (AppHosting.github). `path`: the folder of the repo the app's files are
+ * ("" the whole repo). `keep`: the app's files that stay in Ingot alone (a path, or a folder ending in /), never sent
+ * to GitHub or taken from it. `dispatch`: a workflow to run after a push, for one that doesn't start on a push.
+ * `last`: where the two sides were the same as far as the mirror knows (the Ingot changeset and the GitHub commit
+ * of the last push or link): only what changed on each side since then goes across.
+ */
+export type GithubMirror = {
+  repo: string;
+  branch: string;
+  path: string;
+  keep?: string[];
+  dispatch?: { workflow: string; inputs?: Record<string, string> };
+  last?: { at: string; sha: string; when: number };
+};
+
+const GH_REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const GH_BRANCH = /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._/-]{1,200}$/;
+const GH_PATH = /^(?!.*\.\.)(?!\/)[A-Za-z0-9._/@ -]{0,300}$/;
+
+/** A GitHub mirror as the window sends it, cleaned, or why it won't do. `last` is the server's own (never taken from here). */
+export function cleanGithubMirror(v: unknown): { ok: Omit<GithubMirror, "last"> } | { why: string } {
+  const m = v as Partial<GithubMirror> | null;
+  const repo = typeof m?.repo === "string" ? m.repo.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "") : "";
+  if (!GH_REPO.test(repo)) return { why: "Which GitHub repo? Like OrgoAI/orgo-brandlord." };
+  const branch = typeof m?.branch === "string" && m.branch.trim() ? m.branch.trim() : "main";
+  if (!GH_BRANCH.test(branch)) return { why: "That isn't a branch name." };
+  const path = (typeof m?.path === "string" ? m.path.trim() : "").replace(/^\/+|\/+$/g, "");
+  if (!GH_PATH.test(path)) return { why: "That isn't a folder in the repo." };
+  const keep = Array.isArray(m?.keep) ? [...new Set(m.keep.filter((k): k is string => typeof k === "string").map((k) => k.trim().replace(/^\/+/, "")).filter((k) => k && GH_PATH.test(k)))].slice(0, 50) : [];
+  const w = m?.dispatch;
+  const workflow = typeof w?.workflow === "string" ? w.workflow.trim() : "";
+  if (workflow && !/^[A-Za-z0-9_.-]{1,100}\.ya?ml$/.test(workflow)) return { why: "That isn't a workflow file, like deploy.yml." };
+  const inputs =
+    w?.inputs && typeof w.inputs === "object"
+      ? Object.fromEntries(Object.entries(w.inputs).filter(([k, x]) => /^[A-Za-z0-9_-]{1,50}$/.test(k) && typeof x === "string" && x.length <= 200).slice(0, 10) as [string, string][])
+      : undefined;
+  return { ok: { repo, branch, path, ...(keep.length ? { keep } : {}), ...(workflow ? { dispatch: { workflow, ...(inputs && Object.keys(inputs).length ? { inputs } : {}) } } : {}) } };
+}
 
 /** A site's deploy project left on a computer the app moved off (AppHosting.behind). */
 export type AppProjectBehind = { site: string; computerId: string; projectId: string };
@@ -368,7 +414,9 @@ export type HostedAppAction =
   | { ws: string; action: "addSite" | "removeSite"; site: string }
   | { ws: string; action: "removeLeftOver"; project: string }
   | { ws: string; action: "preview"; site?: string; label?: string }
-  | { ws: string; action: "restore"; to: string };
+  | { ws: string; action: "restore"; to: string }
+  | { ws: string; action: "github"; github: Omit<GithubMirror, "last"> | null }
+  | { ws: string; action: "githubLink" };
 
 /**
  * GET /api/hosted-apps/[name]?ws=&restore=<to> (the owner's alone), for Restore's question before it's sent: every

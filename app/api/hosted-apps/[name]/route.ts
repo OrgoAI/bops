@@ -1,6 +1,6 @@
 import { appsOpen } from "@/lib/apps-access";
 import { appEnvOf } from "@/lib/hosted-apps";
-import { addSite, deployApp, HostedAppError, makePreview, promoteApp, reapplyApp, removeApp, removeLeftOver, removeSite, restoreApp, restoreConfirm, rollbackApp } from "@/lib/server/hosted-apps";
+import { addSite, deployApp, HostedAppError, linkGithubMirror, makePreview, promoteApp, reapplyApp, removeApp, removeLeftOver, removeSite, restoreApp, restoreConfirm, rollbackApp, setGithubMirror } from "@/lib/server/hosted-apps";
 import { notReady } from "@/lib/server/ready";
 import { sharedOpen } from "@/lib/server/shared";
 import { getState } from "@/lib/server/store";
@@ -19,7 +19,9 @@ export const dynamic = "force-dynamic";
  * "removeLeftOver" { project } one of its left overs; "preview" { site?, label? } its Preview's link made now,
  * with a name the owner chose ahead; "restore" { to } the whole app put back as it was at changeset `to`, as a new
  * changeset on main (hosted-apps.ts restoreApp: the owner's alone, never while a workspace shared with the user is
- * open). Answers { app }. A deploy makes the site public, so it's done only from the Bops window (ui-token.ts): never
+ * open); "github" { github: { repo, branch, path, keep?, dispatch? } | null } where its production is on GitHub, so
+ * Publish pushes there (lib/server/github-mirror.ts), and "githubLink" linking it there as both are now (the owner's
+ * alone too). Answers { app }. A deploy makes the site public, so it's done only from the Bops window (ui-token.ts): never
  * from a page a bot's browser reached this server with.
  */
 const notFromWindow = (request: Request, words = "Apps can only be deployed in the Bops app.") => (fromBopsWindow(request) ? null : Response.json({ error: words }, { status: 403 }));
@@ -80,6 +82,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
     if (b.action === "addSite") return Response.json(await addSite(wsId, name, b.site));
     if (b.action === "removeSite") return Response.json(await removeSite(wsId, name, b.site));
     if (b.action === "restore") return notOwner() ?? Response.json(await restoreApp(wsId, name, b.to));
+    // Where its production is on GitHub (null: Publish on Orgo again), and linking it there: the owner's alone.
+    if (b.action === "github") return (sharedOpen() ? Response.json({ error: "Only the owner can change where an app is published." }, { status: 403 }) : null) ?? Response.json(await setGithubMirror(wsId, name, b.github ?? null));
+    if (b.action === "githubLink") return (sharedOpen() ? Response.json({ error: "Only the owner can change where an app is published." }, { status: 403 }) : null) ?? Response.json(await linkGithubMirror(wsId, name));
     return Response.json({ error: "What should happen to it?" }, { status: 400 });
   } catch (e) {
     return answer(e);

@@ -657,7 +657,7 @@ export type IngotFile = { path: string; blob: string; size: number; executable: 
  * One change of a commit Ingot makes on its own (POST /repos/{name}/commit), with no bytes sent: a file set to a
  * blob the repo has already, its executable bit said (unsaid, Ingot keeps the one the file had), or a file deleted.
  */
-export type IngotChange = { path: string; blob: string; executable: boolean } | { path: string; delete: true };
+export type IngotChange = { path: string; blob: string; executable: boolean } | { path: string; delete: true } | { path: string; content_base64: string; executable: boolean };
 
 /**
  * The changes that make a changeset's files (`now`) the files of another (`want`), in path order: each file `want`
@@ -735,6 +735,21 @@ export const ingot = {
     const files = r.json.files.map(fileOf);
     if (files.some((f) => !f)) throw new IngotError(`Ingot listed ${name}'s files in a way this Bops doesn't know.`);
     return files as IngotFile[];
+  },
+  /**
+   * Every file of a repo's changeset `at` with a link to its bytes (GET /repos/{name}/manifest?at=): each link is
+   * presigned (no key; good for a few minutes), so fetch what's needed right away. Null when there's no such repo.
+   */
+  manifest: async (wsId: string, name: string, at: string, signal?: AbortSignal): Promise<(IngotFile & { url: string })[] | null> => {
+    if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
+    const r = await api<{ files?: unknown }>(wsId, "GET", `/repos/${name}/manifest?${new URLSearchParams({ at })}`, { signal });
+    if (r.status === 404) return null;
+    if (r.status !== 200 || !Array.isArray(r.json.files)) throw refusal(`Couldn't read ${name}'s files`, r);
+    return r.json.files.flatMap((v) => {
+      const f = fileOf(v);
+      const url = (v as { url?: unknown })?.url;
+      return f && typeof url === "string" && /^https?:\/\//.test(url) ? [{ ...f, url }] : [];
+    });
   },
   /**
    * A changeset Ingot makes on main itself (POST /repos/{name}/commit), on top of `base`, main's newest as it was
