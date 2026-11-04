@@ -30,7 +30,7 @@ import { undash } from "./side-group";
 import { SelectIcon, TickBar, TickRow, TrashIcon, UndoLine, useMessageDeletes, type Gone } from "./message-deletes";
 import { num, privacyOf } from "@/lib/privacy";
 import { compactBlocked } from "@/lib/chat-summary";
-import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, KeyAskCard, oneLine, type ApiCall } from "./keys";
+import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, KeyAskCard, oneLine, quietCall, type ApiCall } from "./keys";
 import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { AGENTS, aiOf, hasProfile, isCli, threadAgent, upper } from "@/lib/agents";
 import { AgentChip, AgentMark } from "./agent-marks";
@@ -712,7 +712,7 @@ export function ChatView({
       inRun.add(m.id);
       continue;
     }
-    run = call && call.failed === undefined && !chip ? { calls: [call], at: m.at } : null;
+    run = call && quietCall(call) && !chip ? { calls: [call], at: m.at } : null;
     if (run) callRuns.set(m.id, run.calls);
   }
 
@@ -1972,7 +1972,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   if (m.role === "system")
     return (
       <div className={`flex w-full flex-col items-center gap-1.5 self-center py-0.5 ${enterClass}`}>
-        {api ? api.failed !== undefined ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
+        {api ? !quietCall(api) ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
         {chipList}
       </div>
     );
