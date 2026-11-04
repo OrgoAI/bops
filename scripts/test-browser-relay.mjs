@@ -62,9 +62,9 @@ async function until(check, what, ms = 8000) {
 
 /* ---------------- What a person in control may send ---------------- */
 
-await test("only the six methods, each with its parameters checked, and only http and https pages", () => {
-  assert.deepEqual([...BROWSER_METHODS], ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"]);
-  for (const m of ["Runtime.evaluate", "Network.getCookies", "Storage.getCookies", "Page.captureScreenshot", "Browser.close", "Target.createTarget", "DOM.getDocument", "Input.synthesizeTapGesture", "", "constructor"])
+await test("only the nine methods, each with its parameters checked, and only http and https pages", () => {
+  assert.deepEqual([...BROWSER_METHODS], ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry", "Target.createTarget", "Target.activateTarget", "Target.closeTarget"]);
+  for (const m of ["Runtime.evaluate", "Network.getCookies", "Storage.getCookies", "Page.captureScreenshot", "Browser.close", "Target.attachToTarget", "Target.setDiscoverTargets", "DOM.getDocument", "Input.synthesizeTapGesture", "", "constructor"])
     assert.equal(cleanInput(m, {}), null, `${m || "(none)"} is refused`);
   assert.deepEqual(cleanInput("Input.dispatchMouseEvent", { type: "mousePressed", x: 10, y: 20, button: "left", clickCount: 1, evil: "x" }), { type: "mousePressed", x: 10, y: 20, button: "left", clickCount: 1 });
   assert.equal(cleanInput("Input.dispatchMouseEvent", { type: "mousePressed", x: -5, y: 20 }), null, "off the page");
@@ -80,6 +80,12 @@ await test("only the six methods, each with its parameters checked, and only htt
   assert.deepEqual(cleanInput("Page.reload", { ignoreCache: true, scriptToEvaluateOnLoad: "steal()" }), {});
   assert.deepEqual(cleanInput("Page.navigateToHistoryEntry", { entryId: 3 }), { entryId: 3 });
   assert.equal(cleanInput("Page.navigateToHistoryEntry", { entryId: "3" }), null);
+  // Tabs: a new one only at an http or https page; a switch or close only names a tab (its id), nothing else.
+  assert.deepEqual(cleanInput("Target.createTarget", { url: "https://www.canva.com/", newWindow: true, browserContextId: "x" }), { url: "https://www.canva.com/" });
+  for (const url of ["javascript:alert(1)", "chrome://settings", "file:///etc/passwd", "about:blank"]) assert.equal(cleanInput("Target.createTarget", { url }), null, `a new tab at ${url} is refused`);
+  assert.deepEqual(cleanInput("Target.activateTarget", { targetId: "A1B2C3D4E5F6", extra: 1 }), { targetId: "A1B2C3D4E5F6" });
+  assert.deepEqual(cleanInput("Target.closeTarget", { targetId: "A1B2C3D4E5F6" }), { targetId: "A1B2C3D4E5F6" });
+  for (const targetId of ["", "../json/close/x", "a b", 7, "F".repeat(65)]) assert.equal(cleanInput("Target.activateTarget", { targetId }), null, `${JSON.stringify(targetId)} is no tab id`);
 });
 
 await test("a pointer the page's world said is checked: a kind it knows, numbers, on the page", () => {
@@ -289,6 +295,50 @@ try {
     say({ t: "input", bot: "boppy", who: sam, method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: 333, y: 222 } });
     await until(() => pointers().length, "Sam's pointer", 5000);
     assert.deepEqual([pointers()[0].kind, pointers()[0].x, pointers()[0].y, pointers()[0].by], ["move", 333, 222, sam]);
+  });
+
+  await test("tabs: viewers hear the browser's tabs in a steady order; in control, a new tab opens in front, a switch or close reaches only a tab it listed; hand back puts the bot's own tab in front again", async () => {
+    const tabsSaid = () => got.filter((g) => g.m.t === "tabs").map((g) => g.m);
+    const lastTabs = () => tabsSaid().at(-1);
+    const botTab = (await until(() => lastTabs(), "the tabs, said once someone watches")).front;
+    assert.equal(lastTabs().tabs.length, 1);
+    assert.deepEqual(lastTabs().bots, ["boppy"]);
+    assert.equal(lastTabs().tabs[0].id, botTab);
+    assert.equal(lastTabs().tabs[0].url, `${page}next`);
+    // Sam (in control) opens a link in a new tab: it comes to the front, and the capture follows it.
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.createTarget", params: { url: `${page}?tab=2` } });
+    const two = await until(() => lastTabs()?.tabs.length === 2 && lastTabs().front !== botTab && lastTabs(), "a second tab, in front");
+    assert.deepEqual(two.tabs.map((t) => t.url), [`${page}next`, `${page}?tab=2`], "in the order they opened");
+    const second = two.front;
+    await until(() => got.some((g) => g.m.t === "page" && g.m.url === `${page}?tab=2`), "the capture on the new tab");
+    // Refused: a new tab anywhere but http or https, a tab it never listed, and anyone not in control.
+    const [samWas, tessWas] = [to("u-sam").length, to("u-tess").length];
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.createTarget", params: { url: "javascript:alert(1)" } });
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.activateTarget", params: { targetId: "ABCDEF0123456789" } });
+    say({ t: "input", bot: "boppy", who: tess, method: "Target.closeTarget", params: { targetId: botTab } });
+    await until(() => to("u-sam").length === samWas + 2 && to("u-tess").length === tessWas + 1, "the refusals");
+    assert.deepEqual(to("u-sam").slice(-2), ["Only http and https addresses open here.", "That tab isn't open."]);
+    assert.equal(to("u-tess").at(-1), "Take over first.");
+    // A switch: the order stays, the front moves.
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.activateTarget", params: { targetId: botTab } });
+    await until(() => lastTabs().front === botTab, "the first tab in front again");
+    assert.deepEqual(lastTabs().tabs.map((t) => t.id), [botTab, second], "nothing moved");
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.activateTarget", params: { targetId: second } });
+    await until(() => lastTabs().front === second, "Sam's tab in front");
+    // Hand back: the bot's own tab (in front when Sam took over) comes back to the front; Sam's tab stays open.
+    say({ t: "release", bot: "boppy", who: sam });
+    await until(() => !relay.heldBy(100) && lastTabs().front === botTab, "the bot's tab in front after hand back");
+    assert.equal(lastTabs().tabs.length, 2);
+    // A viewer who comes now hears the tabs at once.
+    got.length = 0;
+    say({ t: "watch", bot: "boppy", viewers: [sam, tess, { id: "u-new", name: "New" }] });
+    await until(() => tabsSaid().length, "the tabs for a viewer who just came");
+    // Sam takes it again, closes the extra tab, and keeps control for the next test.
+    say({ t: "take", bot: "boppy", who: sam });
+    await until(() => relay.heldBy(100)?.id === "u-sam", "Sam to have control again");
+    say({ t: "input", bot: "boppy", who: sam, method: "Target.closeTarget", params: { targetId: second } });
+    await until(() => lastTabs()?.tabs.length === 1 && lastTabs().front === botTab, "one tab again");
+    say({ t: "watch", bot: "boppy", viewers: [sam, tess] });
   });
 
   await test("a bot step waits while someone has control, and goes on when they hand it back", async () => {

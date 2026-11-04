@@ -96,13 +96,14 @@ export function browserTabOf(state: AppState, chatBotId: string): PanelTab | nul
  * shown with the page opened there in the viewer's control (or asked first, when a bot step is using it). Null where
  * there's no panel.
  */
-export const OpenInBrowser = createContext<{ may: (botId: string, url?: string) => boolean; open: (botId: string, url: string) => void } | null>(null);
+export const OpenInBrowser = createContext<{ may: (botId: string, url?: string) => boolean; open: (botId: string, url: string, here?: boolean) => void } | null>(null);
 
 /**
  * A page to open in a bot's browser, asked for at `at`: the browser showing that bot takes it (bot-browser.tsx) and says
- * so (`took`), and the ask is dropped, so a browser shown again later never opens it again.
+ * so (`took`), and the ask is dropped, so a browser shown again later never opens it again. It opens in a new tab, the
+ * bot's own page left as it was, unless `here`: in the tab in front (a sign in the bot asked for, on its own page).
  */
-export type BrowserGo = { botId: string; url: string; at: number };
+export type BrowserGo = { botId: string; url: string; at: number; here?: boolean };
 export const BrowserGoTo = createContext<{ go: BrowserGo | null; took: (at: number) => void } | null>(null);
 
 /** A tab you're reading (a page, Logins, a CRM file, Knowledge and Skills in it, a profile, Routines, an app a bot made, an app on the web or the Apps home): a new "Needs you" doesn't take the panel from it. */

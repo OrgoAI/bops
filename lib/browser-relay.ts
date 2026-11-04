@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { isBrowserMethod, POINTER_KINDS, type BrowserActivity, type BrowserFrameMeta, type BrowserPerson, type BrowserPointer, type BrowserToRunner, type RunnerToBrowser } from "@/cloud/protocol";
+import { isBrowserMethod, POINTER_KINDS, type BrowserActivity, type BrowserFrameMeta, type BrowserPerson, type BrowserPointer, type BrowserTab, type BrowserToRunner, type RunnerToBrowser } from "@/cloud/protocol";
 
 /**
  * The bot's browser, relayed (cloud/protocol.ts "The bot's browser"). Runs where the bot's Chrome is: in a computer's
@@ -22,6 +22,10 @@ import { isBrowserMethod, POINTER_KINDS, type BrowserActivity, type BrowserFrame
  *   say the bot is browsing before anyone watches (nothing is captured for that).
  * - In control, they send CDP input: only BROWSER_METHODS, each with its parameters checked (cleanInput: a page to
  *   go to is http or https only). Anything else is refused here, whatever Bops Cloud passed on.
+ * - Its tabs: a captured screen's Chrome's tabs ("tabs": id, title, address, oldest first, and which is in front) go to
+ *   its viewers as they change. In control, a person opens a new tab at a page, switches to or closes a tab it listed
+ *   (through the DevTools address, never a CDP session on the browser), and handing back puts the tab the bot had in
+ *   front when they took over in front again, so the bot carries on where it was.
  * - Where the pointer goes: while captured, the page's own trusted pointer events (moves at most 30 a second, presses,
  *   releases, scrolls) are watched from a world of the relay's own (POINTER_WORLD) that the page's scripts can't see
  *   or reach, and each goes to the viewers labelled with who drove it: the person in control, else the bot. So the bot's
@@ -191,6 +195,15 @@ export function cleanInput(method: string, params: unknown): Record<string, unkn
       const entryId = int(p.entryId, 0, 2 ** 31 - 1);
       return entryId === undefined ? null : { entryId };
     }
+    case "Target.createTarget": {
+      const page = cleanInput("Page.navigate", { url: p.url });
+      return page ? { url: page.url } : null;
+    }
+    case "Target.activateTarget":
+    case "Target.closeTarget": {
+      const targetId = str(p.targetId, 64);
+      return targetId && /^[A-Za-z0-9]+$/.test(targetId) ? { targetId } : null;
+    }
   }
   return null;
 }
@@ -204,6 +217,15 @@ const isTab = (t: Target) => t.type === "page" && !/^(devtools|chrome-extension|
 async function tabsOf(port: number): Promise<Target[]> {
   const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3_000) });
   return ((await res.json()) as Target[]).filter(isTab);
+}
+
+/** The tabs a viewer is told of, at most. */
+const TABS_SAID = 20;
+
+/** One of Chrome's DevTools address calls on a screen (a new tab, a switch, a close): it said yes, or why not. */
+async function devtools(port: number, path: string, method: "GET" | "PUT" = "GET"): Promise<void> {
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, { method, signal: AbortSignal.timeout(5_000) });
+  if (!res.ok) throw new Error("The browser didn't do that.");
 }
 
 /** A CDP session on one tab: calls answered by id, events by name. */
@@ -274,7 +296,11 @@ class Screen {
   /** What the bot is doing with this screen's browser, and which bot (Relay.activity); null till it says. */
   doing: { bot: string; step: BrowserActivity["step"]; signIn: string | null; waiting: boolean } | null = null;
   private said = "";
-  last: { frame?: { data: string; meta: BrowserFrameMeta }; page?: { url: string; title: string; back: number | null } } = {};
+  last: { frame?: { data: string; meta: BrowserFrameMeta }; page?: { url: string; title: string; back: number | null }; tabs?: { tabs: BrowserTab[]; front: string | null } } = {};
+  /** The order tabs were first seen in (a viewer's strip never reorders as the front changes). */
+  private seen = new Map<string, number>();
+  /** The tab in front when someone took control: in front again once they hand back. */
+  private botTab: string | null = null;
   framesSent = 0;
   readonly display: number;
   private port: () => number | null;
@@ -333,6 +359,7 @@ class Screen {
       const tabs = await tabsOf(port).catch(() => [] as Target[]);
       const top = tabs[0];
       if (!top) return;
+      this.sayTabs(tabs);
       if (this.tab === top.id && this.cdp && !this.cdp.closed) {
         const page = this.last.page;
         if (page && page.title !== top.title) this.page({ ...page, title: top.title });
@@ -420,6 +447,7 @@ class Screen {
   /** What a viewer who just came sees at once: the latest frame and page, and who has control. */
   catchUp(bots: string[]) {
     if (this.last.page) this.relay.send({ t: "page", bots, ...this.last.page });
+    if (this.last.tabs) this.relay.send({ t: "tabs", bots, ...this.last.tabs });
     if (this.last.frame && this.relay.send({ t: "frame", bots, ...this.last.frame }, true)) this.framesSent++;
     this.relay.send({ t: "control", bots, by: this.controller?.who ?? null });
   }
@@ -427,6 +455,8 @@ class Screen {
   setController(next: { who: BrowserPerson; bot: string } | null) {
     const was = this.controller;
     this.controller = next;
+    if (next && !was) this.botTab = this.last.tabs?.front ?? this.tab;
+    if (!next && was) void this.backToBotTab();
     if (this.watchers().length) this.relay.send({ t: "control", bots: this.watchers(), by: next?.who ?? null });
     if (next) this.relay.onControl(next.bot, this.display, next.who, was?.who ?? null);
     else if (was) {
@@ -454,8 +484,46 @@ class Screen {
   }
 
   input(method: string, params: Record<string, unknown>) {
+    if (method.startsWith("Target.")) return this.tabAct(method, params);
     if (!this.cdp || this.cdp.closed) return Promise.reject(new Error("The page isn't there right now."));
     return this.cdp.send(method, params);
+  }
+
+  /** The browser's tabs, to its viewers when they change: oldest first (as first seen), at most TABS_SAID, and the one in front. */
+  private sayTabs(tabs: Target[]) {
+    for (const t of tabs) if (!this.seen.has(t.id)) this.seen.set(t.id, this.seen.size);
+    const open = new Set(tabs.map((t) => t.id));
+    for (const id of this.seen.keys()) if (!open.has(id)) this.seen.delete(id);
+    const listed = [...tabs].sort((a, b) => this.seen.get(a.id)! - this.seen.get(b.id)!).slice(0, TABS_SAID);
+    const next = { tabs: listed.map((t) => ({ id: t.id, title: t.title.slice(0, 200), url: t.url.slice(0, 2048) })), front: tabs[0]?.id ?? null };
+    if (JSON.stringify(next) === JSON.stringify(this.last.tabs)) return;
+    this.last.tabs = next;
+    if (this.watchers().length) this.relay.send({ t: "tabs", bots: this.watchers(), ...next });
+  }
+
+  /** A person's tab act: a new tab at a page, or a switch to or close of a tab this screen listed. The capture follows at once. */
+  private async tabAct(method: string, params: Record<string, unknown>) {
+    const port = this.port();
+    if (port === null) throw new Error("The page isn't there right now.");
+    if (method === "Target.createTarget") await devtools(port, `/json/new?${encodeURIComponent(String(params.url))}`, "PUT");
+    else {
+      const id = String(params.targetId);
+      if (!(await tabsOf(port)).some((t) => t.id === id)) throw new Error("That tab isn't open.");
+      await devtools(port, `/json/${method === "Target.activateTarget" ? "activate" : "close"}/${id}`);
+    }
+    await this.attach();
+  }
+
+  /** Hand back: the tab the bot had in front when they took over is in front again (if it's still open). */
+  private async backToBotTab() {
+    const id = this.botTab;
+    this.botTab = null;
+    const port = this.port();
+    if (!id || port === null) return;
+    const tabs = await tabsOf(port).catch(() => [] as Target[]);
+    if (tabs[0]?.id === id || !tabs.some((t) => t.id === id)) return;
+    await devtools(port, `/json/activate/${id}`).catch(() => {});
+    await this.attach();
   }
 }
 
@@ -592,7 +660,7 @@ class RelayCore {
       if (!isBrowserMethod(m.method)) return this.refuse(m.bot, m.who.id, "The browser tab can't do that.");
       if (sc.controller?.who.id !== m.who.id) return this.refuse(m.bot, m.who.id, "Take over first.");
       const params = cleanInput(m.method, m.params);
-      if (!params) return this.refuse(m.bot, m.who.id, m.method === "Page.navigate" ? "Only http and https addresses open here." : "That input isn't allowed.");
+      if (!params) return this.refuse(m.bot, m.who.id, m.method === "Page.navigate" || m.method === "Target.createTarget" ? "Only http and https addresses open here." : "That input isn't allowed.");
       void sc.input(m.method, params).catch((e: Error) => this.refuse(m.bot, m.who.id, e.message));
     }
   }

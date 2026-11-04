@@ -1,12 +1,12 @@
 "use client";
 
 import { useContext, useEffect, useRef, useState } from "react";
-import type { BrowserActivity, BrowserEvent, BrowserFrameMeta, BrowserMethod, BrowserPerson } from "@/cloud/protocol";
+import type { BrowserActivity, BrowserEvent, BrowserFrameMeta, BrowserMethod, BrowserPerson, BrowserTab } from "@/cloud/protocol";
 import type { Bot } from "@/lib/types";
 import { initialsFrom } from "./account";
 import { BrowserCursors, cursorFeed } from "./browser-cursor";
 import { Mascot } from "./mascot";
-import { BrowserGoTo, toAddress } from "./panel-tabs";
+import { BrowserGoTo, hostOf, toAddress } from "./panel-tabs";
 
 /*
  * The bot's browser, beside the chat: the page in front of the Chrome of the screen its task holds, live, for the owner
@@ -24,7 +24,13 @@ import { BrowserGoTo, toAddress } from "./panel-tabs";
  * frees it. Pressing the page while the bot has it takes over at once; that press never reaches the page.
  *
  * A link opened here (BrowserGoTo: one in the bot's message, a web tab's "Open in Boppy's browser") goes there in the
- * viewer's control at once, unless a bot step is using the browser right then: then it asks first, over the page.
+ * viewer's control at once, unless a bot step is using the browser right then: then it asks first, over the page. It
+ * opens in a new tab, the bot's own page left as it was (a sign in the bot asked for opens on its own page instead),
+ * where the computer's runner and Bops Cloud know tabs (the stream says "tabs"); else in the tab in front, as before.
+ *
+ * The browser's tabs show as a strip once it has two or more, oldest first, so none moves as the front changes; the one
+ * in front is raised (form, not colour). Pressing another switches to it, taking over first when nobody has control (as
+ * pressing the page does); in control, each can be closed. Hand back puts the bot's own tab in front again (the runner).
  */
 
 type Page = { url: string; title: string; back: number | null };
@@ -82,6 +88,8 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
   const [refused, setRefused] = useState<Refused | null>(null);
   const [connected, setConnected] = useState<boolean | null>(null);
   const [activity, setActivity] = useState<BrowserActivity | null>(null);
+  // The browser's tabs, once the stream says them (null: a runner or Bops Cloud from before tabs; links open in place).
+  const [tabs, setTabs] = useState<{ tabs: BrowserTab[]; front: string | null } | null>(null);
   // The stream cut (Bops not answering): said in place of the page, with Try again (a new stream: `attempt`).
   const [cut, setCut] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -103,11 +111,11 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
   // A link to open here, from BrowserGoTo, until it's opened or let go; taken once (the ask is dropped then).
   const goTo = useContext(BrowserGoTo);
   const asked = goTo?.go ?? null;
-  const [link, setLink] = useState<string | null>(null);
+  const [link, setLink] = useState<{ url: string; here: boolean } | null>(null);
   const [linkAt, setLinkAt] = useState(0);
   if (asked && asked.botId === bot.id && asked.at !== linkAt && !hidden) {
     setLinkAt(asked.at);
-    setLink(asked.url);
+    setLink({ url: asked.url, here: !!asked.here });
   }
   useEffect(() => {
     if (asked && asked.botId === bot.id && !hidden) goTo?.took(asked.at);
@@ -130,6 +138,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
       setFrame({ src: `data:image/jpeg;base64,${e.data}`, meta: e.meta });
     });
     on("page", (e) => setPage({ url: e.url, title: e.title, back: e.back }));
+    on("tabs", (e) => setTabs({ tabs: e.tabs, front: e.front }));
     on("control", (e) => {
       setControl({ by: e.by, you: e.you });
       setKnown(true);
@@ -160,6 +169,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
       held.current = {};
       setControl({ by: null, you: false });
       setKnown(false);
+      setTabs(null);
     };
   }, [bot.id, project, hidden, feed, attempt]);
 
@@ -230,11 +240,15 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     surface.current?.focus();
   };
   const handBack = () => void act({ act: "release" });
-  /** The page goes to `url`: taking over first unless the viewer has it (acts go in order, so it lands in their control). */
-  const openHere = async (url: string) => {
+  /**
+   * A link opens: in a new tab (or, `here`, the tab in front), taking over first unless the viewer has it (acts go in
+   * order, so it lands in their control). Without tabs from the stream, in the tab in front.
+   */
+  const openHere = async (url: string, here = false) => {
     setLink(null);
     if (!control.you) await take();
-    await act({ act: "input", method: "Page.navigate", params: { url } });
+    if (tabs && !here) await act({ act: "input", method: "Target.createTarget", params: { url } });
+    else await act({ act: "input", method: "Page.navigate", params: { url } });
   };
 
   // Out of reach: the computer isn't connected, the stream is cut, or Bops Cloud can't be reached (it comes back by itself).
@@ -242,13 +256,22 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
   const { look, line, action } = lookOf({ bot: bot.name, control, activity, owner: !project, reachable: !away });
   // Nobody has it and the page is there: pressing the page takes over.
   const pressTakes = !control.by && !away && !!frame && !asking;
+  /** Another tab to the front: taking over first when nobody has control (as pressing the page does). */
+  const switchTo = async (id: string) => {
+    if (id === tabs?.front) return;
+    if (!control.you) {
+      if (!pressTakes) return;
+      await take();
+    }
+    await act({ act: "input", method: "Target.activateTarget", params: { targetId: id } });
+  };
   // A link to open: at once when the viewer has control, or nobody has and no bot step is using it; else asked first.
   const them = control.by && !control.you ? firstName(control.by.name) : null;
   const linkWaits = !!link && known && !away && !control.you && (!!them || activity?.step === "browsing");
   useEffect(() => {
     if (!link || !known || away || !frame || linkWaits || asking) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- an act in answer to the stream (it said who has control), once each link
-    void openHere(link);
+    void openHere(link.url, link.here);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once each link, when the browser is ready for it
   }, [link, known, away, frame, linkWaits, asking]);
   const button = "flex size-7 items-center justify-center rounded-lg text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-30 disabled:hover:bg-transparent";
@@ -269,6 +292,17 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
 
   return (
     <div className={`min-h-0 flex-1 flex-col ${inset ? "-mx-5 -mb-4 -mt-4" : ""} ${hidden ? "hidden" : "flex"}`} aria-label={`${bot.name}'s browser`} data-bot-browser={bot.id} data-browser-look={look}>
+      {tabs && tabs.tabs.length > 1 && (
+        <BrowserTabs
+          bot={bot.name}
+          tabs={tabs}
+          you={control.you}
+          mayTake={pressTakes}
+          busy={them ? `${them} has control` : `${bot.name} is using its browser`}
+          onSwitch={(id) => void switchTo(id)}
+          onClose={(id) => void act({ act: "input", method: "Target.closeTarget", params: { targetId: id } })}
+        />
+      )}
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-[#F0F0EE] px-2.5">
         <button className={button} aria-label="Back" title={control.you ? "Back" : "Take over to go back"} disabled={!control.you || page?.back == null} onClick={() => page?.back != null && input("Page.navigateToHistoryEntry", { entryId: page.back })}>
           <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden>
@@ -410,7 +444,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
                 {them ? `${them} has control. The link opens here once they hand back, or open it in a web tab.` : `${bot.name} is using its browser. Open the link now? ${bot.name} waits until you hand back.`}
               </span>
               {!them && (
-                <button onClick={() => void openHere(link)} className="shrink-0 rounded-full bg-ink px-3 py-1.5 text-[13px] font-semibold leading-4 text-white">
+                <button onClick={() => void openHere(link.url, link.here)} className="shrink-0 rounded-full bg-ink px-3 py-1.5 text-[13px] font-semibold leading-4 text-white">
                   Take over and open
                 </button>
               )}
@@ -427,6 +461,50 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
         )}
         {control.you && <p className="text-[13px] leading-4 text-[#6B6B6B]">{`What you type here stays in ${bot.name}'s browser and never goes to the chat.`}</p>}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The browser's tabs, oldest first, the one in front raised (form, not colour). `you`: the viewer has control (each tab
+ * switches, and closes); `mayTake`: nobody has, so pressing one takes over and switches; else they're read only, saying
+ * who has it (`busy`).
+ */
+function BrowserTabs({ bot, tabs, you, mayTake, busy, onSwitch, onClose }: { bot: string; tabs: { tabs: BrowserTab[]; front: string | null }; you: boolean; mayTake: boolean; busy: string; onSwitch: (id: string) => void; onClose: (id: string) => void }) {
+  return (
+    <div role="tablist" aria-label={`${bot}'s tabs`} data-browser-tabs className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-[#F0F0EE] px-2.5">
+      {tabs.tabs.map((t) => {
+        const front = t.id === tabs.front;
+        const name = t.title.trim() || hostOf(t.url) || "New tab";
+        const may = front || you || mayTake;
+        return (
+          <div key={t.id} className={`group/btab flex h-7 min-w-0 max-w-[200px] shrink items-center rounded-[9px] ${front ? "bg-white shadow-[0_0_0_1px_#E2E2DF,0_1px_2px_rgb(10_10_10_/_0.06)]" : may ? "hover:bg-[#F2F2F0]" : ""}`}>
+            <button
+              role="tab"
+              aria-selected={front}
+              data-browser-tab={t.id}
+              disabled={!may}
+              title={front ? t.url : you ? `Switch to ${name}` : may ? `Take over and switch to ${name}` : `${name} · ${busy}`}
+              onClick={() => !front && onSwitch(t.id)}
+              className={`flex min-w-0 flex-1 items-center py-1 pl-2.5 ${you ? "pr-1" : "pr-2.5"} text-left text-[13px] leading-4 disabled:cursor-default ${front ? "font-medium text-ink" : "text-[#6B6B6B]"}`}
+            >
+              <span className="min-w-0 truncate">{name}</span>
+            </button>
+            {you && (
+              <button
+                aria-label={`Close ${name}`}
+                title={`Close ${name}`}
+                onClick={() => onClose(t.id)}
+                className={`mr-1 flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] hover:bg-[#EEEEEC] hover:text-ink focus:opacity-100 ${front ? "" : "opacity-0 group-hover/btab:opacity-100"}`}
+              >
+                <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
+                  <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

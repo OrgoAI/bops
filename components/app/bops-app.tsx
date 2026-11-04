@@ -803,8 +803,8 @@ function Bops({ state }: { state: AppState | null }) {
    * A bot's browser, shown (`url`: and that page opened there, in the viewer's control): the owner's tab beside the chat's
    * computer for the chat's bot, a browser tab for another bot; a teammate's is that bot's computer tab.
    */
-  const showBrowser = (botId: string, url?: string) => {
-    if (url) setBrowserGo({ botId, url, at: Date.now() });
+  const showBrowser = (botId: string, url?: string, here?: boolean) => {
+    if (url) setBrowserGo({ botId, url, at: Date.now(), ...(here ? { here } : {}) });
     if (botId === chatBotId && browserTab) return pickTab(BROWSER_TAB);
     // A Member's: that bot's computer tab is its browser.
     const b = state.bots.find((x) => x.id === botId);
@@ -814,7 +814,7 @@ function Bops({ state }: { state: AppState | null }) {
   const openInBrowser = {
     // The owner's localhost link keeps Local (its preview, with Select and Draw); a teammate's opens in the bot's browser.
     may: (botId: string, url?: string) => browsesHere(state, state.bots.find((b) => b.id === botId)) && !(url && !state.shared && isLocalLink(url)),
-    open: (botId: string, url: string) => showBrowser(botId, url),
+    open: (botId: string, url: string, here?: boolean) => showBrowser(botId, url, here),
   };
   // The Watch chip: the chat's bot is browsing and its browser isn't in sight ("Boppy is browsing · Watch").
   const chatBot = state.bots.find((b) => b.id === chatBotId);

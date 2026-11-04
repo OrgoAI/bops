@@ -288,8 +288,8 @@ function Inline({ text }: { text: string }) {
 }
 
 /**
- * A bot's ask to sign in for it (Message.signIn): its browser opened at that page, in the viewer's control, for someone
- * who may use it; nothing for anyone else (its words say what it needs).
+ * A bot's ask to sign in for it (Message.signIn): its browser opened at that page, in its own tab (`here`), in the
+ * viewer's control, for someone who may use it; nothing for anyone else (its words say what it needs).
  */
 function SignInAsk({ botId, url, state }: { botId: string; url: string; state: AppState }) {
   const inBrowser = useContext(OpenInBrowser);
@@ -297,7 +297,7 @@ function SignInAsk({ botId, url, state }: { botId: string; url: string; state: A
   if (!inBrowser || !b || !/^https?:\/\//i.test(url) || !inBrowser.may(botId)) return null;
   return (
     <div className="flex pt-0.5">
-      <button onClick={() => inBrowser.open(botId, url)} data-sign-in-ask className="rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white">
+      <button onClick={() => inBrowser.open(botId, url, true)} data-sign-in-ask className="rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white">
         {`Sign in in ${b.name}'s browser`}
       </button>
     </div>
