@@ -862,6 +862,7 @@ await test("Free with people included (orgo-web's numbers, never the plan's name
   await m.done();
   m = await sheet({ plan: "pro_bops", canAdd: false, limit: 2, used: 2, upgrade: null });
   assert.equal(buttonOf(m.box, "Upgrade to Max"), undefined);
+  assert.ok(!/Max|upgrade/i.test(sectionOf(m.box, "Add someone").textContent), sectionOf(m.box, "Add someone").textContent);
   await m.done();
   for (const t of [M.WORDS.invitedNone, M.WORDS.invitedOver]) assert.ok(!/[–—]/.test(t) && !t.includes(" - "), t);
 });
@@ -902,6 +903,26 @@ await test("an Admin's sheet: the owner's row has no controls and says what stay
   assert.ok(box.textContent.includes(M.ADMIN_WORDS.confirmBodyShared), "the Make Admin question in an Admin's words");
   globalThis.fetch = real;
   await done();
+});
+
+await test("an Admin's sheet of a full workspace with no plan to buy: why, and never to ask the owner for more seats; billed by use, still to ask", async () => {
+  const sheet = async (seats) => {
+    const fake = bops();
+    fake.info.people.push({ id: "m2", name: "Ada Admin", email: "ada@example.com", role: "admin", guest: false, access: { others: "none", bots: {} } });
+    fake.info.shared = { me: "m2", can: true };
+    fake.info.seats = { ...fake.info.seats, canAdd: false, ...seats };
+    const admin = { ...base, shared: { projectId: "p9", name: "Acme", owner: "tess@example.com", role: "admin", wsId: "shared_p9", adminActs: true } };
+    return mount(h(S.Members, { state: admin, onClose: noop, onUpgrade: noop, source: "/api/workspaces/shared/people" }));
+  };
+  let m = await sheet({ plan: "free_bops", used: 5, limit: 5, upgrade: null });
+  const add = sectionOf(m.box, "Add someone");
+  assert.ok(add.textContent.includes("Bops includes 5 people, and you have 5."), add.textContent);
+  assert.ok(!m.box.textContent.includes(M.ADMIN_SHEET_WORDS.seats), "the owner has no more seats to get");
+  assert.equal(buttonOf(m.box, "Upgrade to Max"), undefined);
+  await m.done();
+  m = await sheet({ plan: "usage", used: 1, limit: 1, upgrade: null });
+  assert.ok(m.box.textContent.includes(M.ADMIN_SHEET_WORDS.seats), "the owner can upgrade their Orgo plan");
+  await m.done();
 });
 
 await test("an Admin's sheet while orgo-web or Bops Cloud don't let them change people: it reads only, says why, and Leave still goes", async () => {

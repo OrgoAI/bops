@@ -824,12 +824,13 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
     );
   // Only an upgrade orgo-web offers: with none (Bops plans aren't sold now), no button that leads nowhere.
   const upgrade = s.upgrade && (short ? short.upgrade : s.upgrade);
-  // An Admin's sheet: the plan is the owner's to change.
+  // An Admin's sheet: the plan is the owner's to change. Ask the owner only when there's more to get (an upgrade orgo-web offers, or the Orgo plan when billed by use).
   if (info.shared)
     return (
       <Section title="Add someone" aside={counter}>
         <Notice>
-          {short?.text ?? WORDS.upgradeRequired} {ADMIN_SHEET_WORDS.seats}
+          {short?.text ?? WORDS.upgradeRequired}
+          {s.upgrade || s.plan === "usage" ? ` ${ADMIN_SHEET_WORDS.seats}` : ""}
         </Notice>
         {line}
       </Section>

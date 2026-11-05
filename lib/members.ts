@@ -10,7 +10,7 @@
  * set to work, answered and stopped too (lib/shared.ts, cloud/members.ts). Never the user's Vault keys or this
  * Mac's logins.
  * Bops keeps none of this itself: orgo-web holds the list, the invites and the plan's rules (how many
- * people each plan includes: 5 for everyone, for now), and the app shows what it says. Nobody is added from an
+ * people each plan includes: 5 on Free and Pro, 10 on Max, no limit for staff, for now), and the app shows what it says. Nobody is added from an
  * orgo-web that doesn't send its numbers (seats): one from before that rule holds no plan to it.
  *
  * The roles, said plainly in the sheet and the switcher: Owner (the account that owns the workspace: everything),

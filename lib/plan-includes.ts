@@ -236,9 +236,10 @@ export function computerShort(tier: BopsTier, held: number, more = 1): PlanRoomS
 /**
  * Where the user's plan stands on people who can see their bots' computers (lib/members.ts
  * MemberSeats): the plan, how many people it includes besides the user (null: no limit), how many
- * have access or an invite still waiting, and how many Pro and Max include.
+ * have access or an invite still waiting, and how many Pro and Max include. `upgrade`: null when orgo-web
+ * offers no plan for more (then Pro says to make room, not to upgrade to Max).
  */
-export type PeopleRoom = { plan: RoomTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number } };
+export type PeopleRoom = { plan: RoomTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number }; upgrade?: "plan" | "max" | null };
 
 /** What Pro and Max include, from BOPS_TIERS: named in the People sheet only when orgo-web's seats leave their caps out. */
 export const PEOPLE_CAPS = { pro_bops: BOPS_TIERS.pro_bops.people, max_bops: BOPS_TIERS.max_bops.people } as const;
@@ -271,11 +272,11 @@ export function peopleShort(s: PeopleRoom, { withAccess, invited }: { withAccess
   }
   if (s.limit === null || s.used < s.limit) return null;
   const over = s.used > s.limit;
-  if (s.plan === "pro_bops")
+  if (s.plan === "pro_bops" && s.upgrade !== null)
     return over
       ? { text: `Pro includes ${peopleCount(s.limit)}, and you have ${s.used} from before. They keep access, but to add someone, upgrade to Max or remove people.`, upgrade: "max" }
       : { text: `Pro includes ${peopleCount(s.limit)}, and you have ${s.used}. Max includes up to ${max}.`, upgrade: "max", ...(invited ? { note: "Or cancel an invite below to make room." } : {}) };
-  // Max, or Free with people included: no plan to buy for more, so make room instead.
+  // Max, or Free or Pro with no plan to buy: make room instead.
   const includes = s.plan === "max_bops" ? `Max includes up to ${peopleCount(s.limit)}` : `Bops includes ${peopleCount(s.limit)}`;
   return over
     ? { text: `${includes}, and you have ${s.used} from before. They keep access, but to add someone, remove people first.`, upgrade: null }

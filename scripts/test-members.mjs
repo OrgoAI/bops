@@ -1584,6 +1584,10 @@ assert.deepEqual(words("free_bops", 5, 5, 3, 2), { text: "Bops includes 5 people
 assert.deepEqual(words("free_bops", 5, 7, 7, 0), { text: "Bops includes 5 people, and you have 7 from before. They keep access, but to add someone, remove people first.", upgrade: null });
 assert.deepEqual(words("free_bops", 1, 1, 1, 0), { text: "Bops includes 1 person, and you have 1. Remove someone to add someone else.", upgrade: null });
 assert.equal(words("free_bops", null, 40, 40, 0), null, "no limit (staff)");
+// Pro with no plan to buy (orgo-web offers no upgrade): make room, never upgrade to Max.
+assert.deepEqual(P.peopleShort({ plan: "pro_bops", limit: 5, used: 5, caps, upgrade: null }, { withAccess: 4, invited: 1 }), { text: "Bops includes 5 people, and you have 5. Remove someone or cancel an invite to add someone else.", upgrade: null });
+assert.deepEqual(P.peopleShort({ plan: "pro_bops", limit: 5, used: 6, caps, upgrade: null }, { withAccess: 6, invited: 0 }), { text: "Bops includes 5 people, and you have 6 from before. They keep access, but to add someone, remove people first.", upgrade: null });
+assert.deepEqual(P.peopleShort({ plan: "pro_bops", limit: 2, used: 2, caps, upgrade: "max" }, { withAccess: 2, invited: 0 }), { text: "Pro includes 2 people, and you have 2. Max includes up to 5.", upgrade: "max" }, "an upgrade offered: still Max");
 assert.equal(P.peopleAside({ plan: "free_bops", limit: 5, used: 2, caps }), "2 of 5 people", "Free's counter too");
 assert.equal(P.peopleAside({ plan: "free_bops", limit: 5, used: 5, caps }), "5 of 5 people");
 assert.equal(P.peopleAside({ plan: "pro_bops", limit: 2, used: 1, caps }), "1 of 2 people");
