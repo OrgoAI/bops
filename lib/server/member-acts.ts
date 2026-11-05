@@ -1,11 +1,12 @@
 import "server-only";
 import { cleanChange } from "@/cloud/change-routes";
-import { isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
+import { cleanMemberFiles, isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
 import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
 import { botChatId, keptPersona, workBot, workspaceOf, type MemberSaid, type MemberTurn, type Message, type Workspace } from "@/lib/types";
+import type { AddedFile } from "@/lib/added-files";
 import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
@@ -53,7 +54,13 @@ const short = (v: unknown, max: number) => typeof v === "string" && v.length > 0
 function actOf(a: unknown): MemberAct | null {
   if (!a || typeof a !== "object") return null;
   const x = a as Record<string, unknown>;
-  if (x.act === "chat") return short(x.chatId, 120) && short(x.text, MEMBER_MAX_TEXT) && (x.replyTo === undefined || short(x.replyTo, 120)) ? (x as MemberAct) : null;
+  // Words, files on a bot's computer already (cloud/protocol.ts cleanMemberFiles), or both.
+  if (x.act === "chat") {
+    const files = cleanMemberFiles(x.files);
+    const text = typeof x.text === "string" && x.text.length <= MEMBER_MAX_TEXT ? x.text : null;
+    if (!short(x.chatId, 120) || !files || text === null || (!text.trim() && !files.length) || (x.replyTo !== undefined && !short(x.replyTo, 120))) return null;
+    return { act: "chat", chatId: x.chatId as string, text, ...(typeof x.replyTo === "string" ? { replyTo: x.replyTo } : {}), ...(files.length ? { files } : {}) };
+  }
   if (x.act === "reply") return short(x.sessionId, 120) && short(x.text, MEMBER_MAX_TEXT) ? (x as MemberAct) : null;
   if (x.act === "answer") return short(x.askId, 120) && ["once", "always", "reject"].includes(x.reply as string) && (x.message === undefined || (typeof x.message === "string" && x.message.length <= MEMBER_MAX_NOTE)) ? (x as MemberAct) : null;
   if (x.act === "stop") return Array.isArray(x.sessionIds) && x.sessionIds.length > 0 && x.sessionIds.length <= MEMBER_STOP_MAX && x.sessionIds.every((id) => short(id, 120)) ? (x as MemberAct) : null;
@@ -312,17 +319,27 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       // Switched to Bops Cloud since it was queued: only Bops Cloud stamps a member's words there now (it would refuse this
       // Mac's row, MEMBER_STAMP), so it's dropped, and their window says it didn't go.
       if (cloudChatHere(p.wsId)) return void console.warn(`[members] event ${eventId}: not done (the workspace's chat goes through Bops Cloud now)`);
+      // Their files as this state has them (filesFor): only ones on the computer a bot of the chat works on now.
+      const files = filesFor(act.chatId, act.files);
+      // Files alone, none of them there anymore (the owner set the bot to work on this Mac meanwhile): nothing to say to
+      // the bot, so no empty message for it to answer; a note says why.
+      if (!act.text.trim() && !files) {
+        const c = chat(act.chatId);
+        addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: `${who.name} added ${act.files?.length === 1 ? "a file" : "files"} on a computer the bot doesn't work on now, so nothing was sent.` });
+        return void console.warn(`[members] event ${eventId}: not done (its files aren't on the bot's computer now)`);
+      }
       // Not let use its computer (Use its computer, as this state says it), for a bot that has one: their words stay,
-      // with a note, and nothing runs for them.
+      // with their files and a note, and nothing runs for them.
       if (!mayUse(p, who, admin) && chatUsesComputer(act.chatId)) {
-        addMessage({ chatId: act.chatId, role: "user", text: act.text, member: { ...said, noUse: true } });
+        addMessage({ chatId: act.chatId, role: "user", text: act.text, ...(files ? { files } : {}), member: { ...said, noUse: true } });
         const c = chat(act.chatId);
         const name = c?.botIds.length === 1 ? (bot(c.botIds[0])?.name ?? "The bot") : "The bots";
         addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: noUseNote(ownerName(), who.name, name) });
         return;
       }
-      // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message.
-      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin)).catch(warn);
+      // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message. Their files are on the
+      // bot's computer already: kept on the message, and the bot told where in their name (lib/added-files.ts filesNote).
+      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin), undefined, undefined, undefined, files).catch(warn);
       return;
     }
     case "reply": {
@@ -460,6 +477,23 @@ async function answerOne(p: MemberActPayload, who: MemberWho, chatId: string, me
   const at = getState().messages.find((m) => m.id === messageId)!.at;
   if (getState().messages.some((m) => m.chatId === chatId && m.role === "bot" && m.at > at)) return;
   await answerMessage(chatId, messageId, turnOf(said, admin));
+}
+
+/**
+ * A member's files for a chat as this state has it (Bops Cloud checked them against it too: cloud/members.ts filesFit):
+ * each for a bot of the chat, on the computer that bot works on now, named by that computer's bot as this state names
+ * it (never as the member's Bops sent it: it's shown to everyone, and told to the bot). One that isn't is left out,
+ * never told to the bot.
+ */
+function filesFor(chatId: string, files: readonly AddedFile[] | undefined): AddedFile[] | undefined {
+  const c = chat(chatId);
+  const { host, bots } = getState();
+  const kept = (files ?? []).flatMap((f) => {
+    const b = c?.botIds.includes(f.botId) ? bot(f.botId) : undefined;
+    const on = b && host !== "mac" && b.runsOn !== "mac" ? workBot(b, bots) : undefined;
+    return on && on.id === f.hostId ? [{ ...f, hostName: on.name?.trim() || b!.name?.trim() || f.hostName }] : [];
+  });
+  return kept.length ? kept : undefined;
 }
 
 /** What a refused act on an app says, on the app where the member sees it (and the owner's rows). */

@@ -178,11 +178,11 @@ export function sharedAdminOpen({ anyRole = false } = {}): {
   you: string;
   botIds: string[];
   orgoUrl?: string;
-  cloud: (method: "GET" | "POST" | "PATCH", path: "people" | "routing" | "wake", body?: unknown) => Promise<{ status: number; json: Record<string, unknown> } | null>;
+  cloud: (method: "GET" | "POST" | "PATCH", path: "people" | "routing" | "wake" | "files", body?: unknown) => Promise<{ status: number; json: Record<string, unknown> } | null>;
   refresh: () => Promise<void>;
 } | null {
   const open = openNow();
-  // (`anyRole`: a Member too, for what Bops Cloud checks of them itself: waking a computer they may use.)
+  // (`anyRole`: a Member too, for what Bops Cloud checks of them itself: waking a computer they may use, a file for it.)
   if (!open || (!anyRole && open.at.role !== "admin") || !open.data.you) return null;
   const device = deviceIdFor(open.user);
   return {
@@ -204,6 +204,32 @@ export function sharedAdminOpen({ anyRole = false } = {}): {
     },
     refresh: () => open.copy.refresh(),
   };
+}
+
+/**
+ * The user's role in the shared workspace open now ("admin" or "member": lib/server/bot-files.ts SharedAs, which says
+ * Orgo's refusals as theirs), else null.
+ */
+export function sharedRole(): "admin" | "member" | null {
+  const role = openNow()?.at.role;
+  return role === "admin" || role === "member" ? role : null;
+}
+
+/**
+ * Where a file the user adds for a bot of the shared workspace open goes (app/api/bots/files): Bops Cloud's answer to
+ * POST /v1/ws/<project>/files (cloud/members.ts filesIn), which checks they may (an Admin, the bot at Write, on a
+ * computer of this workspace) and names the owner's computer it works on, woken as a message would wake it
+ * (lib/server/bot-files.ts sharedTarget reads it). Never a computer of the user's own bot of that id. Bops Cloud saying
+ * they may no longer see the workspace drops the copy, as an act's answer does (shared-core.ts actWith). Null when Bops
+ * Cloud couldn't be reached.
+ */
+export async function sharedFileTarget(botId: string, { screen = false } = {}): Promise<{ status: number; json: Record<string, unknown> } | null> {
+  const o = sharedAdminOpen({ anyRole: true });
+  if (!o) return { status: 409, json: { error: "Open the workspace again." } };
+  if (!o.botIds.includes(botId)) return { status: 404, json: { error: "That bot isn't in this workspace anymore." } };
+  const got = await o.cloud("POST", "files", { botId, ...(screen ? { screen: true } : {}) });
+  if (got && ((got.status === 404 && got.json.error === "No such workspace") || got.status === 401)) openNow()?.copy.gone();
+  return got;
 }
 
 /**

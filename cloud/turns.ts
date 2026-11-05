@@ -24,6 +24,7 @@ import {
   type ChatSendAnswer,
   type LiveTurn,
   type MemberActPayload,
+  type MemberFile,
   type RunnerClaim,
   type RunnerResume,
   type RunnerTurnEvent,
@@ -651,6 +652,8 @@ export async function takeMessage(o: {
   id: string;
   text: string;
   replyTo?: string;
+  /** A member's files with it, on the bot's computer already (protocol.ts MemberFile): kept on the message (Message.files). */
+  files?: MemberFile[];
   member?: TurnMember;
   needComputer?: boolean;
   check: (blob: Record<string, unknown>) => { botId: string; wsId: string; mayUse: boolean; group?: boolean };
@@ -684,7 +687,7 @@ export async function takeMessage(o: {
     // Said without Use its computer: marked on their stamp (which only Bops Cloud writes), so a turn that reads the chat
     // later (the owner's, or someone's who may) takes their words as something said, never as what to do.
     const member = o.member ? { userId: o.member.userId, ...(o.member.email ? { email: o.member.email } : {}), name: o.member.name, ref: o.member.ref, ...(mayUse ? {} : { noUse: true }) } : undefined;
-    const message: Record<string, unknown> = { id: o.id, chatId: o.chatId, role: "user", text: o.text, at, ...(root ? { replyTo: root } : {}), ...(member ? { member } : {}) };
+    const message: Record<string, unknown> = { id: o.id, chatId: o.chatId, role: "user", text: o.text, at, ...(root ? { replyTo: root } : {}), ...(o.files?.length ? { files: o.files } : {}), ...(member ? { member } : {}) };
     const rows: Record<string, unknown>[] = [message];
     let turn: TurnRow | null = null;
     let where: Taken["where"] = "none";
@@ -852,19 +855,24 @@ function waitForRunner(userId: string, device: string, ms: number): Promise<void
 
 /**
  * Wake one computer now, for someone who asked (an Admin, or a member with Use its computer, from the shared computer
- * panel: members.ts wakeAsMember), as a turn's wake does (wakeLoop): with the owner's say on a computer billed by the
- * hour (allowHourly). `ok` while it's waking or awake; else why not, in the chat's words (NOTES).
+ * panel: members.ts wakeAsMember, or for a file they add: members.ts filesIn), as a turn's wake does (wakeLoop): with
+ * the owner's say on a computer billed by the hour (allowHourly). `ok` while it's waking or awake; else why not, in the
+ * chat's words (NOTES), and which of them (`note`, for words of its own elsewhere).
  */
-export async function wakeComputer(userId: string, desktopId: string, wsId: string, names: { owner: string; bot: string }): Promise<{ ok: boolean; state: string; why?: string }> {
+export async function wakeComputer(userId: string, desktopId: string, wsId: string, names: { owner: string; bot: string }): Promise<{ ok: boolean; state: string; why?: string; note?: WakeRefusal }> {
   const { allowHourly } = await routingOf(userId, wsId);
   const a = await askWake(userId, desktopId, allowHourly);
   if (!a) return { ok: false, state: "unset", why: "Waking computers isn't set up here." };
   if (a.state === "running" || a.state === "woke" || a.state === "storage" || a.state === "retry") return { ok: true, state: a.state };
-  return { ok: false, state: a.state, why: NOTES[refusalNote(a)](names.owner, names.bot) };
+  const note = refusalNote(a);
+  return { ok: false, state: a.state, why: NOTES[note](names.owner, names.bot), note };
 }
 
+/** Why a computer won't wake (refusalNote): a NOTES key. */
+export type WakeRefusal = Exclude<keyof typeof NOTES, "noUse">;
+
 /** Why a computer won't wake, as the note its turns end with. */
-function refusalNote(a: WakeAnswer): Exclude<keyof typeof NOTES, "noUse"> {
+function refusalNote(a: WakeAnswer): WakeRefusal {
   if (a.state === "hourly") return "hourly";
   if (a.state === "stopped") return "stopped";
   if (a.state === "deleted") return "deleted";

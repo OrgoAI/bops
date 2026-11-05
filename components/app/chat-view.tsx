@@ -571,7 +571,20 @@ export function ChatView({
   // Images and files about to go with the next message (the + button, pasting, or dropping them on the chat). A file
   // goes where the chat's bot works: in a group, the main bot's (else its first bot's) computer.
   const fileBot = solo ?? members.find((m) => m.isMain) ?? members[0];
-  const attach = useAttachments(() => (state.shared ? undefined : fileBot?.id));
+  // In a workspace shared with the user, that computer is the owner's: a file goes there for an Admin, who has Write on
+  // the chat's bots and Use its computer (Bops Cloud checks it again: cloud/members.ts filesIn; Orgo's uploads take no
+  // Member yet: FILES_ADMINS_ONLY), and a picture goes as a file too, since one for the model to look at would stay on
+  // this Mac. Anyone else adding one is told why.
+  const filesWhy = !state.shared
+    ? null
+    : !canAct(state, c.botIds)
+      ? "You can watch these bots, not add files for them."
+      : state.shared.role !== "admin"
+        ? "Only the owner and Admins can add files here for now."
+        : state.shared.computer !== true
+          ? "The owner hasn't let you use this bot's computer, so you can't add files for it."
+          : null;
+  const attach = useAttachments(() => (filesWhy ? undefined : fileBot?.id), { asFiles: () => !!state.shared });
   // What the Preview tab's Select and Draw put in the box (composer-bridge.tsx), never sent by themselves: its
   // pictures' keys in the tray and its lines in the draft (each with where it is in the page's code, never shown), so
   // the message that goes with any of them still there is tagged appNote, and carries those lines' code for the bot.
@@ -613,21 +626,58 @@ export function ChatView({
   // Messages go to the server in the order they were sent, each after the one before (one waiting on a big file holds
   // the next back, so the bot never answers the next before the file's there).
   const sending = useRef(new Map<string, Promise<unknown>>());
+  const inTurn = async (chatId: string, go: () => Promise<unknown>) => {
+    const before = sending.current.get(chatId) ?? Promise.resolve();
+    const mineGoes = before.catch(() => {}).then(go);
+    sending.current.set(chatId, mineGoes);
+    await mineGoes.finally(() => sending.current.get(chatId) === mineGoes && sending.current.delete(chatId));
+  };
+  // The chat showing now, so words put back after a refusal (backInBox) go only into the box they came from.
+  const showing = useRef(c.id);
+  useEffect(() => {
+    showing.current = c.id;
+  });
+  // Words that didn't go, with nothing of them kept to try again: back in the box while it's still empty, with what they replied to.
+  const backInBox = (chatId: string, text: string, was: Message | null) => {
+    if (showing.current !== chatId) return;
+    if (text) setDraft((d) => (d.trim() ? d : text));
+    if (was) setReplying((r) => r ?? was);
+  };
+  // The files that didn't make it, under the box.
+  const sayFailed = (failed: { name: string; error: string }[]) =>
+    failed.length && setMicError(failed.length === 1 ? `${failed[0].name} didn't go: ${failed[0].error}` : `${failed.length} of them didn't go: ${failed[0].error}`);
   const send = async () => {
     const text = draft.trim();
     if (!text && !attaching.length) return;
-    // In a shared workspace (the viewer has Write on every bot here): their words go to the owner's Bops through
-    // Bops Cloud (shared-act.ts), shown as theirs at once. Pictures stay on this Mac (view-only.ts uploads).
+    // In a shared workspace (the viewer has Write on every bot here): their words, and the files they put on the owner's
+    // computer, go to the owner's Bops through Bops Cloud (shared-act.ts), shown as theirs at once. Pictures for the model
+    // stay on this Mac (view-only.ts uploads): the box adds them as files here.
     if (state.shared) {
-      if (attaching.length || !text) return setMicError("Pictures can't be sent in a shared workspace.");
+      if (attaching.some((a) => a.kind === "image")) return setMicError("Pictures can't be sent in a shared workspace.");
+      const items = attaching;
+      const chatId = c.id;
+      const was = replying;
+      const replyTo = was?.id;
       setDraft("");
       setReplying(null);
-      const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now() };
+      attach.release(tray.map((a) => a.key));
+      const filed = items.map((a) => ({ name: a.name, size: a.size }));
+      const mine = { id: `pending_${Date.now()}`, chatId, text, at: Date.now(), files: filed.length ? filed : undefined };
       setPending((p) => [...p, mine]);
-      setSent((x) => [...x.slice(-19), { chatId: c.id, text, at: mine.at }]);
-      const r = await memberAct({ act: "chat", chatId: c.id, text, ...(replying ? { replyTo: replying.id } : {}) });
-      setPending((p) => p.filter((x) => x.id !== mine.id));
-      if (!r.ok && r.error) setMicError(r.error);
+      setSent((x) => [...x.slice(-19), { chatId, text, at: mine.at }]);
+      // Once its files are on the owner's computer, after the message sent before it: Bops Cloud names them on the message.
+      await inTurn(chatId, async () => {
+        const got = await Promise.all(items.map((a) => a.done));
+        const files = got.flatMap((x) => (x && "file" in x ? [x.file] : []));
+        sayFailed(got.flatMap((x) => (x && "failed" in x ? [x.failed] : [])));
+        if (text || files.length) {
+          const r = await memberAct({ act: "chat", chatId, text, ...(replyTo ? { replyTo } : {}), ...(files.length ? { files } : {}) });
+          if (!r.ok && r.error) setMicError(r.error);
+          // (Refused before it was kept to try again under their message: a file not ready anymore, Bops not reached.)
+          if (!r.ok && r.unsent) backInBox(chatId, text, was);
+        }
+        setPending((p) => p.filter((x) => x.id !== mine.id));
+      });
       return;
     }
     const items = attaching;
@@ -638,6 +688,7 @@ export function ChatView({
     fromApp.current = { keys: new Set(), lines: new Map() };
     // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
     const previews = tray.flatMap((a) => (a.preview ? [a.preview] : []));
+    const was = replying;
     setDraft("");
     setReplying(null);
     attach.release(tray.map((a) => a.key));
@@ -662,15 +713,18 @@ export function ChatView({
       const got = await Promise.all(items.map((a) => a.done));
       const images = got.flatMap((x) => (x && "pic" in x ? [x.pic] : []));
       const files = got.flatMap((x) => (x && "file" in x ? [x.file.id] : []));
-      const failed = got.flatMap((x) => (x && "failed" in x ? [x.failed] : []));
-      if (failed.length) setMicError(failed.length === 1 ? `${failed[0].name} didn't go: ${failed[0].error}` : `${failed.length} of them didn't go: ${failed[0].error}`);
+      sayFailed(got.flatMap((x) => (x && "failed" in x ? [x.failed] : [])));
       if (!text && !images.length && !files.length) return drop();
-      await post(`/api/chats/${encodeURIComponent(chatId)}/messages`, { text, replyTo, images: images.length ? images : undefined, files: files.length ? files : undefined, lookingAt, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) }).finally(drop);
+      const res = await post(`/api/chats/${encodeURIComponent(chatId)}/messages`, { text, replyTo, images: images.length ? images : undefined, files: files.length ? files : undefined, lookingAt, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) })
+        .finally(drop)
+        .catch(() => null);
+      // Not taken (a file not ready anymore, Bops Cloud not reached): said under the box, and the words put back, never gone without a word.
+      if (!res?.ok) {
+        setMicError(((await res?.json().catch(() => null)) as { error?: string } | null)?.error ?? "That didn't send. Try again.");
+        backInBox(chatId, text, was);
+      }
     };
-    const before = sending.current.get(chatId) ?? Promise.resolve();
-    const mineGoes = before.catch(() => {}).then(go);
-    sending.current.set(chatId, mineGoes);
-    await mineGoes.finally(() => sending.current.get(chatId) === mineGoes && sending.current.delete(chatId));
+    await inTurn(chatId, go);
   };
   const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])];
   // Sent messages the server's state doesn't have yet.
@@ -741,16 +795,16 @@ export function ChatView({
     <main
       className="relative flex min-h-0 min-w-0 flex-1 flex-col border-r border-[#ECECEA] bg-white"
       onDragOver={(e) => {
-        // Nothing's sent in a shared workspace, so it takes no images (the window refuses them: bops-app.tsx).
-        if (state.shared || ![...e.dataTransfer.types].includes("Files")) return;
+        if (![...e.dataTransfer.types].includes("Files")) return;
         e.preventDefault();
-        if (!dropping) setDropping(true);
+        // (One that can't add files here is told why as it drops: filesWhy.)
+        if (!dropping && !filesWhy) setDropping(true);
       }}
       onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropping(false)}
       onDrop={(e) => {
         e.preventDefault();
         setDropping(false);
-        if (state.shared) return;
+        if (filesWhy) return setMicError(filesWhy);
         const files = filesOf(e.dataTransfer);
         if (files.length) {
           attach.add(files);
@@ -760,7 +814,9 @@ export function ChatView({
     >
       {dropping && (
         <div className="pointer-events-none absolute inset-3 z-[40] flex items-center justify-center rounded-[20px] border-2 border-dashed border-[#0A0A0A]/25 bg-white/85 backdrop-blur-[2px]">
-          <span className="text-[14px] font-medium text-[#3A3A38]">Drop images or files to send {solo ? `to ${solo.name}` : "to the group"}</span>
+          <span className="text-[14px] font-medium text-[#3A3A38]">
+            {state.shared ? `Drop to put it on ${fileBot ? `${workBot(fileBot, state.bots).name}'s` : "the bot's"} Desktop` : `Drop images or files to send ${solo ? `to ${solo.name}` : "to the group"}`}
+          </span>
         </div>
       )}
       {pair && <PairSheet state={state} pairId={pair.id} focusId={pair.focus} onClose={() => setPair(null)} />}
@@ -1060,24 +1116,22 @@ export function ChatView({
               e.preventDefault();
               void send();
             }}
-            className={`flex flex-col rounded-[22px] bg-white py-2 ${state.shared ? "pl-4" : "pl-2"} pr-2 shadow-[0_0_0_1px_#E2E2DF]`}
+            className="flex flex-col rounded-[22px] bg-white py-2 pl-2 pr-2 shadow-[0_0_0_1px_#E2E2DF]"
           >
             <AttachmentTray items={tray} onRemove={attach.remove} />
             <div className="flex items-end gap-2">
-            {/* No pictures in a shared workspace: they'd stay on this Mac (view-only.ts uploads). */}
-            {!state.shared && (
+            {/* In a shared workspace, files only, on the owner's computer (filesWhy says why not): pictures would stay on this Mac (view-only.ts uploads). */}
             <button
               type="button"
-              onClick={() => filePicker.current?.click()}
+              onClick={() => (filesWhy ? setMicError(filesWhy) : filePicker.current?.click())}
               aria-label="Add images or files"
-              data-tip="Add images or files · or paste / drop them"
+              data-tip={state.shared ? "Add files · they go on the bot's computer" : "Add images or files · or paste / drop them"}
               className="flex size-[30px] shrink-0 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink"
             >
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
                 <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
             </button>
-            )}
             <input
               ref={filePicker}
               type="file"
@@ -1095,8 +1149,11 @@ export function ChatView({
               onChange={setDraft}
               onPaste={(e) => {
                 const files = filesOf(e.clipboardData);
-                if (!files.length || state.shared) return;
+                if (!files.length) return;
+                // Words copied with a picture of them (cells from a sheet, a paragraph from a document): pasted as words where files can't go.
+                if (filesWhy && e.clipboardData.types.includes("text/plain")) return;
                 e.preventDefault();
+                if (filesWhy) return setMicError(filesWhy);
                 attach.add(files);
               }}
               onKeyDown={(e) => e.key === "Escape" && replying && (e.stopPropagation(), setReplying(null))}
@@ -1914,7 +1971,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             via {CHANNEL_NAME[m.via]}
           </span>
         )}
-        {m.memberSend && <MemberSendLine send={m.memberSend} retry={(key) => void memberAct({ act: "chat", chatId: m.chatId, text: m.text, ...(m.replyTo ? { replyTo: m.replyTo } : {}) }, key)} />}
+        {m.memberSend && <MemberSendLine send={m.memberSend} retry={(key) => void memberAct({ act: "chat", chatId: m.chatId, text: m.text, ...(m.replyTo ? { replyTo: m.replyTo } : {}), ...(m.files?.length ? { files: m.files } : {}) }, key)} />}
         {replies}
         {chipList}
       </div>

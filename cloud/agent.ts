@@ -195,7 +195,8 @@ export function forPhone(text: string): string {
  * A row of the chat as the phone shows it (PhoneMessage), never the row itself: what the user and the
  * bot said, a short note for anything else worth seeing (a call, another person's email or text, a
  * fact remembered), and nothing for the rest (an app's answer, the app's own lines). Pictures are
- * counted, not sent. Null for a row the phone doesn't show.
+ * counted, not sent. Files added with a message (on a bot's computer's Desktop) are named, and a message of
+ * files alone says it added them. Null for a row the phone doesn't show.
  */
 export function phoneMessage(r: MessageRow): PhoneMessage | PhoneRemoved | null {
   if (!r.json) return { id: r.id, seq: r.seq, removed: true };
@@ -203,6 +204,7 @@ export function phoneMessage(r: MessageRow): PhoneMessage | PhoneRemoved | null 
   const base = { id: r.id, seq: r.seq, at: typeof m.at === "number" && Number.isFinite(m.at) ? Math.floor(m.at) : r.at };
   const text = m.role === "bot" ? forPhone(textOf(m.text)) : textOf(m.text);
   const photos = Array.isArray(m.images) ? m.images.length : 0;
+  const files = (Array.isArray(m.files) ? m.files : []).flatMap((f) => (isObject(f) && typeof f.name === "string" && f.name.trim() ? [line(f.name, 120)] : [])).slice(0, 10);
   const note = (said: string): PhoneMessage => ({ ...base, role: "note", text: said });
   // A call's note has its caller's number as a text's too: it's the call.
   if (isObject(m.call)) {
@@ -226,7 +228,7 @@ export function phoneMessage(r: MessageRow): PhoneMessage | PhoneRemoved | null 
   if (isObject(m.sms)) return note(m.sms.dir === "in" ? `Text from ${line(textOf(m.sms.from), 120)}: ${line(text, 140)}` : `Texted ${line(textOf(m.sms.to), 120)}: ${line(text, 140)}`);
   if (m.role === "system") return isObject(m.memory) && m.memory.undone !== true && text.startsWith("Remembered:") ? note(text) : null;
   if (m.role !== "user" && m.role !== "bot") return null;
-  if (!text.trim() && !photos) return null;
+  if (!text.trim() && !photos && !files.length) return null;
   const via = typeof m.via === "string" ? VIA[m.via] : undefined;
   // One-tap replies on the cloud's own answers only: a Mac bot's question waits on the Mac, where its
   // tools are, and the cloud's bot, which has none, can't act on the choice.
@@ -234,11 +236,12 @@ export function phoneMessage(r: MessageRow): PhoneMessage | PhoneRemoved | null 
   return {
     ...base,
     role: m.role,
-    text,
+    text: text.trim() || !files.length ? text : `Added ${files.join(", ")}`,
     ...(m.role === "bot" && typeof m.botId === "string" ? { botId: m.botId } : {}),
     ...(via ? { via } : {}),
     ...(options.length ? { options } : {}),
     ...(photos ? { photos } : {}),
+    ...(files.length ? { files } : {}),
     ...(typeof m.resultOf === "string" && m.resultOf ? { taskId: m.resultOf } : {}),
     ...(typeof m.answers === "string" && m.answers ? { answers: m.answers } : {}),
   };

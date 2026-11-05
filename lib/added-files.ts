@@ -32,11 +32,12 @@ const bytes = (t: string) => new TextEncoder().encode(t).length;
 
 /**
  * A file's name safe to put on a computer: its last part only, no control characters, no leading dots (a hidden
- * file, or . and ..), at most NAME_BYTES with its extension kept, cut between characters (never inside one). Empty
- * when nothing is left.
+ * file, or . and ..), no space at either end, at most NAME_BYTES with its extension kept, cut between characters
+ * (never inside one). Empty when nothing is left. So every name claimed from it is one a shared workspace's Bops Cloud
+ * takes on a member's message (cloud/protocol.ts plainFileName): ". notes.txt" is "notes.txt", never " notes.txt".
  */
 export function cleanFileName(raw: string): string {
-  const last = (raw.split(/[\\/]/).pop() ?? "").normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, "").trim().replace(/^\.+/, "");
+  const last = (raw.split(/[\\/]/).pop() ?? "").normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, "").trim().replace(/^[.\s]+/, "");
   if (bytes(last) <= NAME_BYTES) return last;
   const dot = last.lastIndexOf(".");
   const ext = dot > 0 && last.length - dot <= 16 ? last.slice(dot) : "";
@@ -45,7 +46,8 @@ export function cleanFileName(raw: string): string {
     if (bytes(stem + ch + ext) > NAME_BYTES) break;
     stem += ch;
   }
-  return stem + ext;
+  // (Cut after a space, with no extension to end it: that space goes too.)
+  return (stem + ext).trimEnd();
 }
 
 /** 812 bytes, 14 KB, 3.2 MB, 1.1 GB. */

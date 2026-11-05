@@ -38,7 +38,10 @@ export async function POST(request: Request, ctx: RouteContext<"/api/chats/[chat
   const c = chat(chatId);
   if (!c) return Response.json({ error: "no such chat" }, { status: 404 });
   const pics = (images ?? []).filter((i) => uploadPath(i.id)).slice(0, 10);
-  const added = (Array.isArray(files) ? files : []).flatMap((f) => (typeof f === "string" ? (addedFile(f) ?? []) : [])).filter((f) => c.botIds.includes(f.botId)).slice(0, 10);
+  const named = (Array.isArray(files) ? files : []).filter((f): f is string => typeof f === "string");
+  // One that isn't here anymore (Bops restarted, or it was added a day ago) is on the Desktop with nothing telling the bot: said, never sent without it.
+  if (named.some((f) => !addedFile(f))) return Response.json({ error: "A file you added isn't ready anymore. Add it again." }, { status: 409 });
+  const added = named.flatMap((f) => addedFile(f) ?? []).filter((f) => c.botIds.includes(f.botId)).slice(0, 10);
   if (!text?.trim() && !pics.length && !added.length) return Response.json({ error: "empty message" }, { status: 400 });
   const picked = typeof agent === "string" && fromBopsWindow(request) ? agent : undefined;
   const aboutApp = appNote === true && fromBopsWindow(request) && !sharedOpen() && appsOwnShown(getState());

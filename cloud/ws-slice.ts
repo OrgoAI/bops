@@ -189,6 +189,9 @@ const MESSAGE: Spec = {
   email: { dir: true, from: true, to: true, cc: true, subject: true, files: [{ name: true, size: true }], bulk: true },
   emailed: true,
   images: [{ id: true, type: true, w: true, h: true }],
+  // Files added with it, on the Desktop of a bot's computer (lib/added-files.ts AddedFile): each chip shows for everyone
+  // given the bot it's for (sharedMessage leaves out one for a bot they aren't given).
+  files: [{ id: true, name: true, size: true, path: true, botId: true, hostId: true, hostName: true }],
   picture: { prompt: true },
   // `questionId`: where that exchange is in the two bots' own conversation (pairChatsOf), which "Asked ● Sam" opens at.
   asked: [{ botId: true, question: true, answer: true, questionId: true }],
@@ -736,6 +739,10 @@ export function sharedMessage(json: Record<string, unknown>, bots?: ReadonlySet<
     if (!(out.asked as unknown[]).length) delete out.asked;
   }
   if (bots && Array.isArray(out.sessionIds) && out.sessionIds.some(ofApp)) out.sessionIds = (out.sessionIds as unknown[]).filter((id) => !ofApp(id));
+  if (bots && Array.isArray(out.files)) {
+    out.files = (out.files as Record<string, unknown>[]).filter((f) => typeof f.botId === "string" && bots.has(f.botId));
+    if (!(out.files as unknown[]).length) delete out.files;
+  }
   return out;
 }
 

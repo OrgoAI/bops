@@ -249,6 +249,17 @@ export function historyInput(messages: Msg[], roots: Map<string, Msg>, v: AgentV
       let said = `${via}${quote}${text}${reacted}${did}`;
       const pics = Array.isArray(m.images) ? m.images.length : 0;
       if (m.role === "user" && pics) said = `${said || "(an image)"} [${pics === 1 ? "an image" : `${pics} images`} attached, which you can't see from here]`;
+      // Files added with it are on a bot's computer's Desktop (lib/added-files.ts filesNote), never here: said where, so a message of files alone still reads.
+      const files = m.role === "user" ? objects(m.files).flatMap((f) => (str(f.path) ? [{ path: str(f.path), host: str(f.hostName) }] : [])) : [];
+      if (files.length) {
+        const hosts = new Set(files.map((f) => f.host));
+        const one = files.length === 1;
+        const where =
+          hosts.size === 1
+            ? `${[...hosts][0] || "a bot"}'s computer's Desktop: ${files.map((f) => f.path).join(", ")}`
+            : `the bots' computers' Desktops: ${files.map((f) => (f.host ? `${f.path} on ${f.host}'s` : f.path)).join(", ")}`;
+        said = `${said} [${one ? "a file" : `${files.length} files`} added to ${where}. You can't open ${one ? "it" : "them"} from here.]`.trim();
+      }
       item = m.role === "user" ? { role: "user", content: said } : m.botId === selfId ? { role: "assistant", content: said } : { role: "user", content: `[${name(m.botId)}] ${said}` };
     }
     if (item.content.trim()) items.push(item);
