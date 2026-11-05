@@ -1,4 +1,4 @@
-import type { MemberAct, MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
+import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
 /**
  * Workspaces shared with the user (cloud/members.ts, lib/server/shared.ts): someone added them to one of
  * their Bops workspaces' Orgo projects, and they watch it here. With Write on a bot (the owner's choice,
@@ -191,18 +191,6 @@ export const mayChange = (state: Viewing, power: Power, { soon = false } = {}) =
  * Whether the viewer may act in a shared workspace for these bots: every one at Write (a group with one at Read
  * stays watch only). Never in the user's own, where everything's theirs and nothing goes through Bops Cloud.
  */
-/**
- * A message of theirs as it went to the owner's Bops (Try again under one that didn't get there, with its key): its words,
- * what it replied to, and its files (lib/server/shared.ts takes them again by their ids, as they were added here).
- */
-export const chatActOf = (m: { chatId: string; text: string; replyTo?: string; files?: readonly { id: string; name: string; size: number; path: string; botId: string }[] }): Extract<MemberAct, { act: "chat" }> => ({
-  act: "chat",
-  chatId: m.chatId,
-  text: m.text,
-  ...(m.replyTo ? { replyTo: m.replyTo } : {}),
-  ...(m.files?.length ? { files: m.files.map(({ id, name, size, path, botId }) => ({ id, name, size, path, botId })) } : {}),
-});
-
 export const canAct = (state: Viewing, botIds: readonly string[]) => !!state.shared && botIds.length > 0 && botIds.every((id) => state.shared!.levels?.[id] === "write");
 /**
  * Nothing here may be changed from this window for these bots: in a shared workspace, unless the viewer has Write
