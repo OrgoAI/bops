@@ -1,0 +1,5 @@
+- Admins can add files in a shared workspace's chats.
+- Tasks can save code changes to GitHub, on the usual card.
+- Draft branches a repository lists save without asking.
+- A bot gets more steps for a whole site change.
+- Updating a bot's computer never cuts off its reply.
