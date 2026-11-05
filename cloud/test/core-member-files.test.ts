@@ -4,7 +4,8 @@ import { phoneMessage } from "../agent.ts";
 import { historyInput } from "../agent-prompt.ts";
 import { cleanMemberFiles, MEMBER_FILES_MAX } from "../protocol.ts";
 import { sharedMessage } from "../ws-slice.ts";
-import { cleanFileName } from "../../lib/added-files.ts";
+// The Mac app's own (lib/ is CommonJS to this tsconfig, so it's imported as the edge tests import lib/server/state-merge.ts).
+const { cleanFileName } = (await import(new URL("../../lib/added-files.ts", import.meta.url).href)) as { cleanFileName: (name: string) => string };
 
 /**
  * Files added with a message (lib/added-files.ts AddedFile, protocol.ts MemberFile), as Bops Cloud takes and shows them:
