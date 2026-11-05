@@ -798,6 +798,74 @@ await test("Keys: a switch per Member beside Use its computer, sent as {memberId
   for (const v of Object.values(M.KEYS_WORDS)) assert.ok(!/[–—]/.test(v) && !v.includes(" - ") && !/orbit/i.test(v), v);
 });
 
+/* ---------------- Free with people included ---------------- */
+
+/** A section of the sheet by its title, and what its header says beside the title. */
+const sectionOf = (box, title) => [...box.querySelectorAll("span")].find((s) => s.textContent === title)?.parentElement?.parentElement;
+const asideOf = (box, title) => sectionOf(box, title)?.firstElementChild?.children[1]?.textContent ?? null;
+
+await test("Free with people included (orgo-web's numbers, never the plan's name): the form and its counter while there's room, no plan to buy when full, and invites accepted until there are more than it includes", async () => {
+  const caps = { pro_bops: 2, max_bops: 5 };
+  const sheet = async (seats, change) => {
+    const fake = bops();
+    fake.info.seats = { plan: "free_bops", upgrade: null, caps, ...seats };
+    change?.(fake.info);
+    return mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  };
+  // 0 of 5: nobody yet, the form and its counter.
+  let m = await sheet({ canAdd: true, limit: 5, used: 0 }, (info) => ((info.people = []), (info.invites = [])));
+  assert.ok(sectionOf(m.box, "Add someone").querySelector("form"), "the invite form");
+  assert.equal(asideOf(m.box, "Add someone"), "0 of 5 people");
+  assert.equal(sectionOf(m.box, "Invited"), undefined, "no invites, no Invited");
+  await m.done();
+  // 2 of 5: still the form; the invite waiting can be accepted.
+  m = await sheet({ canAdd: true, limit: 5, used: 2 });
+  assert.ok(sectionOf(m.box, "Add someone").querySelector("form"));
+  assert.equal(asideOf(m.box, "Add someone"), "2 of 5 people");
+  assert.equal(asideOf(m.box, "Invited"), null, "the invite can be accepted");
+  assert.ok(!m.box.textContent.includes("Can't be accepted"));
+  await m.done();
+  // 5 of 5: why not, with the counter, and no button to a plan that can't be bought.
+  m = await sheet({ canAdd: false, limit: 5, used: 5 });
+  const add = sectionOf(m.box, "Add someone");
+  assert.equal(add.querySelector("form"), null);
+  assert.equal(asideOf(m.box, "Add someone"), "5 of 5 people");
+  assert.ok(add.textContent.includes("Bops includes 5 people, and you have 5. Remove someone or cancel an invite to add someone else."), add.textContent);
+  assert.ok(!/Free doesn't include|Pro|Max/.test(add.textContent), "never says Free adds nobody, nor names a plan to buy");
+  assert.equal(add.querySelector("button"), null, "no Purchase a plan, no Upgrade to Max");
+  assert.equal(asideOf(m.box, "Invited"), null, "a full plan's invites still hold their seats: they can be accepted");
+  await m.done();
+  // Over it (more than it includes, from before): the invites can't be accepted, and the tip says to make room, not upgrade.
+  m = await sheet({ canAdd: false, limit: 5, used: 7 });
+  assert.equal(asideOf(m.box, "Add someone"), null, "\"7 of 5\" would only puzzle");
+  assert.equal(asideOf(m.box, "Invited"), "Can't be accepted right now");
+  const tip = sectionOf(m.box, "Invited").firstElementChild.children[1].getAttribute("data-tip");
+  assert.equal(tip, M.WORDS.invitedOver);
+  assert.ok(!/upgrade|Pro|Max/i.test(tip));
+  assert.equal(buttonOf(m.box, "Purchase a plan"), undefined);
+  await m.done();
+  // An orgo-web that still says Free adds nobody (limit 0): those words, no counter, and its invites can't be accepted.
+  m = await sheet({ canAdd: false, limit: 0, used: 1 }, (info) => (info.people = []));
+  assert.equal(asideOf(m.box, "Add someone"), null);
+  assert.ok(sectionOf(m.box, "Add someone").textContent.includes("Free doesn't include adding people."));
+  assert.equal(buttonOf(m.box, "Purchase a plan"), undefined, "no button unless orgo-web offers an upgrade");
+  assert.equal(sectionOf(m.box, "Invited").firstElementChild.children[1].getAttribute("data-tip"), M.WORDS.invitedNone);
+  await m.done();
+  // ...and with the upgrade orgo-web offers, its button.
+  m = await sheet({ canAdd: false, limit: 0, used: 0, upgrade: "plan" }, (info) => ((info.people = []), (info.invites = [])));
+  assert.ok(buttonOf(m.box, "Purchase a plan"));
+  await m.done();
+  // Pro full, with an upgrade to Max offered: still its button; offered none, none.
+  m = await sheet({ plan: "pro_bops", canAdd: false, limit: 2, used: 2, upgrade: "max" });
+  assert.ok(buttonOf(m.box, "Upgrade to Max"));
+  assert.equal(asideOf(m.box, "Add someone"), "2 of 2 people");
+  await m.done();
+  m = await sheet({ plan: "pro_bops", canAdd: false, limit: 2, used: 2, upgrade: null });
+  assert.equal(buttonOf(m.box, "Upgrade to Max"), undefined);
+  await m.done();
+  for (const t of [M.WORDS.invitedNone, M.WORDS.invitedOver]) assert.ok(!/[–—]/.test(t) && !t.includes(" - "), t);
+});
+
 /* ---------------- An Admin's sheet of a workspace shared with them ---------------- */
 
 await test("an Admin's sheet: the owner's row has no controls and says what stays theirs; their own row says You, with Leave; Member or Admin, never Owner; no plan to upgrade", async () => {
