@@ -148,8 +148,12 @@ globalThis.fetch = async (input, init) => {
     jev.asked.push(b);
     return json({ answers: jev.answer(b), model: "jev-test" });
   }
+  // orgo-web, only while a test sets `orgoFake.handle` (a runner's skill saved there).
+  if (orgoFake.handle && url.origin === orgoFake.origin) return orgoFake.handle(req);
   throw new TypeError(`fetch failed (the test is offline: ${url.host})`);
 };
+/** orgo-web's fake: off until a test sets `handle` (and points BOPS_ORGO_ORIGIN at `origin`). */
+const orgoFake = { origin: "https://orgo.test", handle: null };
 /** Jev's fake: off (decide answers null, as without a key) until a test sets `answer`. */
 const jev = { answer: null, asked: [] };
 const warned = [];
@@ -2586,6 +2590,30 @@ await check("a pasted preview link or localhost address isn't asking to publish;
   assert.equal(asks("publish it on brandlord.agency"), true);
   assert.equal(asks("put it on acme.example.com... I mean acme.com"), true);
   assert.equal(asks("publish it"), true);
+  // Putting it live, going live and shipping it, asked for: Publish (a change is on its Preview already).
+  for (const s of ["put it live", "Push it live", "Go live!", "Looks good, ship it", "Can you push the changes live?", "Ok, make the site live", "let's go live", "Don't wait, publish it", "No, push it live"]) assert.equal(asks(s), true, s);
+  // Never words that only mention live, say not to, ask about it, quote it, or ship it to its preview.
+  for (const s of [
+    "Don't put it live yet",
+    "don't ship it yet",
+    "Never push this live",
+    "Do not under any circumstances publish it",
+    "don't publish it",
+    "publish it later",
+    "ship it to preview",
+    "Push it to preview, not live",
+    "Make the live chat widget bigger",
+    "Set up a live chat on the contact page",
+    "Take a look at the live version and fix the header",
+    "Is it going live today?",
+    "When will it go live?",
+    "Did you put it live?",
+    "We'll ship it next week",
+    'Change the button to say "Go live"',
+    "Sam said 'ship it' but wait for me",
+    "> put it live\nwhat do you make of this email?",
+  ])
+    assert.equal(asks(s), false, s);
 });
 
 /* ---------------- A chat turn on a bot's computer (runner-chat.ts) ---------------- */
@@ -2612,10 +2640,13 @@ await check("a turn a computer's runner answers: the message Bops Cloud wrote is
   assert.deepEqual([answer.role, answer.text, answer.turn], ["bot", "Two meetings.", "turn_msg_cloud_1"]);
   assert.ok(answer.at >= T + 1, "after the message it answers, whatever this computer's clock says");
   const names = toolNames(asked[n]);
-  for (const t of ["schedule", "manage_routine", "make_page", "create_bot", "hand_off", "watch", "create_skill"]) assert.ok(!names.includes(t), `${t} waits for the Mac`);
+  // (A Member's turn: no skills either way, as on the Mac.)
+  for (const t of ["schedule", "manage_routine", "make_page", "create_bot", "hand_off", "watch", "create_skill"]) assert.ok(!names.includes(t), `${t} isn't offered`);
   assert.ok(names.includes("start_task"), "a task on its computer still starts");
   const note = asked[n].input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
   assert.match(hear(note), /You're answering from your computer, not from Alex's Mac/);
+  assert.match(note, /say plainly that you can't do that from your computer yet\. Never say a tool isn't available in this chat, and never tell anyone to ask again somewhere else\./);
+  assert.doesNotMatch(note, /wait for Alex's Mac|ask for it there/);
   assert.equal(acted, 0, "a plain answer did nothing that can't be done twice");
   // A task started: said once, before the turn ends.
   S.update((st) => st.messages.push({ id: "msg_cloud_2", chatId, role: "user", text: "check the invoices on your computer", at: T + 10 }));
@@ -2633,6 +2664,104 @@ await check("a turn a computer's runner answers: the message Bops Cloud wrote is
   answers.length = 0;
   // A message it doesn't have, or a group's: not answered here.
   assert.equal(await runInTurn(ctx, () => Chat.answerMessage(chatId, "msg_nowhere")), null);
+});
+
+await check("the owner's turn on the bot's computer: its apps on the web and its skills are there (never what keeps files on the Mac); create_skill saves a draft in Orgo with the computer's own sign in, said plainly when Orgo turns it down; update_skill is a proposal under the answer", async () => {
+  const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
+  // A stand in for orgo-web's skills route: what each POST asked, answered as the test says.
+  const posts = [];
+  let answer = { status: 201, json: { skill: { id: "sk_1", name: "Weekly recap" } } };
+  orgoFake.handle = async (req) => {
+    const u = new URL(req.url);
+    // (Anything else this turn asks of orgo-web, its keys say: not found.)
+    if (!(req.method === "POST" && /^\/api\/projects\/[^/]+\/skills$/.test(u.pathname))) return new Response("{}", { status: 404, headers: { "content-type": "application/json" } });
+    const text = await req.text();
+    posts.push({ method: req.method, url: u.pathname, auth: req.headers.get("authorization"), body: text ? JSON.parse(text) : null });
+    return new Response(JSON.stringify(answer.json), { status: answer.status, headers: { "content-type": "application/json" } });
+  };
+  const had = { origin: process.env.BOPS_ORGO_ORIGIN };
+  process.env.BOPS_ORGO_ORIGIN = orgoFake.origin;
+  const pid = "11111111-2222-4333-8444-555555555555";
+  const wasPid = S.getState().workspaces[0].orgoProjectId;
+  S.update((st) => void (st.workspaces[0].orgoProjectId = pid));
+  const T = Date.now() + 240_000;
+  let k = 0;
+  const onBox = async (text, items) => {
+    const id = `msg_box_${++k}`;
+    S.update((st) => st.messages.push({ id, chatId, role: "user", text, at: T + k }));
+    answers.push(calling(...items), reply("Done."));
+    const n = asked.length;
+    await runInTurn({ id: `turn_${id}`, chatId, botId: "boppy", offsetMs: 0, humanAt: T + k, acting: false, cancelled: false }, () => Chat.answerMessage(chatId, id));
+    return { first: asked[n], out: (i = 0) => hear(outputOf(asked[n + 1], i)) };
+  };
+  try {
+    const t = await onBox("save how you do the weekly recap as a skill", [toolCall("create_skill", { name: "Weekly recap", description: "When Alex asks for the weekly recap", steps: "1. Read the week's chats.\n2. Post five lines.", pitfalls: null, label: null })]);
+    const names = toolNames(t.first);
+    for (const x of ["work_on_app", "deploy_app", "local_app", "create_skill", "update_skill", "propose_skill_change", "start_task"]) assert.ok(names.includes(x), `has ${x}`);
+    for (const x of ["schedule", "manage_routine", "watch", "make_page", "make_image", "make_app", "change_app", "create_bot"]) assert.ok(!names.includes(x), `no ${x}`);
+    assert.equal(t.out(), "Saved \"Weekly recap\" as a draft in your workspace's skills. Alex can publish it in Skills, in Knowledge; then you'll use it.");
+    const noteOf = (req) => req.input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
+    assert.match(noteOf(t.first), /not from Alex's Mac\. Your workspace's apps on the web \(Local, Preview and Published\) work from here as always\. So do skills: a new one is saved as a draft/);
+    assert.equal(posts.length, 1);
+    const p = posts[0];
+    // (The sign in this Bops runs on: on a runner, its computer's own, orgo.ts apiKey; never one sent from elsewhere.)
+    assert.deepEqual([p.method, p.url, p.auth], ["POST", `/api/projects/${pid}/skills`, "Bearer sk_orgo_test_chat_tools"], "to the workspace's skills, with this Bops' own sign in");
+    assert.equal(p.body.status, "draft", "a draft until Alex publishes it");
+    assert.deepEqual([p.body.name, p.body.type, p.body.bot_ids], ["Weekly recap", "skill", ["boppy"]]);
+    assert.match(p.body.body, /^---\n[^]*name: weekly-recap[^]*---\n+# Weekly recap\n\n## Steps\n\n1\. Read the week's chats\.\n2\. Post five lines\.\n/);
+    assert.ok(!W.refsOf("ws_main", "skill").some((r) => r.name === "Weekly recap"), "nothing kept in this computer's state: Alex's Bops brings it in");
+    // Orgo not taking the computer's own sign in for it yet: said plainly, nothing saved, never "ask on the Mac".
+    answer = { status: 403, json: { error: "A computer's own key can't create a workspace skill.", code: "computer_key" } };
+    const no = await onBox("save how you do the monthly recap as a skill", [toolCall("create_skill", { name: "Monthly recap", description: "When Alex asks for the monthly recap", steps: "1. Read the month.", pitfalls: null, label: null })]);
+    assert.match(no.out(), /^Not saved: Orgo doesn't take this computer's own sign in for saving skills\. Nothing was saved\. /);
+    assert.doesNotMatch(no.out(), /Mac|in this chat/);
+    // Its other refusals of a computer's own sign in, each in plain words (never its code), and what was sent each time:
+    // a draft, a skill, for this turn's bot alone, to the workspace's own project.
+    for (const [code, said] of [
+      ["workspace_scope_mismatch", "this computer belongs to another of your Orgo workspaces, so Orgo saves skills from it only there"],
+      ["computer_scope", "Orgo doesn't have Boppy down as working on this computer yet, so it won't save a skill for it from here"],
+    ]) {
+      answer = { status: 403, json: { error: "Refused.", code } };
+      const r = await onBox("save how you do the yearly recap as a skill", [toolCall("create_skill", { name: "Yearly recap", description: "When Alex asks for the yearly recap", steps: "1. Read the year.", pitfalls: null, label: null })]);
+      assert.ok(r.out().startsWith(`Not saved: ${said}. Nothing was saved. `), `${code}: ${r.out()}`);
+      assert.doesNotMatch(r.out(), /_|scope|Refused/);
+      const sent = posts.at(-1);
+      assert.deepEqual([sent.url, sent.body.status, sent.body.type, sent.body.bot_ids], [`/api/projects/${pid}/skills`, "draft", "skill", ["boppy"]]);
+    }
+    // A change to a published skill: a proposal under the answer, nothing written here.
+    const pub = W.refsOf("ws_main", "skill").find((r) => r.status === "published" && (!r.botIds.length || r.botIds.includes("boppy")));
+    assert.ok(pub, "a published skill to change");
+    const n = posts.length;
+    const up = await onBox(`update the skill ${pub.name}: add a last step to say thanks`, [toolCall("update_skill", { name: pub.name, description: pub.description, steps: "1. Do it.\n2. Say thanks.", pitfalls: null, label: null })]);
+    assert.match(up.out(), new RegExp(`^Not changed yet: "${pub.name}" is changed only where its files are kept, so the change is a proposal under this answer, which becomes its next version once Alex accepts it\\.$`));
+    assert.equal(posts.length, n, "nothing sent to Orgo");
+    const card = [...S.getState().messages].reverse().find((m) => m.chatId === chatId && m.skillProposals?.length);
+    assert.ok(card, "the proposal's card");
+    assert.deepEqual([card.skillProposals[0].slug, card.skillProposals[0].file], [pub.slug, "SKILL.md"]);
+    assert.match(card.skillProposals[0].content, /2\. Say thanks\./);
+    // Apps not open to the account: skills are there all the same, said on their own (no "So do" with nothing before it).
+    const was = S.getState().account;
+    S.update((s) => (s.account = { ...s.account, user: { ...s.account.user, email: "alex@example.com" } }));
+    try {
+      const id = `msg_box_${++k}`;
+      S.update((st) => st.messages.push({ id, chatId, role: "user", text: "hi", at: T + k }));
+      answers.push(reply("Hi."));
+      const m = asked.length;
+      await runInTurn({ id: `turn_${id}`, chatId, botId: "boppy", offsetMs: 0, humanAt: T + k, acting: false, cancelled: false }, () => Chat.answerMessage(chatId, id));
+      assert.ok(!toolNames(asked[m]).includes("work_on_app"), "no apps");
+      const note = asked[m].input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
+      assert.match(note, /not from Alex's Mac\. Skills work from here too: a new one is saved as a draft/);
+      assert.doesNotMatch(note, /So do skills/);
+    } finally {
+      S.update((s) => (s.account = was));
+    }
+  } finally {
+    S.update((st) => void (st.workspaces[0].orgoProjectId = wasPid));
+    if (had.origin === undefined) delete process.env.BOPS_ORGO_ORIGIN;
+    else process.env.BOPS_ORGO_ORIGIN = had.origin;
+    orgoFake.handle = null;
+    answers.length = 0;
+  }
 });
 
 /* ---------------- Plain words ---------------- */

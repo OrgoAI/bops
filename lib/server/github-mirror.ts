@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { GithubMirror } from "@/lib/hosted-apps";
 import { ingot, type IngotChange, type IngotFile } from "./ingot";
 import { callKey, KeysError, keyProjectFor, listKeys, type KeyAnswer, type KeyMethod, type VaultKey } from "./keys";
+import { onRunner } from "./persist";
 import { userDir } from "./store";
 
 /**
@@ -34,6 +35,10 @@ import { userDir } from "./store";
  */
 
 const KEY = "GITHUB_TOKEN";
+/** The key a bot needs, given by the owner in Keys, to publish an app to GitHub (Orgo's broker calls GitHub with it). */
+export const GITHUB_KEY = KEY;
+/** Orgo refusing a computer's own sign in a key its bot wasn't given (403): said as that, in plain words. */
+const NO_KEY_HERE = "The bot publishing it has no GitHub key for this app, so nothing went to GitHub. Give it the GitHub key in Keys, then publish again.";
 /** The most bytes of one file sent up (base64 in a broker request of at most 1 MB). */
 export const BLOB_MAX = 700_000;
 /** A file up to this many bytes comes down in the broker's answer (base64 in at most 512 KB); bigger, by GitHub's link. */
@@ -172,6 +177,8 @@ function github(wsId: string) {
     try {
       return await callKey({ name: KEY, method, path, body: body ?? null, query: query ?? null, workspaceId: project });
     } catch (e) {
+      // (On a bot's computer, Orgo calls only the keys its bots were given: one it wasn't is a 403.)
+      if (onRunner() && e instanceof KeysError && e.status === 403) throw new MirrorError(NO_KEY_HERE, 409, { code: "NO_GITHUB_KEY" });
       throw new MirrorError(e instanceof KeysError ? `GitHub: ${e.message}` : "Orgo didn't reach GitHub. Try again.", e instanceof KeysError && e.status === 404 ? 409 : 502);
     }
   };

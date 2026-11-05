@@ -67,6 +67,7 @@ import {
   type OrgoDomainOffer,
   type OrgoRecordInput,
   type OrgoZone,
+  type DeploySettings,
 } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import {
@@ -88,8 +89,9 @@ import {
   type Wanted,
 } from "./cloudflare";
 import { onRunner, selfHosted } from "./persist";
+import { hostingChangeAllowed, hostingScope, type Blob } from "@/cloud/computer-scope";
 import { isLabelOf, labelGiven, newLabel } from "./app-labels";
-import { linkMirror, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
+import { GITHUB_KEY, linkMirror, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
 import { appFolder, authorOf, byBots, changesTo, dropToken, ensureIngotCli, folderChanges, hasToken, ingot, INGOT_BIN, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotChange, type IngotChangeset, type IngotRepo } from "./ingot";
 import { addMessage, bot, flushState, getState, ownerName, sameState, session, update } from "./store";
 import { tailnetUp } from "./tailnet";
@@ -194,6 +196,14 @@ export const computerOf = (botId: string) => {
  * computer it leaves, when no app of the workspace is on it anymore, has its token revoked (best effort).
  */
 function keepHosting(wsId: string, name: string, fn: (h: AppHosting | undefined) => AppHosting | undefined) {
+  // On a computer's runner, only what its computer may keep of an app (cloud/computer-scope.ts hostingChangeAllowed, as
+  // Bops Cloud and the owner's Mac judge its write): anything else is said now, before it's done, never kept here alone.
+  if (onRunner()) {
+    const was = hostingOf(wsId, name);
+    const now = fn(was);
+    if (!hostingChangeAllowed(wsId, was, now, hostingScope(getState() as unknown as Blob, process.env.BOPS_RUNNER_COMPUTER ?? ""), name))
+      throw new HostedAppError(notHere(name, was), 409);
+  }
   let left: string | undefined;
   let moved: AppHosting | undefined;
   update((s) => {
@@ -215,6 +225,48 @@ function keepHosting(wsId: string, name: string, fn: (h: AppHosting | undefined)
   if (left) void dropToken(wsId, left);
   if (moved) void previewLeft(wsId, name, moved).catch(() => {});
 }
+
+/**
+ * Why a computer's runner can't keep a change to an app's record (keepHosting): it lives on another computer, its
+ * computer is gone, or the change is one only the owner's Bops makes (a site added or taken out, where it publishes).
+ */
+function notHere(name: string, was: AppHosting | undefined): string {
+  const here = process.env.BOPS_RUNNER_COMPUTER?.toLowerCase();
+  if (was?.lost) return `${name}'s computer is gone, and this computer can't give it a new home itself, so nothing of it was changed`;
+  if (was && was.computerId.toLowerCase() !== here) return `${name} lives on another computer, not this one, so nothing of it was changed here`;
+  return `That change to ${name} is one this computer can't make itself, so nothing of it was changed`;
+}
+
+/**
+ * On a computer's runner, the apps it acts on (deploy_app, local_app) are the ones whose home is this computer, or a
+ * new one, which gets it here: another computer's (or one whose computer is gone) is said, and nothing of it is touched.
+ */
+function onThisComputer(wsId: string, name: string) {
+  if (!onRunner()) return;
+  const h = hostingOf(wsId, name);
+  if (h && (h.lost || h.computerId.toLowerCase() !== (process.env.BOPS_RUNNER_COMPUTER ?? "").toLowerCase())) throw new HostedAppError(notHere(name, h), 409);
+}
+
+/**
+ * Orgo turned a computer's own sign in away for a call about apps (403, by orgo-web's code), in plain words. orgo-web
+ * takes it for its own computer's deploys (the list, one project, a new one, a deploy) and domains (read), only of
+ * Ingot repos of the workspaces it works for, and never for a project's settings, its variables, logs, a rollback or
+ * a removal. Only ever on a computer's runner, which calls Orgo with its computer's own sign in (orgo.ts apiKey),
+ * never the owner's key.
+ */
+const FOR_COMPUTER: Record<string, string> = {
+  computer_key: "Orgo doesn't take this computer's own sign in for that",
+  computer_scope: "Orgo lets this computer deploy only apps of the workspaces it works for, from Ingot",
+  INGOT_WORKSPACE_MISMATCH: "This app's code is in a workspace this computer doesn't work for, so Orgo won't deploy it here",
+  computer_scope_mismatch: "Orgo lets this computer work only on itself, and that's another computer",
+  workspace_scope_mismatch: "Orgo lets this computer work only in its own workspace",
+};
+export const OFF_FOR_COMPUTER = FOR_COMPUTER.computer_key;
+/** orgo-web's code for a refusal of a computer's own sign in, in plain words (undefined: not one of those). */
+export const computerRefusalWords = (code: unknown): string | undefined => (typeof code === "string" && Object.hasOwn(FOR_COMPUTER, code) ? FOR_COMPUTER[code] : undefined);
+const computerRefused = (e: unknown): e is OrgoError => onRunner() && e instanceof OrgoError && e.status === 403 && computerRefusalWords(e.code) !== undefined;
+/** A read that answers null when Orgo can't say, but not when it turned this computer's own sign in away: that's said. */
+const orNull = <T,>(p: Promise<T>): Promise<T | null> => p.catch((e: unknown) => (e instanceof HostedAppError && e.extra?.code === "COMPUTER_KEY" ? Promise.reject(e) : null));
 
 /* ---------------- Work on one app, one at a time ---------------- */
 
@@ -764,7 +816,11 @@ export async function appCommits(wsId: string, name: string, before: string | nu
 
 /** Orgo turned a deploy call down: its own words when it said why (a paid plan needed, hosting blocked), else ours. */
 const refused = (e: unknown) =>
-  e instanceof OrgoError ? new HostedAppError(e.said ? `Orgo says: ${e.said}` : "Orgo didn't take that. Try again in a minute.", e.status >= 400 && e.status < 500 ? e.status : 502) : e;
+  computerRefused(e)
+    ? new HostedAppError(`${computerRefusalWords(e.code)}.`, 403, { code: "COMPUTER_KEY" })
+    : e instanceof OrgoError
+      ? new HostedAppError(e.said ? `Orgo says: ${e.said}` : "Orgo didn't take that. Try again in a minute.", e.status >= 400 && e.status < 500 ? e.status : 502)
+      : e;
 
 /**
  * A deploy project's name on Orgo, which its public URL takes: the repo's name, cut to the 32 characters
@@ -872,7 +928,14 @@ async function urlsNow(computerId: string, ours: () => boolean): Promise<{ urls:
  * repo's oldest project when its record names none) always finds Published's. `env`: variables to make it
  * with, or to set on the one found.
  */
-async function ensureProd(wsId: string, name: string, s: SiteHosting, ours: () => boolean, env?: Record<string, string>): Promise<SiteHosting & { projectId: string }> {
+async function ensureProd(
+  wsId: string,
+  name: string,
+  s: SiteHosting,
+  ours: () => boolean,
+  env?: Record<string, string>,
+  opts: { settings?: DeploySettings; made?: (p: OrgoDeployProject) => void } = {},
+): Promise<SiteHosting & { projectId: string }> {
   const repo = ingotRepo(wsId, name);
   const projects = await projectsNow(s.computerId, ours);
   const all = hostingOf(wsId, name) ?? s;
@@ -897,18 +960,19 @@ async function ensureProd(wsId: string, name: string, s: SiteHosting, ours: () =
     let label = newLabel("prod", repo, s.site);
     while (names.has(label)) label = newLabel("prod", repo, s.site);
     const port = freePort(projects, urls, ports);
-    const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(env && Object.keys(env).length ? { env } : {}) }).catch((e: unknown) => e as Error);
+    const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(env && Object.keys(env).length ? { env } : {}), ...(opts.settings ? { settings: opts.settings } : {}) }).catch((e: unknown) => e as Error);
     held(ours);
     if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(label);
     else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.push(port);
     else if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT"))
       throw new HostedAppError(`${bot(s.botId)?.name ?? "That bot"}'s computer already runs as many apps as one computer can. Remove a site or a left over first.`, 409);
-    else if (made instanceof OrgoError && made.code === "INVALID_ENV") throw settingsRefused(made);
+    else if (made instanceof OrgoError && (made.code === "INVALID_ENV" || made.code === "INVALID_COMMAND" || made.code === "INVALID_HEALTH_PATH")) throw settingsRefused(made);
     else if (made instanceof Error) throw refused(made);
     else if (!made.enabled) throw new HostedAppError(made.why, 403);
     else {
       // The window reads the app again: it has a deploy project now.
       keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
+      opts.made?.(made.value);
       return keep(made.value.id);
     }
   }
@@ -1243,8 +1307,24 @@ const seedsFor = (url: string, given?: Record<string, string>): Record<string, s
   ...(given ?? {}),
 });
 
-/** The sign in variables a project has none of yet (AUTH_URL, NEXTAUTH_URL, BETTER_AUTH_URL), set to `url`; never one the user set. */
+/** The settings a project was given by hand (its commands, a health path that isn't Orgo's /), for another made to build the same way; none when it has none. */
+function settingsFrom(p: OrgoDeployProject | undefined): DeploySettings | undefined {
+  if (!p) return undefined;
+  const out: DeploySettings = {};
+  if (p.install_cmd) out.install_cmd = p.install_cmd;
+  if (p.build_cmd) out.build_cmd = p.build_cmd;
+  if (p.start_cmd) out.start_cmd = p.start_cmd;
+  if (typeof p.health_path === "string" && p.health_path !== "/") out.health_path = p.health_path;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * The sign in variables a project has none of yet (AUTH_URL, NEXTAUTH_URL, BETTER_AUTH_URL), set to `url`; never one
+ * the user set. Not from a computer's runner: a project's variables are the owner's (orgo-web takes no change of them
+ * from a computer's own sign in), and a Preview it makes has them from its create (seedsFor).
+ */
 async function seedAuth(computerId: string, p: OrgoDeployProject, url: string, ours: () => boolean) {
+  if (onRunner()) return;
   const has = new Set(p.env_keys ?? []);
   if (has.has("AUTH_URL") || has.has("NEXTAUTH_URL") || has.has("BETTER_AUTH_URL")) return;
   const r = await deploys.env(computerId, p.id, seedsFor(url)).catch(() => null);
@@ -1311,30 +1391,21 @@ async function ensurePreview(
     await passwordNow(wsId, name, prod.site, c, r.url, r.project.current?.id ?? null, ours);
     return r;
   };
-  /** Its project made on `port` with `label`, seeded, built as Published builds (a legacy Published's commands copied once). */
+  /**
+   * Its project made on `port` with `label`, seeded (its sign in at its own link: seedsFor), and built as Published
+   * builds: Published's commands set by hand (a legacy one's, or ones saved before its first deploy) go in the same
+   * create, never in a change after it, which a computer's own sign in can't make.
+   */
   const makeProject = async (label: string, url: OrgoPublicUrl): Promise<OrgoDeployProject | "name" | "port"> => {
     const env = seedsFor(url.url, opts.env);
-    const made = await deploys.create(c, { repo, name: label, port: url.port, env }).catch((e: unknown) => e as Error);
+    const made = await deploys.create(c, { repo, name: label, port: url.port, env, settings: settingsFrom(fromProd) }).catch((e: unknown) => e as Error);
     held(ours);
     if (made instanceof OrgoError && made.code === "NAME_TAKEN") return "name";
     if (made instanceof OrgoError && made.code === "PORT_TAKEN") return "port";
     if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT")) throw new HostedAppError(PREVIEW_WORDS.noRoom(bot(prod.botId)?.name ?? "That bot", prod.site), 409, { code: made.code });
-    if (made instanceof OrgoError && made.code === "INVALID_ENV") throw settingsRefused(made);
+    if (made instanceof OrgoError && (made.code === "INVALID_ENV" || made.code === "INVALID_COMMAND" || made.code === "INVALID_HEALTH_PATH")) throw settingsRefused(made);
     if (made instanceof Error) throw refused(made);
     if (!made.enabled) throw new HostedAppError(made.why, 403);
-    // Published's commands set by hand (a legacy one's, or ones saved before its first deploy): its Preview builds the same way to start with.
-    if (fromProd) {
-      const patch: Parameters<typeof deploys.change>[2] = {};
-      if (fromProd.install_cmd) patch.install_cmd = fromProd.install_cmd;
-      if (fromProd.build_cmd) patch.build_cmd = fromProd.build_cmd;
-      if (fromProd.start_cmd) patch.start_cmd = fromProd.start_cmd;
-      if (typeof fromProd.health_path === "string" && fromProd.health_path !== "/") patch.health_path = fromProd.health_path;
-      if (Object.keys(patch).length) {
-        const r = await deploys.change(c, made.value.id, patch).catch(() => null);
-        held(ours);
-        if (r?.enabled) return r.value;
-      }
-    }
     return made.value;
   };
   /** Its project made on its URL's port, the URL moved to a free port when an app on the computer holds that one. */
@@ -1389,7 +1460,8 @@ async function ensurePreview(
   // None on this computer: its label chosen, then its link and its project made.
   let label: string | undefined = opts.given;
   let fromOld = false;
-  if (!label && !said) {
+  // (Never from a computer's runner: it never removes or moves a link of another computer.)
+  if (!label && !said && !onRunner()) {
     const moved = await previewElsewhere(wsId, name, all, prod.site, repo, c, ours);
     if (moved) {
       label = moved.label;
@@ -1441,6 +1513,8 @@ async function ensurePreview(
  * computer can't take it, it's put back there. Undefined: none, or it couldn't be moved (a new one is made).
  */
 async function previewElsewhere(wsId: string, name: string, h: AppHosting, site: string, repo: string, here: string, ours: () => boolean): Promise<{ label: string } | undefined> {
+  // (A computer's runner never touches another computer's links: a new label is made instead.)
+  if (onRunner()) return undefined;
   const others = [
     ...new Set([
       ...(h.behind ?? []).map((b) => b.computerId),
@@ -1798,7 +1872,7 @@ export async function promoteApp(
     // Production on GitHub (AppHosting.github): what the Preview serves goes there (github-mirror.ts), not to Orgo.
     if (now.github) return publishToGithub(wsId, name, now, opts.at, opts.site, ours);
     const sites = opts.site !== undefined ? [siteIn(now, name, opts.site).site] : sitesOf(now, name).map((x) => x.site);
-    const read = await previewsOf(wsId, name, now, (c) => projectsNow(c, ours).catch(() => null), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours);
+    const read = await previewsOf(wsId, name, now, (c) => orNull(projectsNow(c, ours)), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours);
     held(ours);
     if (!read) throw new HostedAppError("Couldn't read its preview just now. Try again in a minute.", 502);
     const plan = sites.map((site) => ({ site, at: read.previews.get(site)?.serving ?? null }));
@@ -1864,7 +1938,7 @@ const sameMirror = (h: AppHosting | undefined, cfg: NonNullable<AppHosting["gith
 async function publishToGithub(wsId: string, name: string, now: AppHosting, at: unknown, site: unknown, ours: () => boolean) {
   const cfg = now.github!;
   if (site !== undefined && site !== name) throw new HostedAppError(`${name} publishes to GitHub as one app: publish it, not one of its sites.`, 409);
-  const read = await previewsOf(wsId, name, now, (c) => projectsNow(c, ours).catch(() => null), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours);
+  const read = await previewsOf(wsId, name, now, (c) => orNull(projectsNow(c, ours)), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours);
   held(ours);
   if (!read) throw new HostedAppError("Couldn't read its preview just now. Try again in a minute.", 502);
   const serving = read.previews.get(name)?.serving ?? null;
@@ -2044,7 +2118,7 @@ export async function removeLeftOver(wsId: string, name: string, project: unknow
       held(ours);
       if (r instanceof Error && !(r instanceof OrgoError && r.status === 404)) throw refused(r);
     } else {
-      await takeDown(wsId, { botId: now.botId, computerId: now.computerId, projectId: x.id, site: name }, ours);
+      await takeDown(wsId, name, { botId: now.botId, computerId: now.computerId, projectId: x.id, site: name }, ours);
       // (A link Bops made for it, which its project doesn't own, goes with it.)
       const u = urls.find((y) => y.label === x.name);
       if (u) await publicUrls.remove(now.computerId, u.id).catch(() => null);
@@ -2110,6 +2184,8 @@ async function projectOf(wsId: string, name: string, ours: () => boolean, site?:
   const p = await deploys.project(h.computerId, id).catch((e: unknown) => Promise.reject(refused(e)));
   held(ours);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
+  // (Its record's, with the list unread: only when it's of the app's own repo, as prodIn's are. A record may name another's: takeDown.)
+  if (!list && repo && !ofRepo(p.value, repo)) return null;
   return { h: { ...h, projectId: id }, p: p.value };
 }
 
@@ -2276,8 +2352,12 @@ async function firstSettings(wsId: string, name: string, site: unknown, patch: P
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
-  const made = await ensureProd(wsId, name, h, ours);
-  const r = await deploys.change(made.computerId, made.projectId, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
+  // Its commands and health path go in the create when the project is made now; only what a create can't take (its port) after it.
+  const { port, ...settings } = patch;
+  const now: { fresh?: OrgoDeployProject } = {};
+  const made = await ensureProd(wsId, name, h, ours, undefined, { ...(Object.keys(settings).length ? { settings } : {}), made: (p) => void (now.fresh = p) });
+  if (now.fresh && port === undefined) return settingsOf(now.fresh, null);
+  const r = await deploys.change(made.computerId, made.projectId, now.fresh ? { port } : patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
   return settingsOf(r.value, null);
@@ -3656,13 +3736,15 @@ export async function addSite(wsId: string, name: string, site: unknown): Promis
 }
 
 /**
- * One site taken off its computer: the domains there on its port first (a bought one's records Orgo wrote
- * go with it; the domain itself stays the workspace's; one in the user's Cloudflare, the records Bops set
+ * One site of app `name` taken off its computer: the domains there on its port first (a bought one's records Orgo
+ * wrote go with it; the domain itself stays the workspace's; one in the user's Cloudflare, the records Bops set
  * for it there too, cloudflareCleaned), then its deploy project (its runner, releases and public URL). One
- * Orgo has no more is gone already. Answers the domains Orgo wouldn't remove (one it turned off), and what
- * Bops couldn't take off in Cloudflare, which are said; any other refusal stops it, nothing kept changed.
+ * Orgo has no more is gone already, and so is one that isn't of the app's own repo (ofRepo, prodIn's rule): a record
+ * may name another's (a computer's runner keeps a site's deploy project: cloud/computer-scope.ts), which is never
+ * taken down for it. Answers the domains Orgo wouldn't remove (one it turned off), and what Bops couldn't take off in
+ * Cloudflare, which are said; any other refusal stops it, nothing kept changed.
  */
-async function takeDown(wsId: string, s: SiteHosting, ours: () => boolean): Promise<TakenDown> {
+async function takeDown(wsId: string, name: string, s: SiteHosting, ours: () => boolean): Promise<TakenDown> {
   const none: TakenDown = { left: [], cf: [] };
   if (!s.projectId || s.lost) return none;
   const p = await deploys.project(s.computerId, s.projectId).catch((e: unknown) => e as Error);
@@ -3670,6 +3752,8 @@ async function takeDown(wsId: string, s: SiteHosting, ours: () => boolean): Prom
   if (gone(p)) return none;
   if (p instanceof Error) throw refused(p);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
+  const repo = repoOrNull(wsId, name);
+  if (!repo || !ofRepo(p.value, repo)) return none;
   const port = typeof p.value.port === "number" ? p.value.port : null;
   const left: string[] = [];
   const cf: CfLeft[] = [];
@@ -3720,7 +3804,7 @@ async function previewDown(wsId: string, name: string, h: AppHosting, sites: str
     const s = siteIn(h, name, site);
     const f = previewIn(list, urls, repo, site, knownLabel(s, h, name, repo, list, urls));
     if (f?.project) {
-      const x = await takeDown(wsId, { botId: h.botId, computerId: h.computerId, projectId: f.project.id, site }, ours);
+      const x = await takeDown(wsId, name, { botId: h.botId, computerId: h.computerId, projectId: f.project.id, site }, ours);
       out.left.push(...x.left);
       out.cf.push(...x.cf);
     }
@@ -3772,7 +3856,7 @@ export async function removeSite(wsId: string, name: string, site: unknown): Pro
     }
     // Its Preview first (its project, then its link), then its Published (with its domains).
     const staged = await previewDown(wsId, name, now, [s.site], ours);
-    const prod = await takeDown(wsId, s, ours);
+    const prod = await takeDown(wsId, name, s, ours);
     const left = keptDomains({ left: [...staged.left, ...prod.left], cf: [...staged.cf, ...prod.cf] });
     keepHosting(wsId, name, (x) => {
       if (!x) return x;
@@ -3827,13 +3911,13 @@ async function takeAppDown(wsId: string, name: string, repo: boolean, ours: () =
   // (Not when Bops can't reach Orgo's hosting at all, signed out: then nothing of it can be read, and it never had a Preview from here.)
   if (!h.lost && (sites.length || behind.length || repo || !(await closedHere()))) add(await previewDown(wsId, name, h, sitesOf(h, name).map((x) => x.site), ours));
   for (const s of sites) {
-    add(await takeDown(wsId, s, ours));
+    add(await takeDown(wsId, name, s, ours));
     keepSite(wsId, name, s.site, () => ({}));
   }
   // (One whose computer is gone since went with it: Orgo has neither.)
   const gone404 = (e: unknown): TakenDown | Promise<never> => (e instanceof HostedAppError && e.status === 404 ? { left: [], cf: [] } : Promise.reject(e));
   for (const b of behind) {
-    add(await takeDown(wsId, { botId: h.botId, computerId: b.computerId, projectId: b.projectId, site: b.site }, ours).catch(gone404));
+    add(await takeDown(wsId, name, { botId: h.botId, computerId: b.computerId, projectId: b.projectId, site: b.site }, ours).catch(gone404));
     keepHosting(wsId, name, (x) => {
       if (!x) return x;
       const { behind: had, ...rest } = x;
@@ -4554,8 +4638,9 @@ export function appWork(botId: string, a: { app: string | null; name: string | n
     ...(others ? [OTHERS_WORDS(name)] : []),
     `Plain git works too, if you'd rather, in a clone of its own (never inside ${dir}): git clone "$(ingot git-url ${repo})" ${dir}-git, make the change and commit there (${git} commit), and git push origin HEAD:main. Ingot's credential helper is set up on this computer already, so git asks no password. A push refused as stale means someone committed first: ${git} pull --no-rebase, fix any file it lists as a conflict, ${git} commit, then push again. Both ways land on the same history.`,
     a.deploy
-      ? `4. Say what you changed. ${owner} asked for a link too: once you've committed and this task ends, Bops deploys its newest commit to its preview itself and tells them where, so don't tell them to deploy it. If you couldn't commit it, say why.`
-      : `4. Say what you changed. ${owner} sees it in its Local now; it goes on the web when they ask, as a preview link first.`,
+      ? `4. Say what you changed. Once you've committed and this task ends, Bops deploys its newest commit to its Preview itself and tells ${owner} the link, so don't deploy it or tell them to. If you couldn't commit it, say why.`
+      : `4. Say what you changed. ${owner} sees it in its Local now; it goes to its Preview when they ask.`,
+    "Never change it on GitHub (its repo, a branch, a pull request), even when its production is there: Ingot is its source, and Publish carries it there.",
   ].join("\n");
   return { goal, title: `Work on ${name}`, name, site };
 }
@@ -4786,7 +4871,7 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   const say = (text: string) => {
     if (ours()) addMessage({ chatId: s.chatId, role: "bot", botId: s.botId, text, sessionIds: [s.id], appNote: true, bops: true });
   };
-  if (s.status !== "done") return say(`Didn't put ${a.name} live: the task didn't finish. If it picks up again and commits its change, I'll deploy it then.`);
+  if (s.status !== "done") return say(unchanged("Preview", a.name, "the task didn't finish. If it picks up again and commits its change, I'll deploy it then"));
   // Its newest commit now (null: nothing committed; undefined: Ingot can't say, so the task's own word, done, goes).
   const head = await ingot.head(a.wsId, a.name).then(
     (x) => x ?? null,
@@ -4796,7 +4881,7 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   const now = session(sessionId)?.app;
   if (!now?.deployAfter) return;
   if (head === null || (head !== undefined && head === now.from))
-    return say(`Didn't put ${a.name} live: the task committed nothing new to it. If it commits its change when it picks up again, I'll deploy it then.`);
+    return say(unchanged("Preview", a.name, "the task committed nothing new to it. If it commits its change when it picks up again, I'll deploy it then"));
   let mine = false;
   update((st) => {
     const x = appOfTask(st, sessionId);
@@ -4808,7 +4893,18 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   if (!mine) return;
   await flushState(5000).catch(() => false);
   if (!ours()) return;
-  say(await deployForBot(s.botId, a.name, null, ours, "preview").catch((e: Error) => `Not deployed: ${e.message}`));
+  // What changed, in the task's own one line: the commit's message (unsaid when Ingot can't say now), with no dashes, as Bops writes.
+  const line = head
+    ? await ingot.log(a.wsId, a.name, { limit: 1 }).then(
+        (l) => {
+          const c = l?.changesets[0];
+          return c && c.id === head ? firstLine(c.message).replace(/^[\s—–]+|[\s—–]+$/g, "").replace(/\s*[—–]\s*/g, ", ") : "";
+        },
+        () => "",
+      )
+    : "";
+  const said = await deployForBot(s.botId, a.name, null, ours, "preview").catch((e: Error) => unchanged("Preview", a.name, e.message));
+  say(line && said.startsWith("Preview:") ? `${said} What changed: ${line}` : said);
 }
 
 const previewedAt = new Map<string, number>();
@@ -4902,6 +4998,9 @@ async function markIfGood(wsId: string, name: string, site: string, port: number
   return true;
 }
 
+/** What a bot says when an environment of an app didn't change (deploy_app, a task's deploy after): which one, why, and that nothing went live. */
+const unchanged = (env: "Preview" | "Published", name: string, why: string) => `${env} of ${name} not changed: ${why.trim().replace(/[.\s]+$/, "")}. Nothing went live.`;
+
 /** How many pages of an app's log (200 each) a short id is looked for in. */
 const LOOK_PAGES = 10;
 
@@ -4949,31 +5048,37 @@ export async function deployForBot(botId: string, app: string, at: string | null
   if (!name) return `There's no app called "${app.slice(0, 80)}" in this workspace.`;
   const site = siteFor(botId, name);
   try {
+    onThisComputer(wsId, name);
     const id = at ? await wholeId(wsId, name, at, ours) : undefined;
     if (where !== "prod") return await previewForBot(wsId, name, id, botId, ours, site);
+    // Publish to GitHub from this bot's computer: with the workspace's GitHub key, which Orgo calls for it only when
+    // the owner gave this bot that key (Keys). Without it, said before anything is read or sent.
+    if (onRunner() && hostingOf(wsId, name)?.github && !b.keys?.includes(GITHUB_KEY))
+      return unchanged("Published", name, `${b.name} has no GitHub key for this app, so it can't publish it to GitHub from here. Give it the GitHub key in Keys, then say publish again`);
     // Publish: what the Preview serves, never a commit it doesn't.
     if (id) {
       const h = hostingOf(wsId, name);
-      const read = h ? await previewsOf(wsId, name, h, (c) => projectsNow(c, ours).catch(() => null), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours) : null;
+      const read = h ? await previewsOf(wsId, name, h, (c) => orNull(projectsNow(c, ours)), (c) => urlsNow(c, ours).then((x) => x.urls, () => null), ours) : null;
       const serving = read?.previews.get(site ?? name)?.serving ?? null;
       if (serving !== id)
         return serving
-          ? `Not published: Publish puts what its preview serves (${short(serving)}). Deploy ${short(id)} to its preview first, look at it, then publish.`
-          : `Not published: its preview isn't live yet. Deploy ${short(id)} to its preview first, look at it, then publish.`;
+          ? `Published not changed: Publish puts what its Preview serves (${short(serving)}). Deploy ${short(id)} to its Preview first, look at it, then publish.`
+          : `Published not changed: its Preview isn't live yet. Deploy ${short(id)} to its Preview first, look at it, then publish.`;
     }
     const promoted = await promoteApp(wsId, name, { ours, ...(site && !hostingOf(wsId, name)?.github ? { site } : {}), ...(id ? { at: id } : {}) });
     // Production on GitHub: what the mirror did, in its words (no domain: GitHub's workflow puts it live).
-    if (promoted.github) return `${name} at ${short(promoted.promoted[0]?.at ?? "")}, what its preview serves, to GitHub ${promoted.github.repo} ${promoted.github.branch}: ${promoted.said ?? ""}`.trim();
+    if (promoted.github)
+      return `Published (on GitHub): ${name} at ${short(promoted.promoted[0]?.at ?? "")}, what its Preview serves, to GitHub ${promoted.github.repo} ${promoted.github.branch}: ${promoted.said ?? ""}`.trim();
     const what = promoted.promoted.map((x) => `${x.site === name ? name : x.site} at ${short(x.at)}`).join(", ");
     const on = promoted.promoted.flatMap((x) => (x.domain ? [x.domain.replace(/^https:\/\//, "")] : []));
-    return `Publishing ${what}, what its preview serves${on.length ? `, on ${on.join(" and ")}. It's live there in a minute or two.` : ". It's live on its domain once its DNS points at Orgo."}${promoted.said ? ` ${promoted.said}` : ""}`;
+    return `Published: publishing ${what}, what its Preview serves${on.length ? `, on ${on.join(" and ")}. It's live there in a minute or two.` : ". It's live on its domain once its DNS points at Orgo."}${promoted.said ? ` ${promoted.said}` : ""}`;
   } catch (e) {
     if (e instanceof HostedAppError && e.extra?.code === "NO_DOMAIN") {
       const sites = (e.extra?.sites as string[] | undefined) ?? [name];
-      return `Not published: ${sites.join(" and ")} ${sites.length === 1 ? "has" : "have"} no domain yet. Connect one in Your Apps (Published, Domain, From Cloudflare), then say publish again.`;
+      return `Published not changed: ${sites.join(" and ")} ${sites.length === 1 ? "has" : "have"} no domain yet. Connect one in Your Apps (Published, Domain, From Cloudflare), then say publish again.`;
     }
-    // (Some of its sites went, which its words say first: not "Not deployed".)
-    if (e instanceof HostedAppError) return e.extra?.partial ? e.message : `Not ${where === "prod" ? "published" : "deployed"}: ${e.message}`;
+    // (Some of its sites went, which its words say first: not "not changed".)
+    if (e instanceof HostedAppError) return e.extra?.partial ? e.message : unchanged(where === "prod" ? "Published" : "Preview", name, e.message);
     throw e;
   }
 }
@@ -4986,14 +5091,14 @@ async function previewForBot(wsId: string, name: string, id: string | undefined,
   // (Whether its link asks for one, as Orgo said in the read after the deploy.)
   const pv = (x: string) => (x === name ? now.preview : now.sites?.find((y) => y.name === x)?.preview);
   const locked = deployed.some((d) => pv(d.site)?.protected === true);
-  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}Say publish, or press Publish in Your Apps, to put it on its domain once it looks right.`;
+  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.`;
   const more = said ? ` ${said}` : "";
   if (deployed.length > 1) {
     const each = deployed.map((d) => (d.url ? `${d.site} at ${d.url}` : d.site));
-    return `Deploying a preview of ${what}${on ? ` on ${on}'s computer` : ""}, one site after another: ${each.join("; ")}. Each link stays the same for every preview, so add them to Google sign in once if the app uses it. ${after}${more}`;
+    return `Preview: deploying ${what}${on ? ` on ${on}'s computer` : ""}, one site after another: ${each.join("; ")}. Each link stays the same for every preview, so add them to Google sign in once if the app uses it. ${after}${more}`;
   }
   const url = deployed[0]?.url;
-  return `Deploying a preview of ${what}${on ? ` on ${on}'s computer` : ""}. ${url ? `It's at ${url} in a minute or two. That link stays the same for every preview, so add it to Google sign in once if the app uses it.` : "Its link shows in Your Apps."} ${after}${more}`;
+  return `Preview: deploying ${what}${on ? ` on ${on}'s computer` : ""}. ${url ? `It serves it at ${url} in a minute or two. That link stays the same for every preview, so add it to Google sign in once if the app uses it.` : "Its link shows in Your Apps."} ${after}${more}`;
 }
 
 /**
@@ -5014,6 +5119,7 @@ export async function localForBot(botId: string, app: string, action: "start" | 
   const copy = copyFor(wsId, name, botId);
   const word = localWord(name, copy);
   try {
+    onThisComputer(wsId, name);
     const r = action === "status" ? await localStatus(wsId, name, { fresh: true }) : await localAct(wsId, name, { action, ...(site ? { site } : {}), ...(port ? { port } : {}), ...(copy ? { bot: botId } : {}) });
     const x = localsOf(r, copy ? botId : undefined)?.[site ?? name];
     // Its dev server ignores $PORT: where it listens instead, and what to change.
@@ -5072,7 +5178,11 @@ export function hostedAppsLine(botId: string): string {
   const owner = ownerName();
   const shared = apps.some(([name, h]) => !h.lost && wsId && appCoders(getState(), wsId, name).length > 1);
   const copies = shared ? ` When more bots work on one app, each works in a copy of its own with Locals of its own, and all commit to the same main: ${SYNC_WORDS} Never change another bot's copy.` : "";
-  return `Your workspace's apps on the web, each an Ingot repo (work_on_app builds or changes one, local_app runs it, deploy_app deploys it): ${apps.map(one).join("; ")}. Each runs three ways on its bot's computer: Local, the live view while you work (its working folder as a dev server with hot reload, each site at its own http://localhost:<port>, the same on its computer's screens and beside this chat, where ${owner} watches it); Preview, a fixed link of its own to share and to test sign in (deploy_app puts changes there), which asks for a password unless ${owner} turned it off (${owner} sees it beside the Preview link in Bops; you never have it, so never write one in this chat or ask for it, and check your work on Local); and Published, only on its own domain (deploy_app with where prod, only when ${owner}'s own words ask to publish it). Say the place and its address when you point ${owner} at one.${copies}${repos ? ` ${repos}` : ""}`;
+  return [
+    `Your workspace's apps on the web, each an Ingot repo, its source: ${apps.map(one).join("; ")}.`,
+    `Each has the three environments Your Apps shows, and one command acts on each, the same as its buttons there: Local, the live view while you work (its working folder as a dev server with hot reload on its bot's computer, each site at its own http://localhost:<port>, the same on its computer's screens and beside this chat, where ${owner} watches it): local_app starts, stops or reads it. Preview, its fixed link to test and share (Deploy in Your Apps): deploy_app puts a commit there. It asks for a password unless ${owner} turned it off (${owner} sees it beside the Preview link in Bops; you never have it, so never write one in this chat or ask for it). Published, its production (Publish in Your Apps): deploy_app with where prod puts what Preview serves there, on its own domain, or for an app whose production is on GitHub, into its folder there, whose own workflow deploys it. Publish only when ${owner}'s or an Admin's own words ask for it.`,
+    `When ${owner} asks for any change to an app, call work_on_app at once, with no question first: it makes the change in its working folder, commits it to Ingot and deploys that commit to its Preview, then says the link and what changed, so ${owner} can test it there. Never ask whether you may use Ingot, make a draft or deploy a preview: only publishing waits for their words. Change an app only that way: never through GitHub (its API, a branch, a pull request, change_files) or by calling Orgo yourself, even when its production is on GitHub. Never open a Preview link to check it (its password page answers 401): check your work on Local. Say the environment and its address when you point ${owner} at one.${copies}${repos ? ` ${repos}` : ""}`,
+  ].join("\n");
 }
 
 /** The domain Orgo's public links are under: orgo.dev, or staging.orgo.dev when this Bops uses Orgo's staging. */

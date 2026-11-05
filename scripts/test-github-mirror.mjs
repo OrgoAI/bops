@@ -510,6 +510,28 @@ await check("someone pushing to the branch meanwhile stops it, saying to publish
   await assert.rejects(publish(at, last), (e) => code("GITHUB_MOVED")(e) && /Publish again/.test(e.message));
 });
 
+await check("on a bot's computer, the GitHub key its bot wasn't given (Orgo turns its computer's call away, 403): said plainly as that, nothing written", async () => {
+  reset(GH0, IG0);
+  const last = await link();
+  const at = ig.change({ "lib/look.ts": "logo green" });
+  const { KeysError } = await import(`${root}/lib/server/keys.ts`);
+  const n = writes().length;
+  const was = process.env.BOPS_RUNNER;
+  process.env.BOPS_RUNNER = "1";
+  globalThis.__fake.callKey = async () => {
+    throw new KeysError("Orgo didn't send it: not one of its bots' keys.", 403);
+  };
+  try {
+    await assert.rejects(publish(at, last), (e) => code("NO_GITHUB_KEY")(e) && e.message === "The bot publishing it has no GitHub key for this app, so nothing went to GitHub. Give it the GitHub key in Keys, then publish again.");
+  } finally {
+    if (was === undefined) delete process.env.BOPS_RUNNER;
+    else process.env.BOPS_RUNNER = was;
+  }
+  assert.equal(writes().length, n, "nothing written");
+  // (On the Mac the same refusal is Orgo's own words, as before.)
+  await assert.rejects(publish(at, last), (e) => e instanceof MirrorError && /^GitHub: Orgo didn't send it/.test(e.message));
+});
+
 await check("a named workflow runs after a push (a client that doesn't deploy on a push), never without one", async () => {
   reset(GH0, IG0);
   const last = await link();

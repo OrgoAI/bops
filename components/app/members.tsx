@@ -808,7 +808,8 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
   const waiting = info.invites.filter((i) => !i.expired).length;
   const short = peopleShort(s, { withAccess: info.people.length, invited: waiting });
   // Over the limit (a plan changed after they joined), the block says how many: "4 of 2" would only puzzle.
-  const aside = s.limit !== null && s.used > s.limit ? null : peopleAside(s);
+  // A limit of 0 has nothing to count; any other limit shows it, Free's too.
+  const aside = s.limit === 0 || (s.limit !== null && s.used > s.limit) ? null : peopleAside(s);
   const counter = aside && (
     <span data-tip="People with access, and invites still waiting" className="text-[12px] tabular-nums text-[#9A9A98]">
       {aside}
@@ -821,19 +822,21 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
         {line}
       </Section>
     );
-  const upgrade = short ? short.upgrade : s.upgrade;
-  // An Admin's sheet: the plan is the owner's to change.
+  // Only an upgrade orgo-web offers: with none (Bops plans aren't sold now), no button that leads nowhere.
+  const upgrade = s.upgrade && (short ? short.upgrade : s.upgrade);
+  // An Admin's sheet: the plan is the owner's to change. Ask the owner only when there's more to get (an upgrade orgo-web offers, or the Orgo plan when billed by use).
   if (info.shared)
     return (
-      <Section title="Add someone" aside={s.plan === "free_bops" ? null : counter}>
+      <Section title="Add someone" aside={counter}>
         <Notice>
-          {short?.text ?? WORDS.upgradeRequired} {ADMIN_SHEET_WORDS.seats}
+          {short?.text ?? WORDS.upgradeRequired}
+          {s.upgrade || s.plan === "usage" ? ` ${ADMIN_SHEET_WORDS.seats}` : ""}
         </Notice>
         {line}
       </Section>
     );
   return (
-    <Section title="Add someone" aside={s.plan === "free_bops" ? null : counter}>
+    <Section title="Add someone" aside={counter}>
       <Notice
         action={
           upgrade && (
@@ -845,14 +848,14 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
       >
         {short?.text ?? WORDS.upgradeRequired}
         {short?.note && <span className="block text-[#6B6B6B]">{short.note}</span>}
-        {s.plan === "free_bops" && <OrgoPlanLine state={state} />}
+        {s.plan === "free_bops" && s.limit === 0 && <OrgoPlanLine state={state} />}
       </Notice>
       {line}
     </Section>
   );
 }
 
-/** On Free, for someone who pays for Orgo: that plan is for their other Orgo workspaces, not the bots' computers. */
+/** On a Free that adds nobody, for someone who pays for Orgo: that plan is for their other Orgo workspaces, not the bots' computers. */
 function OrgoPlanLine({ state }: { state: AppState }) {
   const tier = usePlan(state)?.plan?.tier;
   if (!tier || tier.toLowerCase() === "free") return null;
@@ -1300,13 +1303,15 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
 
 /* ---------------- Invited ---------------- */
 
-/** Invites still waiting, newest first, and whether they can be accepted now (the plan is checked again when they are). */
+/**
+ * Invites still waiting, newest first, and whether they can be accepted now (the plan is checked again when they are):
+ * not when the plan includes nobody, or more people are counted than it includes (orgo-web's numbers, never its name).
+ */
 function Invited({ info, bots, act }: { info: Ready; bots: Bot[] | null; act: Act }) {
   const s = info.seats;
-  const free = !!s && (s.plan === "free_bops" || s.limit === 0);
+  const free = !!s && s.limit === 0;
   const over = !!s && s.limit !== null && s.used > s.limit;
-  const plan = s?.plan === "max_bops" ? "Max" : "Pro";
-  const tip = free ? "Free doesn't include adding people." : `You have more people than ${plan} includes. ${plan === "Max" ? "Cancel invites or remove people." : "Cancel invites, remove people or upgrade."}`;
+  const tip = free ? WORDS.invitedNone : WORDS.invitedOver;
   return (
     <Section
       title="Invited"

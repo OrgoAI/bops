@@ -244,6 +244,11 @@ list = { ...list, seats: seatsOf({ plan: "pro_bops", limit: 2, used: 4, can_add:
 assert.deepEqual((await get()).body.seats, { plan: "pro_bops", canAdd: false, limit: 2, used: 4, upgrade: "max", caps: { pro_bops: 2, max_bops: 5 } });
 list = { ...list, seats: seatsOf({ plan: "free_bops", limit: 0, can_add: false, upgrade_tier: "pro_bops", caps: undefined }) };
 assert.deepEqual((await get()).body.seats, { plan: "free_bops", canAdd: false, limit: 0, used: 4, upgrade: "plan", caps: { pro_bops: 2, max_bops: 5 } });
+// Free with people included (5 for everyone, for now): orgo-web's numbers as sent, and no plan to buy (upgrade_tier null).
+list = { ...list, seats: seatsOf({ plan: "free_bops", plan_name: "Free", basis: "none", limit: 5, used: 2, can_add: true, upgrade_tier: null }) };
+assert.deepEqual((await get()).body.seats, { plan: "free_bops", canAdd: true, limit: 5, used: 2, upgrade: null, caps: { pro_bops: 2, max_bops: 5 } });
+list = { ...list, seats: seatsOf({ plan: "free_bops", plan_name: "Free", basis: "none", limit: 5, used: 5, can_add: false, upgrade_tier: null }) };
+assert.deepEqual((await get()).body.seats, { plan: "free_bops", canAdd: false, limit: 5, used: 5, upgrade: null, caps: { pro_bops: 2, max_bops: 5 } });
 // Billed by use: the seats are the Orgo plan's, said as plan "usage"; nothing to upgrade to in the app.
 list = { ...list, seats: seatsOf({ plan: "usage", plan_name: "Orgo Starter", basis: "orgo_plan", limit: 1, used: 1, can_add: false, upgrade_tier: "pro_bops" }) };
 assert.deepEqual((await get()).body.seats, { plan: "usage", canAdd: false, limit: 1, used: 1, upgrade: null, caps: { pro_bops: 2, max_bops: 5 } });
@@ -1570,6 +1575,21 @@ assert.deepEqual(words("max_bops", 5, 5, 4, 1), { text: "Max includes up to 5 pe
 assert.deepEqual(words("max_bops", 5, 5, 5, 0), { text: "Max includes up to 5 people, and you have 5. Remove someone to add someone else.", upgrade: null });
 assert.deepEqual(words("max_bops", 5, 6, 6, 0), { text: "Max includes up to 5 people, and you have 6 from before. They keep access, but to add someone, remove people first.", upgrade: null });
 assert.equal(words("max_bops", null, 40, 40, 0), null, "no limit");
+// Free with people included: decided by the numbers, never the name; room until the limit, then make room (nothing to buy).
+assert.equal(words("free_bops", 5, 0, 0, 0), null, "Free with room: the form");
+assert.equal(words("free_bops", 5, 2, 1, 1), null);
+assert.equal(words("free_bops", 5, 4, 4, 0), null);
+assert.deepEqual(words("free_bops", 5, 5, 5, 0), { text: "Bops includes 5 people, and you have 5. Remove someone to add someone else.", upgrade: null });
+assert.deepEqual(words("free_bops", 5, 5, 3, 2), { text: "Bops includes 5 people, and you have 5. Remove someone or cancel an invite to add someone else.", upgrade: null });
+assert.deepEqual(words("free_bops", 5, 7, 7, 0), { text: "Bops includes 5 people, and you have 7 from before. They keep access, but to add someone, remove people first.", upgrade: null });
+assert.deepEqual(words("free_bops", 1, 1, 1, 0), { text: "Bops includes 1 person, and you have 1. Remove someone to add someone else.", upgrade: null });
+assert.equal(words("free_bops", null, 40, 40, 0), null, "no limit (staff)");
+// Pro with no plan to buy (orgo-web offers no upgrade): make room, never upgrade to Max.
+assert.deepEqual(P.peopleShort({ plan: "pro_bops", limit: 5, used: 5, caps, upgrade: null }, { withAccess: 4, invited: 1 }), { text: "Bops includes 5 people, and you have 5. Remove someone or cancel an invite to add someone else.", upgrade: null });
+assert.deepEqual(P.peopleShort({ plan: "pro_bops", limit: 5, used: 6, caps, upgrade: null }, { withAccess: 6, invited: 0 }), { text: "Bops includes 5 people, and you have 6 from before. They keep access, but to add someone, remove people first.", upgrade: null });
+assert.deepEqual(P.peopleShort({ plan: "pro_bops", limit: 2, used: 2, caps, upgrade: "max" }, { withAccess: 2, invited: 0 }), { text: "Pro includes 2 people, and you have 2. Max includes up to 5.", upgrade: "max" }, "an upgrade offered: still Max");
+assert.equal(P.peopleAside({ plan: "free_bops", limit: 5, used: 2, caps }), "2 of 5 people", "Free's counter too");
+assert.equal(P.peopleAside({ plan: "free_bops", limit: 5, used: 5, caps }), "5 of 5 people");
 assert.equal(P.peopleAside({ plan: "pro_bops", limit: 2, used: 1, caps }), "1 of 2 people");
 assert.equal(P.peopleAside({ plan: "max_bops", limit: null, used: 9, caps }), null);
 assert.deepEqual(
@@ -1590,11 +1610,12 @@ assert.deepEqual(
 for (const v of Object.values(M.WORDS)) noDashes(typeof v === "function" ? v("alex@example.com") : v);
 for (const v of [...Object.values(M.ROLE_LINES), ...Object.values(M.ROLE_NAMES), ...Object.values(M.ADMIN_WORDS)]) noDashes(typeof v === "function" ? v("Alex") : v);
 for (const v of Object.values(M.ADMIN_WORDS)) assert.ok(!/orbit/i.test(typeof v === "function" ? v("Alex") : v), "never Orbit");
-for (const plan of ["free_bops", "pro_bops", "max_bops"])
+for (const [plan, limit] of [["free_bops", 0], ["free_bops", 5], ["pro_bops", caps.pro_bops], ["max_bops", caps.max_bops]])
   for (let used = 0; used <= 7; used++)
     for (let invited = 0; invited <= used; invited++) {
-      const w = words(plan, plan === "free_bops" ? 0 : caps[plan], used, used - invited, invited);
+      const w = words(plan, limit, used, used - invited, invited);
       if (w) for (const t of [w.text, w.note ?? ""]) noDashes(t);
+      if (w && plan === "free_bops" && limit) assert.ok(!/Pro|Max|upgrade/i.test(w.text), `Free with people names no plan to buy: ${w.text}`);
     }
 for (const card of P.PLAN_CARDS) for (const line of card.lines) noDashes(line.text);
 for (const e of said) noDashes(e);

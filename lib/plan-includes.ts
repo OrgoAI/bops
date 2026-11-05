@@ -236,9 +236,10 @@ export function computerShort(tier: BopsTier, held: number, more = 1): PlanRoomS
 /**
  * Where the user's plan stands on people who can see their bots' computers (lib/members.ts
  * MemberSeats): the plan, how many people it includes besides the user (null: no limit), how many
- * have access or an invite still waiting, and how many Pro and Max include.
+ * have access or an invite still waiting, and how many Pro and Max include. `upgrade`: null when orgo-web
+ * offers no plan for more (then Pro says to make room, not to upgrade to Max).
  */
-export type PeopleRoom = { plan: RoomTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number } };
+export type PeopleRoom = { plan: RoomTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number }; upgrade?: "plan" | "max" | null };
 
 /** What Pro and Max include, from BOPS_TIERS: named in the People sheet only when orgo-web's seats leave their caps out. */
 export const PEOPLE_CAPS = { pro_bops: BOPS_TIERS.pro_bops.people, max_bops: BOPS_TIERS.max_bops.people } as const;
@@ -254,7 +255,8 @@ export const peopleAside = (s: PeopleRoom) => (s.limit === null ? null : `${s.us
  * they can. `withAccess`: the people who have access now (not invites); `invited`: invites still waiting.
  * People over a limit keep their access (a plan changed after they joined): the words say so, and that
  * adding someone needs room first. `note`: a second line, when cancelling an invite would make room.
- * The numbers are orgo-web's (it holds the workspace to them).
+ * The numbers are orgo-web's (it holds the workspace to them), never the plan's name: Free includes
+ * people too now (5 for everyone, for now), so only a limit of 0 says Free adds nobody.
  */
 export function peopleShort(s: PeopleRoom, { withAccess, invited }: { withAccess: number; invited: number }): (PlanRoomShort & { note?: string }) | null {
   const max = s.caps.max_bops;
@@ -264,17 +266,19 @@ export function peopleShort(s: PeopleRoom, { withAccess, invited }: { withAccess
     const keep = s.used > s.limit ? ` The ${peopleCount(s.used)} with access keep it.` : "";
     return { text: `Your Orgo plan includes ${s.limit === 0 ? "no one else" : peopleCount(s.limit)}.${keep} Upgrade your Orgo plan on orgo.ai to add more.`, upgrade: null };
   }
-  if (s.plan === "free_bops" || s.limit === 0) {
+  if (s.limit === 0) {
     const keep = withAccess === 1 ? "The 1 person who has access keeps it." : `The ${withAccess} people who have access keep it.`;
     return { text: `Free doesn't include adding people. ${withAccess > 0 ? keep : `Pro includes ${s.caps.pro_bops}, and Max up to ${max}.`}`, upgrade: "plan" };
   }
   if (s.limit === null || s.used < s.limit) return null;
   const over = s.used > s.limit;
-  if (s.plan === "pro_bops")
+  if (s.plan === "pro_bops" && s.upgrade !== null)
     return over
       ? { text: `Pro includes ${peopleCount(s.limit)}, and you have ${s.used} from before. They keep access, but to add someone, upgrade to Max or remove people.`, upgrade: "max" }
       : { text: `Pro includes ${peopleCount(s.limit)}, and you have ${s.used}. Max includes up to ${max}.`, upgrade: "max", ...(invited ? { note: "Or cancel an invite below to make room." } : {}) };
+  // Max, or Free or Pro with no plan to buy: make room instead.
+  const includes = s.plan === "max_bops" ? `Max includes up to ${peopleCount(s.limit)}` : `Bops includes ${peopleCount(s.limit)}`;
   return over
-    ? { text: `Max includes up to ${peopleCount(s.limit)}, and you have ${s.used} from before. They keep access, but to add someone, remove people first.`, upgrade: null }
-    : { text: `Max includes up to ${peopleCount(s.limit)}, and you have ${s.used}. ${invited ? "Remove someone or cancel an invite" : "Remove someone"} to add someone else.`, upgrade: null };
+    ? { text: `${includes}, and you have ${s.used} from before. They keep access, but to add someone, remove people first.`, upgrade: null }
+    : { text: `${includes}, and you have ${s.used}. ${invited ? "Remove someone or cancel an invite" : "Remove someone"} to add someone else.`, upgrade: null };
 }
