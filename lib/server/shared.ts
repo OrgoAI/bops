@@ -1,9 +1,8 @@
 import "server-only";
-import { BOPS_DEVICE_HEADER, type MemberAct, type MemberFile, type SharedKey, type SharedWsState } from "@/cloud/protocol";
+import { BOPS_DEVICE_HEADER, type MemberAct, type SharedKey, type SharedWsState } from "@/cloud/protocol";
 import type { SharedOpen, SharedWorkspace } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
 import { appHeaders } from "./app-version";
-import { addedFile } from "./bot-files";
 import { cloudOn, cloudUrl } from "./cloud";
 import { LiveSubscriber, RemoteMoods } from "./live-core";
 import { sharedWorkspaces } from "./orgo";
@@ -108,13 +107,6 @@ export async function olderShared(chatId: string): Promise<boolean> {
 export async function actShared(act: MemberAct, key: string): Promise<{ ok: true; key: string; macOn: boolean } | { ok: false; status: number; error: string; code?: string }> {
   const open = openNow();
   if (!open || !open.data.you) return { ok: false, status: 409, error: "Open the workspace again." };
-  // A message's files: only ones added here (POST /api/bots/files, sharedFilesTo) for a bot of that chat, as they were added.
-  if (act.act === "chat" && act.files !== undefined) {
-    const { chatId, text, replyTo } = act;
-    const files = filesOf(act.files, open.data.state.chats.find((c) => c.id === chatId)?.botIds);
-    if (!files) return { ok: false, status: 400, error: "A file didn't finish adding. Add it again." };
-    act = { act: "chat", chatId, text, ...(replyTo ? { replyTo } : {}), ...(files.length ? { files } : {}) };
-  }
   const device = deviceIdFor(open.user);
   const u = getState().account?.user;
   const me = { userId: open.data.you, ...(u?.email ? { email: u.email } : {}), name: u?.name?.trim() || u?.email?.split("@")[0] || "You" };
@@ -129,34 +121,6 @@ export async function actShared(act: MemberAct, key: string): Promise<{ ok: true
     if (!res) return { status: 0 };
     return { status: res.status, body: (await res.json().catch(() => undefined)) as ActResult["body"] };
   });
-}
-
-/** Files a chat act names (by their ids), as they were added here for a bot of `botIds`; null when any wasn't. */
-function filesOf(named: unknown, botIds: unknown): MemberFile[] | null {
-  if (!Array.isArray(named) || !Array.isArray(botIds)) return null;
-  const out: MemberFile[] = [];
-  for (const n of named) {
-    const f = typeof (n as { id?: unknown })?.id === "string" ? addedFile((n as { id: string }).id) : undefined;
-    if (!f || !botIds.includes(f.botId)) return null;
-    out.push({ id: f.id, name: f.name, size: f.size, path: f.path, botId: f.botId });
-  }
-  return out;
-}
-
-/**
- * Where a file for a bot of the shared workspace open now goes (lib/server/bot-files.ts addFileTo): the computer it works
- * on, which Bops Cloud names for an Admin alone (sharedScreen), put there with the user's own Orgo key. The bot whose
- * computer that is, the owner's side works out again (cloud/turns.ts hostFiles). Or why not.
- */
-export function sharedFilesTo(botId: string): { computerId: string; host: { id: string; name: string } } | { why: string } {
-  const open = openNow();
-  if (!open) return { why: "Open the workspace again." };
-  const b = open.data.state.bots.find((x) => x.id === botId);
-  if (!b) return { why: "That bot isn't in this workspace." };
-  const name = typeof b.name === "string" && b.name.trim() ? b.name.trim() : "The bot";
-  if (open.at.role !== "admin") return { why: `Only an Admin can add files for ${name} here: they go on its computer.` };
-  const computerId = sharedScreen(botId);
-  return computerId ? { computerId, host: { id: botId, name } } : { why: `${name} has no computer to put files on.` };
 }
 
 /** Leave the shared workspace open now (the user switched to one of their own, or signed out): its copy and stream go. */

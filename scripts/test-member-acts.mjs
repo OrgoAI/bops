@@ -147,8 +147,7 @@ globalThis.__fake = {
     answerMessage: async (chatId, messageId, member) => void did.push(["answer", chatId, messageId, member]),
     handleMessage: async (chatId, text, replyTo, ...rest) => {
       const member = rest[6];
-      // (The files that go with it, when some do: chat.ts handleMessage's last.)
-      did.push(["chat", chatId, text, replyTo, member, ...(rest[10] ? [rest[10]] : [])]);
+      did.push(["chat", chatId, text, replyTo, member]);
       state.messages.push({ id: `m${state.messages.length}`, chatId, role: "user", text, at: Date.now(), member });
     },
   },
@@ -252,29 +251,6 @@ await check("a chat to a bot they have at Write is the member's message, once pe
   // The tunnel sends it again (an ack lost): their words are there, nothing more.
   await memberEvent(event({ act: "chat", chatId: "bot:max", text: "Book the 9am train" }), "e1");
   assert.equal(did.length, 1);
-});
-
-await check("a member's files go with their message, each on the computer this Mac's state says has it; a forged one isn't done", async () => {
-  fresh();
-  // Dana works on Max's computer (the main bot's, which she shares).
-  state.bots.find((b) => b.id === "max").isMain = true;
-  state.bots.push({ id: "dana", name: "Dana", workspaceId: "ws_acme" });
-  state.chats.push({ id: "bot:dana", kind: "bot", botIds: ["dana"], workspaceId: "ws_acme" });
-  state.workspaces[1].memberAccess["sam@example.com"].bots.dana = "write";
-  const file = { id: "file_1", name: "Itinerary (2).pdf", size: 1200, path: "~/Desktop/Itinerary (2).pdf", botId: "dana" };
-  // What their Bops said of the host is never taken: this Mac works it out.
-  await memberEvent(event({ act: "chat", chatId: "bot:dana", text: "", files: [{ ...file, hostId: "dana", hostName: "Forged" }, { ...file, id: "file_2", botId: "max" }] }), "e_files");
-  assert.deepEqual(did, [["chat", "bot:dana", "", undefined, { ...SAM, ref: "key_00000001" }, [{ ...file, hostId: "max", hostName: "Max" }]]]);
-  // A path that isn't the Desktop file of its name, or a hidden name: the act isn't done at all.
-  for (const bad of [{ ...file, path: "~/.ssh/authorized_keys" }, { ...file, name: ".bashrc", path: "~/Desktop/.bashrc" }, { ...file, name: "a/b", path: "~/Desktop/a/b" }]) {
-    did.length = 0;
-    await memberEvent(event({ act: "chat", chatId: "bot:dana", text: "look", files: [bad], key: `key_${Math.random().toString(36).slice(2, 10)}` }), "e_bad");
-    assert.deepEqual(did, [], JSON.stringify(bad));
-  }
-  // No words and no files: nothing.
-  did.length = 0;
-  await memberEvent(event({ act: "chat", chatId: "bot:dana", text: "", key: "key_00000009" }), "e_empty");
-  assert.deepEqual(did, []);
 });
 
 await check("without Use its computer their words stay, with a note that the bot won't answer, and no turn runs for them", async () => {

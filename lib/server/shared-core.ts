@@ -610,18 +610,7 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   const chatIds = new Set(chats.map((c) => c.id));
   for (const p of acts)
     if (p.act.act === "chat" && chatIds.has(p.act.chatId))
-      messages.push({
-        id: `acting_${p.key}`,
-        chatId: p.act.chatId,
-        role: "user",
-        text: p.act.text,
-        at: p.at,
-        ...(p.act.replyTo ? { replyTo: p.act.replyTo } : {}),
-        // Their files, on the bot's own computer as far as this copy knows (the owner's side works out whose it is).
-        ...(p.act.files?.length ? { files: p.act.files.map((f) => ({ ...f, hostId: f.botId, hostName: String(s.bots.find((b) => b.id === f.botId)?.name ?? "The bot") })) } : {}),
-        member: { ...p.me, ref: p.key },
-        memberSend: sendOf(p),
-      });
+      messages.push({ id: `acting_${p.key}`, chatId: p.act.chatId, role: "user", text: p.act.text, at: p.at, ...(p.act.replyTo ? { replyTo: p.act.replyTo } : {}), member: { ...p.me, ref: p.key }, memberSend: sendOf(p) });
   // (A watch's heads-up, "Heads up, something new in <window> on your Mac: “…”" or "Heads up, <site> changed. It looks like what
   // you're watching for: …" (watches.ts tell), and the digest, "While you were busy:" (attention.ts flush): the owner's Mac, what
   // the owner watches for, the owner who was busy. The window's title, the news and what's watched for stay as written.)

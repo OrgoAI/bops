@@ -1,7 +1,6 @@
 import "server-only";
 import { cleanChange } from "@/cloud/change-routes";
-import { isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, memberFiles, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct, type MemberFile } from "@/cloud/protocol";
-import type { AddedFile } from "@/lib/added-files";
+import { isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
@@ -54,13 +53,7 @@ const short = (v: unknown, max: number) => typeof v === "string" && v.length > 0
 function actOf(a: unknown): MemberAct | null {
   if (!a || typeof a !== "object") return null;
   const x = a as Record<string, unknown>;
-  if (x.act === "chat") {
-    // Files added for its bots (protocol.ts memberFiles): with them, the words may be empty.
-    const files = x.files === undefined ? [] : memberFiles(x.files);
-    const said = short(x.text, MEMBER_MAX_TEXT) || (x.text === "" && !!files?.length);
-    if (!short(x.chatId, 120) || !files || !said || (x.replyTo !== undefined && !short(x.replyTo, 120))) return null;
-    return { act: "chat", chatId: x.chatId as string, text: x.text as string, ...(typeof x.replyTo === "string" ? { replyTo: x.replyTo } : {}), ...(files.length ? { files } : {}) };
-  }
+  if (x.act === "chat") return short(x.chatId, 120) && short(x.text, MEMBER_MAX_TEXT) && (x.replyTo === undefined || short(x.replyTo, 120)) ? (x as MemberAct) : null;
   if (x.act === "reply") return short(x.sessionId, 120) && short(x.text, MEMBER_MAX_TEXT) ? (x as MemberAct) : null;
   if (x.act === "answer") return short(x.askId, 120) && ["once", "always", "reject"].includes(x.reply as string) && (x.message === undefined || (typeof x.message === "string" && x.message.length <= MEMBER_MAX_NOTE)) ? (x as MemberAct) : null;
   if (x.act === "stop") return Array.isArray(x.sessionIds) && x.sessionIds.length > 0 && x.sessionIds.length <= MEMBER_STOP_MAX && x.sessionIds.every((id) => short(id, 120)) ? (x as MemberAct) : null;
@@ -77,21 +70,6 @@ function actOf(a: unknown): MemberAct | null {
     return call ? { act: "change", ...call } : null;
   }
   return null;
-}
-
-/**
- * A member's files as this Mac's state places them (bot-files.ts filesGoTo): each for a bot of the chat, with the bot whose
- * computer has it (its own, or the main bot's it shares), never what the member's Bops said. None for a bot on this Mac.
- */
-function filesHere(files: readonly MemberFile[] | undefined, botIds: readonly string[]): AddedFile[] {
-  const s = getState();
-  if (!files?.length || s.host === "mac") return [];
-  return files.flatMap((f) => {
-    const b = botIds.includes(f.botId) ? bot(f.botId) : undefined;
-    if (!b || b.runsOn === "mac") return [];
-    const host = workBot(b, s.bots);
-    return host.computerId ? [{ ...f, hostId: host.id, hostName: host.name }] : [];
-  });
 }
 
 const OPAQUE = /^[A-Za-z0-9_-]{1,80}$/;
@@ -343,9 +321,8 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
         addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: noUseNote(ownerName(), who.name, name) });
         return;
       }
-      // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message. Their files, where they are.
-      const files = mayUse(p, who, admin) ? filesHere(act.files, chat(act.chatId)?.botIds ?? []) : [];
-      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin), undefined, undefined, undefined, files.length ? files : undefined).catch(warn);
+      // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message.
+      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin)).catch(warn);
       return;
     }
     case "reply": {
