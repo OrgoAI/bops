@@ -148,7 +148,19 @@ function baseState() {
     brains: [{ id: "br", kind: "claude", name: "C", auth: "plan", bots: ["main"], workspaceId: "ws_main", createdAt: 1, signIns: [{ computerId: D2, at: 1 }] }],
     screenLog: { "iris:1": { sessionId: "x", botId: "iris", title: "t", at: 1 } },
     digest: [{ botId: "iris", text: "old", at: 1 }],
-    workspaces: [{ id: "ws_main", name: "Acme", createdAt: 1 }],
+    // Its apps on the web (Workspace.hostedApps): one on this computer (its main bot's, with another site and a GitHub
+    // mirror), and one on Iris's computer.
+    workspaces: [
+      {
+        id: "ws_main",
+        name: "Acme",
+        createdAt: 1,
+        hostedApps: {
+          site: { botId: "main", computerId: D1, projectId: "p1", preview: "abcdefabcdef", sites: [{ name: "api", projectId: "p2" }], github: { repo: "acme/site", branch: "main", path: "", last: { sha: "a1", ingot: "c1", when: 1 } } },
+          far: { botId: "iris", computerId: D2, projectId: "p9" },
+        },
+      },
+    ],
     usage: [],
     // Requests for the user's OK (lib/types.ts AppApproval): one of this runner's unanswered, one of the Mac's, one of its own the owner answered.
     appApprovals: [
@@ -181,6 +193,13 @@ const ALLOWED = [
   (s) => s.appApprovals.push(askOf({ id: "apr-new", threadId: "s-run", askedBy: ME })),
   (s) => (s.appApprovals = s.appApprovals.filter((a) => a.id !== "apr-mine")),
   (s) => (s.appApprovals = s.appApprovals.filter((a) => a.id !== "apr-done")),
+  // What its deploys, Previews and Locals keep of its apps on this computer, and a new app's first home here.
+  (s) => (s.workspaces[0].hostedApps.site.queuedAt = 5),
+  (s) => Object.assign(s.workspaces[0].hostedApps.site, { projectId: "p3", preview: "zyxwvuzyxwvu", localPort: 3001, toldGoogle: ["http://localhost:3001"], passwordSet: { at: 2, live: null } }),
+  (s) => Object.assign(s.workspaces[0].hostedApps.site.sites[0], { projectId: "p4", localPort: 3002, passwordSet: { at: 3, live: "d1" } }),
+  (s) => (s.workspaces[0].hostedApps.site.copies = ["helper"]),
+  (s) => (s.workspaces[0].hostedApps.site.github.last = { sha: "a2", ingot: "c2", when: 2 }),
+  (s) => (s.workspaces[0].hostedApps.fresh = { botId: "helper", computerId: D1.toUpperCase(), queuedAt: 2 }),
 ];
 /** What it may not (and the path refused). */
 const REFUSED = [
@@ -199,7 +218,27 @@ const REFUSED = [
   [(s) => (s.brains[0].signIns = []), "brains.br.signIns"],
   [(s) => (s.screenLog["iris:1"].title = "z"), "screenLog.iris:1"],
   [(s) => (s.digest = []), "digest"],
-  [(s) => (s.workspaces[0].name = "z"), "workspaces"],
+  [(s) => (s.workspaces[0].name = "z"), "workspaces.ws_main.name"],
+  [(s) => s.workspaces.push({ id: "ws_new", name: "New" }), "workspaces.ws_new"],
+  [(s) => (s.workspaces[0].ingotTokens = { [D1]: { id: "t1", sum: "s", at: 1 } }), "workspaces.ws_main.ingotTokens"],
+  // Of its apps' records only what its own work keeps: never one moved, given away, lost or taken out, its sites, its mirror's place, its password's switch.
+  [(s) => (s.workspaces[0].hostedApps.site.computerId = D2), "workspaces.ws_main.hostedApps.site"],
+  [(s) => (s.workspaces[0].hostedApps.site.botId = "helper"), "workspaces.ws_main.hostedApps.site"],
+  [(s) => (s.workspaces[0].hostedApps.site.lost = 5), "workspaces.ws_main.hostedApps.site"],
+  [(s) => (s.workspaces[0].hostedApps.site.passwordOff = true), "workspaces.ws_main.hostedApps.site"],
+  [(s) => (s.workspaces[0].hostedApps.site.github.repo = "someone/else"), "workspaces.ws_main.hostedApps.site"],
+  [(s) => delete s.workspaces[0].hostedApps.site.github, "workspaces.ws_main.hostedApps.site"],
+  [(s) => s.workspaces[0].hostedApps.site.sites.push({ name: "more" }), "workspaces.ws_main.hostedApps.site"],
+  [(s) => (s.workspaces[0].hostedApps.site.sites[0].name = "renamed"), "workspaces.ws_main.hostedApps.site"],
+  [(s) => (s.workspaces[0].hostedApps.site.copies = ["iris"]), "workspaces.ws_main.hostedApps.site"],
+  [(s) => (s.workspaces[0].hostedApps.site.behind = [{ site: "site", computerId: D2, projectId: "p7" }]), "workspaces.ws_main.hostedApps.site"],
+  [(s) => delete s.workspaces[0].hostedApps.site, "workspaces.ws_main.hostedApps.site"],
+  // Nor another computer's app, nor a new one for a bot not on it, on another computer, or with more than a first home has.
+  [(s) => (s.workspaces[0].hostedApps.far.queuedAt = 9), "workspaces.ws_main.hostedApps.far"],
+  [(s) => (s.workspaces[0].hostedApps.new1 = { botId: "iris", computerId: D1 }), "workspaces.ws_main.hostedApps.new1"],
+  [(s) => (s.workspaces[0].hostedApps.new2 = { botId: "main", computerId: D2 }), "workspaces.ws_main.hostedApps.new2"],
+  [(s) => (s.workspaces[0].hostedApps.new3 = { botId: "main", computerId: D1, github: { repo: "someone/else", branch: "main", path: "" } }), "workspaces.ws_main.hostedApps.new3"],
+  [(s) => (s.workspaces[0].hostedApps.new4 = { botId: "main", computerId: D1, sites: [{ name: "x" }] }), "workspaces.ws_main.hostedApps.new4"],
   [(s) => (s.macs = { [ME]: { relay: { on: true } } }), "macs"],
   [(s) => (s.accounts[0].onlyGiven = true), "accounts.a1.onlyGiven"],
   // Never a reply to a request, its own included: once, always and reject are the owner's, from a Bops of their own.
@@ -330,6 +369,42 @@ await check("what a computer reads (forComputer): only its bots' things and a te
   assert.equal(C.carriesPasswords(C.forComputer(pass, scope)), false);
   assert.equal(C.carriesPasswords(pass), true);
   assert.deepEqual(C.withHeldBack(pass, C.forComputer(pass, scope), scope), pass);
+});
+
+await check("its apps on the web: what its deploys, Previews and Locals keep lands over what it read (a workspace without its Preview passwords), the passwords kept; another workspace's app never", () => {
+  const base = baseState();
+  base.workspaces[0].appsForMembers = { apps: { site: { sites: [{ name: "site", previewPassword: "p4ss" }] } } };
+  base.workspaces.push({ id: "ws_two", name: "Two", createdAt: 1 });
+  base.bots.push({ id: "tia", name: "Tia", isMain: true, workspaceId: "ws_two", computerId: D3, computerStatus: "ready" });
+  const view = C.forComputer(base, scope);
+  assert.ok(!JSON.stringify(view).includes("p4ss"), "never read");
+  assert.deepEqual(view.workspaces.map((w) => w.id), ["ws_main"], "its bots' workspace only");
+  const mine = structuredClone(view);
+  Object.assign(mine.workspaces[0].hostedApps.site, { queuedAt: 7, preview: "zyxwvuzyxwvu" });
+  const kept = C.keepAllowed(view, mine, scope);
+  assert.deepEqual(kept.held, [], "a runner sends it");
+  const back = C.withHeldBack(base, kept.blob, scope);
+  assert.deepEqual(C.writeDenials(base, back, scope), [], "Bops Cloud takes it");
+  const want = structuredClone(base);
+  Object.assign(want.workspaces[0].hostedApps.site, { queuedAt: 7, preview: "zyxwvuzyxwvu" });
+  assert.deepEqual(back, want, "the passwords and the other workspace as they were, the change in");
+  // The owner's Mac, reading that write (the second guard), takes it whole.
+  assert.deepEqual(C.keepAllowed(base, back, scope).held, []);
+  // A workspace it never read, sent with an app of its own bot in it: refused, and put back.
+  const sneak = structuredClone(view);
+  sneak.workspaces.push({ id: "ws_two", name: "Two", createdAt: 1, hostedApps: { grab: { botId: "main", computerId: D1 } } });
+  const denied = C.writeDenials(base, C.withHeldBack(base, sneak, scope), scope);
+  assert.ok(denied.includes("workspaces.ws_two.hostedApps.grab"), JSON.stringify(denied));
+  // Nor its own bot's app put in a workspace that isn't that bot's.
+  const into = structuredClone(base);
+  into.workspaces[1].hostedApps = { grab: { botId: "main", computerId: D1 } };
+  assert.ok(C.writeDenials(base, into, scope).includes("workspaces.ws_two.hostedApps.grab"));
+  // The pure check, as hosted-apps.ts keepHosting asks it on a runner.
+  const sc = C.hostingScope(base, D1);
+  assert.equal(C.hostingChangeAllowed("ws_main", undefined, { botId: "main", computerId: D1 }, sc), true, "a first home here");
+  assert.equal(C.hostingChangeAllowed("ws_two", undefined, { botId: "main", computerId: D1 }, sc), false, "in another workspace");
+  assert.equal(C.hostingChangeAllowed("ws_main", base.workspaces[0].hostedApps.site, undefined, sc), false, "taken out");
+  assert.equal(C.hostingChangeAllowed("ws_main", base.workspaces[0].hostedApps.far, { ...base.workspaces[0].hostedApps.far, botId: "main", computerId: D1 }, sc), false, "taken from another computer");
 });
 
 await check("a member's stamp: kept only as it was (none, or the same as the stored row's); the cloud path is a workspace's switch, a chat in it by its own workspace or its first bot's", () => {

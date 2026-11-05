@@ -28,6 +28,11 @@ import { bot, getState, sameState, update, watchChanges } from "./store";
  * and the ingot command signs in to a repo with its workspace's. A token goes there sealed to a key the
  * computer makes for it (sealScript): orgo-web logs every command, and the computer runs each as an
  * argument of `bash -c`, so no command carries it, not even in base64.
+ *
+ * A computer's runner (a chat turn or a task answered on the bot's own computer) calls Ingot's API with that same
+ * token of its computer's for the workspace (runnerToken: it runs as root there), never an Orgo key, so it reads,
+ * commits and makes repos in that workspace alone. It never makes, lists or revokes a token (ensureIngotCli's
+ * runnerReady, dropToken): only the owner's account can, so a computer with none yet says so in plain words.
  */
 
 export const INGOT_BIN = "/opt/bops/bin/ingot";
@@ -44,6 +49,28 @@ const CONFIG = "~root/.config/ingot/config.json";
 /** Root's agent tokens there, beside the config (Ingot's tokens folder): one file per workspace, named after its Orgo project. */
 const TOKENS = "~root/.config/ingot/tokens";
 const tokenFile = (workspace: string) => `${TOKENS}/${workspace}`;
+
+/**
+ * On a computer's runner (which runs as root there): that same tokens folder, read straight (BOPS_INGOT_TOKENS: a
+ * test's). A runner calls Ingot only with the token its computer has for the workspace (runnerToken), never with an
+ * Orgo key: Ingot takes a computer's own Orgo sign in for nothing (it asks orgo-web which workspaces the key's user
+ * is in, which a computer's key may not ask), and a token is for that one workspace alone.
+ */
+const runnerTokens = () => process.env.BOPS_INGOT_TOKENS || "/root/.config/ingot/tokens";
+
+/** What a runner says when its computer has no token of the workspace's: only the owner's own Orgo sign in makes one. */
+export const NO_TOKEN_HERE =
+  "This computer has no Ingot sign in for this workspace yet, and it can't make one with its own Orgo sign in (only the owner's account can), so nothing of the app was changed";
+
+/** The workspace's agent token on this computer, as the owner's Bops wrote it there (tokenScript), or null: a runner's own sign in to Ingot. */
+function runnerToken(workspace: string): string | null {
+  try {
+    const t = readFileSync(join(runnerTokens(), workspace), "utf8").trim();
+    return /^ingot_[A-Za-z0-9]{16,128}$/.test(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Ingot's MCP tools (repo_status, repo_diff, repo_commit, repo_pull, repo_log, repo_show, repo_file,
@@ -442,6 +469,8 @@ async function newToken(computerId: string, wsId: string, workspace: string, old
  * can't be told): no app of the workspace is on the computer anymore, or it's gone (hosted-apps.ts, sweep).
  */
 export async function dropToken(wsId: string, computerId: string): Promise<void> {
+  // A computer's runner mints and revokes none (that's the owner's account's, with its key).
+  if (onRunner()) return;
   const t = tokenOf(wsId, computerId);
   const job = `${wsId}\n${computerId}`;
   const busy = (g.bopsIngotDropping ??= new Set());
@@ -497,6 +526,7 @@ if (!onRunner())
 export async function ensureIngotCli(computerId: string, wsId: string, opts: { signal?: AbortSignal; botId?: string; renew?: boolean } = {}): Promise<void> {
   const ours = sameState();
   const workspace = ingotWorkspace(wsId);
+  if (onRunner()) return runnerReady(computerId, workspace, opts);
   const key = await apiKey().catch(() => null);
   stillOurs(ours);
   if (!key) throw new IngotError("Sign in with Orgo to work on apps on the web.");
@@ -525,6 +555,38 @@ export async function ensureIngotCli(computerId: string, wsId: string, opts: { s
   } finally {
     if (setup.get(computerId) === work) setup.delete(computerId);
   }
+}
+
+/**
+ * ensureIngotCli on a computer's runner, for its own computer: the ingot command and root's config made right there
+ * when they aren't (this Bops has the binary, and they're the computer's own), and the workspace's token file looked
+ * for. A runner never makes a token (only the owner's account can, with its key: ingot.mintToken), so one that's
+ * missing, or that Ingot turned away (`renew`), is said in plain words (NO_TOKEN_HERE), and nothing is changed.
+ */
+async function runnerReady(computerId: string, workspace: string, o: { signal?: AbortSignal; renew?: boolean }): Promise<void> {
+  if (o.renew) throw new IngotError("Ingot no longer takes this computer's sign in for this workspace, and it can't make a new one with its own Orgo sign in (only the owner's account can), so nothing of the app was changed", false, true);
+  const ready = (g.bopsIngotReady ??= new Map());
+  const job = `${computerId}\n${workspace}`;
+  const was = ready.get(job);
+  if (was && Date.now() - was.at < READY_MS && runnerToken(workspace)) return;
+  const probe = await orgo.bash(computerId, probeScript(workspace), 30, { signal: o.signal });
+  const m = marks(probe.output);
+  const arch = m.get("INGOT_ARCH");
+  if (arch !== "amd64" && arch !== "arm64") throw new IngotError(`Ingot runs on Linux on amd64 or arm64, and this computer is ${arch || "something else"}.`);
+  const sum = m.get("INGOT_TOKEN_FILE");
+  if (!sum || sum === "none" || !runnerToken(workspace)) throw new IngotError(NO_TOKEN_HERE);
+  const has = m.get("INGOT_BIN") ?? "none";
+  const bin = vendored(arch);
+  if (!bin && has === "none") throw new IngotError(`This Bops has no Ingot for the computer to run (${binaryPath(arch)} is missing), so its apps can't be set up there.`);
+  if (bin && has !== bin.sha256) await sendBinary(computerId, bin, () => true, o.signal);
+  const config = configText();
+  const newConfig = m.get("INGOT_CONFIG") !== sha256(config);
+  if (newConfig) {
+    const r = await orgo.bash(computerId, configScript(config), 30, { signal: o.signal });
+    if (r.exit_code !== 0 || !/INGOT_CONFIG=ok/.test(r.output)) throw new IngotError(`Couldn't write Ingot's config on the computer: ${tail(r.output)}`);
+  }
+  await gitReady(computerId, bin?.sha256 ?? has, newConfig, o.signal);
+  ready.set(job, { at: Date.now(), sum });
 }
 
 async function setUp(computerId: string, wsId: string, workspace: string, o: { signal?: AbortSignal; botId?: string; refused?: string; ours: () => boolean }): Promise<IngotToken> {
@@ -597,10 +659,12 @@ const utf8 = (s: string) => Buffer.from(s, "utf8").toString("latin1");
 async function api<T>(wsId: string, method: "GET" | "POST" | "DELETE", path: string, opts: { body?: unknown; author?: string; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<Answer<T>> {
   const ours = sameState();
   const project = ingotWorkspace(wsId);
-  const key = await apiKey().catch(() => null);
+  // On a computer's runner: its computer's token for the workspace (runnerToken), which reads, commits and makes repos
+  // there, and never manages tokens or deletes a repo (Ingot refuses that to a token). Elsewhere the user's key.
+  const key = onRunner() ? runnerToken(project) : await apiKey().catch(() => null);
   // The key of the account whose workspace this is, never one signed in since.
   stillOurs(ours);
-  if (!key) throw new IngotError("Sign in with Orgo to use apps on the web.");
+  if (!key) throw new IngotError(onRunner() ? NO_TOKEN_HERE : "Sign in with Orgo to use apps on the web.");
   const headers: Record<string, string> = { Authorization: `Bearer ${key}`, Accept: "application/json" };
   if (opts.author) headers["X-Ingot-Author"] = utf8(opts.author);
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -620,7 +684,10 @@ async function api<T>(wsId: string, method: "GET" | "POST" | "DELETE", path: str
   }
   if (DOWN.has(res.status)) throw new IngotError("Ingot isn't answering.", true);
   const json = (await res.json().catch(() => ({}))) as Answer<T>["json"];
-  if (res.status === 401) throw new IngotError("Ingot didn't take your Orgo key. Sign in with Orgo again.");
+  if (res.status === 401)
+    throw onRunner()
+      ? new IngotError("Ingot no longer takes this computer's sign in for this workspace, and it can't make a new one with its own Orgo sign in (only the owner's account can), so nothing of the app was changed", false, true)
+      : new IngotError("Ingot didn't take your Orgo key. Sign in with Orgo again.");
   return { status: res.status, json };
 }
 

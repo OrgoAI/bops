@@ -944,6 +944,48 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
   return { ref: findRef(wsId, kind, slug)!, warnings };
 }
 
+/**
+ * create_skill on a computer's runner (chat.ts): the skill saved straight in Orgo as a draft of the workspace's (POST
+ * /api/projects/{project}/skills with status draft), with the computer's own Orgo sign in (orgo.ts apiKey there:
+ * never the owner's key), so the owner's Bops brings it in on its next sync (syncSkills: one only on Orgo comes
+ * here) and it stays a draft until they publish it in Skills, as one made on the Mac does. Checked here as createSkill
+ * checks one (its name, its description, no secret, its label); Orgo checks the rest. Nothing is kept on the
+ * computer or in its state: a computer may not write a workspace's skills (cloud/computer-scope.ts), and the owner's
+ * Bops keeps their folders. Answers its name, or why it wasn't saved, in plain words.
+ */
+export async function saveSkillFromComputer(wsId: string, input: { name: string; description: string; body: string; label: string | null; botIds: string[] }): Promise<{ ok: true; name: string } | { ok: false; why: string }> {
+  const pid = workspaceById(wsId)?.orgoProjectId;
+  if (!pid) return { ok: false, why: "this workspace isn't on Orgo yet, so a skill can be saved only where its folders are kept" };
+  const name = cut(oneLine(input.name), 120);
+  const description = oneLine(input.description);
+  if (!/[\p{L}\p{N}]/u.test(name)) return { ok: false, why: "a skill needs a name" };
+  if (!description) return { ok: false, why: "say what it does and when to use it" };
+  if (description.length > BUNDLE_LIMITS.description) return { ok: false, why: `the description is ${BUNDLE_LIMITS.description} characters at most` };
+  const extra = input.label ? withLabel({}, knownLabel(wsId, input.label)) : {};
+  try {
+    noSecretsIn(name, description, extra);
+    checkFiles(input.body, []);
+  } catch (e) {
+    if (e instanceof SkillError) return { ok: false, why: e.message.replace(/[.\s]+$/, "") };
+    throw e;
+  }
+  const team = teamIds(wsId);
+  const md = renderSkillMd(frontmatterOf(slugify(name), description, extra), input.body.replace(/\r\n?/g, "\n"));
+  const { apiKey, callOrgo } = await import("./orgo");
+  const key = await apiKey().catch(() => "");
+  if (!key) return { ok: false, why: "this computer isn't signed in to Orgo right now" };
+  const r = await callOrgo<{ skill?: { name?: string }; error?: string; code?: string }>(key, `/api/projects/${encodeURIComponent(pid)}/skills`, {
+    method: "POST",
+    body: { name, description, type: "skill", body: md, files: [], bot_ids: input.botIds.filter((id) => team.has(id)), status: "draft" },
+    timeoutMs: 20_000,
+  });
+  if (r?.status === 201) return { ok: true, name: r.json.skill?.name ?? name };
+  if (!r) return { ok: false, why: "Orgo didn't answer" };
+  if (r.status === 403 && (r.json.code === "computer_key" || r.json.code === "computer_scope")) return { ok: false, why: "Orgo doesn't take this computer's own sign in for saving skills yet" };
+  const said = typeof r.json.error === "string" && r.json.error ? r.json.error.replace(/[.\s]+$/, "") : `Orgo answered ${r.status}`;
+  return { ok: false, why: `Orgo says: ${said}` };
+}
+
 /** A key in the name, the description or the frontmatter would reach every prompt and Orgo: refused like one in the body. */
 function noSecretsIn(name: string, description: string, extra: Record<string, unknown> = {}) {
   const found = [...scanSecrets("name", name), ...scanSecrets("description", description), ...scanSecrets("frontmatter", JSON.stringify(extra))];

@@ -195,7 +195,8 @@ test("a computer's state write: its own threads, its bots' routines' runs and ho
     ["a thread said to be another device's", (s) => s.sessions.push({ id: "s-other", botId: "main", by: "mac-device", goal: "x", status: "queued" }), "sessions.s-other"],
     ["a thread of another computer's bot", (s) => s.sessions.push({ id: "s-iris", botId: "iris", chatId: "bot:iris", by: me, goal: "Confirm your bank", status: "done" }), "sessions.s-iris"],
     ["a thread of its bot in another's chat", (s) => s.sessions.push({ id: "s-away", botId: "main", chatId: "bot:iris", by: me, goal: "x", status: "done" }), "sessions.s-away"],
-    ["a workspace", (s) => (s.workspaces[0].name = "Mine"), "workspaces"],
+    ["a workspace", (s) => (s.workspaces[0].name = "Mine"), "workspaces.ws_main.name"],
+    ["another computer's app", (s) => (((s.workspaces[0] as Record<string, unknown>).hostedApps = { shop: { botId: "iris", computerId: D2, queuedAt: 5 } }), s), "workspaces.ws_main.hostedApps.shop"],
     ["a runner stopped", (s) => ((s as Record<string, unknown>).runners = { [D2]: { status: "stopping" } }), "runners"],
     ["a verified number", (s) => s.ownerPhones.push({ number: "+15555550123", consentAt: 1, verifiedAt: 1 }), "ownerPhones"],
     ["an account's default", (s) => delete (s.accounts[1] as Record<string, unknown>).onlyGiven, "accounts.acct_notion.onlyGiven"],
@@ -727,18 +728,27 @@ test("a computer never reads the Preview passwords kept for members, and its wri
 
   // Still refused: a password of its own, even the right one (so it can't guess), or another change to a workspace.
   const read2 = (await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) })).json;
-  for (const change of [
-    (s: ReturnType<typeof stateOf>) => (sitesOf(s)[0].previewPassword = "mine123"),
-    (s: ReturnType<typeof stateOf>) => (sitesOf(s)[0].previewPassword = PASS),
-    (s: ReturnType<typeof stateOf>) => (s.workspaces[0].name = "Mine"),
-  ]) {
+  for (const [change, paths] of [
+    [(s: ReturnType<typeof stateOf>) => (sitesOf(s)[0].previewPassword = "mine123"), ["workspaces"]],
+    [(s: ReturnType<typeof stateOf>) => (sitesOf(s)[0].previewPassword = PASS), ["workspaces"]],
+    [(s: ReturnType<typeof stateOf>) => (s.workspaces[0].name = "Mine"), ["workspaces.ws_main.name"]],
+  ] as const) {
     const next = structuredClone(read2.state) as ReturnType<typeof stateOf>;
     change(next);
     const r = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read2.version, state: next } });
     assert.equal(r.status, 403, r.text);
-    assert.deepEqual(r.json.paths, ["workspaces"]);
+    assert.deepEqual(r.json.paths, paths);
   }
   assert.equal(sitesOf((await stateNow(u)).state)[0].previewPassword, PASS);
+  // Its own app's record (a first home on its computer for its bot, as its deploy keeps it): taken, the password as it was.
+  const read3 = (await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) })).json;
+  const app = structuredClone(read3.state) as ReturnType<typeof stateOf>;
+  (app.workspaces[0] as Record<string, unknown>).hostedApps = { shop: { botId: "main", computerId: D1, queuedAt: 7 } };
+  const took = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read3.version, state: app } });
+  assert.equal(took.status, 200, took.text);
+  const kept = (await stateNow(u)).state;
+  assert.equal(sitesOf(kept)[0].previewPassword, PASS, "the password kept");
+  assert.deepEqual((kept.workspaces[0] as Record<string, unknown>).hostedApps, { shop: { botId: "main", computerId: D1, queuedAt: 7 } });
 
   // A write over an older version: the state it's handed back has no password either.
   const stale = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read.json.version, state: mine } });
