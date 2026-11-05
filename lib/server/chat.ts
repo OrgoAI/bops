@@ -1803,16 +1803,47 @@ async function ownerAskedForApp(chatId: string, botId: string, member?: MemberTu
 /** The user's words asking for their app on the web to go live, or back to an older commit there (deploy_app). */
 const ASKS_TO_DEPLOY = /\b(?:deploy\w*|publish\w*|launch\w*|roll(?:ed|ing|s)?\s?back|go(?:es)? live|(?:put|make|set)\b[^.?!\n]{0,60}\b(?:live|online|on the web))\b/i;
 /**
- * The user's words asking for Prod (deploy_app's where prod, what's Published): the real site, not its preview. A
- * change goes to its Preview by itself (work_on_app), so putting it live, going live or shipping it is publishing.
+ * Where an ask starts: a clause's start, or a word that leads one (please, can you, ok, and, then, to). "Put it live"
+ * and "ship it" count there, never in "did you put it live?", "we'll ship it next week" or "when does it go live?".
  */
-export const ASKS_FOR_PROD =
-  /\b(?:prod|production|promot\w*|publish\w*|live site|real site|real one|for real)\b|\b(?:put|push|make|set|take)\b[^.?!\n]{0,40}\blive\b|\bgo(?:es|ing)? live\b|\bship (?:it|this|that|them)\b|\b[a-z0-9-]+\.(?:com|agency|ai|io|co|app|dev|net|org)\b/i;
+const ASK_LEAD = String.raw`(?:^|[.?!,;:\n]\s*|\b(?:let['’]?s|let us|please|pls|ok|okay|yes|yeah|yep|sure|so|and|then|now|also|just|go ahead and|to|can we|could we|we can|can you|could you|would you|will you|you can)\s+)`;
+/**
+ * The user's words asking for Prod (deploy_app's where prod, what's Published): the real site, not its preview. A
+ * change goes to its Preview by itself (work_on_app), so putting it live (it, this, the site, the changes), going live
+ * or shipping it, asked for (ASK_LEAD), is publishing; the live chat, the live view or shipping it to its preview isn't.
+ */
+export const ASKS_FOR_PROD = new RegExp(
+  [
+    String.raw`\b(?:prod|production|promot\w*|publish\w*|live site|real site|real one|for real)\b`,
+    String.raw`${ASK_LEAD}(?:put|push|take|make|set)\s+(?:it|this|that|them|these|those|everything|(?:the|my|our|this|that|these|those)\s+(?:[\w'’-]+\s+){0,3}?(?:apps?|sites?|website|websites|pages?|changes?|updates?|versions?|fix|fixes|ones?|build|commit))\s+live\b`,
+    String.raw`${ASK_LEAD}(?:(?:make|let|have)\s+(?:it|this|that|them)\s+)?go live\b`,
+    String.raw`${ASK_LEAD}ship (?:it|this|that|them)\b(?!\s+(?:to|on|onto|into|in)\s+(?:the\s+|its\s+|a\s+)?(?:preview|staging|local|test))`,
+    String.raw`\b[a-z0-9-]+\.(?:com|agency|ai|io|co|app|dev|net|org)\b`,
+  ].join("|"),
+  "gi",
+);
 /** A preview link or a localhost address in the user's words: never a sign they asked to publish (a pasted link says nothing of where it goes). */
 const NOT_A_DOMAIN = /\b(?:https?:\/\/)?(?:(?:[a-z0-9-]+\.)+orgo\.dev|localhost|127\.0\.0\.1)(?::\d+)?\S*/gi;
+/** Words someone else said or a button's text, quoted ("Go live", a line of an email starting with >): never theirs asking. */
+const QUOTED = /"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|(?<![\w'’])'[^'\n]*'(?![\w])|^[ \t]*>.*$/gm;
+/** Said not to, in the same clause just before (don't put it live, never publish it, no need to push it live)... */
+const NOT_BEFORE = /\b(?:(?:don['’]?t|do not|dont)(?!\s+forget\b)|never|not|no|won['’]?t|can['’]?t|cannot|shouldn['’]?t|mustn['’]?t|without|stop|avoid|hold off(?: on)?|wait (?:to|before|until))\s+(?:[\w'’-]+\s+){0,3}$/i;
+/** ...or just after (publish it later, ship it? not yet). */
+const NOT_AFTER = /^[^.?!;\n]{0,24}?\b(?:yet|later)\b/i;
 
-/** Whether words ask for Prod (deploy_app's where prod), once preview links and localhost addresses in them are taken out. */
-export const asksForProd = (words: string) => ASKS_FOR_PROD.test(words.replace(NOT_A_DOMAIN, " "));
+/**
+ * Whether words ask for Prod (deploy_app's where prod): an ask in ASKS_FOR_PROD that isn't said not to (NOT_BEFORE,
+ * NOT_AFTER), once quoted words (QUOTED), preview links and localhost addresses in them are taken out.
+ */
+export function asksForProd(words: string): boolean {
+  const text = words.replace(QUOTED, " ").replace(NOT_A_DOMAIN, " ");
+  for (const m of text.matchAll(ASKS_FOR_PROD)) {
+    const at = m.index ?? 0;
+    const clause = text.slice(0, at).split(/[.?!;:\n]/).pop() ?? "";
+    if (!NOT_BEFORE.test(clause) && !NOT_AFTER.test(text.slice(at + m[0].length))) return true;
+  }
+  return false;
+}
 
 /**
  * Whether the speaker's own latest message here asks for Prod (deploy_app): the owner's or an Admin's words (MemberTurn
@@ -2450,7 +2481,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       opts.outside ? "" : watchesNote([botId, ...below], b.isMain && !member),
       // Answered on the bot's computer (runner-chat.ts): what it can't do from there, said plainly (never sent elsewhere for it).
       onBox
-        ? `You're answering from your computer, not from ${owner}'s Mac.${offered.has("work_on_app") ? " Your workspace's apps on the web (Local, Preview and Published) work from here as always." : ""}${offered.has("create_skill") ? " So do skills: a new one is saved as a draft, and a change to one is a proposal under your answer." : ""} You can't set up routines, reminders or watches, make a new bot, a page, a picture or an app in Bops' panel, or hand work to a teammate from here yet: if asked, say plainly that you can't do that from your computer yet. Never say a tool isn't available in this chat, and never tell anyone to ask again somewhere else.`
+        ? `You're answering from your computer, not from ${owner}'s Mac.${offered.has("work_on_app") ? " Your workspace's apps on the web (Local, Preview and Published) work from here as always." : ""}${offered.has("create_skill") ? `${offered.has("work_on_app") ? " So do skills" : " Skills work from here too"}: a new one is saved as a draft, and a change to one is a proposal under your answer.` : ""} You can't set up routines, reminders or watches, make a new bot, a page, a picture or an app in Bops' panel, or hand work to a teammate from here yet: if asked, say plainly that you can't do that from your computer yet. Never say a tool isn't available in this chat, and never tell anyone to ask again somewhere else.`
         : "",
       // Someone else's turn: what's the user's alone (NOT_FROM_OUTSIDE).
       opts.outside

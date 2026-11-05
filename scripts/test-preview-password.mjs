@@ -567,7 +567,8 @@ await check("a bot is told a Preview asks for a password, where the owner sees i
   assert.equal(said.includes(pw), false);
   const note = H.hostedAppsLine("boppy");
   hear(note);
-  assert.match(note, /asks for a password unless Alex turned it off \(Alex sees it beside the Preview link in Bops; you never have it, so never write one in this chat or ask for it, and check your work on Local\)/);
+  assert.match(note, /It asks for a password unless Alex turned it off \(Alex sees it beside the Preview link in Bops; you never have it, so never write one in this chat or ask for it\)\./);
+  assert.match(note, /Never open a Preview link to check it \(its password page answers 401\): check your work on Local\./);
   assert.equal(note.includes(pw), false);
   await passPost({ action: "off" });
   assert.match(H.hostedAppsLine("boppy"), /preview at https:\/\/[a-z0-9]{12}\.orgo\.dev, with no password;/);

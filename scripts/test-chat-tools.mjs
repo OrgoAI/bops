@@ -2590,6 +2590,30 @@ await check("a pasted preview link or localhost address isn't asking to publish;
   assert.equal(asks("publish it on brandlord.agency"), true);
   assert.equal(asks("put it on acme.example.com... I mean acme.com"), true);
   assert.equal(asks("publish it"), true);
+  // Putting it live, going live and shipping it, asked for: Publish (a change is on its Preview already).
+  for (const s of ["put it live", "Push it live", "Go live!", "Looks good, ship it", "Can you push the changes live?", "Ok, make the site live", "let's go live", "Don't wait, publish it", "No, push it live"]) assert.equal(asks(s), true, s);
+  // Never words that only mention live, say not to, ask about it, quote it, or ship it to its preview.
+  for (const s of [
+    "Don't put it live yet",
+    "don't ship it yet",
+    "Never push this live",
+    "Do not under any circumstances publish it",
+    "don't publish it",
+    "publish it later",
+    "ship it to preview",
+    "Push it to preview, not live",
+    "Make the live chat widget bigger",
+    "Set up a live chat on the contact page",
+    "Take a look at the live version and fix the header",
+    "Is it going live today?",
+    "When will it go live?",
+    "Did you put it live?",
+    "We'll ship it next week",
+    'Change the button to say "Go live"',
+    "Sam said 'ship it' but wait for me",
+    "> put it live\nwhat do you make of this email?",
+  ])
+    assert.equal(asks(s), false, s);
 });
 
 /* ---------------- A chat turn on a bot's computer (runner-chat.ts) ---------------- */
@@ -2676,6 +2700,8 @@ await check("the owner's turn on the bot's computer: its apps on the web and its
     for (const x of ["work_on_app", "deploy_app", "local_app", "create_skill", "update_skill", "propose_skill_change", "start_task"]) assert.ok(names.includes(x), `has ${x}`);
     for (const x of ["schedule", "manage_routine", "watch", "make_page", "make_image", "make_app", "change_app", "create_bot"]) assert.ok(!names.includes(x), `no ${x}`);
     assert.equal(t.out(), "Saved \"Weekly recap\" as a draft in your workspace's skills. Alex can publish it in Skills, in Knowledge; then you'll use it.");
+    const noteOf = (req) => req.input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
+    assert.match(noteOf(t.first), /not from Alex's Mac\. Your workspace's apps on the web \(Local, Preview and Published\) work from here as always\. So do skills: a new one is saved as a draft/);
     assert.equal(posts.length, 1);
     const p = posts[0];
     // (The sign in this Bops runs on: on a runner, its computer's own, orgo.ts apiKey; never one sent from elsewhere.)
@@ -2700,6 +2726,22 @@ await check("the owner's turn on the bot's computer: its apps on the web and its
     assert.ok(card, "the proposal's card");
     assert.deepEqual([card.skillProposals[0].slug, card.skillProposals[0].file], [pub.slug, "SKILL.md"]);
     assert.match(card.skillProposals[0].content, /2\. Say thanks\./);
+    // Apps not open to the account: skills are there all the same, said on their own (no "So do" with nothing before it).
+    const was = S.getState().account;
+    S.update((s) => (s.account = { ...s.account, user: { ...s.account.user, email: "alex@example.com" } }));
+    try {
+      const id = `msg_box_${++k}`;
+      S.update((st) => st.messages.push({ id, chatId, role: "user", text: "hi", at: T + k }));
+      answers.push(reply("Hi."));
+      const m = asked.length;
+      await runInTurn({ id: `turn_${id}`, chatId, botId: "boppy", offsetMs: 0, humanAt: T + k, acting: false, cancelled: false }, () => Chat.answerMessage(chatId, id));
+      assert.ok(!toolNames(asked[m]).includes("work_on_app"), "no apps");
+      const note = asked[m].input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
+      assert.match(note, /not from Alex's Mac\. Skills work from here too: a new one is saved as a draft/);
+      assert.doesNotMatch(note, /So do skills/);
+    } finally {
+      S.update((s) => (s.account = was));
+    }
   } finally {
     S.update((st) => void (st.workspaces[0].orgoProjectId = wasPid));
     if (had.origin === undefined) delete process.env.BOPS_ORGO_ORIGIN;

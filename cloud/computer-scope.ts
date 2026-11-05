@@ -31,9 +31,10 @@
  *   (Workspace.hostedApps, hostingChangeAllowed): what its own deploys, Previews and Locals keep of one
  *   (when it queued a deploy, a site's deploy project, its Preview label's copy, its Local's port, the
  *   addresses told for Google sign in, when its Preview password was set, a bot of its own working in a
- *   copy, where its GitHub mirror last matched), and a new app's first home on this computer for one of
- *   its bots. Never another computer's app, one moved or taken out, its sites, its GitHub mirror's place,
- *   or anything else of a workspace.
+ *   copy, where its GitHub mirror last matched), each only as that work writes it (a number, an id, a Preview
+ *   label sealed for that app: RUN_SHAPE, sealedFor), and a new app's first home on this computer for one of
+ *   its bots (MAX_APPS_FROM_COMPUTER in a workspace). Never another computer's app, one moved or taken out, its
+ *   sites, its GitHub mirror's place, or anything else of a workspace.
  * Anything else (bots added, moved or given keys or app access, routines added, edited or taken out,
  * another device's threads, the rest of a workspace, logins, channels, phone numbers, Macs' own settings) is refused
  * (403 computer_not_allowed). Its chat messages are only its bots' words and Bops' notes, in its bots'
@@ -41,11 +42,13 @@
  * it reaches through Bops Cloud are held to its bots too (proxy.ts: their memory banks, app accounts,
  * inboxes and texting lines).
  *
- * Pure, with no imports: Bops Cloud checks with it (state.ts, proxy.ts), a runner keeps to it before it
- * sends (keepAllowed in lib/server/persist-cloud.ts, so a runner never sends what would be refused), and
- * the Mac holds a computer's write to it again when it reads one (the second guard, persist-cloud.ts).
+ * Pure, with no imports but node:crypto (a Preview label's seal): Bops Cloud checks with it (state.ts, proxy.ts), a
+ * runner keeps to it before it sends (keepAllowed in lib/server/persist-cloud.ts, so a runner never sends what would
+ * be refused), and the Mac holds a computer's write to it again when it reads one (the second guard, persist-cloud.ts).
  * Which bot works where follows lib/types.ts workBot exactly (scripts/test-computer-scope.mjs checks).
  */
+
+import { createHash } from "node:crypto";
 
 export type Blob = Record<string, unknown>;
 /** The computer (its Orgo id, any case) and its device as the state knows it (cloud/device.ts). */
@@ -333,45 +336,134 @@ const FREE = new Set(["usage", "credits"]);
 const HOSTING_RUN = new Set(["queuedAt", "projectId", "preview", "localPort", "toldGoogle", "passwordSet"]);
 /** An app's record as a new app's first home on a computer keeps it (hosted-apps.ts movedTo, appWork): its bot and computer, and what it runs with. */
 const HOSTING_NEW = new Set(["botId", "computerId", "copies", ...HOSTING_RUN]);
+/** A computer gives a new app its first home only while its workspace has fewer apps than this (the owner's Bops adds more): each is in every bot's prompt there (hostedAppsLine). */
+export const MAX_APPS_FROM_COMPUTER = 100;
 
-/** Where a computer's runner keeps its apps' records: its computer, its bots, and each bot's workspace. */
-export type HostingScope = { desktopId: string; bots: Set<string>; workspaceOf: (botId: string) => string | undefined };
+/** Orgo's ids (a deploy project's, a deploy's), an app's name (lib/hosted-apps.ts isAppName), a Preview label, a Local's address told for Google. */
+const ORGO_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const APP_NAME = /^(?=.{1,64}$)[a-z0-9]+(-[a-z0-9]+)*$/;
+const LABEL = /^[a-z0-9]{12}$/;
+const LOCAL = /^http:\/\/localhost:\d{1,5}$/;
+const HEX = /^[0-9a-f]{1,64}$/;
+const isTime = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const isPort = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v > 0 && v < 65536;
+const onlyKeys = (v: Blob, keys: readonly string[]) => Object.keys(v).every((k) => keys.includes(k));
+/**
+ * What each field a computer's own work keeps (HOSTING_RUN) may be, as hosted-apps.ts writes it (gone is fine too):
+ * never a long text or a word where a port goes, as these reach the bots' prompts (hostedAppsLine) and the owner's
+ * window. A Preview label is held to its seal as well (sealedFor).
+ */
+const RUN_SHAPE: Record<string, (v: unknown) => boolean> = {
+  queuedAt: isTime,
+  projectId: (v) => typeof v === "string" && ORGO_ID.test(v),
+  preview: (v) => typeof v === "string" && LABEL.test(v),
+  localPort: isPort,
+  toldGoogle: (v) => Array.isArray(v) && v.length <= 20 && v.every((x) => typeof x === "string" && LOCAL.test(x)),
+  passwordSet: (v) => isObject(v) && onlyKeys(v, ["at", "live"]) && isTime(v.at) && (v.live === null || (typeof v.live === "string" && ORGO_ID.test(v.live))),
+};
 
-/** The scope hostingChangeAllowed takes for a computer, from its user's state (botsOn, each bot's workspace). */
-export function hostingScope(state: Blob, desktopId: string): HostingScope {
-  const all = new Map(listOf(state.bots).map((b) => [b.id as string, workspaceOf(b)]));
-  return { desktopId, bots: botIdsOn(state, desktopId), workspaceOf: (id) => all.get(id) };
+/**
+ * Whether `label` is a Preview label sealed for this app's repo ("<its workspace's Orgo project>/<name>") and site, as
+ * lib/server/app-labels.ts sealOf makes one: only that one is a computer's to keep as a site's Preview label copy.
+ * Another's (another app's, another computer's, a name the owner chose) would have the owner's Bops take that link
+ * from where it is (hosted-apps.ts previewElsewhere) for this app.
+ */
+function sealedFor(label: string, project: string | undefined, name: string | undefined, site: string): boolean {
+  if (!project || !name || !LABEL.test(label) || !/[a-z]/.test(label.slice(0, 8))) return false;
+  const ABC = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const h = createHash("sha256").update(`bops:preview:${`${project}/${name}`.toLowerCase()}:${site}:${label.slice(0, 8)}`).digest();
+  return label.slice(8) === Array.from({ length: 4 }, (_, i) => ABC[h[i] % 36]).join("");
 }
 
-/** A list of bot ids: what it had (`was`), and only bots on the computer added. */
-const copiesGrow = (was: unknown, now: unknown, bots: Set<string>) => {
+/**
+ * Where a computer's runner keeps its apps' records: its computer, its bots, each bot's workspace, each workspace's
+ * Orgo project (for a Preview label's seal) and how many apps it has (MAX_APPS_FROM_COMPUTER).
+ */
+export type HostingScope = {
+  desktopId: string;
+  bots: Set<string>;
+  workspaceOf: (botId: string) => string | undefined;
+  projectOf?: (wsId: string) => string | undefined;
+  appsIn?: (wsId: string) => number;
+};
+
+/** The scope hostingChangeAllowed takes for a computer, from its user's state (botsOn, each bot's workspace, each workspace's Orgo project and apps). */
+export function hostingScope(state: Blob, desktopId: string): HostingScope {
+  const all = new Map(listOf(state.bots).map((b) => [b.id as string, workspaceOf(b)]));
+  const spaces = new Map(listOf(state.workspaces).map((w) => [w.id as string, w]));
+  return {
+    desktopId,
+    bots: botIdsOn(state, desktopId),
+    workspaceOf: (id) => all.get(id),
+    projectOf: (id) => str(spaces.get(id)?.orgoProjectId),
+    appsIn: (id) => {
+      const apps = spaces.get(id)?.hostedApps;
+      return isObject(apps) ? Object.keys(apps).length : 0;
+    },
+  };
+}
+
+/** A list of bot ids: what it had (`was`), and only bots on the computer, of the app's workspace, added, each once. */
+const copiesGrow = (was: unknown, now: unknown, sc: HostingScope, wsId: string) => {
   const before = Array.isArray(was) ? was : [];
   if (now === undefined) return !before.length;
-  if (!Array.isArray(now) || !now.every((x) => typeof x === "string")) return false;
-  return before.every((x) => now.includes(x)) && now.every((x) => before.includes(x) || bots.has(x));
+  if (!Array.isArray(now) || !now.every((x) => typeof x === "string") || new Set(now).size !== now.length) return false;
+  return before.every((x) => now.includes(x)) && now.every((x) => before.includes(x) || (sc.bots.has(x) && sc.workspaceOf(x) === wsId));
 };
 
 /** Two records that differ only in what `free` names (and, with `rest`, in what it allows of the rest). */
 const onlyIn = (a: Blob, b: Blob, free: Set<string>, rest: (k: string) => boolean = () => false) => differ(a, b).every((k) => free.has(k) || rest(k));
 
 /**
- * Whether a computer's runner may change the record of workspace `wsId`'s app on the web from `was` to `now`
+ * Each field of HOSTING_RUN that `now` has otherwise than `was` (all of them, for a new one) as RUN_SHAPE says, and a
+ * Preview label sealed for site `site` of the app (sealedFor): what a computer's own work writes, and nothing else.
+ */
+const runFieldsOk = (was: Blob | undefined, now: Blob, site: string, ok: (label: string, site: string) => boolean) =>
+  [...HOSTING_RUN].every((k) => now[k] === undefined || (was !== undefined && same(was[k], now[k])) || (RUN_SHAPE[k](now[k]) && (k !== "preview" || ok(now[k] as string, site))));
+
+/**
+ * Where it last matched GitHub (github.last, as github-mirror.ts makes it after a Link, a Publish or a Bring in): the
+ * commits' ids, when, and the paths left alone then, which are the mirror's own (`keep`, so its Link stands as it is).
+ */
+const lastOk = (last: unknown, mirror: Blob) =>
+  isObject(last) &&
+  onlyKeys(last, ["sha", "ingot", "keep", "when"]) &&
+  typeof last.sha === "string" &&
+  HEX.test(last.sha) &&
+  typeof last.ingot === "string" &&
+  HEX.test(last.ingot) &&
+  isTime(last.when) &&
+  same(last.keep ?? [], mirror.keep ?? []);
+
+/**
+ * Whether a computer's runner may change the record of workspace `wsId`'s app on the web, `name`, from `was` to `now`
  * (Workspace.hostedApps[name]; undefined: none): only an app whose home is this computer (not lost), of one of its
  * bots in that workspace, before and after, its bot and computer kept; and in it only what its deploys, Previews and
- * Locals keep (HOSTING_RUN), of the app's own site and of each of its sites (the same sites, in order), a bot of its
- * own added to work in a copy, and where its GitHub mirror last matched (github.last, the mirror itself kept). Or a new
- * app's first home here for one of its bots, with no more than that. Never one taken out, moved, given away or lost.
+ * Locals keep (HOSTING_RUN, each as RUN_SHAPE says, a Preview label sealed for the app: sealedFor), of the app's own
+ * site and of each of its sites (the same sites, in order), a bot of its own in that workspace added to work in a copy,
+ * and where its GitHub mirror last matched (github.last, the mirror itself kept). Or a new app's first home here for
+ * one of its bots, with no more than that (and a name an app can have). Never one taken out, moved, given away or lost.
  * Pure: Bops Cloud, a runner and the owner's Mac ask the same (writeDenials, keepAllowed; hosted-apps.ts keepHosting).
+ * Without `name`, a Preview label is never taken.
  */
-export function hostingChangeAllowed(wsId: string, was: unknown, now: unknown, sc: HostingScope): boolean {
+export function hostingChangeAllowed(wsId: string, was: unknown, now: unknown, sc: HostingScope, name?: string): boolean {
   if (same(was, now)) return true;
   if (!isObject(now)) return false;
   const here = (h: Blob) => !h.lost && lower(h.computerId) === lower(sc.desktopId) && typeof h.botId === "string" && sc.bots.has(h.botId) && sc.workspaceOf(h.botId) === wsId;
   if (!here(now)) return false;
-  if (was === undefined) return Object.keys(now).every((k) => HOSTING_NEW.has(k)) && copiesGrow(undefined, now.copies, sc.bots);
+  const sealed = (label: string, site: string) => sealedFor(label, sc.projectOf?.(wsId), name, site);
+  if (was === undefined)
+    return (
+      (name === undefined || APP_NAME.test(name)) &&
+      (sc.appsIn?.(wsId) ?? 0) < MAX_APPS_FROM_COMPUTER &&
+      Object.keys(now).every((k) => HOSTING_NEW.has(k)) &&
+      copiesGrow(undefined, now.copies, sc, wsId) &&
+      runFieldsOk(undefined, now, name ?? "", sealed)
+    );
   if (!isObject(was) || !here(was) || was.botId !== now.botId || was.computerId !== now.computerId) return false;
+  if (!runFieldsOk(was, now, name ?? "", sealed)) return false;
   return onlyIn(was, now, HOSTING_RUN, (k) => {
-    if (k === "copies") return copiesGrow(was.copies, now.copies, sc.bots);
+    if (k === "copies") return copiesGrow(was.copies, now.copies, sc, wsId);
     if (k === "sites") {
       const a = Array.isArray(was.sites) ? was.sites : [];
       const b = Array.isArray(now.sites) ? now.sites : null;
@@ -380,12 +472,12 @@ export function hostingChangeAllowed(wsId: string, was: unknown, now: unknown, s
         a.length === b.length &&
         a.every((x: unknown, i: number) => {
           const y: unknown = b[i];
-          return isObject(x) && isObject(y) && x.name === y.name && onlyIn(x, y, HOSTING_RUN);
+          return isObject(x) && isObject(y) && x.name === y.name && typeof y.name === "string" && onlyIn(x, y, HOSTING_RUN) && runFieldsOk(x, y, y.name, sealed);
         })
       );
     }
     // Where it last matched GitHub (Publish there), never where the mirror is.
-    if (k === "github") return isObject(was.github) && isObject(now.github) && onlyIn(was.github, now.github, new Set(["last"]));
+    if (k === "github") return isObject(was.github) && isObject(now.github) && onlyIn(was.github, now.github, new Set(["last"])) && lastOk(now.github.last, now.github);
     return false;
   });
 }
@@ -571,8 +663,12 @@ const RULES: Record<string, (stored: unknown, next: unknown, ctx: Ctx) => Kept> 
           const was = isObject(s.hostedApps) ? s.hostedApps : {};
           const now = isObject(n.hostedApps) ? n.hostedApps : {};
           const out: Blob = {};
+          // (New ones count as they're taken: MAX_APPS_FROM_COMPUTER in all, however many one write brings.)
+          let apps = Object.keys(was).length;
           for (const name of new Set([...Object.keys(was), ...Object.keys(now)])) {
-            const ok = hostingChangeAllowed(s.id as string, was[name], now[name], ctx.hosting);
+            const fresh = was[name] === undefined && now[name] !== undefined;
+            const ok = (!fresh || apps < MAX_APPS_FROM_COMPUTER) && hostingChangeAllowed(s.id as string, was[name], now[name], ctx.hosting, name);
+            if (ok && fresh) apps++;
             if (!ok) denied.push(`workspaces.${s.id}.hostedApps.${name}`);
             const keep = ok ? now[name] : was[name];
             if (keep !== undefined) out[name] = keep;

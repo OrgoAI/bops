@@ -200,7 +200,7 @@ function keepHosting(wsId: string, name: string, fn: (h: AppHosting | undefined)
   if (onRunner()) {
     const was = hostingOf(wsId, name);
     const now = fn(was);
-    if (!hostingChangeAllowed(wsId, was, now, hostingScope(getState() as unknown as Blob, process.env.BOPS_RUNNER_COMPUTER ?? "")))
+    if (!hostingChangeAllowed(wsId, was, now, hostingScope(getState() as unknown as Blob, process.env.BOPS_RUNNER_COMPUTER ?? ""), name))
       throw new HostedAppError(notHere(name, was), 409);
   }
   let left: string | undefined;
@@ -2089,7 +2089,7 @@ export async function removeLeftOver(wsId: string, name: string, project: unknow
       held(ours);
       if (r instanceof Error && !(r instanceof OrgoError && r.status === 404)) throw refused(r);
     } else {
-      await takeDown(wsId, { botId: now.botId, computerId: now.computerId, projectId: x.id, site: name }, ours);
+      await takeDown(wsId, name, { botId: now.botId, computerId: now.computerId, projectId: x.id, site: name }, ours);
       // (A link Bops made for it, which its project doesn't own, goes with it.)
       const u = urls.find((y) => y.label === x.name);
       if (u) await publicUrls.remove(now.computerId, u.id).catch(() => null);
@@ -2155,6 +2155,8 @@ async function projectOf(wsId: string, name: string, ours: () => boolean, site?:
   const p = await deploys.project(h.computerId, id).catch((e: unknown) => Promise.reject(refused(e)));
   held(ours);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
+  // (Its record's, with the list unread: only when it's of the app's own repo, as prodIn's are. A record may name another's: takeDown.)
+  if (!list && repo && !ofRepo(p.value, repo)) return null;
   return { h: { ...h, projectId: id }, p: p.value };
 }
 
@@ -3701,13 +3703,15 @@ export async function addSite(wsId: string, name: string, site: unknown): Promis
 }
 
 /**
- * One site taken off its computer: the domains there on its port first (a bought one's records Orgo wrote
- * go with it; the domain itself stays the workspace's; one in the user's Cloudflare, the records Bops set
+ * One site of app `name` taken off its computer: the domains there on its port first (a bought one's records Orgo
+ * wrote go with it; the domain itself stays the workspace's; one in the user's Cloudflare, the records Bops set
  * for it there too, cloudflareCleaned), then its deploy project (its runner, releases and public URL). One
- * Orgo has no more is gone already. Answers the domains Orgo wouldn't remove (one it turned off), and what
- * Bops couldn't take off in Cloudflare, which are said; any other refusal stops it, nothing kept changed.
+ * Orgo has no more is gone already, and so is one that isn't of the app's own repo (ofRepo, prodIn's rule): a record
+ * may name another's (a computer's runner keeps a site's deploy project: cloud/computer-scope.ts), which is never
+ * taken down for it. Answers the domains Orgo wouldn't remove (one it turned off), and what Bops couldn't take off in
+ * Cloudflare, which are said; any other refusal stops it, nothing kept changed.
  */
-async function takeDown(wsId: string, s: SiteHosting, ours: () => boolean): Promise<TakenDown> {
+async function takeDown(wsId: string, name: string, s: SiteHosting, ours: () => boolean): Promise<TakenDown> {
   const none: TakenDown = { left: [], cf: [] };
   if (!s.projectId || s.lost) return none;
   const p = await deploys.project(s.computerId, s.projectId).catch((e: unknown) => e as Error);
@@ -3715,6 +3719,8 @@ async function takeDown(wsId: string, s: SiteHosting, ours: () => boolean): Prom
   if (gone(p)) return none;
   if (p instanceof Error) throw refused(p);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
+  const repo = repoOrNull(wsId, name);
+  if (!repo || !ofRepo(p.value, repo)) return none;
   const port = typeof p.value.port === "number" ? p.value.port : null;
   const left: string[] = [];
   const cf: CfLeft[] = [];
@@ -3765,7 +3771,7 @@ async function previewDown(wsId: string, name: string, h: AppHosting, sites: str
     const s = siteIn(h, name, site);
     const f = previewIn(list, urls, repo, site, knownLabel(s, h, name, repo, list, urls));
     if (f?.project) {
-      const x = await takeDown(wsId, { botId: h.botId, computerId: h.computerId, projectId: f.project.id, site }, ours);
+      const x = await takeDown(wsId, name, { botId: h.botId, computerId: h.computerId, projectId: f.project.id, site }, ours);
       out.left.push(...x.left);
       out.cf.push(...x.cf);
     }
@@ -3817,7 +3823,7 @@ export async function removeSite(wsId: string, name: string, site: unknown): Pro
     }
     // Its Preview first (its project, then its link), then its Published (with its domains).
     const staged = await previewDown(wsId, name, now, [s.site], ours);
-    const prod = await takeDown(wsId, s, ours);
+    const prod = await takeDown(wsId, name, s, ours);
     const left = keptDomains({ left: [...staged.left, ...prod.left], cf: [...staged.cf, ...prod.cf] });
     keepHosting(wsId, name, (x) => {
       if (!x) return x;
@@ -3872,13 +3878,13 @@ async function takeAppDown(wsId: string, name: string, repo: boolean, ours: () =
   // (Not when Bops can't reach Orgo's hosting at all, signed out: then nothing of it can be read, and it never had a Preview from here.)
   if (!h.lost && (sites.length || behind.length || repo || !(await closedHere()))) add(await previewDown(wsId, name, h, sitesOf(h, name).map((x) => x.site), ours));
   for (const s of sites) {
-    add(await takeDown(wsId, s, ours));
+    add(await takeDown(wsId, name, s, ours));
     keepSite(wsId, name, s.site, () => ({}));
   }
   // (One whose computer is gone since went with it: Orgo has neither.)
   const gone404 = (e: unknown): TakenDown | Promise<never> => (e instanceof HostedAppError && e.status === 404 ? { left: [], cf: [] } : Promise.reject(e));
   for (const b of behind) {
-    add(await takeDown(wsId, { botId: h.botId, computerId: b.computerId, projectId: b.projectId, site: b.site }, ours).catch(gone404));
+    add(await takeDown(wsId, name, { botId: h.botId, computerId: b.computerId, projectId: b.projectId, site: b.site }, ours).catch(gone404));
     keepHosting(wsId, name, (x) => {
       if (!x) return x;
       const { behind: had, ...rest } = x;
@@ -4854,12 +4860,12 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   if (!mine) return;
   await flushState(5000).catch(() => false);
   if (!ours()) return;
-  // What changed, in the task's own one line: the commit's message (unsaid when Ingot can't say now).
+  // What changed, in the task's own one line: the commit's message (unsaid when Ingot can't say now), with no dashes, as Bops writes.
   const line = head
     ? await ingot.log(a.wsId, a.name, { limit: 1 }).then(
         (l) => {
           const c = l?.changesets[0];
-          return c && c.id === head ? firstLine(c.message) : "";
+          return c && c.id === head ? firstLine(c.message).replace(/^[\s—–]+|[\s—–]+$/g, "").replace(/\s*[—–]\s*/g, ", ") : "";
         },
         () => "",
       )

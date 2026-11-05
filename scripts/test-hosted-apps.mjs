@@ -4733,6 +4733,24 @@ await check("Removing a site: its domains on its port, then its deploy project, 
   assert.ok(!("sites" in (await H.listApps(WS)).apps.find((a) => a.name === "shop-suite")));
 });
 
+await check("A site's record naming another app's deploy project (a computer's runner keeps a site's project id): removing it takes neither that project nor the domains on its port down, and the site still goes from the app", async () => {
+  const other = recipeProject();
+  assert.ok(other, "the recipe box's Published project");
+  web.domains.push({ id: "cd_recipe_kept", computerId: "c_boppy", domain: "kept.recipes.example", status: "active", target_port: other.port, zone: null, token: "tok-kept" });
+  assert.equal((await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-odd" })).status, 200);
+  S.update((st) => {
+    const h = st.workspaces.find((w) => w.id === WS).hostedApps["shop-suite"];
+    h.sites = h.sites.map((x) => (x.name === "shop-suite-odd" ? { ...x, projectId: other.id } : x));
+  });
+  const n = web.calls.length;
+  const r = await post("shop-suite", { ws: WS, action: "removeSite", site: "shop-suite-odd" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(writesSince(n), [], "nothing of another app's taken down");
+  assert.ok(web.projects.some((p) => p.id === other.id) && web.domains.some((d) => d.id === "cd_recipe_kept"));
+  assert.ok(!(suite().sites ?? []).some((x) => x.name === "shop-suite-odd"), "the site gone from the app");
+  web.domains = web.domains.filter((d) => d.id !== "cd_recipe_kept");
+});
+
 await check("Removing an app (the window only): each site's domains and deploy project off its computer, its record gone, its code kept in Ingot unless asked; with repo, its Ingot repo deleted too; not while a task works on it; one Orgo won't take down stops it, kept to try again", async () => {
   const ADMIN = "shop-suite-admin";
   // (Only the recipe box's domains on Boppy's computer: the made-up ones on the next port would be this app's.)
