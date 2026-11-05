@@ -4886,6 +4886,9 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   update((st) => {
     const x = appOfTask(st, sessionId);
     if (!x?.deployAfter) return;
+    // Picked up again while Ingot was asked (more asked of it: chat.ts tell_task, whose askDeploy found the ask still
+    // on): the ask stays for that run, whose end deploys its newest commit, this one's too.
+    if (st.sessions.find((y) => y.id === sessionId)?.status !== "done") return;
     delete x.deployAfter;
     if (head !== undefined) x.from = head;
     mine = true;

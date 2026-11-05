@@ -2409,6 +2409,26 @@ await check("Asked again of that task with nothing new committed since it went l
   assert.equal(sessionOf("ses_dep").app.deployAfter, undefined);
 });
 
+await check("Picked up again while its end still reads Ingot (more asked of it, as tell_task queues it): that end deploys nothing and keeps the ask, so the next run's end deploys its newest commit", async () => {
+  H.askDeploy("ses_dep", RECIPE);
+  const c4 = commit("recipe-box", "A red title", { id: "boppy", name: "Boppy" });
+  const n = web.calls.length;
+  const m = messages().length;
+  const ending = H.deployAfterTask("ses_dep");
+  S.patchSession("ses_dep", { status: "queued" });
+  await ending;
+  assert.deepEqual(deploysSince(n), [], "not the run that ended");
+  assert.equal(messages().length, m, "nothing said");
+  assert.equal(sessionOf("ses_dep").app.deployAfter, true, "the ask stays");
+  const c5 = commit("recipe-box", "The old title back", { id: "boppy", name: "Boppy" });
+  S.patchSession("ses_dep", { status: "done" });
+  await H.deployAfterTask("ses_dep");
+  assert.equal(deploysSince(n).length, 1, "once");
+  assert.equal(stagingDeploys()[0].source_version, c5.id, "the newest, with the earlier commit in it");
+  assert.notEqual(c4.id, c5.id);
+  assert.equal(sessionOf("ses_dep").app.deployAfter, undefined);
+});
+
 await check("A task that failed (after committing, even): not deployed, said under it; the ask stays, so Try again that ends done deploys it then", async () => {
   appSession("ses_fail");
   await H.readyAppForTask("ses_fail", "c_boppy");
