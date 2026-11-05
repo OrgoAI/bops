@@ -43,6 +43,7 @@ import {
   type Problem,
 } from "./skill-bundle";
 import { onRunner } from "./persist";
+import { botIdsOn } from "@/cloud/computer-scope";
 import { bot, getState, ownerName, update, userDir } from "./store";
 import { outbox } from "./sync-outbox";
 
@@ -945,17 +946,25 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
 }
 
 /**
- * create_skill on a computer's runner (chat.ts): the skill saved straight in Orgo as a draft of the workspace's (POST
- * /api/projects/{project}/skills with status draft), with the computer's own Orgo sign in (orgo.ts apiKey there:
- * never the owner's key), so the owner's Bops brings it in on its next sync (syncSkills: one only on Orgo comes
- * here) and it stays a draft until they publish it in Skills, as one made on the Mac does. Checked here as createSkill
- * checks one (its name, its description, no secret, its label); Orgo checks the rest. Nothing is kept on the
- * computer or in its state: a computer may not write a workspace's skills (cloud/computer-scope.ts), and the owner's
- * Bops keeps their folders. Answers its name, or why it wasn't saved, in plain words.
+ * create_skill on a computer's runner (chat.ts): the skill saved straight in Orgo as a draft (POST
+ * /api/projects/{project}/skills), with the computer's own Orgo sign in (orgo.ts apiKey there: never the owner's key),
+ * so the owner's Bops brings it in on its next sync (syncSkills: one only on Orgo comes here) and it stays a draft
+ * until they or an Admin publish it in Skills, as one made on the Mac does. Always status draft, type skill, for the
+ * bot of this turn alone (`botId`), which must work on this computer, in this workspace's Orgo project, which must be
+ * the computer's own: orgo-web takes nothing else from a computer's own sign in, and its refusals are said in plain
+ * words. Checked here as createSkill checks one (its name, its description, no secret, its label); Orgo checks the
+ * rest. Nothing is kept on the computer or in its state: a computer may not write a workspace's skills
+ * (cloud/computer-scope.ts), and the owner's Bops keeps their folders. Answers its name, or why it wasn't saved.
  */
-export async function saveSkillFromComputer(wsId: string, input: { name: string; description: string; body: string; label: string | null; botIds: string[] }): Promise<{ ok: true; name: string } | { ok: false; why: string }> {
+export async function saveSkillFromComputer(wsId: string, input: { name: string; description: string; body: string; label: string | null; botId: string }): Promise<{ ok: true; name: string } | { ok: false; why: string }> {
   const pid = workspaceById(wsId)?.orgoProjectId;
   if (!pid) return { ok: false, why: "this workspace isn't on Orgo yet, so a skill can be saved only where its folders are kept" };
+  const who = bot(input.botId);
+  if (!who || workspaceOf(who) !== wsId) return { ok: false, why: "that bot isn't in this workspace" };
+  // (On a computer's runner: only for a bot that works on this computer, as orgo-web holds it.)
+  const here = process.env.BOPS_RUNNER_COMPUTER;
+  if (onRunner() && (!here || !botIdsOn(getState() as unknown as Record<string, unknown>, here).has(input.botId)))
+    return { ok: false, why: `${who.name} doesn't work on this computer, so it can't save a skill from here` };
   const name = cut(oneLine(input.name), 120);
   const description = oneLine(input.description);
   if (!/[\p{L}\p{N}]/u.test(name)) return { ok: false, why: "a skill needs a name" };
@@ -969,21 +978,30 @@ export async function saveSkillFromComputer(wsId: string, input: { name: string;
     if (e instanceof SkillError) return { ok: false, why: e.message.replace(/[.\s]+$/, "") };
     throw e;
   }
-  const team = teamIds(wsId);
   const md = renderSkillMd(frontmatterOf(slugify(name), description, extra), input.body.replace(/\r\n?/g, "\n"));
   const { apiKey, callOrgo } = await import("./orgo");
   const key = await apiKey().catch(() => "");
   if (!key) return { ok: false, why: "this computer isn't signed in to Orgo right now" };
   const r = await callOrgo<{ skill?: { name?: string }; error?: string; code?: string }>(key, `/api/projects/${encodeURIComponent(pid)}/skills`, {
     method: "POST",
-    body: { name, description, type: "skill", body: md, files: [], bot_ids: input.botIds.filter((id) => team.has(id)), status: "draft" },
+    body: { name, description, type: "skill", body: md, files: [], bot_ids: [input.botId], status: "draft" },
     timeoutMs: 20_000,
   });
   if (r?.status === 201) return { ok: true, name: r.json.skill?.name ?? name };
   if (!r) return { ok: false, why: "Orgo didn't answer" };
-  if (r.status === 403 && (r.json.code === "computer_key" || r.json.code === "computer_scope")) return { ok: false, why: "Orgo doesn't take this computer's own sign in for saving skills yet" };
+  const plain = r.status === 403 && typeof r.json.code === "string" ? skillRefusedWords(r.json.code, who.name) : undefined;
+  if (plain) return { ok: false, why: plain };
   const said = typeof r.json.error === "string" && r.json.error ? r.json.error.replace(/[.\s]+$/, "") : `Orgo answered ${r.status}`;
   return { ok: false, why: `Orgo says: ${said}` };
+}
+
+/** What orgo-web's refusal of a skill saved with a computer's own sign in means (by its code), in plain words; undefined for any other. */
+function skillRefusedWords(code: string, botName: string): string | undefined {
+  if (code === "computer_key") return "Orgo doesn't take this computer's own sign in for saving skills";
+  if (code === "workspace_scope_mismatch") return "this computer belongs to another of your Orgo workspaces, so Orgo saves skills from it only there";
+  if (code === "computer_scope") return `Orgo doesn't have ${botName} down as working on this computer yet, so it won't save a skill for it from here`;
+  if (code === "computer_scope_mismatch") return "Orgo lets this computer work only on itself";
+  return undefined;
 }
 
 /** A key in the name, the description or the frontmatter would reach every prompt and Orgo: refused like one in the body. */

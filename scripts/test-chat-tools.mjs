@@ -2713,8 +2713,21 @@ await check("the owner's turn on the bot's computer: its apps on the web and its
     // Orgo not taking the computer's own sign in for it yet: said plainly, nothing saved, never "ask on the Mac".
     answer = { status: 403, json: { error: "A computer's own key can't create a workspace skill.", code: "computer_key" } };
     const no = await onBox("save how you do the monthly recap as a skill", [toolCall("create_skill", { name: "Monthly recap", description: "When Alex asks for the monthly recap", steps: "1. Read the month.", pitfalls: null, label: null })]);
-    assert.match(no.out(), /^Not saved: Orgo doesn't take this computer's own sign in for saving skills yet\. Nothing was saved\. /);
+    assert.match(no.out(), /^Not saved: Orgo doesn't take this computer's own sign in for saving skills\. Nothing was saved\. /);
     assert.doesNotMatch(no.out(), /Mac|in this chat/);
+    // Its other refusals of a computer's own sign in, each in plain words (never its code), and what was sent each time:
+    // a draft, a skill, for this turn's bot alone, to the workspace's own project.
+    for (const [code, said] of [
+      ["workspace_scope_mismatch", "this computer belongs to another of your Orgo workspaces, so Orgo saves skills from it only there"],
+      ["computer_scope", "Orgo doesn't have Boppy down as working on this computer yet, so it won't save a skill for it from here"],
+    ]) {
+      answer = { status: 403, json: { error: "Refused.", code } };
+      const r = await onBox("save how you do the yearly recap as a skill", [toolCall("create_skill", { name: "Yearly recap", description: "When Alex asks for the yearly recap", steps: "1. Read the year.", pitfalls: null, label: null })]);
+      assert.ok(r.out().startsWith(`Not saved: ${said}. Nothing was saved. `), `${code}: ${r.out()}`);
+      assert.doesNotMatch(r.out(), /_|scope|Refused/);
+      const sent = posts.at(-1);
+      assert.deepEqual([sent.url, sent.body.status, sent.body.type, sent.body.bot_ids], [`/api/projects/${pid}/skills`, "draft", "skill", ["boppy"]]);
+    }
     // A change to a published skill: a proposal under the answer, nothing written here.
     const pub = W.refsOf("ws_main", "skill").find((r) => r.status === "published" && (!r.botIds.length || r.botIds.includes("boppy")));
     assert.ok(pub, "a published skill to change");

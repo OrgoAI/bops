@@ -67,6 +67,7 @@ import {
   type OrgoDomainOffer,
   type OrgoRecordInput,
   type OrgoZone,
+  type DeploySettings,
 } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import {
@@ -90,7 +91,7 @@ import {
 import { onRunner, selfHosted } from "./persist";
 import { hostingChangeAllowed, hostingScope, type Blob } from "@/cloud/computer-scope";
 import { isLabelOf, labelGiven, newLabel } from "./app-labels";
-import { linkMirror, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
+import { GITHUB_KEY, linkMirror, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
 import { appFolder, authorOf, byBots, changesTo, dropToken, ensureIngotCli, folderChanges, hasToken, ingot, INGOT_BIN, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotChange, type IngotChangeset, type IngotRepo } from "./ingot";
 import { addMessage, bot, flushState, getState, ownerName, sameState, session, update } from "./store";
 import { tailnetUp } from "./tailnet";
@@ -247,13 +248,23 @@ function onThisComputer(wsId: string, name: string) {
 }
 
 /**
- * Orgo turned a computer's own sign in away for a call about apps (403 computer_key, or computer_scope): orgo-web
- * takes it for a computer's own screen, commands and public URLs, and not yet for its deploys or domains. Only ever
- * on a computer's runner, which calls Orgo with its computer's own sign in (orgo.ts apiKey), never the owner's key.
+ * Orgo turned a computer's own sign in away for a call about apps (403, by orgo-web's code), in plain words. orgo-web
+ * takes it for its own computer's deploys (the list, one project, a new one, a deploy) and domains (read), only of
+ * Ingot repos of the workspaces it works for, and never for a project's settings, its variables, logs, a rollback or
+ * a removal. Only ever on a computer's runner, which calls Orgo with its computer's own sign in (orgo.ts apiKey),
+ * never the owner's key.
  */
-const COMPUTER_KEY = new Set(["computer_key", "computer_scope"]);
-export const OFF_FOR_COMPUTER = "Orgo doesn't take this computer's own sign in for deploys yet";
-const computerRefused = (e: unknown) => onRunner() && e instanceof OrgoError && e.status === 403 && !!e.code && COMPUTER_KEY.has(e.code);
+const FOR_COMPUTER: Record<string, string> = {
+  computer_key: "Orgo doesn't take this computer's own sign in for that",
+  computer_scope: "Orgo lets this computer deploy only apps of the workspaces it works for, from Ingot",
+  INGOT_WORKSPACE_MISMATCH: "This app's code is in a workspace this computer doesn't work for, so Orgo won't deploy it here",
+  computer_scope_mismatch: "Orgo lets this computer work only on itself, and that's another computer",
+  workspace_scope_mismatch: "Orgo lets this computer work only in its own workspace",
+};
+export const OFF_FOR_COMPUTER = FOR_COMPUTER.computer_key;
+/** orgo-web's code for a refusal of a computer's own sign in, in plain words (undefined: not one of those). */
+export const computerRefusalWords = (code: unknown): string | undefined => (typeof code === "string" && Object.hasOwn(FOR_COMPUTER, code) ? FOR_COMPUTER[code] : undefined);
+const computerRefused = (e: unknown): e is OrgoError => onRunner() && e instanceof OrgoError && e.status === 403 && computerRefusalWords(e.code) !== undefined;
 /** A read that answers null when Orgo can't say, but not when it turned this computer's own sign in away: that's said. */
 const orNull = <T,>(p: Promise<T>): Promise<T | null> => p.catch((e: unknown) => (e instanceof HostedAppError && e.extra?.code === "COMPUTER_KEY" ? Promise.reject(e) : null));
 
@@ -806,7 +817,7 @@ export async function appCommits(wsId: string, name: string, before: string | nu
 /** Orgo turned a deploy call down: its own words when it said why (a paid plan needed, hosting blocked), else ours. */
 const refused = (e: unknown) =>
   computerRefused(e)
-    ? new HostedAppError(`${OFF_FOR_COMPUTER}.`, 403, { code: "COMPUTER_KEY" })
+    ? new HostedAppError(`${computerRefusalWords(e.code)}.`, 403, { code: "COMPUTER_KEY" })
     : e instanceof OrgoError
       ? new HostedAppError(e.said ? `Orgo says: ${e.said}` : "Orgo didn't take that. Try again in a minute.", e.status >= 400 && e.status < 500 ? e.status : 502)
       : e;
@@ -917,7 +928,14 @@ async function urlsNow(computerId: string, ours: () => boolean): Promise<{ urls:
  * repo's oldest project when its record names none) always finds Published's. `env`: variables to make it
  * with, or to set on the one found.
  */
-async function ensureProd(wsId: string, name: string, s: SiteHosting, ours: () => boolean, env?: Record<string, string>): Promise<SiteHosting & { projectId: string }> {
+async function ensureProd(
+  wsId: string,
+  name: string,
+  s: SiteHosting,
+  ours: () => boolean,
+  env?: Record<string, string>,
+  opts: { settings?: DeploySettings; made?: (p: OrgoDeployProject) => void } = {},
+): Promise<SiteHosting & { projectId: string }> {
   const repo = ingotRepo(wsId, name);
   const projects = await projectsNow(s.computerId, ours);
   const all = hostingOf(wsId, name) ?? s;
@@ -942,18 +960,19 @@ async function ensureProd(wsId: string, name: string, s: SiteHosting, ours: () =
     let label = newLabel("prod", repo, s.site);
     while (names.has(label)) label = newLabel("prod", repo, s.site);
     const port = freePort(projects, urls, ports);
-    const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(env && Object.keys(env).length ? { env } : {}) }).catch((e: unknown) => e as Error);
+    const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(env && Object.keys(env).length ? { env } : {}), ...(opts.settings ? { settings: opts.settings } : {}) }).catch((e: unknown) => e as Error);
     held(ours);
     if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(label);
     else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.push(port);
     else if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT"))
       throw new HostedAppError(`${bot(s.botId)?.name ?? "That bot"}'s computer already runs as many apps as one computer can. Remove a site or a left over first.`, 409);
-    else if (made instanceof OrgoError && made.code === "INVALID_ENV") throw settingsRefused(made);
+    else if (made instanceof OrgoError && (made.code === "INVALID_ENV" || made.code === "INVALID_COMMAND" || made.code === "INVALID_HEALTH_PATH")) throw settingsRefused(made);
     else if (made instanceof Error) throw refused(made);
     else if (!made.enabled) throw new HostedAppError(made.why, 403);
     else {
       // The window reads the app again: it has a deploy project now.
       keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
+      opts.made?.(made.value);
       return keep(made.value.id);
     }
   }
@@ -1288,8 +1307,24 @@ const seedsFor = (url: string, given?: Record<string, string>): Record<string, s
   ...(given ?? {}),
 });
 
-/** The sign in variables a project has none of yet (AUTH_URL, NEXTAUTH_URL, BETTER_AUTH_URL), set to `url`; never one the user set. */
+/** The settings a project was given by hand (its commands, a health path that isn't Orgo's /), for another made to build the same way; none when it has none. */
+function settingsFrom(p: OrgoDeployProject | undefined): DeploySettings | undefined {
+  if (!p) return undefined;
+  const out: DeploySettings = {};
+  if (p.install_cmd) out.install_cmd = p.install_cmd;
+  if (p.build_cmd) out.build_cmd = p.build_cmd;
+  if (p.start_cmd) out.start_cmd = p.start_cmd;
+  if (typeof p.health_path === "string" && p.health_path !== "/") out.health_path = p.health_path;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * The sign in variables a project has none of yet (AUTH_URL, NEXTAUTH_URL, BETTER_AUTH_URL), set to `url`; never one
+ * the user set. Not from a computer's runner: a project's variables are the owner's (orgo-web takes no change of them
+ * from a computer's own sign in), and a Preview it makes has them from its create (seedsFor).
+ */
 async function seedAuth(computerId: string, p: OrgoDeployProject, url: string, ours: () => boolean) {
+  if (onRunner()) return;
   const has = new Set(p.env_keys ?? []);
   if (has.has("AUTH_URL") || has.has("NEXTAUTH_URL") || has.has("BETTER_AUTH_URL")) return;
   const r = await deploys.env(computerId, p.id, seedsFor(url)).catch(() => null);
@@ -1356,30 +1391,21 @@ async function ensurePreview(
     await passwordNow(wsId, name, prod.site, c, r.url, r.project.current?.id ?? null, ours);
     return r;
   };
-  /** Its project made on `port` with `label`, seeded, built as Published builds (a legacy Published's commands copied once). */
+  /**
+   * Its project made on `port` with `label`, seeded (its sign in at its own link: seedsFor), and built as Published
+   * builds: Published's commands set by hand (a legacy one's, or ones saved before its first deploy) go in the same
+   * create, never in a change after it, which a computer's own sign in can't make.
+   */
   const makeProject = async (label: string, url: OrgoPublicUrl): Promise<OrgoDeployProject | "name" | "port"> => {
     const env = seedsFor(url.url, opts.env);
-    const made = await deploys.create(c, { repo, name: label, port: url.port, env }).catch((e: unknown) => e as Error);
+    const made = await deploys.create(c, { repo, name: label, port: url.port, env, settings: settingsFrom(fromProd) }).catch((e: unknown) => e as Error);
     held(ours);
     if (made instanceof OrgoError && made.code === "NAME_TAKEN") return "name";
     if (made instanceof OrgoError && made.code === "PORT_TAKEN") return "port";
     if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT")) throw new HostedAppError(PREVIEW_WORDS.noRoom(bot(prod.botId)?.name ?? "That bot", prod.site), 409, { code: made.code });
-    if (made instanceof OrgoError && made.code === "INVALID_ENV") throw settingsRefused(made);
+    if (made instanceof OrgoError && (made.code === "INVALID_ENV" || made.code === "INVALID_COMMAND" || made.code === "INVALID_HEALTH_PATH")) throw settingsRefused(made);
     if (made instanceof Error) throw refused(made);
     if (!made.enabled) throw new HostedAppError(made.why, 403);
-    // Published's commands set by hand (a legacy one's, or ones saved before its first deploy): its Preview builds the same way to start with.
-    if (fromProd) {
-      const patch: Parameters<typeof deploys.change>[2] = {};
-      if (fromProd.install_cmd) patch.install_cmd = fromProd.install_cmd;
-      if (fromProd.build_cmd) patch.build_cmd = fromProd.build_cmd;
-      if (fromProd.start_cmd) patch.start_cmd = fromProd.start_cmd;
-      if (typeof fromProd.health_path === "string" && fromProd.health_path !== "/") patch.health_path = fromProd.health_path;
-      if (Object.keys(patch).length) {
-        const r = await deploys.change(c, made.value.id, patch).catch(() => null);
-        held(ours);
-        if (r?.enabled) return r.value;
-      }
-    }
     return made.value;
   };
   /** Its project made on its URL's port, the URL moved to a free port when an app on the computer holds that one. */
@@ -1434,7 +1460,8 @@ async function ensurePreview(
   // None on this computer: its label chosen, then its link and its project made.
   let label: string | undefined = opts.given;
   let fromOld = false;
-  if (!label && !said) {
+  // (Never from a computer's runner: it never removes or moves a link of another computer.)
+  if (!label && !said && !onRunner()) {
     const moved = await previewElsewhere(wsId, name, all, prod.site, repo, c, ours);
     if (moved) {
       label = moved.label;
@@ -1486,6 +1513,8 @@ async function ensurePreview(
  * computer can't take it, it's put back there. Undefined: none, or it couldn't be moved (a new one is made).
  */
 async function previewElsewhere(wsId: string, name: string, h: AppHosting, site: string, repo: string, here: string, ours: () => boolean): Promise<{ label: string } | undefined> {
+  // (A computer's runner never touches another computer's links: a new label is made instead.)
+  if (onRunner()) return undefined;
   const others = [
     ...new Set([
       ...(h.behind ?? []).map((b) => b.computerId),
@@ -2323,8 +2352,12 @@ async function firstSettings(wsId: string, name: string, site: unknown, patch: P
   const why = await closedHere();
   held(ours);
   if (why) throw new HostedAppError(why, 403);
-  const made = await ensureProd(wsId, name, h, ours);
-  const r = await deploys.change(made.computerId, made.projectId, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
+  // Its commands and health path go in the create when the project is made now; only what a create can't take (its port) after it.
+  const { port, ...settings } = patch;
+  const now: { fresh?: OrgoDeployProject } = {};
+  const made = await ensureProd(wsId, name, h, ours, undefined, { ...(Object.keys(settings).length ? { settings } : {}), made: (p) => void (now.fresh = p) });
+  if (now.fresh && port === undefined) return settingsOf(now.fresh, null);
+  const r = await deploys.change(made.computerId, made.projectId, now.fresh ? { port } : patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
   return settingsOf(r.value, null);
@@ -5018,6 +5051,10 @@ export async function deployForBot(botId: string, app: string, at: string | null
     onThisComputer(wsId, name);
     const id = at ? await wholeId(wsId, name, at, ours) : undefined;
     if (where !== "prod") return await previewForBot(wsId, name, id, botId, ours, site);
+    // Publish to GitHub from this bot's computer: with the workspace's GitHub key, which Orgo calls for it only when
+    // the owner gave this bot that key (Keys). Without it, said before anything is read or sent.
+    if (onRunner() && hostingOf(wsId, name)?.github && !b.keys?.includes(GITHUB_KEY))
+      return unchanged("Published", name, `${b.name} has no GitHub key for this app, so it can't publish it to GitHub from here. Give it the GitHub key in Keys, then say publish again`);
     // Publish: what the Preview serves, never a commit it doesn't.
     if (id) {
       const h = hostingOf(wsId, name);

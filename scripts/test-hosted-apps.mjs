@@ -749,6 +749,9 @@ async function orgoWeb(req) {
       if (here.some((x) => x.port === body.port)) return json({ error: `Another app on this computer already uses port ${body.port}.`, code: "PORT_TAKEN" }, 409);
       for (const k of Object.keys(body.env ?? {})) if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(k)) return json({ error: `${k} isn’t a valid name.`, code: "INVALID_ENV" }, 400);
       const p = { id: randomUUID(), computerId, name: body.name, port: body.port, source: "ingot", ingot_repo: ingotRepo, ingot_at: body.at ?? null, url: null, deployments: [], created: body };
+      // How it builds and is checked, as given in the create (orgo-web's checkProjectInput: "" is Orgo's own).
+      for (const k of ["install_cmd", "build_cmd", "start_cmd"]) if (body[k] !== undefined) p[k] = body[k] || null;
+      if (body.health_path !== undefined) p.health_path = body.health_path || "/";
       web.projects.push(p);
       // Its variables saved with it, as orgo-web keeps them (encrypted there).
       if (body.env) web.envs.set(p.id, new Map(Object.entries(body.env)));
@@ -2085,6 +2088,33 @@ await check("deploy_app where prod on a turn from someone's own Bops: an Admin's
     S.update((s) => void (s.workspaces.find((w) => w.id === WS).memberAccess = was));
     web.liveAtOnce = false;
   }
+});
+
+await check("On a bot's computer: Orgo's refusals of its computer's own sign in are said in plain words, never its codes; Publish to GitHub without the bot's GitHub key is said before anything is read or sent, and nothing went live", async () => {
+  for (const code of ["computer_key", "computer_scope", "INGOT_WORKSPACE_MISMATCH", "computer_scope_mismatch", "workspace_scope_mismatch"]) {
+    const words = H.computerRefusalWords(code);
+    assert.ok(words && !/_|scope|MISMATCH|key\b/.test(words), `${code}: ${words}`);
+    hear(words);
+  }
+  assert.equal(H.computerRefusalWords("NAME_TAKEN"), undefined, "only those");
+  const was = structuredClone(hostedApps()["recipe-box"]);
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].github = { repo: "acme/site", branch: "main", path: "", last: { sha: "a1", ingot: "c1", when: 1 } }));
+  const env = { runner: process.env.BOPS_RUNNER, computer: process.env.BOPS_RUNNER_COMPUTER };
+  const n = web.calls.length;
+  let out;
+  try {
+    process.env.BOPS_RUNNER = "1";
+    process.env.BOPS_RUNNER_COMPUTER = was.computerId;
+    out = await H.deployForBot("boppy", "recipe-box", null, undefined, "prod");
+  } finally {
+    for (const [k, v] of [["BOPS_RUNNER", env.runner], ["BOPS_RUNNER_COMPUTER", env.computer]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"] = was));
+  }
+  assert.equal(hear(out), "Published of recipe-box not changed: Boppy has no GitHub key for this app, so it can't publish it to GitHub from here. Give it the GitHub key in Keys, then say publish again. Nothing went live.");
+  assert.equal(web.calls.length, n, "nothing asked of Orgo");
 });
 
 await check("deploy_app with the short id Ingot prints: the whole one looked up on main in Ingot and deployed, the computer asleep or not; the start of two, an unknown one, and one while Ingot is down are refused in words", async () => {
@@ -4878,7 +4908,7 @@ function gate(method, re) {
   return g;
 }
 
-await check("Settings before a site's first deploy: saved, its deploy project is made and changed (nothing deployed), so its first build starts it its own way, and its first deploy uses that project; refused for one whose computer is gone", async () => {
+await check("Settings before a site's first deploy: saved, its deploy project is made with them in one create (nothing deployed, nothing changed after), so its first build starts it its own way, and its first deploy uses that project, its Preview made with the same commands in its create; refused for one whose computer is gone", async () => {
   suiteAgain();
   assert.equal((await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" })).status, 200);
   const queuedAt = suite().queuedAt;
@@ -4886,26 +4916,26 @@ await check("Settings before a site's first deploy: saved, its deploy project is
   const r = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/shop-suite/settings", SUITE, { ws: WS, site: "shop-suite-admin", start: "npm run admin", health: "/up" });
   assert.equal(r.status, 200);
   const p = siteProject("shop-suite-admin");
-  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [
-    ["POST", "/api/computers/c_boppy/deploy-projects"],
-    ["PATCH", `/api/computers/c_boppy/deploy-projects/${p.id}`],
-  ], "made, then changed");
-  assert.deepEqual(writesSince(n)[1].body, { start_cmd: "npm run admin", health_path: "/up" });
+  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [["POST", "/api/computers/c_boppy/deploy-projects"]], "made with them, nothing changed after");
+  assert.deepEqual([writesSince(n)[0].body.start_cmd, writesSince(n)[0].body.health_path, writesSince(n)[0].body.public_url], ["npm run admin", "/up", false]);
   assert.deepEqual([p.deployments.length, p.created.deploy], [0, false], "nothing deployed");
   assert.deepEqual([r.body.settings.start, r.body.settings.health, r.body.settings.port], ["npm run admin", "/up", p.port]);
   assert.deepEqual(suite().sites, [{ name: "shop-suite-admin", projectId: p.id }], "kept");
   assert.ok((suite().queuedAt ?? 0) > (queuedAt ?? 0), "the window reads the app again");
   n = web.calls.length;
   assert.equal((await post("shop-suite", { ws: WS, action: "deploy", site: "shop-suite-admin" })).status, 200);
-  // Its first deploy goes to its Preview, made then with those commands copied once, and built there.
+  // Its first deploy goes to its Preview, made then with those commands in its create (a computer's own sign in
+  // can't change a project after: the same on the Mac), its sign in seeded at its own link, and built there.
   const pv = sitePreview("shop-suite-admin");
   assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [
     ["POST", "/api/computers/c_boppy/public-urls"],
     ["POST", "/api/computers/c_boppy/deploy-projects"],
-    ["PATCH", `/api/computers/c_boppy/deploy-projects/${pv.id}`],
     ["POST", `/api/computers/c_boppy/deploy-projects/${pv.id}/deployments`],
   ]);
   assert.deepEqual([pv.start_cmd, pv.health_path], ["npm run admin", "/up"], "built as Published would be");
+  const link = web.urls.find((u) => u.label === pv.name);
+  assert.ok(link, "its link");
+  assert.deepEqual([pv.created.start_cmd, pv.created.health_path, pv.created.env?.AUTH_URL, pv.created.env?.AUTH_TRUST_HOST], ["npm run admin", "/up", `https://${link.label}.orgo.dev`, "true"], "in the create, with its sign in seeds");
   assert.equal(p.deployments.length, 0, "Published untouched");
   S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["shop-suite"] = { botId: "boppy", computerId: "c_gone", lost: 1, sites: [{ name: "shop-suite-admin" }] }));
   n = web.calls.length;

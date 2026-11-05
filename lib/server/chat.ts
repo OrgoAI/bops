@@ -2696,7 +2696,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           return `Not changed yet: "${had.name}" is changed only where its files are kept, so the change is a proposal under this answer, which becomes its next version once ${owner} accepts it.`;
         }
         if (onBox) {
-          const saved = await saveSkillFromComputer(workspaceOf(b), { name: title, description: undash(String(p.description ?? "")), body, label, botIds: [botId] });
+          const saved = await saveSkillFromComputer(workspaceOf(b), { name: title, description: undash(String(p.description ?? "")), body, label, botId });
           if (!saved.ok) return `Not saved: ${saved.why}. Nothing was saved. ${offer}`;
           notes.push(`Saved the skill "${saved.name}" as a draft`);
           return `Saved "${saved.name}" as a draft in your workspace's skills. ${owner} can publish it in Skills, in Knowledge; then you'll use it.`;
