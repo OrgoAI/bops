@@ -6,6 +6,7 @@ import { ACCESS_LABELS, ACCESS_LEVELS, accessSummary, appsSummary, computerSumma
 import { appsOwnShown } from "@/lib/apps-access";
 import {
   ACCESS_TIPS,
+  ACCESS_WORDS,
   ADMIN_SHEET_WORDS,
   ADMIN_WORDS,
   APPS_TIPS,
@@ -406,12 +407,36 @@ function useSummary() {
  * level of the rest isn't named, as cleanAccess keeps it, so the same access always looks the same. Your Apps and Use its computer stay.
  */
 export function withLevel(access: MemberAccess, botId: string | null, level: AccessLevel): MemberAccess {
-  const apps = { ...(access.apps ? { apps: access.apps } : {}), ...(access.computer ? { computer: access.computer } : {}) };
+  const apps = keptBeside(access);
   if (botId === null) return { others: level, bots: {}, ...apps };
   const bots: Record<string, AccessLevel> = Object.fromEntries(Object.entries(access.bots).filter(([id]) => id !== botId));
   if (level !== access.others) bots[botId] = level;
   return { others: access.others, bots, ...apps };
 }
+
+/** What a bot change keeps as it was: Your Apps, Use its computer and the switches (a bot picked never turns a switch off). */
+const keptBeside = (access: MemberAccess) => ({
+  ...(access.apps ? { apps: access.apps } : {}),
+  ...(access.computer ? { computer: access.computer } : {}),
+  ...(access.can ? { can: access.can } : {}),
+});
+
+/**
+ * `access` with bots made later at `level`, each bot of `botIds` (and each named) kept at the level it has now: named
+ * only when that isn't the new level, as cleanAccess keeps it.
+ */
+export function withOthers(access: MemberAccess, botIds: readonly string[], level: AccessLevel): MemberAccess {
+  const bots: Record<string, AccessLevel> = {};
+  for (const id of new Set([...botIds, ...Object.keys(access.bots)])) {
+    const now = levelOf(access, id);
+    if (now !== level) bots[id] = now;
+  }
+  return { others: level, bots, ...keptBeside(access) };
+}
+
+/** The level every bot of `botIds` and bots made later share, or undefined when they differ (All bots then shows none picked). */
+export const allLevel = (access: MemberAccess, botIds: readonly string[]): AccessLevel | undefined =>
+  botIds.every((id) => levelOf(access, id) === access.others) ? access.others : undefined;
 
 /** `access` with Your Apps at `level`, the bots as they are. */
 export const withApps = (access: MemberAccess, level: AccessLevel): MemberAccess => ({ ...access, apps: level });
@@ -419,90 +444,100 @@ export const withApps = (access: MemberAccess, level: AccessLevel): MemberAccess
 /** `access` with Use its computer on or off ("none" is sent, so the server turns off what it kept), the rest as it is. */
 export const withComputer = (access: MemberAccess, on: boolean): MemberAccess => ({ ...access, computer: on ? "use" : "none" });
 
+/** Keys as the panel shows it beside Use its computer: on or off, how to change it, and the line under it. */
+export type KeysPick = { on: boolean; onChange?: (on: boolean) => void; disabled?: boolean; locked?: boolean; note?: string };
+
 /**
- * Which bots someone sees, like an API key's permissions: a row for every bot at once, bots made later
- * included (`others`), then one row per bot, each None, Read or Write. Picking on the first row sets every
- * bot to it too, and single bots can differ after: then the first row's level is only the new bots', shown
- * lighter, named so for a screen reader, and picking it again sets every bot to it. One line a row, names
- * cut short. Under the rows, what each level means (ACCESS_TIPS). Use its computer comes with Write: taking away
- * someone's last Write turns it off too (fitComputer), and an invite (`invite`) never has it until they've joined.
+ * Everything someone may do, in three groups, each with its name over it:
+ * - Bots: All bots (every bot here and bots made later, picked only while they're all the same), one row per bot, then
+ *   Bots you make later (only that: the bots above keep theirs). Each None, Read or Write; under them what each means.
+ * - Apps and computers: Your Apps (None, Read or Write), Use its computer and Keys (Off or On), each line under them.
+ * - What they can change (PowerRows): each switch Off or On.
+ * One line a row, names cut short. Use its computer comes with Write: taking away someone's last Write turns it off too
+ * (fitComputer). An invite (`invite`) shows Use its computer and Keys off, to turn on once they've joined: orgo-web keeps
+ * both per member, and there's no member yet. `keys`: Keys' row (a person's, or an invite's off); none, no row.
  */
-export function BotAccess({ bots, value, onChange, disabled, invite }: { bots: Bot[]; value: MemberAccess; onChange: (next: MemberAccess) => void; disabled?: boolean; invite?: boolean }) {
-  const mixed = bots.some((b) => levelOf(value, b.id) !== value.others);
+export function BotAccess({ bots, value, onChange, disabled, invite, keys }: { bots: Bot[]; value: MemberAccess; onChange: (next: MemberAccess) => void; disabled?: boolean; invite?: boolean; keys?: KeysPick }) {
   const scope = useContext(AppsScope);
   const ids = bots.map((b) => b.id);
+  const all = allLevel(value, ids);
   // Your Apps comes with a bot: none seen, nothing of the workspace opens for them.
   const hasBot = value.others !== "none" || bots.some((b) => levelOf(value, b.id) !== "none");
   // Use its computer comes with Write: someone who can't chat never sets a bot going there.
   const writes = writesAny(value, ids);
   const computerOn = !invite && usesComputer(value);
   const pickLevel = (botId: string | null, level: AccessLevel) => onChange(fitComputer(withLevel(value, botId, level), ids));
+  const pickLater = (level: AccessLevel) => onChange(fitComputer(withOthers(value, ids, level), ids));
+  const appsNote = scope.shown && (!hasBot || !CLOUD_SHARES_APPS || !scope.roles) ? (!hasBot ? APPS_WORDS.needsBot : APPS_WORDS.notYet) : null;
+  const keysOff: KeysPick | undefined = invite ? { on: false, disabled: true } : keys;
   return (
-    <div data-bot-access className="flex flex-col gap-2">
-      <div className="flex max-h-[250px] flex-col overflow-y-auto rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
-        <AccessRow
-          icon={<EveryBot />}
-          name="Every bot, new ones too"
-          label={mixed ? "bots you make later" : undefined}
-          tip={mixed ? `Bots you make later: ${ACCESS_LABELS[value.others]}. Pick here to set every bot below too.` : "Sets every bot below, and bots you make later."}
-          level={value.others}
-          loose={mixed}
-          onPick={(level) => pickLevel(null, level)}
-          disabled={disabled}
-        />
-        {bots.map((b) => (
-          <AccessRow
-            key={b.id}
-            icon={<Mascot botId={b.id} color={b.color} size={16} />}
-            name={b.name}
-            level={levelOf(value, b.id)}
-            onPick={(level) => pickLevel(b.id, level)}
-            disabled={disabled}
-          />
-        ))}
-      </div>
-      {/* Your Apps: a scope of its own, behind the list's hairline (lib/member-access.ts MemberAccess.apps), only with a bot (workspaces.ts showsAny). */}
-      {scope.shown && (
-        <div data-apps-access className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
-          <AccessRow
-            icon={<AppsIcon size={16} />}
-            name={APPS_WORDS.row}
-            level={!hasBot ? "none" : isAccessLevel(value.apps) ? value.apps : undefined}
-            tips={APPS_TIPS}
-            onPick={(level) => onChange(withApps(value, level))}
-            disabled={disabled || !hasBot}
-          />
+    <div data-bot-access className="flex flex-col gap-4">
+      <AccessGroup title={ACCESS_WORDS.bots}>
+        <div className="flex max-h-[290px] flex-col overflow-y-auto rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+          <AccessRow icon={<EveryBot />} name={ACCESS_WORDS.all} tip={all ? ACCESS_WORDS.allTip : ACCESS_WORDS.allMixed} level={all} onPick={(level) => pickLevel(null, level)} disabled={disabled} />
+          {bots.map((b) => (
+            <AccessRow
+              key={b.id}
+              icon={<Mascot botId={b.id} color={b.color} size={16} />}
+              name={b.name}
+              level={levelOf(value, b.id)}
+              onPick={(level) => pickLevel(b.id, level)}
+              disabled={disabled}
+            />
+          ))}
+          <AccessRow icon={<LaterBots />} name={ACCESS_WORDS.later} tip={ACCESS_WORDS.laterTip} level={value.others} onPick={pickLater} disabled={disabled} />
         </div>
-      )}
-      {scope.shown && (!hasBot || !CLOUD_SHARES_APPS || !scope.roles) && (
-        <span data-apps-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
-          {!hasBot ? APPS_WORDS.needsBot : APPS_WORDS.notYet}
-        </span>
-      )}
-      {/* Use its computer: a scope of its own, as Your Apps is (lib/member-access.ts MemberAccess.computer), only with Write on a bot, never on an invite. */}
-      <div data-computer-access className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
-        {/* On without Write (a bot deleted under them, or orgo-web's list says so): shown as on, and it can only be turned off. */}
-        <ComputerRow on={computerOn} onChange={(on) => onChange(withComputer(value, on))} disabled={disabled || invite} onLocked={!writes} />
-      </div>
-      <span data-computer-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
-        {invite ? COMPUTER_WORDS.afterJoin : writes ? COMPUTER_WORDS.legend : computerOn ? COMPUTER_WORDS.onWithoutWrite : COMPUTER_WORDS.needsWrite}
-      </span>
+        <ul data-access-levels className="flex flex-col gap-0.5 px-1 text-[12px] leading-4 text-[#6B6B6B]">
+          {ACCESS_LEVELS.map((level) => (
+            <li key={level}>
+              <span className="font-medium text-[#3A3A38]">{ACCESS_LABELS[level]}:</span> {ACCESS_TIPS[level].charAt(0).toLowerCase() + ACCESS_TIPS[level].slice(1)}
+            </li>
+          ))}
+        </ul>
+      </AccessGroup>
+      <AccessGroup title={scope.shown ? ACCESS_WORDS.more : ACCESS_WORDS.moreNoApps}>
+        <div className="flex flex-col divide-y divide-[#F0F0EE] rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+          {/* Your Apps: a scope of its own (lib/member-access.ts MemberAccess.apps), only with a bot (workspaces.ts showsAny). */}
+          {scope.shown && (
+            <div data-apps-access>
+              <AccessRow
+                icon={<AppsIcon size={16} />}
+                name={APPS_WORDS.row}
+                level={!hasBot ? "none" : isAccessLevel(value.apps) ? value.apps : undefined}
+                tips={APPS_TIPS}
+                onPick={(level) => onChange(withApps(value, level))}
+                disabled={disabled || !hasBot}
+              />
+            </div>
+          )}
+          {/* Use its computer (MemberAccess.computer), only with Write on a bot, never on an invite. On without Write (a bot deleted under them, or orgo-web's list says so): shown as on, and it can only be turned off. */}
+          <div data-computer-access>
+            <ComputerRow on={computerOn} onChange={(on) => onChange(withComputer(value, on))} disabled={disabled || invite} onLocked={!writes} />
+          </div>
+          {/* Keys: kept by orgo-web per member (lib/server/members.ts changeKeys), beside Use its computer. */}
+          {keysOff && <KeysRow on={keysOff.on} onChange={keysOff.onChange} disabled={keysOff.disabled} locked={keysOff.locked} />}
+        </div>
+        <div className="flex flex-col gap-1 px-1 text-[12px] leading-4 text-[#6B6B6B]">
+          {scope.shown && <span data-apps-legend>{APPS_WORDS.legend}</span>}
+          {appsNote && <span data-apps-note>{appsNote}</span>}
+          {scope.shown && scope.older && <span data-apps-older>{APPS_WORDS.older}</span>}
+          <span data-computer-note>{invite ? COMPUTER_WORDS.afterJoin : writes ? COMPUTER_WORDS.legend : computerOn ? COMPUTER_WORDS.onWithoutWrite : COMPUTER_WORDS.needsWrite}</span>
+          {!invite && keys?.note && <span data-keys-note>{keys.note}</span>}
+        </div>
+      </AccessGroup>
       {/* What they may change: each a switch of its own (lib/member-access.ts MemberAccess.can, Power). */}
       <PowerRows can={value.can} onChange={(can) => onChange({ ...value, can })} disabled={disabled} />
-      <ul data-access-levels className="flex flex-col gap-0.5 px-1 text-[12px] leading-4 text-[#6B6B6B]">
-        {ACCESS_LEVELS.map((level) => (
-          <li key={level}>
-            <span className="font-medium text-[#3A3A38]">{ACCESS_LABELS[level]}:</span> {ACCESS_TIPS[level].charAt(0).toLowerCase() + ACCESS_TIPS[level].slice(1)}
-          </li>
-        ))}
-        {scope.shown && <li data-apps-legend>{APPS_WORDS.legend}</li>}
-      </ul>
-      {scope.shown && scope.older && (
-        <span data-apps-older className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
-          {APPS_WORDS.older}
-        </span>
-      )}
     </div>
+  );
+}
+
+/** One group of the panel: its name over it, then its rows and their lines. */
+function AccessGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section data-access-group={title} className="flex flex-col gap-1.5">
+      <h4 className="px-1 text-[12.5px] font-semibold leading-4 text-ink">{title}</h4>
+      {children}
+    </section>
   );
 }
 
@@ -526,11 +561,12 @@ export const withPower = (can: Partial<Record<Power, true>> | undefined, power: 
  * settings, app secrets, spending, the owner's Mac), each Off or On as Use its computer is, saying on hover what it covers.
  * `locked`: an Admin's, every one on.
  */
-export function PowerRows({ can, onChange, disabled, locked }: { can?: Partial<Record<Power, true>>; onChange?: (next: Partial<Record<Power, true>>) => void; disabled?: boolean; locked?: boolean }) {
+export function PowerRows({ can, onChange, disabled, locked, lead }: { can?: Partial<Record<Power, true>>; onChange?: (next: Partial<Record<Power, true>>) => void; disabled?: boolean; locked?: boolean; lead?: React.ReactNode }) {
   return (
-    <div data-powers className="flex flex-col gap-1">
-      <span className="px-1 text-[12px] font-medium leading-4 text-[#3A3A38]">{POWER_SHEET_WORDS.title}</span>
-      <div className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+    <div data-powers className="flex flex-col gap-1.5">
+      <h4 className="px-1 text-[12.5px] font-semibold leading-4 text-ink">{POWER_SHEET_WORDS.title}</h4>
+      <div className="flex flex-col divide-y divide-[#F0F0EE] rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+        {lead}
         {POWERS.map((power) => {
           const on = locked || can?.[power] === true;
           return (
@@ -613,12 +649,13 @@ function ComputerMark() {
 }
 
 /**
- * Keys' row (lib/members.ts KEYS_WORDS): Off or On, as Use its computer's is, beside it. orgo-web keeps it per member
- * (PATCH {memberId, keys}: lib/server/members.ts changeKeys). `locked`: an Admin's, always on.
+ * Keys' row (lib/members.ts KEYS_WORDS): Off or On, as Use its computer's is, beside it in the same box (BotAccess), or
+ * over an Admin's switches. orgo-web keeps it per member (PATCH {memberId, keys}: lib/server/members.ts changeKeys).
+ * `locked`: an Admin's, always on.
  */
 export function KeysRow({ on, onChange, disabled, locked }: { on: boolean; onChange?: (on: boolean) => void; disabled?: boolean; locked?: boolean }) {
   return (
-    <div data-keys-access className="flex flex-col rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+    <div data-keys-access>
       <div className="flex h-[30px] shrink-0 items-center gap-2">
         <KeysMark />
         <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-ink">{KEYS_WORDS.row}</span>
@@ -744,6 +781,16 @@ function EveryBot() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
       {[4.5, 11.5].flatMap((x) => [4.5, 11.5].map((y) => <circle key={`${x}${y}`} cx={x} cy={y} r="2.6" fill="#C9C9C6" />))}
+    </svg>
+  );
+}
+
+/** Bots you make later's mark, as big as a bot's: a plus in a dashed ring. */
+function LaterBots() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+      <circle cx="8" cy="8" r="6.3" fill="none" stroke="#C9C9C6" strokeWidth="1.3" strokeDasharray="2.2 1.8" />
+      <path d="M8 5.3v5.4M5.3 8h5.4" stroke="#9A9A98" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }
@@ -907,7 +954,8 @@ function InviteForm({
   const [role, setRole] = useState<MemberRole>("viewer");
   // The bots chosen, null for the default: it follows the workspace's bots until the user picks.
   const [chosen, setChosen] = useState<MemberAccess | null>(null);
-  const [choosing, setChoosing] = useState(false);
+  // Open from the start: what they get is in front of the user before it's sent, never behind a toggle.
+  const [choosing, setChoosing] = useState(true);
   const [busy, setBusy] = useState(false);
   const ids = bots?.map((b) => b.id) ?? [];
   const waiting = info.invites.find((i) => i.email === email.trim().toLowerCase());
@@ -934,7 +982,7 @@ function InviteForm({
     setEmail("");
     setRole("viewer");
     setChosen(null);
-    setChoosing(false);
+    setChoosing(true);
     onSent(made.emailSent);
     onSaid(
       made.emailSent
@@ -1238,20 +1286,25 @@ function PersonRow({ person: p, bots, act }: { person: Person; bots: Bot[] | nul
       </div>
       {bots && choosing && !admin && (
         <div className="flex flex-col gap-2 pl-12 pt-2">
-          <BotAccess bots={bots} value={access} onChange={(next) => void pick(next)} />
           {/* Keys: a scope of its own, kept by orgo-web (lib/server/members.ts changeKeys), beside Use its computer. */}
           {/* A share link's guest never gets Keys (orgo-web refuses it): shown off, with why; one on still turns off. */}
-          <KeysRow on={keysNow} onChange={(on) => void pickKeys(on)} disabled={locked || (p.guest && !keysNow)} />
-          <span data-keys-note className="px-1 text-[12px] leading-4 text-[#6B6B6B]">
-            {p.guest ? KEYS_WORDS.guest : keysCloud ? (sheet ? KEYS_WORDS.legendShared : KEYS_WORDS.legend) : KEYS_WORDS.notYet}
-          </span>
+          <BotAccess
+            bots={bots}
+            value={access}
+            onChange={(next) => void pick(next)}
+            keys={{
+              on: keysNow,
+              onChange: (on) => void pickKeys(on),
+              disabled: locked || (p.guest && !keysNow),
+              note: p.guest ? KEYS_WORDS.guest : keysCloud ? (sheet ? KEYS_WORDS.legendShared : KEYS_WORDS.legend) : KEYS_WORDS.notYet,
+            }}
+          />
         </div>
       )}
       {/* An Admin always has Keys, and may change everything but delete the workspace: shown on and locked. */}
       {admin && (
         <div className="flex flex-col gap-2 pl-12 pt-2">
-          <KeysRow on locked />
-          <PowerRows locked />
+          <PowerRows locked lead={<KeysRow on locked />} />
         </div>
       )}
       {error && (
