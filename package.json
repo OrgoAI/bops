@@ -163,17 +163,6 @@
     "@honcho-ai/sdk": {
       "zod": "^4.6.6"
     },
-    "@electron/universal": {
-      "minimatch": "^11.0.1"
-    },
-    "@ts-morph/common": {
-      "minimatch": "^11.0.1"
-    },
-    "@typescript-eslint/typescript-estree": {
-      "minimatch": "^11.0.1"
-    },
-    "app-builder-lib": {
-      "minimatch": "^11.0.1"
-    }
+    "minimatch@>=9.0.0 <11.0.1": "^11.0.1"
   }
 }
