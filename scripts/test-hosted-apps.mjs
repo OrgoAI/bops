@@ -2024,6 +2024,15 @@ await check("deploy_app in the chat: to its Preview at its fixed link unless Ale
   assert.equal(newestFirst(pp)[0].source_version, served, "the Preview's exact commit");
   assert.equal(pp.url, null, "Published got no public URL");
   assert.equal(web.envs.get(pp.id)?.get("AUTH_URL"), "https://recipes.acme.test", "sign in at its domain, set as it had none");
+  // A Preview note says where Publish goes: Published, whose domain doesn't point at Orgo yet, so its visitors don't see
+  // it there; and, for an app whose production is on GitHub, GitHub (brandlord's Four Corners and CCLC, 2026-11-05).
+  const pvAgain = () => turnWith("Put the recipe app on its preview", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "preview" })], "Done.");
+  const waiting = await pvAgain();
+  assert.ok(waiting.out().endsWith("Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on Published once it looks right. Visitors to recipes.acme.test won't see it until its DNS points at Orgo."), waiting.out());
+  S.update((st) => void (st.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].github = { repo: "acme/recipes", branch: "main", path: "app" }));
+  const toGithub = await pvAgain();
+  assert.ok(toGithub.out().endsWith("Published is as it was: once it looks right, say publish or press Publish in Your Apps to send what Preview serves to GitHub (acme/recipes, main), where its own deploy puts it live."), toGithub.out());
+  S.update((st) => void delete st.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].github);
   web.liveAtOnce = false;
   forgetListed();
   const a = await H.listApps(WS);

@@ -2882,6 +2882,29 @@ await test("Your Apps shared with an Admin, once the owner's Bops takes it (Shar
     // What an Admin did, said as it was: published, or tried to.
     assert.match(actLine({ key: "k", userId: "u", name: "Ada", act: "deploy", env: "prod", ok: true, at: 1 }), /^Ada published it · /);
     assert.match(actLine({ key: "k", userId: "u", name: "Ada", act: "deploy", env: "prod", ok: false, said: "No.", at: 1 }), /^Ada tried to publish it: No\. · /);
+    // Where Publish goes, said under it: GitHub when its production is there; else a domain not pointed at Orgo yet, as
+    // its visitors don't see a published change until it is (brandlord's Four Corners, 2026-11-05: Published "Live" with
+    // fourcorners.brandlord.agency still pointing at BrandLord's own server).
+    const waiting = { ...shop, sites: [{ ...shop.sites[0], url: null, domains: [{ domain: "shop.acme.example", status: "pending" }] }] };
+    const w = await mount(h(SharedAppsPage, { state: state("admin", true, waiting) }));
+    const wc = w.box.querySelector('[data-shared-app="shop"]');
+    assert.equal(wc.querySelector("[data-publish-where]")?.textContent, "Visitors to shop.acme.example won't see a publish until its DNS points at Orgo.");
+    await click(wc.querySelector("button[aria-expanded]"));
+    assert.equal(wc.querySelector('[data-domain-state="pending"]')?.textContent, "shop.acme.example · Waiting for its DNS", "the domain says it isn't live");
+    await w.done();
+    const gh = await mount(h(SharedAppsPage, { state: state("admin", true, { ...waiting, github: { repo: "acme/shop-site", branch: "main" } }) }));
+    assert.equal(gh.box.querySelector("[data-publish-where]")?.textContent, "Publish sends it to GitHub (acme/shop-site, main), where its own deploy puts it live.");
+    await gh.done();
+    // Live on its domain: nothing more to say, and the domain is just its name. A Member has no Publish, so no line.
+    for (const [why, st] of [["live on its domain", state("admin", true)], ["a Member", state("member", true, waiting)]]) {
+      const x = await mount(h(SharedAppsPage, { state: st }));
+      assert.equal(x.box.querySelector("[data-publish-where]"), null, why);
+      await x.done();
+    }
+    const lv = await mount(h(SharedAppsPage, { state: state("admin", true) }));
+    await click(lv.box.querySelector("button[aria-expanded]"));
+    assert.equal(lv.box.querySelector('[data-domain-state="active"]')?.textContent, "shop.acme.example");
+    await lv.done();
   } finally {
     delete routes["/api/workspaces/shared"];
   }

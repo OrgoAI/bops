@@ -5091,7 +5091,16 @@ async function previewForBot(wsId: string, name: string, id: string | undefined,
   // (Whether its link asks for one, as Orgo said in the read after the deploy.)
   const pv = (x: string) => (x === name ? now.preview : now.sites?.find((y) => y.name === x)?.preview);
   const locked = deployed.some((d) => pv(d.site)?.protected === true);
-  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.`;
+  // Where Publish goes: GitHub, for an app whose production is there; else Published, said as not what visitors see
+  // while none of its domains points at Orgo yet (pending: a new one, or one still pointing at another server).
+  const gh = now.hosting?.github;
+  const waiting = !gh && !now.domain && now.domains?.length && now.domains.every((d) => d.status !== "active") ? now.domains.map((d) => d.domain) : [];
+  const publish = gh
+    ? `Published is as it was: once it looks right, say publish or press Publish in Your Apps to send what Preview serves to GitHub (${gh.repo}, ${gh.branch}), where its own deploy puts it live.`
+    : waiting.length
+      ? `Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on Published once it looks right. Visitors to ${waiting.join(" and ")} won't see it until ${waiting.length === 1 ? "its" : "their"} DNS points at Orgo.`
+      : "Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.";
+  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}${publish}`;
   const more = said ? ` ${said}` : "";
   if (deployed.length > 1) {
     const each = deployed.map((d) => (d.url ? `${d.site} at ${d.url}` : d.site));
