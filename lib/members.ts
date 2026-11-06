@@ -216,7 +216,22 @@ export const COMPUTER_WORDS = {
   legend: "Use its computer lets them wake the bots' computers and run anything there as administrator. Turn it on only for people you trust with those computers.",
   needsWrite: "Give them Write on a bot first. Using its computer comes with Write.",
   onWithoutWrite: "They can't write to any bot now, so turn this off. Using its computer comes with Write.",
-  afterJoin: "You can turn on Use its computer once they've joined.",
+  afterJoin: "You can turn on Use its computer and Keys once they've joined.",
+};
+
+/**
+ * The access panel's words (components/app/members.tsx BotAccess): its groups, and the two bot rows that aren't one bot.
+ * No dashes: shown as they are.
+ */
+export const ACCESS_WORDS = {
+  bots: "Bots",
+  all: "All bots",
+  allTip: "Sets every bot here, and bots you make later.",
+  allMixed: "Not every bot is the same. Pick here to set them all to one level.",
+  later: "Bots you make later",
+  laterTip: "Where a bot you make later starts. The bots above keep their own.",
+  more: "Apps and computers",
+  moreNoApps: "Computers",
 };
 
 /**
