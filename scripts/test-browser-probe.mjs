@@ -187,3 +187,47 @@ test('cold HTTP connections pay one extra RTT while warm acts reuse the paired c
         await new Promise(r => upstream.close(r));
     }
 });
+test('acts on the browser input socket are logged as POST acts are, in order, without their text', { timeout: 5000 }, async () => {
+    mkdirSync('.scratch', { recursive: true });
+    const logFile = '.scratch/probe-input-socket-test.jsonl';
+    writeFileSync(logFile, '');
+    const upstream = createServer();
+    const wss = new WebSocketServer({ server: upstream });
+    const got = [];
+    wss.on('connection', ws => ws.on('message', (m) => got.push(JSON.parse(String(m)))));
+    await new Promise(r => upstream.listen(0, '127.0.0.1', r));
+    const proxy = await startLink(`http://127.0.0.1:${upstream.address().port}`, 35, logFile);
+    const ws = new WebSocket(proxy.url.replace('http:', 'ws:') + '/v1/browser/input?bot=b', { handshakeTimeout: 1000, perMessageDeflate: false });
+    try {
+        await new Promise((ok, no) => { ws.once('open', ok); ws.once('error', no); });
+        const moves = Array.from({ length: 5 }, (_, i) => ({ act: 'input', method: 'Input.dispatchMouseEvent', params: { type: 'mouseMoved', x: 10 + i, y: 20 } }));
+        for (const m of moves)
+            ws.send(JSON.stringify(m));
+        ws.send(JSON.stringify({ act: 'input', method: 'Input.insertText', params: { text: 'secret-typed-words' } }));
+        // A frame over 125 bytes (a 16-bit length).
+        ws.send(JSON.stringify({ act: 'input', method: 'Input.dispatchMouseEvent', params: { type: 'mousePressed', x: 200, y: 200, pad: 'x'.repeat(300) } }));
+        await new Promise((ok) => { const t = setInterval(() => got.length === 7 && (clearInterval(t), ok()), 5); });
+        await new Promise(r => setTimeout(r, 10));
+        const text = readFileSync(logFile, 'utf8');
+        assert.ok(!text.includes('secret-typed-words'), 'typed text never logged');
+        const logs = text.trim().split('\n').map(l => JSON.parse(l));
+        const ins = logs.filter(e => e.phase === 'proxy_act_in');
+        assert.deepEqual(ins.map(e => [e.type ?? e.method, e.x]), [...moves.map(m => ['mouseMoved', m.params.x]), ['Input.insertText', undefined], ['mousePressed', 200]]);
+        for (const act of ins) {
+            const ready = logs.find(e => e.phase === 'proxy_act_ready' && e.actId === act.actId);
+            const out = logs.find(e => e.phase === 'proxy_act_out' && e.actId === act.actId);
+            const connection = logs.find(e => e.phase === 'proxy_act_connection' && e.actId === act.actId);
+            assert.ok(ready.at - act.at >= 30, 'pays the outbound delay');
+            assert.ok(out.at >= ready.at);
+            assert.equal(connection.newConnection, false, 'sent on the open socket');
+        }
+    }
+    finally {
+        ws.terminate();
+        await proxy.close();
+        for (const s of wss.clients)
+            s.terminate();
+        await new Promise(r => wss.close(r));
+        await new Promise(r => upstream.close(r));
+    }
+});

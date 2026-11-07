@@ -2,6 +2,52 @@ import { Agent, createServer, request } from "node:http";
 import { appendFileSync } from "node:fs";
 import { connect } from 'node:net';
 export const now = () => performance.timeOrigin + performance.now();
+/**
+ * Acts on the browser input socket (WS /v1/browser/input), read from the client's raw frames: each complete text frame
+ * of JSON. Only its act, method, mouse type and position, as for a POST act; never its text.
+ */
+function actFrames(nextId) {
+    let buf = Buffer.alloc(0);
+    return (chunk) => {
+        buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+        const found = [];
+        while (buf.length >= 2) {
+            const fin = buf[0] & 0x80, opcode = buf[0] & 0x0f, masked = buf[1] & 0x80;
+            let length = buf[1] & 0x7f, at = 2;
+            if (length === 126) {
+                if (buf.length < 4)
+                    break;
+                length = buf.readUInt16BE(2);
+                at = 4;
+            }
+            else if (length === 127) {
+                if (buf.length < 10)
+                    break;
+                length = Number(buf.readBigUInt64BE(2));
+                at = 10;
+            }
+            const mask = masked ? buf.subarray(at, at + 4) : null;
+            if (masked)
+                at += 4;
+            if (buf.length < at + length)
+                break;
+            const payload = Buffer.from(buf.subarray(at, at + length));
+            buf = buf.subarray(at + length);
+            if (mask)
+                for (let i = 0; i < payload.length; i++)
+                    payload[i] ^= mask[i & 3];
+            if (!fin || opcode !== 1)
+                continue;
+            try {
+                const m = JSON.parse(payload.toString());
+                const p = m.params ?? {};
+                found.push({ actId: nextId(), act: m.act, method: m.method, type: p.type, x: p.x, y: p.y, transport: 'websocket' });
+            }
+            catch { }
+        }
+        return found;
+    };
+}
 /** A fixed propagation delay, not a bandwidth cap or a serial sleep per chunk. */
 export async function startLink(target, delayMs, logFile) {
     const sockets = new Set();
@@ -132,13 +178,29 @@ export async function startLink(target, delayMs, logFile) {
         const destination = new URL(target);
         const downstreamId = paired.get(socket).connectionId;
         let up;
-        const writeLater = (to, data) => later(() => {
-            if (!to.destroyed)
-                to.write(data);
+        // The input socket's acts, logged as POST acts are: in on arrival, ready and out as they're written upstream.
+        const read = req.url.startsWith('/v1/browser/input') ? actFrames(() => ++nextAct) : () => [];
+        const arrived = (data) => {
+            const acts = read(data);
+            for (const act of acts)
+                log('proxy_act_in', act);
+            return acts;
+        };
+        const writeLater = (to, data, acts = [], newConnection = false) => later(() => {
+            if (to.destroyed)
+                return;
+            const connection = info.get(to);
+            for (const act of acts) {
+                log('proxy_act_ready', act);
+                log('proxy_act_connection', { ...act, ...connection, newConnection, setupMs: newConnection ? connection.readyAt - connection.startAt : 0 });
+            }
+            to.write(data);
+            for (const act of acts)
+                log('proxy_act_out', act);
         });
         const headers = { ...req.headers, host: destination.host };
         const requestHead = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n` + Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('') + '\r\n';
-        const pending = [Buffer.concat([Buffer.from(requestHead), head])];
+        const pending = [{ data: Buffer.concat([Buffer.from(requestHead), head]), acts: arrived(head) }];
         openConnection({ port: Number(destination.port), host: destination.hostname }, downstreamId, 'websocket', (error, connected) => {
             if (error || socket.destroyed) {
                 connected?.destroy();
@@ -146,18 +208,21 @@ export async function startLink(target, delayMs, logFile) {
                 return;
             }
             up = connected;
-            for (const chunk of pending)
-                writeLater(up, chunk);
+            for (const { data, acts } of pending)
+                writeLater(up, data, acts, true);
             pending.length = 0;
             up.on('data', data => writeLater(socket, data));
             up.on('end', () => later(() => socket.end()));
             up.on('error', () => socket.destroy());
             up.on('close', () => later(() => socket.destroy()));
         });
-        socket.on('data', data => { if (up)
-            writeLater(up, data);
-        else
-            pending.push(data); });
+        socket.on('data', data => {
+            const acts = arrived(data);
+            if (up)
+                writeLater(up, data, acts);
+            else
+                pending.push({ data, acts });
+        });
         socket.on('end', () => later(() => up?.end()));
         socket.on('error', () => up?.destroy());
         socket.on('close', () => up?.destroy());
