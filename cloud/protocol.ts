@@ -838,6 +838,28 @@ export const KEY_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 /** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
 export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
 
+/**
+ * A site's Preview password as Bops makes one (lib/server/hosted-apps.ts newPassword, which takes these two): its
+ * length in characters of this alphabet (letters and digits without the ones that look alike: 0, O, o, 1, l, I), case
+ * sensitive, with a letter and a digit in it. PREVIEW_PASSWORD is the same rule as a pattern, and Bops Cloud takes no
+ * other password (PREVIEW_PASSWORD_PATH).
+ */
+export const PREVIEW_PASSWORD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // gitleaks:allow (an alphabet, not a key)
+export const PREVIEW_PASSWORD_LENGTH = 7;
+export const PREVIEW_PASSWORD = /^(?=.*[A-Za-z])(?=.*[2-9])[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789]{7}$/;
+
+/**
+ * A site's Preview password as whoever just set it tells Bops Cloud (POST PREVIEW_PASSWORD_PATH, lib/server/preview-password-share.ts):
+ * the owner's Bops on their own key, or the app's own computer's runner on its identity. `site` is the app's own name
+ * for its own site. `password` null: it has none now (the owner turned it off). `seen`: only in place of the one Bops
+ * Cloud kept at that time (its `at`), else nothing changes: the owner's Mac telling it what it read from Orgo
+ * (lib/server/apps-for-members.ts), which never lands over a share that came after it looked. Bops Cloud keeps it on the
+ * workspace (Workspace.previewPasswords) and answers 204 with nothing in it: it never says a password back, nor whether
+ * one was the same or was kept.
+ */
+export const PREVIEW_PASSWORD_PATH = "/v1/apps/preview-password";
+export type PreviewPasswordPost = { ws: string; app: string; site: string; url: string; password: string | null; seen?: number };
+
 /** What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` when the owner's Mac last read them. */
 export type SharedApps = { level: "read" | "write"; at: number; list: SharedApp[]; /** The workspace's domains bought through Orgo: Write only. */ owned?: { id: string; domain: string }[] };
 /** One app as a member sees it (lib/hosted-apps.ts AppForMembers, spelled out: this file imports nothing). */

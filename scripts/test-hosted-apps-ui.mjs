@@ -1975,6 +1975,14 @@ await test("the calls of a site: its log, domains and settings read with it; the
   assert.notEqual(stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin", projectId: "p" }] } }), stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin" }] } }), "its project made");
   assert.notEqual(stamp({ shop: { ...hosting("shop"), lost: 5 } }), was, "its computer gone");
   assert.equal(stamp({ shop: { ...hosting("shop"), sites: [] } }), was);
+  // A Preview's new password, set as its deploy went live (here, or on its bot's computer, after the list was read): the
+  // list is read again, so the window shows the new one and the Preview tab's cookie follows it.
+  const set = (at) => ({ at, live: "d1" });
+  assert.notEqual(stamp({ shop: { ...hosting("shop"), passwordSet: set(5) } }), was, "its own site's password set");
+  assert.notEqual(stamp({ shop: { ...hosting("shop"), passwordSet: set(6) } }), stamp({ shop: { ...hosting("shop"), passwordSet: set(5) } }), "a new one");
+  const admin = (x) => stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin", projectId: "p", ...x }] } });
+  assert.notEqual(admin({ passwordSet: set(5) }), admin({}), "another site's");
+  assert.notEqual(admin({ passwordSet: set(6) }), admin({ passwordSet: set(5) }));
 });
 
 await test("a site picked, clicked: its settings (health too) and variables saved with it, its rollback and Deploy this site name it; Deploy all names none", async () => {

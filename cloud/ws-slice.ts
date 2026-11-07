@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
 import { groupKeyOf } from "./group-key.ts";
 import { accessOf, adminAccess, appsLevelOf, cleanPowers, currentFor, holdsKeys, isAccessLevel, levelOf, permits, powersOf, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import { KEY_NAME, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedWsSlice, type WsRole } from "./protocol.ts";
+import { KEY_NAME, PREVIEW_PASSWORD, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedWsSlice, type WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -340,6 +340,25 @@ const SITE_SEEN = {
 } as const satisfies Spec;
 /** A site at Write (the owner gave them all of Your Apps): its Preview's password too. Never at Read. */
 const SITE_SEEN_WRITE: Spec = { ...SITE_SEEN, previewPassword: true };
+
+/**
+ * A Write viewer's sites (as SITE_SEEN_WRITE kept them) with each Preview's password as Bops Cloud keeps it from whoever
+ * set it last (Workspace.previewPasswords, cloud/preview-passwords.ts: "<app>/<site>"), for a site whose Preview link is
+ * the one it was set for: that one over the copy the owner's Mac read (appsForMembers), which stays for a site Bops
+ * Cloud has none for. One for a link the site no longer has is never shown. One a share never reached is put right by
+ * the owner's Mac as it reads Orgo for members (lib/server/apps-for-members.ts fixCloudCopy), and each sender keeps
+ * trying its newest for about 20 minutes (lib/server/preview-password-share.ts).
+ */
+function withCloudPasswords(app: string, sites: unknown, kept: Record<string, unknown>): unknown {
+  if (!Array.isArray(sites)) return sites;
+  return sites.map((s) => {
+    if (!isObject(s) || typeof s.name !== "string" || typeof s.preview !== "string") return s;
+    const key = `${app}/${s.name}`;
+    const p = Object.hasOwn(kept, key) ? kept[key] : undefined;
+    if (!isObject(p) || p.url !== s.preview || typeof p.password !== "string" || !PREVIEW_PASSWORD.test(p.password)) return s;
+    return { ...s, previewProtected: true, previewPassword: p.password };
+  });
+}
 const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
 /** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
 const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
@@ -365,8 +384,10 @@ export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer
  * Admin always has Write: viewerAccess). A workspace with no apps yet gives an empty list. Allow lists only: of each app's record its name, its
  * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
  * members (Workspace.appsForMembers) its head, sites (each with its Preview's link and state), history, deploys and
- * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. Never its
- * variables, tokens, keys, logs, error text, computer or project ids.
+ * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. The
+ * password is the one Bops Cloud keeps from whoever set it last (Workspace.previewPasswords: withCloudPasswords), else
+ * the owner's Mac's copy; it changes their slice, so a Write viewer watching gets a new fingerprint and reads it. Never
+ * its variables, tokens, keys, logs, error text, computer or project ids.
  */
 export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>): SharedApps | undefined {
   const open = appsOpenFor(viewer);
@@ -380,6 +401,8 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   if (!isObject(workspace.hostedApps)) return { level: write ? "write" : "read", at: 0, list: [] };
   const seen = isObject(workspace.appsForMembers) ? workspace.appsForMembers : {};
   const seenApps = isObject(seen.apps) ? seen.apps : {};
+  // Each Preview's password as whoever set it last told Bops Cloud: Write only, over the owner's Mac's copy.
+  const passwords = write && isObject(workspace.previewPasswords) ? workspace.previewPasswords : {};
   const list: SharedApp[] = Object.entries(workspace.hostedApps)
     .filter(([name, h]) => /^[a-z0-9-]{1,64}$/.test(name) && isObject(h))
     .slice(0, MAX_SHARED_APPS)
@@ -395,7 +418,7 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
         ...(typeof host.lost === "number" ? { lost: true } : {}),
         ...(sites.length ? { siteNames: sites } : {}),
         ...(got.head === null ? { head: null } : isObject(got.head) ? { head: keep(got.head, { id: true, message: true, at: true }) } : {}),
-        ...(Array.isArray(got.sites) ? { sites: keep(got.sites, [write ? SITE_SEEN_WRITE : SITE_SEEN]) } : {}),
+        ...(Array.isArray(got.sites) ? { sites: write ? withCloudPasswords(name, keep(got.sites, [SITE_SEEN_WRITE]), passwords) : keep(got.sites, [SITE_SEEN]) } : {}),
         ...(Array.isArray(got.commits) ? { commits: keep(got.commits, [COMMIT_SEEN]) } : {}),
         ...(Array.isArray(got.deploys) ? { deploys: keep(got.deploys, [DEPLOY_SEEN]) } : {}),
         ...(Array.isArray(got.acts) ? { acts: keep(got.acts, [ACT_SEEN]) } : {}),
