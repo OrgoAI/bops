@@ -2,17 +2,25 @@
 import { spawnSync } from 'node:child_process';
 const feature = process.argv[2] ?? 'browser-speed';
 if (feature === '--list') {
-    console.log('browser-speed');
+    console.log('browser-speed\nbrowser-input');
     process.exit(0);
 }
-if (feature !== 'browser-speed')
-    throw new Error('Use scripts/verify browser-speed; see docs/FEATURES.md');
-for (const [cmd, args] of [
+if (feature !== 'browser-speed' && feature !== 'browser-input')
+    throw new Error('Use scripts/verify browser-speed or browser-input; see docs/FEATURES.md');
+// The browser tab's input socket: the app server's sending (fake Bops Cloud), Bops Cloud's checks (needs the test database, cloud/test/edge-fakes.ts), types and lint.
+const steps = feature === 'browser-input' ? [
+    [process.execPath, ['scripts/test-browser-view.mjs']],
+    [process.execPath, ['--test', 'cloud/test/core-browser.test.ts', 'cloud/test/edge-browser.test.ts']],
+    ['npx', ['tsc', '--noEmit']],
+    ['npx', ['tsc', '--noEmit', '-p', 'cloud']],
+    ['npx', ['eslint', 'cloud/browser.ts', 'cloud/http.ts', 'cloud/protocol.ts', 'cloud/test/edge-browser.test.ts', 'lib/server/browser-view.ts', 'scripts/test-browser-view.mjs', 'components/app/bot-browser.tsx', 'components/app/browser-cursor.tsx', 'scripts/browser-speed/link.mjs', 'scripts/test-browser-probe.mjs']],
+] : [
     [process.execPath, ['--test', 'scripts/test-browser-probe.mjs']],
     [process.execPath, ['--check', 'scripts/verify']],
     ['npx', ['tsc', '--noEmit']],
     ['npx', ['eslint', 'scripts/browser-speed', 'scripts/probe-browser-speed.mjs', 'scripts/probe-computer-side.mjs', 'scripts/dev-two-person.mjs', 'scripts/test-browser-probe.mjs', 'cloud/browser-probe.ts', 'cloud/browser.ts', 'lib/browser-relay.ts', 'components/app/bot-browser.tsx', 'next.config.ts']],
-]) {
+];
+for (const [cmd, args] of steps) {
     const r = spawnSync(cmd, args, { stdio: 'inherit' });
     if (r.status !== 0)
         process.exit(r.status ?? 1);
