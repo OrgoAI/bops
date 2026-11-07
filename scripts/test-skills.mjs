@@ -1031,7 +1031,8 @@ await check("A large program goes to a computer in pieces, none of them a call t
   const sent = [];
   globalThis.bopsSkillsCopied?.clear();
   await W.copySkillsToComputer("max", "c_free", async (id, command) => (sent.push(command), { output: "", exit_code: 0 }));
-  assert.ok(sent.every((c) => c.length < 250_000), `every call small: ${sent.map((c) => c.length).join(", ")}`);
+  // Linux takes no single argument over 128 KB (MAX_ARG_STRLEN), and the call reaches bash as one.
+  assert.ok(sent.every((c) => Buffer.byteLength(c) < 128 * 1024), `every call under 128 KB: ${sent.map((c) => c.length).join(", ")}`);
   const to = `'/workspace/capabilities/apps/${made.slug}/bin/big'`;
   const pieces = sent.join("\n").split("\n").filter((l) => l.includes(to) && l.includes("base64 -d >>"));
   assert.ok(pieces.length >= 4, `in pieces (${pieces.length})`);
