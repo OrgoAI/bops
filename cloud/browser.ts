@@ -1,4 +1,5 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { STATUS_CODES, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { bearer, type CloudUser } from "./auth.ts";
 import { HttpError, readJson, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
@@ -6,6 +7,8 @@ import { botsOn } from "./computer-scope.ts";
 import { levelOf, permits, type MemberAccess } from "./member-access.ts";
 import { ROLE_MS, trackMemberStream, viewerOf, watchable } from "./members.ts";
 import {
+  BROWSER_INPUT_HEADER,
+  BROWSER_INPUT_PATH,
   BROWSER_NEEDS_COMPUTER,
   BROWSER_NEEDS_WRITE,
   BROWSER_SHARED_COMPUTER,
@@ -14,6 +17,8 @@ import {
   type BrowserAct,
   type BrowserActivity,
   type BrowserEvent,
+  type BrowserInputAct,
+  type BrowserInputReply,
   type BrowserPerson,
   type BrowserToRunner,
   type RunnerToBrowser,
@@ -42,6 +47,10 @@ import { probeInput, probeTiming } from "./browser-probe.ts";
  * - **Acting**: POST /v1/browser/act takes control, hands it back, or sends one CDP input, checked the same way each time.
  *   The runner holds who has control (one person at a time) and refuses any input but theirs, and any method outside
  *   BROWSER_METHODS.
+ * - **Acting on one socket**: WS /v1/browser/input?bot=<id>[&project=<Orgo workspace>] (protocol.ts BROWSER_INPUT_PATH)
+ *   carries one viewer's acts in order, each checked as a POST's is (actOf, sendAct), without asking the owner's state for
+ *   each: who may is asked at the upgrade and every ROLE_MS while it's open, and orgo-web's notice ends it at once, as a
+ *   watch stream. A pointer's moves go about 60 a second there, which a POST each (a database read each) couldn't carry.
  */
 
 const BOT_ID = /^[A-Za-z0-9_-]{1,80}$/;
@@ -52,6 +61,11 @@ const MAX_FRAME = 8 * 1024 * 1024;
 const KEEPALIVE_MS = 15_000;
 /** The most bots one runner message is for. */
 const MAX_BOTS = 50;
+/** The most one act may be, on the socket as in a POST's body. */
+const MAX_ACT = 64 * 1024;
+/** An input socket's end: they may no longer use the bot's browser, or its computer or account changed. */
+const INPUT_REFUSED = 4403;
+const INPUT_MOVED = 4409;
 
 /** `quiet`: an activity-only stream (`?only=activity`): not watching, so never in `watching`, and only told activity and the computer. */
 type Viewer = { person: BrowserPerson; desktop: string; res: ServerResponse; end: () => void; quiet: boolean };
@@ -63,6 +77,8 @@ const runners = new Map<string, Runner>();
 const viewers = new Map<string, Set<Viewer>>();
 /** By "<account>\n<bot id>": what the bot is doing with its browser, as the runner of that computer last said. */
 const doing = new Map<string, { desktop: string; activity: BrowserActivity }>();
+/** Each input socket open now, as its end. */
+const inputs = new Set<() => void>();
 const runnerKey = (account: string, desktop: string) => `${account}\n${desktop}`;
 const botKey = (account: string, bot: string) => `${account}\n${bot}`;
 
@@ -72,6 +88,7 @@ let every = ROLE_MS;
 /** Every socket and stream ends (the cloud stopping): each runner and viewer reconnects to the next start. */
 export function closeBrowser() {
   for (const set of viewers.values()) for (const v of [...set]) v.end();
+  for (const end of [...inputs]) end();
   for (const r of runners.values()) r.ws.terminate();
   runners.clear();
   viewers.clear();
@@ -238,26 +255,104 @@ const watchRoute: Route = {
 
 /* ---------------- Acting ---------------- */
 
+type Act = BrowserInputAct["act"];
+
+/** An act's name, checked: take, release or input. */
+function actOf(v: unknown): Act {
+  if (v !== "take" && v !== "release" && v !== "input") throw new HttpError(400, "act must be take, release or input");
+  return v;
+}
+
+/** One act of someone who may use `bot`'s browser (`a`), sent to the runner of its computer now; what it refuses, thrown. */
+function sendAct(a: BrowserAccess, bot: string, act: Act, body: Partial<BrowserInputAct>) {
+  const r = runners.get(runnerKey(a.account, a.desktop));
+  if (!r) throw new HttpError(409, `${a.botName}'s computer isn't connected right now.`, { code: "browser_offline" });
+  if (act === "input") {
+    if (!isBrowserMethod(body.method)) throw new HttpError(400, "The browser tab can't do that.");
+    sendRunner(r, { t: "input", bot, who: a.person, method: body.method, params: body.params ?? {} });
+  } else if (act === "take") sendRunner(r, { t: "take", bot, who: a.person, ...(a.owner ? { over: true as const } : {}) });
+  else sendRunner(r, { t: "release", bot, who: a.person });
+}
+
 const actRoute: Route = {
   method: "POST",
   path: "/v1/browser/act",
   auth: "user",
   handle: async (req, res, { user }) => {
-    const body = await readJson<Partial<BrowserAct>>(req, 64 * 1024);
+    const body = await readJson<Partial<BrowserAct>>(req, MAX_ACT);
     probeInput("cloud_got", body.method, body.params);
-    if (body.act !== "take" && body.act !== "release" && body.act !== "input") throw new HttpError(400, "act must be take, release or input");
+    const act = actOf(body.act);
     const project = typeof body.project === "string" && body.project ? body.project : null;
-    const a = await mayUseBrowser(user!, bearer(req), project, typeof body.bot === "string" ? body.bot : "");
-    const r = runners.get(runnerKey(a.account, a.desktop));
-    if (!r) throw new HttpError(409, `${a.botName}'s computer isn't connected right now.`, { code: "browser_offline" });
-    if (body.act === "input") {
-      if (!isBrowserMethod(body.method)) throw new HttpError(400, "The browser tab can't do that.");
-      sendRunner(r, { t: "input", bot: body.bot!, who: a.person, method: body.method, params: body.params ?? {} });
-    } else if (body.act === "take") sendRunner(r, { t: "take", bot: body.bot!, who: a.person, ...(a.owner ? { over: true as const } : {}) });
-    else sendRunner(r, { t: "release", bot: body.bot!, who: a.person });
+    const bot = typeof body.bot === "string" ? body.bot : "";
+    sendAct(await mayUseBrowser(user!, bearer(req), project, bot), bot, act, body);
     sendJson(res, 202, { ok: true });
   },
 };
+
+const inputWss = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: MAX_ACT, perMessageDeflate: false });
+
+/** What didn't go, told on the socket it came on (nothing for what did). */
+const replyInput = (ws: WebSocket, e: HttpError) => {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const m: BrowserInputReply = { t: "error", code: String(e.extra?.code ?? `http_${e.status}`), why: e.message };
+  ws.send(JSON.stringify(m));
+};
+
+/**
+ * WS /v1/browser/input: asked as the watch stream is (mayUseBrowser; a refusal is the upgrade's status), then each message
+ * one act, checked and sent on in the order it came. Asked afresh every ROLE_MS, and ended at once by orgo-web's notice
+ * that their access changed; ended too when the bot's computer or account isn't the one it was.
+ */
+async function openInput(req: IncomingMessage, socket: Duplex, head: Buffer, user: CloudUser, url: URL) {
+  const bot = url.searchParams.get("bot") ?? "";
+  const project = url.searchParams.get("project");
+  const key = bearer(req);
+  let a = await mayUseBrowser(user, key, project, bot);
+  // Gone while that was asked: never a socket.
+  if (socket.destroyed) return;
+  inputWss.handleUpgrade(req, socket, head, (ws) => {
+    let over = false;
+    const end = (code: number, why: string) => {
+      if (over) return;
+      over = true;
+      inputs.delete(stop);
+      clearInterval(look);
+      untrack();
+      if (ws.readyState === WebSocket.OPEN) ws.close(code, why);
+      else ws.terminate();
+    };
+    const stop = () => end(1001, "Bops Cloud is restarting");
+    inputs.add(stop);
+    const look = setInterval(() => {
+      void mayUseBrowser(user, key, project, bot, { fresh: true })
+        .then((now) => {
+          if (now.account !== a.account || now.desktop !== a.desktop) end(INPUT_MOVED, "The bot's computer changed");
+          else a = now;
+        })
+        .catch((e) => {
+          if (e instanceof HttpError && e.status < 500) end(INPUT_REFUSED, "No longer allowed");
+        });
+    }, every);
+    look.unref?.();
+    const untrack = project ? trackMemberStream(user.id, project, () => end(INPUT_REFUSED, "Access changed")) : () => {};
+    ws.on("message", (data: RawData, binary: boolean) => {
+      if (over) return;
+      let m: unknown = null;
+      try {
+        if (!binary) m = JSON.parse(String(data));
+      } catch {}
+      const body = (m && typeof m === "object" ? m : {}) as Partial<BrowserInputAct>;
+      probeInput("cloud_got", body.method, body.params);
+      try {
+        sendAct(a, bot, actOf(body.act), body);
+      } catch (e) {
+        if (e instanceof HttpError) replyInput(ws, e);
+      }
+    });
+    ws.on("close", () => end(1000, ""));
+    ws.on("error", () => ws.terminate());
+  });
+}
 
 /* ---------------- The runner ---------------- */
 
@@ -346,6 +441,20 @@ export const upgrades: Upgrade[] = [
       // Only a computer, as itself: the user's own key (a Mac) has no computer to relay.
       if (!user.computer?.desktopId) return refuseUpgrade(socket, 403, "Forbidden");
       wss.handleUpgrade(req, socket, head, (ws) => attach(user, ws));
+    },
+  },
+  {
+    // A person's own key only: a computer is refused before this (server.ts computerCheck).
+    path: BROWSER_INPUT_PATH,
+    handle: (req, socket, head, { user, url }) => {
+      // Node takes its own error handler off an upgrading socket: one dropping mid-handshake mustn't take the process down.
+      socket.on("error", () => socket.destroy());
+      openInput(req, socket, head, user, url).catch((e: unknown) => {
+        const status = e instanceof HttpError ? e.status : 500;
+        if (!(e instanceof HttpError)) console.error(`[browser] input socket: ${(e as Error)?.message ?? e}`);
+        // Marked as this route's: a 404 without the mark is a Bops Cloud from before it.
+        if (!socket.destroyed) refuseUpgrade(socket, status, STATUS_CODES[status] ?? "Error", { [BROWSER_INPUT_HEADER]: "1" });
+      });
     },
   },
 ];

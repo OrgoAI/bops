@@ -1317,6 +1317,19 @@ export type BrowserEvent =
 /** POST /v1/browser/act: take control, hand it back, or (in control) one CDP input. `project`: a shared workspace's Orgo id; none for the caller's own bots. */
 export type BrowserAct = { bot: string; project?: string; act: "take" | "release" | "input"; method?: string; params?: unknown };
 
+/**
+ * WS /v1/browser/input?bot=<id>[&project=<Orgo workspace>]: the acts of one viewer's Bops for one bot, in order, on one
+ * socket (lib/server/browser-view.ts), each message a BrowserAct without `bot` and `project` (the address says them), at
+ * most 64 KiB. Checked as the watch stream is: at the upgrade (refused with mayUseBrowser's status), every ROLE_MS while
+ * open, and ended by orgo-web's notice; each act checked as POST /v1/browser/act checks it, then sent to the runner of
+ * that computer at that moment. Bops Cloud answers only what didn't go (BrowserInputReply). Its refusals of the upgrade
+ * carry BROWSER_INPUT_HEADER, so a 404 without it is a Bops Cloud from before this socket.
+ */
+export const BROWSER_INPUT_PATH = "/v1/browser/input";
+export const BROWSER_INPUT_HEADER = "x-bops-browser-input";
+export type BrowserInputAct = Omit<BrowserAct, "bot" | "project">;
+export type BrowserInputReply = { t: "error"; code: string; why: string };
+
 /** Why Bops Cloud won't let someone watch a bot's browser (403, with the words to show them). */
 export const BROWSER_NEEDS_WRITE = "browser_needs_write";
 export const BROWSER_NEEDS_COMPUTER = "browser_needs_computer";

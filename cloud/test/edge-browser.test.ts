@@ -5,7 +5,7 @@ import { WebSocket } from "ws";
 import { clearAuthCache } from "../auth.ts";
 import { resetBrowser, runnerConnected, viewersOf } from "../browser.ts";
 import { closeDb } from "../db.ts";
-import { resetMembers } from "../members.ts";
+import { membersChanged, resetMembers } from "../members.ts";
 import { BROWSER_NEEDS_COMPUTER, BROWSER_NEEDS_WRITE, BROWSER_SHARED_COMPUTER, type BrowserToRunner, type RunnerToBrowser } from "../protocol.ts";
 import { listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
@@ -324,4 +324,97 @@ test("only a computer opens the runner's socket", async () => {
     ws.on("open", () => ok(101));
   });
   assert.equal(status, 403, "the owner's own key isn't a computer");
+});
+
+/**
+ * A viewer's input socket (WS /v1/browser/input): the upgrade's status and whether Bops Cloud marked a refusal as this
+ * route's (a plain 404 is a Bops Cloud from before it); open, what Bops Cloud says on it and how it closed. The address
+ * and the mark are the wire's, spelled out here.
+ */
+async function inputSocket(key: string, query = `bot=max&project=${PROJECT}`) {
+  const ws = new WebSocket(`${cloud.url.replace("http", "ws")}/v1/browser/input?${query}`, { headers: { Authorization: `Bearer ${key}` } });
+  const said: { t: string; code?: string; why?: string }[] = [];
+  let closed: number | null = null;
+  ws.on("message", (d) => said.push(JSON.parse(String(d))));
+  ws.on("close", (code) => (closed = code));
+  ws.on("error", () => {});
+  const upgrade = await new Promise<{ status: number; marked: boolean }>((ok) => {
+    ws.on("unexpected-response", (req, res) => {
+      ok({ status: res.statusCode ?? 0, marked: res.headers["x-bops-browser-input"] === "1" });
+      req.destroy();
+    });
+    ws.on("open", () => ok({ status: 101, marked: false }));
+  });
+  return { ...upgrade, said, closed: () => closed, send: (m: unknown) => ws.send(typeof m === "string" ? m : JSON.stringify(m)), close: () => ws.close() };
+}
+
+test("one input socket: each act reaches the runner in order as who sent it; what a POST would refuse is refused on it, in words", async () => {
+  const r = await runner();
+  const s = await inputSocket(keyOf(writer));
+  assert.equal(s.status, 101, "a member with Write and Use its computer opens it");
+  const who = { id: writer, name: "writer" };
+  const moves = Array.from({ length: 20 }, (_, x) => ({ type: "mouseMoved", x, y: 5, button: "none", clickCount: 0, modifiers: 0 }));
+  s.send({ act: "take" });
+  for (const params of moves) s.send({ act: "input", method: "Input.dispatchMouseEvent", params });
+  s.send({ act: "input", method: "Runtime.evaluate", params: { expression: "document.cookie" } });
+  s.send({ act: "input", method: "Input.insertText", params: { text: "hi" } });
+  s.send({ act: "steal" });
+  s.send("not json");
+  s.send({ act: "release" });
+  const acts = await until(() => {
+    const a = r.got.filter((m) => m.t !== "watch");
+    return a.length >= 23 && a;
+  }, "the acts");
+  assert.deepEqual(acts, [
+    { t: "take", bot: "max", who },
+    ...moves.map((params) => ({ t: "input", bot: "max", who, method: "Input.dispatchMouseEvent", params })),
+    { t: "input", bot: "max", who, method: "Input.insertText", params: { text: "hi" } },
+    { t: "release", bot: "max", who },
+  ], "in the order sent; a method outside BROWSER_METHODS never reaches the runner");
+  await until(() => s.said.length === 3, "the refusals");
+  assert.deepEqual(s.said, [
+    { t: "error", code: "http_400", why: "The browser tab can't do that." },
+    { t: "error", code: "http_400", why: "act must be take, release or input" },
+    { t: "error", code: "http_400", why: "act must be take, release or input" },
+  ]);
+  // No runner now: said on the socket in Bops Cloud's words, and nothing sent.
+  r.close();
+  await until(() => !runnerConnected(owner, DESKTOP), "the runner to go");
+  s.send({ act: "input", method: "Input.insertText", params: { text: "x" } });
+  assert.deepEqual(await until(() => s.said[3], "the offline answer"), { t: "error", code: "browser_offline", why: "Max's computer isn't connected right now." });
+  // More than 64 KiB in one act: the socket ends, as a POST that big is refused.
+  s.send({ act: "input", method: "Input.insertText", params: { text: "x".repeat(70 * 1024) } });
+  assert.equal(await until(() => s.closed(), "the socket to end"), 1009);
+});
+
+test("only someone who may use the bot's browser opens its input socket: refused at the upgrade with the watch stream's status, marked as this route's", async () => {
+  for (const [who, status] of [[noComputer, 403], [reader, 403], [hidden, 404], [outsider, 404]] as const) {
+    const s = await inputSocket(keyOf(who));
+    assert.deepEqual({ status: s.status, marked: s.marked }, { status, marked: true }, `${who}`);
+  }
+  const shared = await inputSocket(keyOf(hidden), `bot=dana&project=${PROJECT}`);
+  assert.deepEqual({ status: shared.status, marked: shared.marked }, { status: 403, marked: true }, "nor through a bot that shares its computer");
+  const own = await inputSocket(keyOf(outsider), "bot=max");
+  assert.deepEqual({ status: own.status, marked: own.marked }, { status: 404, marked: true }, "nor their own account's bot of that id");
+  assert.equal((await inputSocket(COMPUTER_KEY)).status, 403, "a computer's key isn't a person");
+  const before = await new Promise<{ status: number; marked: boolean }>((ok) => {
+    const ws = new WebSocket(`${cloud.url.replace("http", "ws")}/v1/browser/elsewhere?bot=max`, { headers: { Authorization: `Bearer ${keyOf(owner)}` } });
+    ws.on("error", () => {});
+    ws.on("unexpected-response", (req, res) => (ok({ status: res.statusCode ?? 0, marked: !!res.headers["x-bops-browser-input"] }), req.destroy()));
+  });
+  assert.deepEqual(before, { status: 404, marked: false }, "a path Bops Cloud doesn't have: a plain 404, as one from before the socket says");
+});
+
+test("an open input socket ends at once on orgo-web's notice, and when the owner takes away Write (asked again every ROLE_MS)", async () => {
+  let now: typeof state = state;
+  resetBrowser({ state: async (account) => (account === owner ? now : {}), every: 50 });
+  const s = await inputSocket(keyOf(writer));
+  assert.equal(s.status, 101);
+  membersChanged(PROJECT, writer);
+  assert.equal(await until(() => s.closed(), "the notice to end it", 1000), 4403);
+  const t = await inputSocket(keyOf(writer));
+  assert.equal(t.status, 101, "asked afresh, they still may");
+  const ws = state.workspaces[0];
+  now = { ...state, workspaces: [{ ...ws, memberAccess: { ...ws.memberAccess, [`${writer}@example.com`]: { others: "none", bots: { max: "read", dana: "write" }, computer: "use", at } } }] };
+  assert.equal(await until(() => t.closed(), "the next look to end it", 2000), 4403);
 });
