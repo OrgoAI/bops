@@ -32,7 +32,7 @@ import { isBrowserMethod, POINTER_KINDS, type BrowserActivity, type BrowserFrame
  *   or reach, and each goes to the viewers labelled with who drove it: the person in control, else the bot. So the bot's
  *   cursor shows however it moves (xdotool on the screen, Playwright over CDP), and so does a person's. Never kept.
  *
- * It imports only `ws` and the protocol, so plain Node runs it (the stand-in) as well as the Next server.
+ * Its dependencies are `ws`, the protocol and optional safe timing logs; plain Node runs it as well as Next.
  */
 
 export { BOPS_DEVICE_HEADER as DEVICE_HEADER } from "@/cloud/protocol";
@@ -392,7 +392,7 @@ class Screen {
         void cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }).catch(() => {});
         if (this.cdp !== cdp) return;
         const frame = { data: String(p.data ?? ""), meta: p.metadata as BrowserFrameMeta };
-        probeTiming("source_frame", { timestamp: frame.meta.timestamp, bytes: Math.floor(frame.data.length * 3 / 4) });
+        probeTiming("source_frame", { timestamp: frame.meta.timestamp, bytes: Buffer.byteLength(frame.data, "base64") });
         this.last.frame = frame;
         if (this.watchers().length && this.relay.send({ t: "frame", bots: this.watchers(), ...frame }, true)) this.framesSent++;
       });

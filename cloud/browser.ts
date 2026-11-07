@@ -286,7 +286,7 @@ function fromRunner(r: Runner, m: RunnerToBrowser) {
       if (v.quiet) continue;
       if (m.t === "frame") {
         if (!v.res.writableNeedDrain && typeof m.data === "string") {
-          probeTiming("cloud_frame", { timestamp: m.meta?.timestamp, bytes: Math.floor(m.data.length * 3 / 4) });
+          probeTiming("cloud_frame", { timestamp: m.meta?.timestamp, bytes: Buffer.byteLength(m.data, "base64") });
           event(v.res, { t: "frame", data: m.data, meta: m.meta });
         }
       } else if (m.t === "page") event(v.res, { t: "page", url: String(m.url ?? ""), title: String(m.title ?? ""), back: typeof m.back === "number" ? m.back : null });
