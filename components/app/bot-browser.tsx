@@ -316,6 +316,8 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     if (!p) return;
     const params = { type, ...p, button: type === "mouseMoved" ? (e.buttons & 1 ? "left" : "none") : (BUTTON[e.button] ?? "left"), clickCount: type === "mouseMoved" ? 0 : Math.min(3, e.detail || 1), modifiers: mods(e) };
     if (type === "mouseMoved") return often({ move: params });
+    // Their own press rings at once where they pressed, rather than once the page's answer comes back.
+    if (type === "mousePressed") feed.ring(p);
     // A press or release lands after the move held back for it, where the pointer is.
     flushHeld();
     input("Input.dispatchMouseEvent", params);
