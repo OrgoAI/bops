@@ -129,6 +129,7 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
   );
   const surface = useRef<HTMLDivElement>(null);
   const sending = useRef(Promise.resolve());
+  const probePending = useRef(0);
   const lastMove = useRef(0);
   const held = useRef<{ move?: Record<string, unknown>; wheel?: { x: number; y: number; deltaX: number; deltaY: number }; timer?: ReturnType<typeof setTimeout> }>({});
   const meta = useRef<BrowserFrameMeta | null>(null);
@@ -224,10 +225,23 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
 
   /** One act, after the ones before it (typing stays in order). */
   const act = (body: { act: "take" | "release" | "input"; method?: BrowserMethod; params?: unknown }) => {
+    const probing = process.env.BOPS_BROWSER_PROBE === "1";
+    const params = body.params as { type?: string; x?: number; y?: number } | undefined;
+    const timing = (phase: string) => {
+      if (probing && body.method === "Input.dispatchMouseEvent") window.dispatchEvent(new CustomEvent("bops-browser-probe", {
+        detail: { phase, at: performance.timeOrigin + performance.now(), depth: probePending.current - 1, type: params?.type, x: params?.x, y: params?.y },
+      }));
+    };
+    if (probing) { probePending.current++; timing("queued"); }
     const run = sending.current.then(async () => {
-      const res = await fetch("/api/browser", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bot: bot.id, ...(project ? { project } : {}), ...body }) }).catch(() => null);
-      if (!res) return setNote("Couldn't reach Bops. Try again.");
-      if (!res.ok) setNote(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "That didn't go through.");
+      timing("sent");
+      try {
+        const res = await fetch("/api/browser", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bot: bot.id, ...(project ? { project } : {}), ...body }) }).catch(() => null);
+        if (!res) return setNote("Couldn't reach Bops. Try again.");
+        if (!res.ok) setNote(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "That didn't go through.");
+      } finally {
+        if (probing) { timing("settled"); probePending.current--; }
+      }
     });
     sending.current = run.catch(() => {});
     return run;

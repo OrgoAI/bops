@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { probeInput, probeTiming } from "@/cloud/browser-probe";
 import { isBrowserMethod, POINTER_KINDS, type BrowserActivity, type BrowserFrameMeta, type BrowserPerson, type BrowserPointer, type BrowserTab, type BrowserToRunner, type RunnerToBrowser } from "@/cloud/protocol";
 
 /**
@@ -391,6 +392,7 @@ class Screen {
         void cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }).catch(() => {});
         if (this.cdp !== cdp) return;
         const frame = { data: String(p.data ?? ""), meta: p.metadata as BrowserFrameMeta };
+        probeTiming("source_frame", { timestamp: frame.meta.timestamp, bytes: Math.floor(frame.data.length * 3 / 4) });
         this.last.frame = frame;
         if (this.watchers().length && this.relay.send({ t: "frame", bots: this.watchers(), ...frame }, true)) this.framesSent++;
       });
@@ -689,6 +691,7 @@ class RelayCore {
       return;
     }
     if (m.t === "input") {
+      probeInput("runner_got", m.method, m.params);
       if (!isBrowserMethod(m.method)) return this.refuse(m.bot, m.who.id, "The browser tab can't do that.");
       if (sc.controller?.who.id !== m.who.id) return this.refuse(m.bot, m.who.id, "Take over first.");
       const params = cleanInput(m.method, m.params);

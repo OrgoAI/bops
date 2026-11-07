@@ -21,6 +21,7 @@ import {
 import { loadState } from "./state.ts";
 import { computerFor } from "./turns.ts";
 import { computerUseOf, list, viewerAccess, wsOfBot } from "./ws-slice.ts";
+import { probeInput, probeTiming } from "./browser-probe.ts";
 
 /**
  * The bot's browser (protocol.ts "The bot's browser"): Bops Cloud between the runner on a bot's computer, which captures
@@ -243,6 +244,7 @@ const actRoute: Route = {
   auth: "user",
   handle: async (req, res, { user }) => {
     const body = await readJson<Partial<BrowserAct>>(req, 64 * 1024);
+    probeInput("cloud_got", body.method, body.params);
     if (body.act !== "take" && body.act !== "release" && body.act !== "input") throw new HttpError(400, "act must be take, release or input");
     const project = typeof body.project === "string" && body.project ? body.project : null;
     const a = await mayUseBrowser(user!, bearer(req), project, typeof body.bot === "string" ? body.bot : "");
@@ -283,7 +285,10 @@ function fromRunner(r: Runner, m: RunnerToBrowser) {
       if (activity) event(v.res, { t: "activity", ...activity });
       if (v.quiet) continue;
       if (m.t === "frame") {
-        if (!v.res.writableNeedDrain && typeof m.data === "string") event(v.res, { t: "frame", data: m.data, meta: m.meta });
+        if (!v.res.writableNeedDrain && typeof m.data === "string") {
+          probeTiming("cloud_frame", { timestamp: m.meta?.timestamp, bytes: Math.floor(m.data.length * 3 / 4) });
+          event(v.res, { t: "frame", data: m.data, meta: m.meta });
+        }
       } else if (m.t === "page") event(v.res, { t: "page", url: String(m.url ?? ""), title: String(m.title ?? ""), back: typeof m.back === "number" ? m.back : null });
       else if (m.t === "tabs") event(v.res, { t: "tabs", ...tabsOf(m) });
       else if (m.t === "control") event(v.res, { t: "control", by: m.by ?? null, you: !!m.by && m.by.id === v.person.id });
