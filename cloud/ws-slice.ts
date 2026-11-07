@@ -356,7 +356,7 @@ function withCloudPasswords(app: string, sites: unknown, kept: Record<string, un
     const key = `${app}/${s.name}`;
     const p = Object.hasOwn(kept, key) ? kept[key] : undefined;
     if (!isObject(p) || p.url !== s.preview || typeof p.password !== "string" || !PREVIEW_PASSWORD.test(p.password)) return s;
-    return { ...s, previewProtected: true, previewPassword: p.password };
+    return { ...s, previewProtected: true, previewPassword: p.password, ...(typeof p.at === "number" ? { previewPasswordAt: p.at } : {}) };
   });
 }
 const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
@@ -780,7 +780,20 @@ export const sharedMessages = (all: Record<string, unknown>[], bots?: ReadonlySe
 export function canonical(v: unknown): string {
   return JSON.stringify(v, (_k, x) => (isObject(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
 }
-const digest = (v: unknown) => createHash("sha256").update(canonical(v)).digest("base64url").slice(0, 22);
+/**
+ * What a fingerprint is worked out from: canonical, but with no Preview password in it (a site's previewPassword, the
+ * password of each Workspace.previewPasswords entry). A fingerprint only says whether something changed, so it never
+ * needs one, and what does change with each new password is in it: the entry's own time (previewPasswords' `at`, and a
+ * Write viewer's previewPasswordAt beside it), and for the owner's Mac's copy the time it wrote it (appsForMembers.at).
+ */
+function fingerprintText(v: unknown): string {
+  return JSON.stringify(v, (k, x) => {
+    if (k === "previewPassword") return undefined;
+    if (k === "previewPasswords" && isObject(x)) return Object.fromEntries(Object.keys(x).sort().map((n) => [n, isObject(x[n]) ? { at: x[n].at, url: x[n].url } : null]));
+    return isObject(x) ? Object.fromEntries(Object.keys(x).sort().map((n) => [n, x[n]])) : x;
+  });
+}
+const digest = (v: unknown) => createHash("sha256").update(fingerprintText(v)).digest("base64url").slice(0, 22);
 
 /** A fingerprint of one workspace's whole part (live.ts: did it change?). */
 export const fullHash = (blob: Record<string, unknown>, ws: string) => digest(sliceOf(blob, ws));

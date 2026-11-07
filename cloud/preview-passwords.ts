@@ -67,7 +67,7 @@ function postOf(body: unknown): PreviewPasswordPost {
  * computer is gone). `unchanged`: nothing to write (null for a site with no entry, or one sent `seen` an entry that
  * isn't the one kept now: another share landed since the owner's Mac looked, and that one stands).
  */
-function withPassword(blob: Record<string, unknown>, p: PreviewPasswordPost, user: CloudUser): { next: Record<string, unknown> } | { unchanged: true } | null {
+function stateWith(blob: Record<string, unknown>, p: PreviewPasswordPost, user: CloudUser): { next: Record<string, unknown> } | { unchanged: true } | null {
   const spaces = list(blob.workspaces);
   const ws = spaces.find((w) => w.id === p.ws);
   const apps = ws && isObject(ws.hostedApps) ? ws.hostedApps : undefined;
@@ -107,7 +107,7 @@ const post: Route = {
     const out = await tx(async (c) => {
       await lockUser(c, user!.id);
       const blob = await lockedState(c, user!.id);
-      const r = withPassword(blob, p, user!);
+      const r = stateWith(blob, p, user!);
       if (!r || "unchanged" in r) return r;
       await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [user!.id, toJson(r.next)]);
       return r;

@@ -885,6 +885,8 @@ export type SharedApp = {
     previewServing?: string | null;
     previewProtected?: true;
     previewPassword?: string;
+    /** When Bops Cloud took that password (Workspace.previewPasswords' `at`): what a fingerprint goes by, never the password. */
+    previewPasswordAt?: number;
     serving: string | null;
     live: { id: string; state: string | null; when: number | null } | null;
     domains?: { domain: string; status: string }[];

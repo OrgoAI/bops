@@ -296,6 +296,23 @@ test("who is shown it: a Write member and an Admin see the new one beside its li
   assert.notEqual(fullHash(now as unknown as Record<string, unknown>, "ws_main"), fullWas);
   assert.notEqual(sharedHash(sharedSlice(now as unknown as Record<string, unknown>, "ws_main", SAM)), samWas);
   assert.equal(sharedHash(sharedSlice(now as unknown as Record<string, unknown>, "ws_main", RAE)), raeWas);
+  // No fingerprint is worked out from a password: only a password changed gives the same ones; only its time, new ones.
+  const nowBlob = now as unknown as Record<string, unknown>;
+  const wsIn = (b: Record<string, unknown>) => (b.workspaces as Record<string, unknown>[]).find((w) => w.id === "ws_main")!;
+  const twin = structuredClone(nowBlob);
+  const entry = (wsIn(twin).previewPasswords as Record<string, { password: string; at: number }>)["shop/shop"];
+  entry.password = "Wm6pL3d";
+  const macSite = ((wsIn(twin).appsForMembers as { apps: Record<string, { sites: { name: string; previewPassword?: string }[] }> }).apps.shop.sites).find((x) => x.name === "admin")!;
+  macSite.previewPassword = "Hd8rK2v";
+  for (const v of [SAM, ADA]) assert.equal(sharedHash(sharedSlice(twin, "ws_main", v)), sharedHash(sharedSlice(nowBlob, "ws_main", v)), v.email);
+  assert.equal(fullHash(twin, "ws_main"), fullHash(nowBlob, "ws_main"));
+  entry.at += 1;
+  assert.notEqual(sharedHash(sharedSlice(twin, "ws_main", SAM)), sharedHash(sharedSlice(nowBlob, "ws_main", SAM)), "Bops Cloud's time");
+  assert.notEqual(fullHash(twin, "ws_main"), fullHash(nowBlob, "ws_main"));
+  const macTwin = structuredClone(nowBlob);
+  (wsIn(macTwin).appsForMembers as { at: number }).at += 1;
+  assert.notEqual(sharedHash(sharedSlice(macTwin, "ws_main", SAM)), sharedHash(sharedSlice(nowBlob, "ws_main", SAM)), "the owner's Mac's time");
+  assert.notEqual(fullHash(macTwin, "ws_main"), fullHash(nowBlob, "ws_main"));
   // One kept for a link the site no longer has (it moved, its link made again): never shown; the owner's Mac's copy is.
   assert.equal((await post(`key-${u}`, body({ site: "admin", url: "https://zz9yxw8vu7ts.orgo.dev", password: "Qs5cX2m" }))).status, 204);
   const stale = (await row(u)).state;
