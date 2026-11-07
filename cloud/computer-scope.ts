@@ -436,6 +436,16 @@ const lastOk = (last: unknown, mirror: Blob) =>
   same(last.keep ?? [], mirror.keep ?? []);
 
 /**
+ * Whether app record `h` of workspace `wsId` (Workspace.hostedApps[name]) has its home on the scope's computer: not lost,
+ * on that computer, and its bot one of that computer's bots in that workspace. hostingChangeAllowed holds a record to
+ * it before and after a computer's write, and Bops Cloud holds a computer's Preview password to it (cloud/preview-passwords.ts):
+ * a computer tells only its own apps'.
+ */
+export function appHomeHere(wsId: string, h: unknown, sc: HostingScope): boolean {
+  return isObject(h) && !h.lost && !!sc.desktopId && lower(h.computerId) === lower(sc.desktopId) && typeof h.botId === "string" && sc.bots.has(h.botId) && sc.workspaceOf(h.botId) === wsId;
+}
+
+/**
  * Whether a computer's runner may change the record of workspace `wsId`'s app on the web, `name`, from `was` to `now`
  * (Workspace.hostedApps[name]; undefined: none): only an app whose home is this computer (not lost), of one of its
  * bots in that workspace, before and after, its bot and computer kept; and in it only what its deploys, Previews and
@@ -449,7 +459,7 @@ const lastOk = (last: unknown, mirror: Blob) =>
 export function hostingChangeAllowed(wsId: string, was: unknown, now: unknown, sc: HostingScope, name?: string): boolean {
   if (same(was, now)) return true;
   if (!isObject(now)) return false;
-  const here = (h: Blob) => !h.lost && lower(h.computerId) === lower(sc.desktopId) && typeof h.botId === "string" && sc.bots.has(h.botId) && sc.workspaceOf(h.botId) === wsId;
+  const here = (h: Blob) => appHomeHere(wsId, h, sc);
   if (!here(now)) return false;
   const sealed = (label: string, site: string) => sealedFor(label, sc.projectOf?.(wsId), name, site);
   if (was === undefined)
@@ -757,25 +767,35 @@ export function keepAllowed(base: Blob, mine: Blob, scope: Scope, force: Iterabl
 
 /* ---------------- What a computer never reads ---------------- */
 
-/** A workspace without the Preview passwords kept for its members (null: it keeps none). */
+/**
+ * A workspace without the Preview passwords kept for its members (null: it keeps none): the copy the owner's Mac read
+ * for them (appsForMembers' sites' previewPassword), and the one Bops Cloud keeps from whoever set each last
+ * (Workspace.previewPasswords, cloud/preview-passwords.ts), each on its own: either one is left out wherever it is.
+ */
 function withoutPasswords(w: unknown): Blob | null {
-  const seen = isObject(w) && isObject(w.appsForMembers) ? w.appsForMembers : undefined;
-  if (!isObject(seen?.apps)) return null;
+  if (!isObject(w)) return null;
+  const seen = isObject(w.appsForMembers) ? w.appsForMembers : undefined;
   let held = false;
-  const apps = Object.fromEntries(
-    Object.entries(seen.apps).map(([name, app]) => {
-      if (!isObject(app) || !Array.isArray(app.sites) || !app.sites.some((s) => isObject(s) && "previewPassword" in s)) return [name, app];
-      held = true;
-      const sites = app.sites.map((s) => {
-        if (!isObject(s) || !("previewPassword" in s)) return s;
-        const rest = { ...s };
-        delete rest.previewPassword;
-        return rest;
-      });
-      return [name, { ...app, sites }];
-    }),
-  );
-  return held ? { ...(w as Blob), appsForMembers: { ...seen, apps } } : null;
+  const apps = isObject(seen?.apps)
+    ? Object.fromEntries(
+        Object.entries(seen.apps).map(([name, app]) => {
+          if (!isObject(app) || !Array.isArray(app.sites) || !app.sites.some((s) => isObject(s) && "previewPassword" in s)) return [name, app];
+          held = true;
+          const sites = app.sites.map((s) => {
+            if (!isObject(s) || !("previewPassword" in s)) return s;
+            const rest = { ...s };
+            delete rest.previewPassword;
+            return rest;
+          });
+          return [name, { ...app, sites }];
+        }),
+      )
+    : undefined;
+  const cloud = "previewPasswords" in w;
+  if (!held && !cloud) return null;
+  const out: Blob = held ? { ...w, appsForMembers: { ...seen, apps } } : { ...w };
+  delete out.previewPasswords;
+  return out;
 }
 
 /** What of a teammate (a bot of the same workspace as one on the computer, not on it itself) its runner reads: who it is and where it works, never its keys, access, persona or sessions. */
@@ -839,8 +859,9 @@ function readList(list: unknown, read: (x: Blob) => Blob | null): unknown {
  * holding the free computer) who it is and where it works (TEAMMATE): what workBot, a hand-off and a main bot's
  * mail go by. Never another workspace, another workspace's bots, chats, threads or routines, or a teammate's keys,
  * access or persona. Nor the Preview password of each site the owner's Mac keeps for members at Your Apps Write
- * (Workspace.appsForMembers, lib/hosted-apps.ts AppForMembers): a runner never needs them (lib/server/apps-for-members.ts
- * seeApps is the owner's Mac's alone), nor another bot's procedures or channel links. Everything else is as it is
+ * (Workspace.appsForMembers, lib/hosted-apps.ts AppForMembers), nor the one Bops Cloud keeps from whoever set it last
+ * (Workspace.previewPasswords): a runner never needs them (lib/server/apps-for-members.ts seeApps is the owner's Mac's
+ * alone, and a runner tells Bops Cloud a password it set without reading any back), nor another bot's procedures or channel links. Everything else is as it is
  * (the account, the owner, its usage, and not narrowed yet: held news (digest, whose items have no id to put back by),
  * the owner's phones and emails, the Macs, screens and the connected apps' account names). A write puts back what this left out (withHeldBack). With no
  * scope, only the passwords are left out.
