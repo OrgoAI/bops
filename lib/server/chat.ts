@@ -3057,6 +3057,11 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             sessionIds.push(moved.id);
             notes.push(`Moved ${s.title} to your Mac: “${message}”`);
           } else {
+            // More asked of a task on an app that already put a change on its Preview (`from`: hosted-apps.ts keepHeads
+            // and deployAfterTask set it only on a task asked to deploy, and deployAfterTask took that ask off): its next
+            // commit goes there too, on work_on_app's rule (the user's own turn; after an outside read, only when their
+            // own words asked to deploy). Set before the run is queued, so it ends with the deploy.
+            if (s.app && s.app.from !== undefined && !bg && !opts.outside && (!outsideRead || (await ownerAskedForSite(chatId, botId, "deploy", member)))) askDeploy(s.id, s.app);
             // Passed on from someone else's email: the task gets it as information from them, not the user's words.
             replyToSession(s.id, message, undefined, outsideFrom, member ? saidOf(member) : undefined);
             sessionIds.push(s.id);

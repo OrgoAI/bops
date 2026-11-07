@@ -2318,6 +2318,33 @@ await check("Asked of a task already on the app (foldInto hands that one back): 
   assert.match(twin, /foldInto\(twin, s\.goal, where, opts\);\n.*\n\s*if \(s\.app\?\.deployAfter\) askDeploy\(twin\.id, s\.app\);/);
 });
 
+await check("More asked of a task on the app that already put a change on its Preview (tell_task): the next commit goes there too; not for a task never asked to deploy, nor on a turn that read something from outside Bops unless Alex's own words asked to deploy", async () => {
+  // Each thread its own title, so the chat's note says which one got it; the bot's say ends the turn (one answer),
+  // a web_fetch first takes a second.
+  const tell = async (id, text, before = []) => {
+    const call = toolCall("tell_task", { thread_id: id, message: "Put the old title back.", on_mac: false, say: "Passing it on." });
+    if (before.length) answers.push(calling(...before), calling(call));
+    else answers.push(calling(call));
+    await Chat.handleMessage(chatId, text);
+    assert.equal(answers.length, 0, "every answer read");
+    assert.equal(messages().at(-1).text, `Sent to Work on ${id}: “Put the old title back.”`);
+  };
+  const done = (id, app) => appSession(id, { title: `Work on ${id}`, status: "done", endedAt: Date.now(), app });
+  // Deployed once: deployAfterTask took the ask off and kept what it deployed (from).
+  done("ses_again", { ...RECIPE, from: recipeHead() });
+  await tell("ses_again", "Now put the old title back");
+  assert.equal(sessionOf("ses_again").app.deployAfter, true, "the follow-up's commit goes to the Preview");
+  // Started with deploy false (Alex said not to put it on its Preview): never asked, so a follow-up isn't either.
+  done("ses_never", { ...RECIPE });
+  await tell("ses_never", "Now put the old title back");
+  assert.equal(sessionOf("ses_never").app.deployAfter, undefined);
+  done("ses_out", { ...RECIPE, from: recipeHead() });
+  await tell("ses_out", "Use the title from that page", [toolCall("web_fetch", { url: "https://example.com/menu" })]);
+  assert.equal(sessionOf("ses_out").app.deployAfter, undefined, "a turn that read the web");
+  await tell("ses_out", "Use the title from that page and deploy it", [toolCall("web_fetch", { url: "https://example.com/menu" })]);
+  assert.equal(sessionOf("ses_out").app.deployAfter, true, "Alex's own words asked");
+});
+
 await check("As a task first starts, the app's newest commit is noted, once (picked up again, it's kept): where its changes start (startHead), and for one asked to deploy, what a new commit is told from; a task that started before reads nothing more of Ingot", async () => {
   appSession("ses_dep");
   const head = recipeHead();
@@ -2379,6 +2406,26 @@ await check("Asked again of that task with nothing new committed since it went l
   await H.deployAfterTask("ses_dep");
   assert.equal(deploysSince(n).length, 1);
   assert.equal(stagingDeploys()[0].source_version, c2.id);
+  assert.equal(sessionOf("ses_dep").app.deployAfter, undefined);
+});
+
+await check("Picked up again while its end still reads Ingot (more asked of it, as tell_task queues it): that end deploys nothing and keeps the ask, so the next run's end deploys its newest commit", async () => {
+  H.askDeploy("ses_dep", RECIPE);
+  const c4 = commit("recipe-box", "A red title", { id: "boppy", name: "Boppy" });
+  const n = web.calls.length;
+  const m = messages().length;
+  const ending = H.deployAfterTask("ses_dep");
+  S.patchSession("ses_dep", { status: "queued" });
+  await ending;
+  assert.deepEqual(deploysSince(n), [], "not the run that ended");
+  assert.equal(messages().length, m, "nothing said");
+  assert.equal(sessionOf("ses_dep").app.deployAfter, true, "the ask stays");
+  const c5 = commit("recipe-box", "The old title back", { id: "boppy", name: "Boppy" });
+  S.patchSession("ses_dep", { status: "done" });
+  await H.deployAfterTask("ses_dep");
+  assert.equal(deploysSince(n).length, 1, "once");
+  assert.equal(stagingDeploys()[0].source_version, c5.id, "the newest, with the earlier commit in it");
+  assert.notEqual(c4.id, c5.id);
   assert.equal(sessionOf("ses_dep").app.deployAfter, undefined);
 });
 
