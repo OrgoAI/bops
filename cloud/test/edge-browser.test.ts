@@ -32,6 +32,8 @@ const PROJECT = "22222222-3333-4444-5555-666666666666";
 const DESKTOP = "0f0e0d0c-0b0a-4908-8706-050403020100";
 const keyOf = (id: string) => `key-${id}`;
 const COMPUTER_KEY = `computer-${owner}`;
+/** Keys orgo-web turns down now (revoked after they signed in). */
+const revoked = new Set<string>();
 
 before(async () => {
   await prepareDb();
@@ -51,6 +53,7 @@ before(async () => {
       const json = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
       const key = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
       if (req.url === "/api/user/profile") {
+        if (revoked.has(key)) return json(401, { error: "This key was revoked" });
         if (key === COMPUTER_KEY) return json(200, { id: owner, api_key: { scope: "computer", computer_id: DESKTOP } });
         const id = /^key-(.+)$/.exec(key)?.[1];
         return id ? json(200, { id, email: `${id}@example.com`, full_name: id.split("-")[1] }) : json(401, { error: "no" });
@@ -417,4 +420,28 @@ test("an open input socket ends at once on orgo-web's notice, and when the owner
   const ws = state.workspaces[0];
   now = { ...state, workspaces: [{ ...ws, memberAccess: { ...ws.memberAccess, [`${writer}@example.com`]: { others: "none", bots: { max: "read", dana: "write" }, computer: "use", at } } }] };
   assert.equal(await until(() => t.closed(), "the next look to end it", 2000), 4403);
+});
+
+test("an open input socket ends once orgo-web turns its key down, at the next look, though no notice comes for an owner's own bot", async () => {
+  resetBrowser({ state: async (account) => (account === owner ? state : {}), every: 50 });
+  const r = await runner();
+  const s = await inputSocket(keyOf(owner), "bot=max");
+  try {
+    assert.equal(s.status, 101);
+    s.send({ act: "input", method: "Input.insertText", params: { text: "a" } });
+    await until(() => r.got.some((m) => m.t === "input"), "the act before");
+    // Revoked: orgo-web turns the key down, and what was kept of its sign-in has run out (as HIT_MS passing).
+    revoked.add(keyOf(owner));
+    clearAuthCache();
+    assert.equal(await until(() => s.closed(), "the next look to end it", 2000), 4403);
+    s.send({ act: "input", method: "Input.insertText", params: { text: "b" } });
+    await new Promise((ok) => setTimeout(ok, 150));
+    assert.equal(r.got.filter((m) => m.t === "input").length, 1, "nothing after it reaches the runner");
+    assert.equal((await inputSocket(keyOf(owner), "bot=max")).status, 401, "nor does a new socket on that key");
+  } finally {
+    revoked.delete(keyOf(owner));
+    clearAuthCache();
+    r.close();
+    await until(() => !runnerConnected(owner, DESKTOP), "the runner to go");
+  }
 });

@@ -1,7 +1,7 @@
 import { STATUS_CODES, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import { bearer, type CloudUser } from "./auth.ts";
+import { bearer, userForKey, type CloudUser } from "./auth.ts";
 import { HttpError, readJson, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
 import { botsOn } from "./computer-scope.ts";
 import { levelOf, permits, type MemberAccess } from "./member-access.ts";
@@ -300,8 +300,9 @@ const replyInput = (ws: WebSocket, e: HttpError) => {
 
 /**
  * WS /v1/browser/input: asked as the watch stream is (mayUseBrowser; a refusal is the upgrade's status), then each message
- * one act, checked and sent on in the order it came. Asked afresh every ROLE_MS, and ended at once by orgo-web's notice
- * that their access changed; ended too when the bot's computer or account isn't the one it was.
+ * one act, checked and sent on in the order it came. Asked afresh every ROLE_MS (the key itself too: userForKey, cached as
+ * a POST's sign-in is, so a key turned down stops it within HIT_MS and ROLE_MS, as it would a POST), and ended at once by
+ * orgo-web's notice that their access changed; ended too when the bot's computer or account isn't the one it was.
  */
 async function openInput(req: IncomingMessage, socket: Duplex, head: Buffer, user: CloudUser, url: URL) {
   const bot = url.searchParams.get("bot") ?? "";
@@ -324,12 +325,16 @@ async function openInput(req: IncomingMessage, socket: Duplex, head: Buffer, use
     const stop = () => end(1001, "Bops Cloud is restarting");
     inputs.add(stop);
     const look = setInterval(() => {
-      void mayUseBrowser(user, key, project, bot, { fresh: true })
-        .then((now) => {
+      // The key asked again, as each POST's is (kept as long): one Orgo turns down now, or someone else's, ends it.
+      void userForKey(key)
+        .then(async (who) => {
+          if (!who || who.id !== user.id) return end(INPUT_REFUSED, "Sign in again");
+          const now = await mayUseBrowser(user, key, project, bot, { fresh: true });
           if (now.account !== a.account || now.desktop !== a.desktop) end(INPUT_MOVED, "The bot's computer changed");
           else a = now;
         })
         .catch((e) => {
+          // Orgo or the database out of reach (5xx): kept as it is, as a watch stream is.
           if (e instanceof HttpError && e.status < 500) end(INPUT_REFUSED, "No longer allowed");
         });
     }, every);
