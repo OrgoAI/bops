@@ -111,6 +111,11 @@ await test("inputs go on one socket in order, each answered once on its way; tak
     assert.equal(c.upgrades, 2);
     // Another workspace than the one open here: refused before anything is sent, as before.
     assert.equal((await v.actBrowser(move(103), "p-other")).body.code, "workspace_changed");
+    // A method outside BROWSER_METHODS: by POST, so Bops Cloud's refusal comes back in its words; never on the socket.
+    const said = c.said.length;
+    await v.actBrowser({ bot: "b", act: "input", method: "Runtime.evaluate", params: { expression: "1" } }, "");
+    assert.equal(c.posts.at(-1).method, "Runtime.evaluate");
+    assert.equal(c.said.length, said);
   } finally {
     await c.close();
   }

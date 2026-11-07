@@ -1,6 +1,6 @@
 import "server-only";
 import WebSocket from "ws";
-import { BOPS_DEVICE_HEADER, BROWSER_INPUT_HEADER, BROWSER_INPUT_PATH, type BrowserAct, type BrowserInputAct, type BrowserInputReply } from "@/cloud/protocol";
+import { BOPS_DEVICE_HEADER, BROWSER_INPUT_HEADER, BROWSER_INPUT_PATH, isBrowserMethod, type BrowserAct, type BrowserInputAct, type BrowserInputReply } from "@/cloud/protocol";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudUrl } from "./cloud";
 import { orgoKey } from "./orgo-auth";
@@ -72,8 +72,8 @@ export async function actBrowser(act: Omit<BrowserAct, "project">, project: stri
   const who = asWhom();
   if (!who) return { status: 409, body: { error: "Sign in with Orgo first." } };
   if (!sameWorkspace(who, project)) return { status: 409, body: { error: MOVED, code: "workspace_changed" } };
-  // Take and hand back go by POST: their refusals come back in Bops Cloud's words.
-  return act.act === "input" && !noSocket ? viaSocket(who, act) : post(who, act);
+  // Take, hand back and a method outside BROWSER_METHODS go by POST: their refusals come back in Bops Cloud's words.
+  return act.act === "input" && isBrowserMethod(act.method) && !noSocket ? viaSocket(who, act) : post(who, act);
 }
 
 /** One act by POST /v1/browser/act, as Bops Cloud answers it. */
