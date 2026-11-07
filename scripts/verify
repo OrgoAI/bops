@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+const feature = process.argv[2] ?? 'browser-speed';
+if (feature === '--list') {
+    console.log('browser-speed');
+    process.exit(0);
+}
+if (feature !== 'browser-speed')
+    throw new Error('Use scripts/verify browser-speed; see docs/FEATURES.md');
+for (const [cmd, args] of [
+    [process.execPath, ['--test', 'scripts/test-browser-probe.mjs']],
+    [process.execPath, ['--check', 'scripts/verify']],
+    ['npx', ['tsc', '--noEmit']],
+    ['npx', ['eslint', 'scripts/browser-speed', 'scripts/probe-browser-speed.mjs', 'scripts/probe-computer-side.mjs', 'scripts/dev-two-person.mjs', 'scripts/test-browser-probe.mjs', 'cloud/browser-probe.ts', 'cloud/browser.ts', 'lib/browser-relay.ts', 'components/app/bot-browser.tsx', 'next.config.ts']],
+]) {
+    const r = spawnSync(cmd, args, { stdio: 'inherit' });
+    if (r.status !== 0)
+        process.exit(r.status ?? 1);
+    console.log(`PASS ${cmd} ${args.join(' ')}`);
+}
