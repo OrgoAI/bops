@@ -1,5 +1,6 @@
 import "server-only";
-import { BOPS_DEVICE_HEADER, type BrowserAct } from "@/cloud/protocol";
+import WebSocket from "ws";
+import { BOPS_DEVICE_HEADER, BROWSER_INPUT_HEADER, BROWSER_INPUT_PATH, type BrowserAct, type BrowserInputAct, type BrowserInputReply } from "@/cloud/protocol";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudUrl } from "./cloud";
 import { orgoKey } from "./orgo-auth";
@@ -12,14 +13,20 @@ import { stateUser } from "./store";
  * stream of it (cloud/browser.ts), asked for on the signed-in user's own key, for a bot of the workspace open now: the
  * user's own, or the one shared with them (by its Orgo id). Bops Cloud decides who may; this only passes it on. Nothing
  * of it is kept: frames go straight through to the window.
+ *
+ * Inputs go to Bops Cloud on one socket per bot and workspace (WS /v1/browser/input), in order, each answered as soon as
+ * it's on its way rather than after a round trip to Bops Cloud and a database read there. A Bops Cloud from before that
+ * socket (its upgrade a plain 404) gets every act by POST, as before, for as long as this server runs.
  */
 
-/** Where to ask, as whom: null when this Bops isn't signed in on Bops Cloud. */
-function asWhom(): { headers: Record<string, string>; project: string | null } | null {
+type Who = { id: string; url: string; headers: Record<string, string>; project: string | null };
+
+/** Where to ask, as whom: null when this Bops isn't signed in on Bops Cloud. `id`: the person and key it's asked as. */
+function asWhom(): Who | null {
   const user = stateUser();
   const key = orgoKey();
   if (!cloudOn() || !user || !key) return null;
-  return { headers: { Authorization: `Bearer ${key}`, [BOPS_DEVICE_HEADER]: deviceIdFor(user), ...appHeaders() }, project: sharedProjectId() };
+  return { id: `${user}\n${key}`, url: cloudUrl(), headers: { Authorization: `Bearer ${key}`, [BOPS_DEVICE_HEADER]: deviceIdFor(user), ...appHeaders() }, project: sharedProjectId() };
 }
 
 const SSE = { "content-type": "text/event-stream", "cache-control": "no-store", "x-accel-buffering": "no" };
@@ -47,7 +54,7 @@ export async function watchBrowser(bot: string, project: string, signal: AbortSi
   if (!who) return refused("Sign in with Orgo to see the bot's browser.", "signed_out");
   if (!sameWorkspace(who, project)) return refused(MOVED, "workspace_changed");
   const q = new URLSearchParams({ bot, ...(who.project ? { project: who.project } : {}), ...(quiet ? { only: "activity" } : {}) });
-  const res = await fetch(`${cloudUrl()}/v1/browser/watch?${q}`, { headers: { ...who.headers, accept: "text/event-stream" }, cache: "no-store", signal }).catch(() => null);
+  const res = await fetch(`${who.url}/v1/browser/watch?${q}`, { headers: { ...who.headers, accept: "text/event-stream" }, cache: "no-store", signal }).catch(() => null);
   if (!res) return refused("Couldn't reach Bops Cloud. Check your internet connection.", "unreachable", true);
   if (!res.ok || !res.body) {
     const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
@@ -57,12 +64,21 @@ export async function watchBrowser(bot: string, project: string, signal: AbortSi
   return new Response(res.body, { headers: SSE });
 }
 
+type Answer = { status: number; body: unknown };
+const SENT: Answer = { status: 202, body: { ok: true } };
+
 /** POST: take control, hand it back, or one input, as Bops Cloud answers it. `project`: as watchBrowser's. */
-export async function actBrowser(act: Omit<BrowserAct, "project">, project: string): Promise<{ status: number; body: unknown }> {
+export async function actBrowser(act: Omit<BrowserAct, "project">, project: string): Promise<Answer> {
   const who = asWhom();
   if (!who) return { status: 409, body: { error: "Sign in with Orgo first." } };
   if (!sameWorkspace(who, project)) return { status: 409, body: { error: MOVED, code: "workspace_changed" } };
-  const res = await fetch(`${cloudUrl()}/v1/browser/act`, {
+  // Take and hand back go by POST: their refusals come back in Bops Cloud's words.
+  return act.act === "input" && !noSocket ? viaSocket(who, act) : post(who, act);
+}
+
+/** One act by POST /v1/browser/act, as Bops Cloud answers it. */
+async function post(who: Who, act: Omit<BrowserAct, "project">): Promise<Answer> {
+  const res = await fetch(`${who.url}/v1/browser/act`, {
     method: "POST",
     headers: { ...who.headers, "content-type": "application/json" },
     body: JSON.stringify({ ...act, ...(who.project ? { project: who.project } : {}) }),
@@ -71,4 +87,93 @@ export async function actBrowser(act: Omit<BrowserAct, "project">, project: stri
   }).catch(() => null);
   if (!res) return { status: 502, body: { error: "Couldn't reach Bops Cloud." } };
   return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+/* ---------------- One socket per bot ---------------- */
+
+/** A socket with no act for this long closes; the next act opens another. */
+const IDLE_MS = 60_000;
+/** The most one act may be on the socket (Bops Cloud's limit); a bigger one goes by POST, which refuses it in words. */
+const MAX_ACT = 64 * 1024;
+
+type Waiting = { who: Who; act: Omit<BrowserAct, "project">; done: (a: Answer) => void };
+/**
+ * `waiting`: acts that came while it opens, sent in order once it has. `said`: an act Bops Cloud said didn't go (its
+ * computer isn't connected): the next goes by POST, so the window hears it in Bops Cloud's words.
+ */
+type Pipe = { ws: WebSocket; who: Who; waiting: Waiting[]; said: boolean; idle?: ReturnType<typeof setTimeout> };
+
+/** By "<person and key>\n<Bops Cloud>\n<workspace>\n<bot>". */
+const pipes = new Map<string, Pipe>();
+/** This server's Bops Cloud has no input socket (a plain 404): every act goes by POST from now on. */
+let noSocket = false;
+
+function viaSocket(who: Who, act: Omit<BrowserAct, "project">): Promise<Answer> {
+  const msg = JSON.stringify({ act: act.act, method: act.method, params: act.params } satisfies BrowserInputAct);
+  if (Buffer.byteLength(msg) > MAX_ACT) return post(who, act);
+  const id = `${who.id}\n${who.url}\n${who.project ?? ""}\n${act.bot}`;
+  let p = pipes.get(id);
+  if (p && p.ws.readyState > WebSocket.OPEN) {
+    gone(id, p);
+    p = undefined;
+  }
+  if (p?.said) {
+    p.said = false;
+    return post(who, act);
+  }
+  const pipe = p ?? openPipe(id, who, act.bot);
+  rest(id, pipe);
+  return new Promise((done) => {
+    if (pipe.ws.readyState === WebSocket.OPEN) send(pipe, { who, act, done }, msg);
+    else pipe.waiting.push({ who, act, done });
+  });
+}
+
+/** On its way: answered once the socket took it; a socket that failed sends it by POST instead. */
+function send(p: Pipe, w: Waiting, msg = JSON.stringify({ act: w.act.act, method: w.act.method, params: w.act.params })) {
+  p.ws.send(msg, (e) => (e ? void post(w.who, w.act).then(w.done) : w.done(SENT)));
+}
+
+function openPipe(id: string, who: Who, bot: string): Pipe {
+  const q = new URLSearchParams({ bot, ...(who.project ? { project: who.project } : {}) });
+  const ws = new WebSocket(`${who.url.replace(/^http/, "ws")}${BROWSER_INPUT_PATH}?${q}`, { headers: who.headers, handshakeTimeout: 10_000, perMessageDeflate: false, maxPayload: MAX_ACT });
+  const p: Pipe = { ws, who, waiting: [], said: false };
+  pipes.set(id, p);
+  ws.once("open", () => {
+    for (const w of p.waiting.splice(0)) send(p, w);
+  });
+  ws.once("unexpected-response", (req, res) => {
+    // A Bops Cloud from before this socket: by POST, for good. Any other refusal: these by POST, which say why in words.
+    if (res.statusCode === 404 && !res.headers[BROWSER_INPUT_HEADER]) noSocket = true;
+    req.destroy();
+    gone(id, p);
+  });
+  ws.on("message", (data, binary) => {
+    if (binary) return;
+    try {
+      if ((JSON.parse(String(data)) as BrowserInputReply).t === "error") p.said = true;
+    } catch {}
+  });
+  ws.on("error", () => gone(id, p));
+  ws.on("close", () => gone(id, p));
+  return p;
+}
+
+/** Closed after IDLE_MS without an act. */
+function rest(id: string, p: Pipe) {
+  if (p.idle) clearTimeout(p.idle);
+  p.idle = setTimeout(() => {
+    p.ws.close(1000);
+    gone(id, p);
+  }, IDLE_MS);
+  p.idle.unref?.();
+}
+
+/** The socket is gone (or going): forgotten, and acts still waiting for it go by POST, in order. */
+function gone(id: string, p: Pipe) {
+  if (pipes.get(id) === p) pipes.delete(id);
+  if (p.idle) clearTimeout(p.idle);
+  const waiting = p.waiting.splice(0);
+  if (p.ws.readyState < WebSocket.CLOSING) p.ws.terminate();
+  void waiting.reduce((chain, w) => chain.then(() => post(w.who, w.act).then(w.done)), Promise.resolve());
 }
