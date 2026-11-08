@@ -84,7 +84,13 @@ export async function startLink(target, delayMs, logFile) {
             socket.once('close', () => { sockets.delete(socket); log('connection_close', { direction: 'upstream', connectionId, downstreamId, transport }); });
         }, 2 * delayMs);
     };
+    const upstream = new URL(target);
     const server = createServer(async (req, res) => {
+        // Only a path on the one Bops Cloud this stands in front of: an absolute or "//" address would name another host.
+        if (!req.url.startsWith('/') || req.url.startsWith('//')) {
+            res.writeHead(400).end();
+            return;
+        }
         const chunks = [];
         for await (const chunk of req)
             chunks.push(chunk);
@@ -107,7 +113,7 @@ export async function startLink(target, delayMs, logFile) {
                 return;
             if (act)
                 log("proxy_act_ready", act);
-            const up = request(new URL(req.url, target), { agent: paired.get(req.socket).agent, method: req.method, headers: { ...req.headers, host: new URL(target).host } }, (reply) => {
+            const up = request({ protocol: upstream.protocol, hostname: upstream.hostname, port: upstream.port, path: req.url, agent: paired.get(req.socket).agent, method: req.method, headers: { ...req.headers, host: upstream.host } }, (reply) => {
                 let pending = "";
                 if (act)
                     log("proxy_reply_in", { status: reply.statusCode });

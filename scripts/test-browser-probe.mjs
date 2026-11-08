@@ -58,6 +58,34 @@ test("proxy adds both one-way delays and streams the first event before upstream
         await new Promise(r => upstream.close(r));
     }
 });
+test("the delay proxy only forwards a path to its own upstream, never to a host the request names", async () => {
+    let upstreamHits = 0, elsewhereHits = 0;
+    const upstream = createServer((req, res) => { upstreamHits++; res.end('ok'); });
+    const elsewhere = createServer((req, res) => { elsewhereHits++; res.end('elsewhere'); });
+    await new Promise(r => upstream.listen(0, '127.0.0.1', r));
+    await new Promise(r => elsewhere.listen(0, '127.0.0.1', r));
+    const proxy = await startLink(`http://127.0.0.1:${upstream.address().port}`, 0);
+    const ask = (path) => new Promise((ok, no) => {
+        const r = request({ host: '127.0.0.1', port: new URL(proxy.url).port, path, agent: false }, (res) => { res.resume(); res.on('end', () => ok(res.statusCode)); });
+        r.on('error', no);
+        r.end();
+    });
+    try {
+        const other = `127.0.0.1:${elsewhere.address().port}`;
+        assert.equal(await ask(`http://${other}/v1/browser/watch`), 400, "an absolute address is refused");
+        assert.equal(await ask(`//${other}/v1/browser/watch`), 400, "a scheme-relative one too");
+        assert.equal(elsewhereHits, 0, "nothing reached the other host");
+        assert.equal(await ask('/v1/health?x=1'), 200, "a path goes to the upstream");
+        assert.equal(upstreamHits, 1);
+    }
+    finally {
+        await proxy.close();
+        for (const s of [upstream, elsewhere]) {
+            s.closeAllConnections();
+            await new Promise(r => s.close(r));
+        }
+    }
+});
 test("Chrome expected-display metadata can be later than the encoded frame; preserve signed deltas", () => {
     const times = { input: 0, sent: 1, cloud: 2, runner: 3, handled: 4, frame: 20, sourceReceived: 10, forwarded: 11, received: 12, painted: 14 };
     const hops = hopTimings(times);
