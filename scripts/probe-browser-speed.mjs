@@ -179,7 +179,9 @@ try {
         let idle;
         if (idleMs) {
             const start = now();
-            await sleep(idleMs);
+            // A timer can end a fraction of a millisecond early by this clock: wait out the rest.
+            while (now() - start < idleMs)
+                await sleep(Math.max(1, idleMs - (now() - start)));
             idle = { start, end: now(), waitedMs: now() - start };
         }
         const start = now();
