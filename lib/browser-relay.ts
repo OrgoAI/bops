@@ -677,7 +677,7 @@ class RelayCore {
 
   private heard(m: BrowserToRunner) {
     if (!m || typeof m !== "object" || typeof m.bot !== "string") return;
-    if (m.t === "watch") return this.watch(m.bot, Array.isArray(m.viewers) ? m.viewers : []);
+    if (m.t === "watch") return this.watch(m.bot, Array.isArray(m.viewers) ? m.viewers : [], m.joined === true);
     const sc = this.screenOf(m.bot);
     if (!sc) return m.who && this.refuse(m.bot, m.who.id, "Its browser isn't open right now.");
     if (m.t === "take") {
@@ -701,7 +701,7 @@ class RelayCore {
   }
 
   /** Who watches a bot's browser now: its screen captured while anyone does; a person in control who left hands it back. */
-  private watch(bot: string, viewers: BrowserPerson[]) {
+  private watch(bot: string, viewers: BrowserPerson[], joined: boolean) {
     const had = this.screenOf(bot);
     const want = viewers.length ? this.screen(this.botScreen.get(bot) ?? this.o.screenFor(bot) ?? this.o.screens()[0]?.display ?? -1) : null;
     if (had && had !== want) {
@@ -716,8 +716,9 @@ class RelayCore {
     this.botScreen.set(bot, want.display);
     want.watch();
     if (want.controller && !want.watchedBy(want.controller.who.id)) want.setController(null);
-    // Someone new: they see the screen at once, not at its next paint.
-    if (viewers.some((v) => !before.some((b) => b.id === v.id))) want.catchUp([bot]);
+    // Someone new, or a stream just opened (someone already watching, on another Mac or window): they see the screen at
+    // once, not at its next paint.
+    if (joined || viewers.some((v) => !before.some((b) => b.id === v.id))) want.catchUp([bot]);
   }
 
   status() {

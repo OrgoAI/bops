@@ -1277,11 +1277,13 @@ export type BrowserActivity = { step: "browsing" | "idle"; waiting: boolean; sig
 
 /**
  * What Bops Cloud tells a runner on its socket (WS /v1/browser/runner): who watches each of its bots' browsers now
- * ("watch", the whole list each time; empty: nobody), and what a viewer asked ("take", "release", "input"). A take
+ * ("watch", the whole list each time; empty: nobody; `joined`: a stream just opened, maybe for someone already watching
+ * on another Mac or window, who sees the page at once as someone new does), and what a viewer asked ("take", "release",
+ * "input"). A take
  * by the owner (`over`) takes control from a member who has it; a member's never takes it from anyone.
  */
 export type BrowserToRunner =
-  | { t: "watch"; bot: string; viewers: BrowserPerson[] }
+  | { t: "watch"; bot: string; viewers: BrowserPerson[]; joined?: true }
   | { t: "take"; bot: string; who: BrowserPerson; over?: true }
   | { t: "release"; bot: string; who: BrowserPerson }
   | { t: "input"; bot: string; who: BrowserPerson; method: string; params: unknown };

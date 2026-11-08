@@ -190,9 +190,9 @@ function watching(account: string, bot: string, desktop: string): BrowserPerson[
   return [...out.values()];
 }
 
-/** Tell the bot's runner who watches it now. */
-function sayWatching(account: string, bot: string, desktop: string) {
-  sendRunner(runners.get(runnerKey(account, desktop)), { t: "watch", bot, viewers: watching(account, bot, desktop) });
+/** Tell the bot's runner who watches it now; `joined`: a stream just opened (its runner catches it up). */
+function sayWatching(account: string, bot: string, desktop: string, joined = false) {
+  sendRunner(runners.get(runnerKey(account, desktop)), { t: "watch", bot, viewers: watching(account, bot, desktop), ...(joined ? { joined: true as const } : {}) });
 }
 
 function sendRunner(r: Runner | undefined, m: BrowserToRunner) {
@@ -239,7 +239,7 @@ const watchRoute: Route = {
     event(res, { t: "computer", connected: runners.has(runnerKey(a.account, a.desktop)) });
     const now = doing.get(k);
     if (now?.desktop === a.desktop) event(res, { t: "activity", ...now.activity });
-    if (!quiet) sayWatching(a.account, bot, a.desktop);
+    if (!quiet) sayWatching(a.account, bot, a.desktop, true);
     const beat = setInterval(() => res.write(": still\n\n"), KEEPALIVE_MS);
     beat.unref?.();
     // Asked afresh while it's open: a key turned down, someone out of the workspace, or without Write or Use its computer

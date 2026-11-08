@@ -182,6 +182,28 @@ test("the owner and a member with Write and Use its computer watch the bot's bro
   r.close();
 });
 
+test("a second stream of someone already watching (another Mac or window) tells the runner one joined, so it catches them up", async () => {
+  const r = await runner();
+  const first = await watch(owner, null);
+  const second = { close: () => {} };
+  try {
+    await until(() => r.got.some((m) => m.t === "watch" && m.viewers.length === 1), "the runner to hear the owner");
+    r.got.length = 0;
+    Object.assign(second, await watch(owner, null));
+    const w = await until(() => r.got.findLast((m) => m.t === "watch"), "the runner to hear of the second stream");
+    assert.ok(w.t === "watch" && w.joined === true && w.viewers.length === 1, JSON.stringify(w));
+    first.close();
+    const left = await until(() => r.got.findLast((m) => m.t === "watch" && m !== w), "the runner to hear one left");
+    assert.ok(left.t === "watch" && !left.joined && left.viewers.length === 1, "one leaving: no one joined, the owner still watches");
+  } finally {
+    first.close();
+    second.close();
+    await until(() => viewersOf(owner, "max") === 0, "both streams to end");
+    r.close();
+    await until(() => !runnerConnected(owner, DESKTOP), "the runner to go");
+  }
+});
+
 test("a member without Use its computer, a member at Read, one who doesn't see the bot and an outsider are refused, saying why", async () => {
   const no = await watch(noComputer);
   assert.equal(no.status, 403);
