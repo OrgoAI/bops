@@ -445,3 +445,22 @@ test("an open input socket ends once orgo-web turns its key down, at the next lo
     await until(() => !runnerConnected(owner, DESKTOP), "the runner to go");
   }
 });
+
+test("an open watch stream ends once orgo-web turns its key down, at the next look, though no notice comes for an owner's own bot", async () => {
+  resetBrowser({ state: async (account) => (account === owner ? state : {}), every: 50 });
+  const v = await watch(owner, null);
+  try {
+    assert.equal(v.status, 200);
+    await until(() => viewersOf(owner, "max") === 1, "watching");
+    // Revoked: orgo-web turns the key down, and what was kept of its sign-in has run out (as HIT_MS passing).
+    revoked.add(keyOf(owner));
+    clearAuthCache();
+    await until(() => viewersOf(owner, "max") === 0, "the next look to end it", 2000);
+    assert.ok(v.events.some((e) => e.t === "refused" && e.code === "signed_out"), "it says why, in place of the page");
+    assert.equal((await watch(owner, null)).status, 401, "nor does a new stream on that key");
+  } finally {
+    revoked.delete(keyOf(owner));
+    clearAuthCache();
+    v.close();
+  }
+});

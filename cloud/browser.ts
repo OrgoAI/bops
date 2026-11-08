@@ -157,6 +157,17 @@ const nameOf = (blob: Record<string, unknown>, botId: string) => {
   return typeof n === "string" && n.trim() ? n.trim().slice(0, 80) : "The bot";
 };
 
+/**
+ * Asked again for a watch stream or input socket that's open: the key itself first, as each POST's is (userForKey, kept
+ * as long: one Orgo turns down now, or someone else's, is a 401 within HIT_MS and ROLE_MS, though no notice comes for an
+ * owner's own bot), then who may now (mayUseBrowser). Orgo or the database out of reach: a 5xx, which keeps it open.
+ */
+async function stillMay(user: CloudUser, key: string, projectId: string | null, botId: string): Promise<BrowserAccess> {
+  const who = await userForKey(key);
+  if (!who || who.id !== user.id) throw new HttpError(401, "Sign in with Orgo again to see the bot's browser.", { code: "signed_out" });
+  return mayUseBrowser(user, key, projectId, botId, { fresh: true });
+}
+
 /* ---------------- Viewers ---------------- */
 
 /** What a runner says its bot is doing with its browser, checked; null for anything else. A sign-in's page: http or https only. */
@@ -231,9 +242,10 @@ const watchRoute: Route = {
     if (!quiet) sayWatching(a.account, bot, a.desktop);
     const beat = setInterval(() => res.write(": still\n\n"), KEEPALIVE_MS);
     beat.unref?.();
-    // Asked afresh while it's open: someone out of the workspace, or without Write or Use its computer now, stops watching.
+    // Asked afresh while it's open: a key turned down, someone out of the workspace, or without Write or Use its computer
+    // now, stops watching.
     const look = setInterval(() => {
-      void mayUseBrowser(user!, key, project, bot, { fresh: true })
+      void stillMay(user!, key, project, bot)
         .then((now) => {
           if (now.account !== a.account || now.desktop !== a.desktop) v.end();
         })
@@ -300,9 +312,8 @@ const replyInput = (ws: WebSocket, e: HttpError) => {
 
 /**
  * WS /v1/browser/input: asked as the watch stream is (mayUseBrowser; a refusal is the upgrade's status), then each message
- * one act, checked and sent on in the order it came. Asked afresh every ROLE_MS (the key itself too: userForKey, cached as
- * a POST's sign-in is, so a key turned down stops it within HIT_MS and ROLE_MS, as it would a POST), and ended at once by
- * orgo-web's notice that their access changed; ended too when the bot's computer or account isn't the one it was.
+ * one act, checked and sent on in the order it came. Asked afresh every ROLE_MS (stillMay: the key too), and ended at once
+ * by orgo-web's notice that their access changed; ended too when the bot's computer or account isn't the one it was.
  */
 async function openInput(req: IncomingMessage, socket: Duplex, head: Buffer, user: CloudUser, url: URL) {
   const bot = url.searchParams.get("bot") ?? "";
@@ -325,17 +336,14 @@ async function openInput(req: IncomingMessage, socket: Duplex, head: Buffer, use
     const stop = () => end(1001, "Bops Cloud is restarting");
     inputs.add(stop);
     const look = setInterval(() => {
-      // The key asked again, as each POST's is (kept as long): one Orgo turns down now, or someone else's, ends it.
-      void userForKey(key)
-        .then(async (who) => {
-          if (!who || who.id !== user.id) return end(INPUT_REFUSED, "Sign in again");
-          const now = await mayUseBrowser(user, key, project, bot, { fresh: true });
+      void stillMay(user, key, project, bot)
+        .then((now) => {
           if (now.account !== a.account || now.desktop !== a.desktop) end(INPUT_MOVED, "The bot's computer changed");
           else a = now;
         })
         .catch((e) => {
           // Orgo or the database out of reach (5xx): kept as it is, as a watch stream is.
-          if (e instanceof HttpError && e.status < 500) end(INPUT_REFUSED, "No longer allowed");
+          if (e instanceof HttpError && e.status < 500) end(INPUT_REFUSED, e.status === 401 ? "Sign in again" : "No longer allowed");
         });
     }, every);
     look.unref?.();
