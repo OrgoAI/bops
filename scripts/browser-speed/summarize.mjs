@@ -103,6 +103,20 @@ export function summarize(raw, logs, links = []) {
     const received = new Set(raw.viewer.received.map(f => f.timestamp));
     summary.integrity = { unreceivedSourceFrames: [...produced].filter(t => !received.has(t)).length, clock: raw.clock };
     assert.equal(summary.integrity.unreceivedSourceFrames, 0, 'Source colour attribution requires every source frame during input scenarios');
+    // Others watching while the driver drives: when each first painted the change, from the driver's own input, and how
+    // long after the driver's window it was; and each one's frames a second while scrolling.
+    summary.driver = raw.driver ?? 'owner';
+    summary.watchers = (raw.watchers ?? []).map(w => w.who);
+    if (summary.watchers.length) {
+        for (const scenario of ['rest', 'moving', 'hover', 'idle']) {
+            const seen = raw.samples.filter(s => s.scenario === scenario).flatMap(s => s.watchers.map(w => ({ total: w.at - s.times.input, behind: w.at - s.paint.at })));
+            assert.equal(seen.length, raw.samples.filter(s => s.scenario === scenario).length * summary.watchers.length, `${scenario}: every watcher saw every change`);
+            summary.metrics[`watcher_${scenario}_to_photon_ms`] = stats(seen.map(w => w.total));
+            summary.metrics[`watcher_${scenario}_behind_driver_ms`] = stats(seen.map(w => w.behind));
+        }
+        summary.metrics.watcher_scroll_fps = stats(raw.watchers.flatMap(w => bins(w.painted.filter(f => inScroll(f.at)), f => f.at, () => 1)));
+        summary.caveats.push("Watchers are pages on this same Mac (one headless Chrome), so they share its CPU with the driver; in real use each is on its own Mac. Per-hop splits are the driver's; a watcher's figures are its first paint of the change.");
+    }
     assert.ok(sourceFrames.length > 0 && viewerFrames.length > 0 && receivedFrames.length > 0, 'non-empty scrolling observations');
     return summary;
 }

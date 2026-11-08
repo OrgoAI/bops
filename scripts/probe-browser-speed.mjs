@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
-import { BOT } from './fixtures/two-person.mjs';
+import { BOT, PROJECT } from './fixtures/two-person.mjs';
 import { args, cleanupSteps, connectPage, cpuSeconds, cpuTree, now, sleep, testSite, until } from './browser-speed/common.mjs';
 import { installViewerProbe, PALETTE } from './browser-speed/viewer.mjs';
 import { summarize } from './browser-speed/summarize.mjs';
@@ -33,6 +33,8 @@ async function stackCommand(command, env = process.env) {
 }
 const raw = { version: 2, linkMs: delay, startedAt: now(), samples: [], cpu: [], cpuErrors: [], scenarios: [], scroll: null, clock: [], errors: [] };
 let started = false, stack, browser, context, page, source, site, cpuTimer;
+/** Others watching the bot's browser while the driver drives it, each its own page and stream. */
+const watchers = [];
 const write = (name, value) => writeFileSync(join(out, name), JSON.stringify(value, null, 2));
 let cleanupPromise;
 function cleanup() { return cleanupPromise ??= performCleanup(); }
@@ -40,6 +42,10 @@ async function performCleanup() {
     clearInterval(cpuTimer);
     if (page && !page.isClosed())
         raw.viewer = await page.evaluate(() => window.__speed).catch(() => null);
+    // A watcher's frames, as when it got and painted each (not its pixels: the samples say when it showed the change).
+    for (const w of watchers)
+        w.speed = await w.page.evaluate(() => ({ received: window.__speed.received.map(f => ({ at: f.at, timestamp: f.timestamp, bytes: f.bytes })), painted: window.__speed.painted.map(f => ({ at: f.at, timestamp: f.timestamp })) })).catch(() => null);
+    raw.watchers = watchers.map(w => ({ who: w.who, ...w.speed }));
     if (source)
         raw.page = await source.eval('window.__probe').catch(() => null);
     raw.endedAt = now();
@@ -52,7 +58,7 @@ async function performCleanup() {
             if (stack?.probe?.logFile)
                 copyFileSync(stack.probe.logFile, join(out, 'link.jsonl'));
         },
-        () => source?.close(), () => context?.close(), () => browser?.close(), () => site?.close(),
+        () => source?.close(), ...watchers.map(w => () => w.context.close()), () => context?.close(), () => browser?.close(), () => site?.close(),
         () => started ? stackCommand('stop') : undefined,
     ]);
 }
@@ -80,13 +86,27 @@ try {
         raw.cpuErrors.push({ at: now(), scenario: 'setup', error: 'Stand-in Chrome PID not observed; CPU unavailable' });
     browser = await chromium.launch({ channel: 'chrome', headless: true });
     raw.versions = { node: process.version, source: (await source.send('Browser.getVersion')).product, viewer: browser.version(), platform: process.platform };
-    context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
-    await context.route(/^(?!(https?|wss?):\/\/127\.0\.0\.1[:/])(?!data:)(?!blob:)/, r => r.abort());
-    await context.addInitScript(installViewerProbe);
-    page = await context.newPage();
-    await page.goto(stack.urls.owner, { waitUntil: 'load' });
-    await page.locator(`div.group\\/tab[title="${BOT.name}'s browser"]`).click({ timeout: 30000 });
-    await page.locator('[data-bot-browser] canvas[data-drawn]').waitFor({ timeout: 30000 });
+    // One person's Bops showing the bot's browser: the owner's, or sam's in the owner's shared workspace (as a Member).
+    async function openViewer(who) {
+        const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+        await ctx.route(/^(?!(https?|wss?):\/\/127\.0\.0\.1[:/])(?!data:)(?!blob:)/, r => r.abort());
+        await ctx.addInitScript(installViewerProbe);
+        const p = await ctx.newPage();
+        await p.goto(stack.urls[who], { waitUntil: 'load' });
+        if (who === 'sam') {
+            const opened = await p.evaluate((id) => fetch('/api/workspaces/shared', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ open: id }) }).then(r => r.status), PROJECT.id);
+            assert.equal(opened, 200, 'sam opens the shared workspace');
+            await p.reload({ waitUntil: 'load' });
+        }
+        await p.locator(`div.group\\/tab[title="${BOT.name}'s browser"]`).click({ timeout: 30000 });
+        await p.locator('[data-bot-browser] canvas[data-drawn]').waitFor({ timeout: 30000 });
+        return { who, context: ctx, page: p };
+    }
+    raw.driver = options.driver;
+    ({ context, page } = await openViewer(options.driver));
+    const other = options.driver === 'owner' ? 'sam' : 'owner';
+    for (let i = 0; i < options.watchers; i++)
+        watchers.push(await openViewer(other));
     await page.getByRole('button', { name: 'Take over', exact: true }).click();
     await page.getByRole('button', { name: 'Hand back', exact: true }).waitFor();
     await until(() => page.evaluate(() => window.__speed.painted.length), 'observed canvas paint');
@@ -97,11 +117,14 @@ try {
         return { x: r.left + x * r.width / m.deviceWidth, y: r.top + y * r.height / m.deviceHeight };
     }, { x, y });
     const move = async (x, y) => { const p = await point(x, y); await page.mouse.move(p.x, p.y); };
-    const painted = (kind, value, start, latest = false) => until(() => page.evaluate(({ kind, start, latest, expected }) => {
+    const paintedOn = (p, kind, value, start, latest = false) => until(() => p.evaluate(({ kind, start, latest, expected }) => {
         const index = kind === 'click' ? 0 : 1;
         const matches = p => p && p.at >= start && expected.every((channel, i) => Math.abs(p.colours[index][i] - channel) <= 35);
         return latest ? (matches(window.__speed.painted.at(-1)) && window.__speed.painted.at(-1)) : window.__speed.painted.find(matches);
     }, { kind, start, latest, expected: PALETTE[kind][value] }), `${kind} colour at viewer`, 30000);
+    const painted = (...a) => paintedOn(page, ...a);
+    // When each watcher first painted the change the driver made (their first frame of it after `start`).
+    const seenBy = (kind, value, start) => Promise.all(watchers.map(async (w) => ({ who: w.who, at: (await paintedOn(w.page, kind, value, start)).at })));
     // Warm route compilation, then exclude it from the measurement interval.
     await move(200, 200);
     await drained();
@@ -161,7 +184,7 @@ try {
         await page.mouse.up();
         clickValue ^= 1;
         const paint = await painted('click', clickValue, start);
-        raw.samples.push({ scenario, kind: 'click', value: clickValue, start, paint, ...(idle ? { idle } : {}) });
+        raw.samples.push({ scenario, kind: 'click', value: clickValue, start, paint, watchers: await seenBy('click', clickValue, start), ...(idle ? { idle } : {}) });
         await sleep(Math.max(0, 650 - (now() - start)));
     }
     console.log(`link ${delay} ms: 30 rest clicks`);
@@ -181,7 +204,7 @@ try {
         const start = now();
         await move(700, 200);
         const paint = await painted('hover', 1, start);
-        raw.samples.push({ scenario: 'hover', kind: 'hover', value: 1, start, paint });
+        raw.samples.push({ scenario: 'hover', kind: 'hover', value: 1, start, paint, watchers: await seenBy('hover', 1, start) });
         await drained();
         await sleep(150);
     }

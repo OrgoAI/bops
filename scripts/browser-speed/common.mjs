@@ -76,14 +76,22 @@ export function hopTimings(t) {
 export function args(argv) {
     const out = {};
     for (let i = 0; i < argv.length; i += 2) {
-        if (!['--link-ms', '--out'].includes(argv[i]) || !argv[i + 1])
-            throw new Error("Usage: --link-ms <0|35> --out <directory>");
+        if (!['--link-ms', '--out', '--driver', '--watchers'].includes(argv[i]) || !argv[i + 1])
+            throw new Error("Usage: --link-ms <0|35> --out <directory> [--driver owner|sam] [--watchers <0-3>]");
         out[argv[i].slice(2)] = argv[i + 1];
     }
     if (!out.out)
         throw new Error("--out is required");
     if (out['link-ms'] !== undefined && !['0', '35'].includes(out['link-ms']))
         throw new Error("--link-ms must be 0 or 35");
+    // Who drives the bot's browser (sam: a Member of the shared workspace, by its Orgo id), and how many others watch it
+    // at once: the other person first, then more tabs of either, each its own stream.
+    out.driver ??= 'owner';
+    if (!['owner', 'sam'].includes(out.driver))
+        throw new Error("--driver must be owner or sam");
+    out.watchers = Number(out.watchers ?? 0);
+    if (!Number.isInteger(out.watchers) || out.watchers < 0 || out.watchers > 3)
+        throw new Error("--watchers must be 0 to 3");
     out.out = resolve(out.out);
     mkdirSync(out.out, { recursive: true });
     return out;
