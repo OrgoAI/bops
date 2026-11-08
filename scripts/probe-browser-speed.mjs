@@ -98,7 +98,11 @@ try {
             assert.equal(opened, 200, 'sam opens the shared workspace');
             await p.reload({ waitUntil: 'load' });
         }
-        await p.locator(`div.group\\/tab[title="${BOT.name}'s browser"]`).click({ timeout: 30000 });
+        // The browser's tab, unless it's in front already (a Member's only tab is): a press on the open tab would close it.
+        const tab = p.locator(`div.group\\/tab[title="${BOT.name}'s browser"]`);
+        await tab.waitFor({ timeout: 30000 });
+        if (!(await tab.evaluate(t => t.classList.contains('bg-white'))))
+            await tab.click();
         await p.locator('[data-bot-browser] canvas[data-drawn]').waitFor({ timeout: 30000 });
         return { who, context: ctx, page: p };
     }
