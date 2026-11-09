@@ -157,7 +157,8 @@ export const priceFor = (cents: number, years: number | null) => (years && years
 /** A day as a renewal says it: Oct 7, 2027. */
 export const day = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
-export const HEAD = "pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]";
+// (A section's title, in ink: a heading, not a label.)
+export const HEAD = "pb-1 text-[13px] font-semibold leading-4 text-ink";
 const HINT = "text-[12px] leading-4 text-[#9A9A98]";
 const ALERT = "min-w-0 text-[12px] leading-4 text-[#B42318]";
 export const BOX = "flex flex-col gap-2 rounded-[12px] bg-[#FCFCFB] p-2.5 shadow-[0_0_0_1px_#ECECEA]";
@@ -1503,7 +1504,7 @@ export function Variables({ ws, name, names, onSaved, first, lacks }: { ws: stri
   );
   return (
     <div data-env className="mt-3 flex flex-col">
-      <span className="text-[12px] leading-[18px] text-[#6B6B6B]">Variables</span>
+      <span className={HEAD}>Variables</span>
       <div className="-mx-2 flex flex-col">
         {names.map((k) =>
           editing === k ? (
@@ -1608,7 +1609,8 @@ const deployWords = (d: AppDeploy) =>
   d.live ? (d.rollback ? "Live, put back" : "Live") : d.state === "succeeded" ? "Was live" : (STATES[d.state]?.word ?? d.state);
 
 /** Its dot: green only for the one live now; one that was live, grey; else its state's. */
-const deployDot = (d: AppDeploy) => (d.live ? "bg-[#2BB673]" : d.state === "succeeded" ? "bg-[#C9C9C6]" : (STATES[d.state]?.dot ?? "bg-[#9A9A98]"));
+// (Filled while it serves, hollow once it did, the state's own mark otherwise: form, not colour.)
+const deployDot = (d: AppDeploy) => (d.live ? "bg-ink" : d.state === "succeeded" ? "shadow-[inset_0_0_0_1.5px_#C9C9C6]" : (STATES[d.state]?.dot ?? "shadow-[inset_0_0_0_1.5px_#C9C9C6]"));
 
 /**
  * Its recent deploys, newest first, one line each: the changeset it built, how it went, when; only the one
