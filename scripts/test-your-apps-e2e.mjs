@@ -305,9 +305,11 @@ async function ownerAppChecks(page) {
   check("Restore is reached by the keyboard too: focused, it shows", (await restore.evaluate((b) => document.activeElement === b && getComputedStyle(b.parentElement.parentElement).opacity === "1")) === true);
   check("the live version offers Restore too, to put it back on the preview", (await tab.locator('[data-commit][data-serving]').locator("button", { hasText: "Restore" }).count()) === 1);
   // Publish: the dot goes, and the page stays quiet.
+  const previewAt = appOf("fourcorners").preview.serving;
   await tab.locator('[data-next-action="publish"]').click();
   await page.waitForTimeout(400);
-  check("Publish was sent as a promote of what the preview serves", model.acts.some((x) => x.action === "promote" && x.site === "fourcorners" && typeof x.at === "string" && x.at.length > 6));
+  // (The exact version: what the sample's Preview served as Publish was pressed, read before the press moved the sample on.)
+  check("Publish was sent as a promote of exactly what the preview serves", model.acts.some((x) => x.action === "promote" && x.site === "fourcorners" && x.at === previewAt));
   await page.waitForTimeout(3800);
   check("after Publish, the dot is off and the newest version is Live", (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0 && (await tab.locator('[data-commit] >> nth=0').locator('[data-tag="live"]').count()) === 1);
   check("and the Live card now says that version", /Home line/.test(await tab.locator('[data-place="live"] [data-place-serving]').innerText()));
