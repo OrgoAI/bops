@@ -83,14 +83,16 @@ const json = (route, body, status = 200) => route.fulfill({ status, contentType:
 /** The owner's window: its state as Orgo's team with the sample apps in it, and every Your Apps route answered from the sample. */
 async function ownerRoutes(page) {
   await page.route((u) => u.pathname === "/api/state", async (route) => {
-    const r = await route.fetch();
-    const j = await r.json();
+    // (A read still in flight as the window closes: let it go, don't fail the run on it.)
+    const r = await route.fetch().catch(() => null);
+    const j = r ? await r.json().catch(() => null) : null;
+    if (!j) return route.abort().catch(() => {});
     if (j.state) {
       j.state.account = { ...j.state.account, user: { ...j.state.account?.user, email: F.TEAM_EMAIL } };
       j.state.madeApps = F.MADE;
       j.state.workspaces = (j.state.workspaces ?? []).map((w) => (w.id === F.PROJECT.wsId ? { ...w, hostedApps: F.hostingInState(), appsForMembers: { at: Date.now(), apps: Object.fromEntries(Object.entries(F.ACTS).map(([n, acts]) => [n, { head: null, sites: [], commits: [], deploys: [], acts }])) } } : w));
     }
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(j) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(j) }).catch(() => {});
   });
   await page.route((u) => u.pathname.startsWith("/api/made-apps/"), async (route) => {
     const u = new URL(route.request().url());
@@ -147,10 +149,11 @@ async function ownerRoutes(page) {
 /** Sam's window: the shared workspace's apps, as the owner's Mac would have written them, and an Admin's acts taken here. */
 async function samRoutes(page) {
   await page.route((u) => u.pathname === "/api/state", async (route) => {
-    const r = await route.fetch();
-    const j = await r.json();
+    const r = await route.fetch().catch(() => null);
+    const j = r ? await r.json().catch(() => null) : null;
+    if (!j) return route.abort().catch(() => {});
     if (j.state?.shared) j.state.shared = { ...j.state.shared, owner: F.TEAM_EMAIL, apps: F.sharedApps(), adminPublish: true, appActs: model.samActs ?? [] };
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(j) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(j) }).catch(() => {});
   });
   await page.route((u) => u.pathname === "/api/workspaces/shared", async (route) => {
     const body = route.request().method() === "POST" ? (route.request().postDataJSON() ?? {}) : {};
