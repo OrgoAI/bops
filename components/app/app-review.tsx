@@ -3,8 +3,8 @@
 import { useRef, useState, type ReactNode } from "react";
 import { ArrowUpRight, Check, Copy, Info, Lock } from "lucide-react";
 import type { AppCommit } from "@/lib/hosted-apps";
-import { reviewLabel, type ReviewStatus } from "@/lib/app-review";
-import { AppDisclosure, appGhost, appIcon, appList, appOutline, appPrimary, appRow, appTag, segment, segmented } from "./app-controls";
+import { hasUnpublishedPreview, reviewLabel, type ReviewStatus } from "@/lib/app-review";
+import { AppDisclosure, appAttention, appAttentionTag, appGhost, appIcon, appList, appOutline, appPrimary, appRow, appTag, segment, segmented } from "./app-controls";
 import { Fold } from "./fold";
 import { useDismiss } from "./new-thread";
 import { ago, AskInPlace } from "./ui";
@@ -57,17 +57,18 @@ export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt,
   const why = update ? whyUpdate : whyPublish;
   const url = env === "preview" ? previewUrl : liveUrl;
   const moved = !!confirm && (confirm.at !== previewAt || confirm.destination !== destination);
-  return <div className="flex min-w-0 flex-col gap-5" data-review-content>
+  const unpublished = hasUnpublishedPreview(status);
+  return <div className="@container flex min-w-0 flex-col gap-5" data-review-content>
     <div className="flex flex-wrap items-center gap-3">
       <div role="tablist" aria-label="App view" className={segmented}>{(["preview", "prod"] as const).map(p => <button key={p} role="tab" aria-selected={env === p} data-tip={p === "preview" ? "Review changes here before publishing." : github ? "The version last sent to GitHub. Website deployment is managed there." : "The website your visitors use. Production is the technical name."} onClick={() => { onEnv?.(p); setConfirm(null); }} className={segment(env === p)}>{p === "preview" ? "Preview" : "Live"}</button>)}</div>
       <button className={appGhost} aria-label="About preview and live" aria-expanded={help} onClick={() => setHelp(!help)}><Info {...appIcon}/></button><span className="flex-1"/>
-      <span data-review-state className={appTag} data-tip={status.sentence}>{reviewLabel(status)}</span>
+      <span data-review-state className={unpublished ? appAttentionTag : appTag} data-tip={status.sentence}>{reviewLabel(status)}</span>
     </div>
-    <Fold lazy open={help}><div data-view-help className="flex flex-col gap-2 rounded-xl bg-desk p-3 text-[13px] leading-[18px]"><p><strong>Preview</strong> is your review copy, separate from your live website.</p><p><strong>Live</strong> {github ? "shows the version last sent to GitHub. Your website updates through its connected deployment." : "is the website visitors use."}</p></div></Fold>
+    <Fold lazy open={help}><div data-view-help className="flex flex-col gap-2 rounded-xl bg-desk p-3 text-[13px] leading-[18px]"><p><strong>Preview</strong> is your review copy. Review it before starting a different change; keep editing if you’re improving this one.</p><p><strong>Live</strong> {github ? "shows the version last sent to GitHub. Your website updates through its connected deployment." : "is the website visitors use."}</p></div></Fold>
     <div className="flex flex-col rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
       <div className="flex flex-wrap items-center gap-3 px-4 py-4">
-        {url ? <a href={url} target="_blank" rel="noreferrer" className={appOutline}>{env === "preview" ? "Open preview" : "Open website"}<ArrowUpRight {...appIcon}/></a> : <span className="text-[13px] text-pencil">{env === "preview" ? "No preview yet" : github ? "Website address not available" : "Not live yet"}</span>}
-        {env === "preview" && password}<span className="flex-1"/>
+        {url ? <a href={url} target="_blank" rel="noreferrer" className={env === "preview" && unpublished && !confirm ? appAttention : appOutline}>{env === "preview" ? unpublished ? "Review preview" : "Open preview" : "Open website"}<ArrowUpRight {...appIcon}/></a> : <span className="text-[13px] text-pencil">{env === "preview" ? "No preview yet" : github ? "Website address not available" : "Not live yet"}</span>}
+        {env === "preview" && password}<span className="hidden flex-1 @[512px]:block"/>
         {env === "preview" && (onUpdate || onPublish || onDomain) && <span data-tip={why ?? status.sentence}><button data-review-publish className={appPrimary} disabled={busy || sending || !!why || (!status.action && !update) || (update ? !onUpdate : domain ? !onDomain : !onPublish)} onClick={() => { if (update) onUpdate?.(); else if (domain) onDomain?.(); else if (previewAt) setConfirm({ at: previewAt, note: change?.message ?? previewAt, destination }); }}>{busy || sending ? "Working…" : label}</button></span>}
       </div>
       <div className="flex items-center gap-3 border-t border-rule px-4 py-4"><span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-[18px]" title={change?.message}>{change?.message.split("\n")[0] ?? (shown ? "Version details unavailable" : "No version here yet")}</span><span className={appTag}>{env === "preview" ? "Preview" : github ? "Sent to GitHub" : "Last published"}</span>{change && <span className="shrink-0 text-[12.5px] text-pencil">{ago(change.at)}</span>}</div>

@@ -5,7 +5,7 @@ Run `scripts/verify your-apps` for the focused type, lint, request, permission, 
 | Feature | Reach it | Expected result | Files |
 |---|---|---|---|
 | Your Apps | Sidebar → Your Apps | Equal rows for websites and tools; changed websites lead to review | made-apps.tsx, hosted-apps.tsx, app-controls.tsx |
-| Review and publish | Open a website | Preview and Live; explicit confirmation names the reviewed version and destination | app-review.tsx, app-envs.tsx, lib/app-review.ts |
+| Review and publish | Open a website → Review preview | Yellow marks a pending preview/release difference; final confirmation names the reviewed version and destination | app-review.tsx, app-envs.tsx, lib/app-review.ts |
 | Password | Preview → Show password | Reveal, copy, Escape; current password fetched from the existing protected route | app-review.tsx, preview-password.tsx |
 | Versions | Version history → Restore to preview | Original preview deploy request; publishing remains a separate choice | hosted-apps.tsx, shared-apps.tsx, lib/hosted-apps.ts |
 | Advanced actions | Technical details | Local controls for owners; existing GitHub, rollback, and deployment actions | app-envs.tsx |

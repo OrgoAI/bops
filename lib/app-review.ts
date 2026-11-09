@@ -2,6 +2,9 @@ import { appStatus, changesBetween, type HostedApp, type AppCommit, type AppStat
 
 export type ReviewStatus = ReturnType<typeof appStatus>;
 
+/** A preview/release difference, not a recorded approval or an editing lock. */
+export const hasUnpublishedPreview = (status: ReviewStatus) => status.action === "publish" && status.tone === "waits";
+
 /** The Preview and the destination it was last sent to, never a claim about a GitHub deployment. */
 export function statusForApp(app: HostedApp, commits: AppCommit[] = []): ReviewStatus {
   const gh = app.hosting?.github;

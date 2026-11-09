@@ -2,8 +2,8 @@
 
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { appStatus, changesBetween, type DeployState } from "@/lib/hosted-apps";
-import { reviewLabel } from "@/lib/app-review";
-import { AppDisclosure, appIcon, appList, appOutline, appRow } from "./app-controls";
+import { hasUnpublishedPreview, reviewLabel } from "@/lib/app-review";
+import { AppDisclosure, appAttention, appIcon, appList, appOutline, appRow } from "./app-controls";
 import { AppPassword, AppReview, AppVersions } from "./app-review";
 import { Fold } from "./fold";
 import { useState } from "react";
@@ -135,7 +135,7 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
           <span className="flex min-w-0 flex-1 flex-col gap-0.5"><span className="truncate text-[14px] font-medium leading-[18px]">{a.name}</span><span className="truncate text-[12.5px] leading-[17px] text-pencil">{a.url?.replace(/^https?:\/\//, "") ?? site?.preview?.replace(/^https?:\/\//, "") ?? "No preview yet"}</span></span>
         </button>
         <span className="hidden w-[120px] shrink-0 text-right text-[12px] text-pencil @[600px]:block">{open ? "" : reviewLabel(status)}</span>
-        <span className="flex w-[120px] shrink-0 justify-end">{!open && <button className={appOutline} onClick={() => setOpen(true)}>{status.action === "publish" ? "Review changes" : "Open app"}</button>}</span>
+        <span className="flex w-[120px] shrink-0 justify-end">{!open && <button className={hasUnpublishedPreview(status) ? appAttention : appOutline} onClick={() => setOpen(true)}>{status.action === "publish" ? "Review changes" : "Open app"}</button>}</span>
       </div>
       {(going || acts.some((x) => x.state === "failed") || said || newest) && (
         <div className="flex flex-col gap-0.5 px-4 pb-2.5 text-[12px] leading-4">

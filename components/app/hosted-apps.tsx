@@ -3,8 +3,8 @@
 import { Children, createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Globe, Lock, Pencil, Plus, Trash2 } from "lucide-react";
-import { AppDisclosure, appGhost, appIcon, appList, appOutline, appRow, segmented, segment } from "./app-controls";
-import { reviewLabel, statusForApp } from "@/lib/app-review";
+import { AppDisclosure, appAttention, appGhost, appIcon, appList, appOutline, appRow, segmented, segment } from "./app-controls";
+import { hasUnpublishedPreview, reviewLabel, statusForApp } from "@/lib/app-review";
 import { DNS_TYPES, dnsNeeds } from "@/lib/hosted-apps";
 import type {
   AddAppAnswer,
@@ -648,7 +648,7 @@ export function HostedAppsList({
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5"><span className="truncate text-[14px] font-medium leading-[18px]">{a.name}</span><span data-member-act={!!theirs || undefined} className={`truncate text-[12.5px] leading-[17px] ${theirs && !theirs.ok ? "text-[#B42318]" : "text-pencil"}`} title={theirs ? actLine(theirs) : a.preview?.url ?? undefined}>{theirs ? actLine(theirs) : <><span className="hidden @[600px]:inline">{urlOf(a)?.replace(/^https?:\/\//, "") ?? a.preview?.url?.replace(/^https?:\/\//, "") ?? "No preview yet"}</span><span className="@[600px]:hidden">{label}</span></>}</span></span>
               </button>
               <span data-review-state className="hidden @[600px]:block w-[120px] shrink-0 text-right text-[12px] text-pencil" data-tip={status.sentence}>{label}</span>
-              <span className="flex w-[120px] shrink-0 justify-end"><button className={appOutline} onClick={(e) => { e.stopPropagation(); open?.(ws, a.name); }}>{status.action === "publish" ? "Review changes" : "Open app"}</button></span>
+              <span className="flex w-[120px] shrink-0 justify-end"><button className={hasUnpublishedPreview(status) ? appAttention : appOutline} onClick={(e) => { e.stopPropagation(); open?.(ws, a.name); }}>{status.action === "publish" ? "Review changes" : "Open app"}</button></span>
             </div>;
           })}
           {tools}

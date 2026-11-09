@@ -2967,5 +2967,30 @@ await test("S7 no tools gives a useful empty state and no empty list box", () =>
   const state={bots:[],chats:[],workspaces:[],madeApps:[],account:{user:{id:'outside',email:'kimi@example.com'}}}; const html=renderToStaticMarkup(h(MadeAppsHome,{state,ws:'ws_main'})); assert.match(text(html),/Ask a bot/); assert.ok(!html.includes('overflow-hidden rounded-2xl'));
   const web=list({enabled:true,apps:[]},{tools:[]}); assert.ok(!web.includes('overflow-hidden rounded-2xl'));
 });
+const { AppReview } = await import(pathToFileURL(`${root}/components/app/app-review.tsx`).href);
+const pendingReview = { sentence: "The preview has 1 change that isn't live.", tone: "waits", action: "publish" };
+const reviewProps = { status: pendingReview, previewUrl: "https://preview.example", liveUrl: "https://live.example", previewAt: id("a1"), publishedAt: id("b2"), destination: "example/repo · main", onPublish: async () => true, technical: h("span", null, "Local") };
+await test("approved review emphasis keeps the pending count and directs people to the same preview", () => {
+  const box=parseHTML(`<html><body>${renderToStaticMarkup(h(AppReview,reviewProps))}</body></html>`).document;
+  const state=box.querySelector('[data-review-state]');
+  assert.equal(state.textContent,'1 unpublished change'); assert.ok(state.className.includes('bg-highlighter'));
+  const preview=box.querySelector('a'); assert.equal(preview.textContent,'Review preview'); assert.equal(preview.href,'https://preview.example'); assert.equal(preview.target,'_blank'); assert.ok(preview.className.includes('bg-highlighter'));
+});
+await test("quiet, working and failed states never borrow the pending-review color", () => {
+  for(const status of [{sentence:'Live and up to date.',tone:'quiet'},{sentence:'Updating the preview…',tone:'working'},{sentence:'The last publish failed.',tone:'failed',action:'publish'}]) {
+    const box=parseHTML(`<html><body>${renderToStaticMarkup(h(AppReview,{...reviewProps,status}))}</body></html>`).document;
+    assert.ok(!box.querySelector('[data-review-state]').className.includes('bg-highlighter')); assert.equal(box.querySelector('a').textContent,'Open preview');
+  }
+});
+await test("the final publishing decision quiets review without creating an editing gate", async () => {
+  const m=await mount(h(AppReview,reviewProps));
+  try {
+    await click(button(m.box,'Publish changes'));
+    assert.ok(m.box.querySelector('[data-publish-confirmation]'));
+    assert.equal(m.box.querySelector('a').textContent,'Review preview'); assert.ok(!m.box.querySelector('a').className.includes('bg-highlighter'));
+    await click(button(m.box,'Keep reviewing')); assert.ok(m.box.querySelector('a').className.includes('bg-highlighter'));
+    await click(button(m.box,'About preview and live')); assert.match(m.box.querySelector('[data-view-help]').textContent,/keep editing if you’re improving this one/);
+  } finally { await m.done(); }
+});
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
 process.exit(failed ? 1 : 0);

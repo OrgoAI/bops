@@ -193,7 +193,7 @@ const snap = async (page, screen, width) => {
   await page.evaluate(() => document.fonts.ready);
   shot++;
   const file = `${PREFIX}-${String(shot).padStart(2, "0")}-${screen}${width === 1440 ? "" : `-${width}`}.png`;
-  await page.screenshot({ path: join(OUT, file) });
+  await page.screenshot({ path: join(OUT, file), animations: "disabled" });
   console.log(`shot ${file}`);
 };
 
@@ -236,6 +236,7 @@ async function hold(browser) {
 const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 async function refresh(page) { await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await page.waitForTimeout(500); }
 async function click(page, name) { await page.getByRole('button',{name,exact:true}).click(); await (page.page?.() ?? page).waitForTimeout(250); }
+const attention = locator => locator.evaluate(x=>getComputedStyle(x).backgroundColor==='rgb(233, 255, 59)');
 async function layout(page, root, name) {
   check(`content fits ${name}`, await root.evaluate(x=>x.scrollWidth<=x.clientWidth));
   const heights=await root.locator('[data-hosted-app], [data-made-app]').evaluateAll(xs=>xs.map(x=>x.getBoundingClientRect().height));
@@ -255,6 +256,7 @@ async function owner(browser,width) {
   await snap(page,'owner-home',width);
   if(!LOOK) {
     check(`home leads to review before publishing ${width}`, await home.getByRole('button',{name:'Review changes',exact:true}).count()===1 && !/Publish changes|Local|On the web/.test(await home.innerText()));
+    check(`home highlights the pending review ${width}`,await attention(home.getByRole('button',{name:'Review changes',exact:true})));
     check(`home has five rows including tools ${width}`, await home.locator('[data-made-app]').count()===2);
     await layout(page,home,`home ${width}`);
   }
@@ -264,6 +266,13 @@ async function owner(browser,width) {
   await tab.getByText(F.COMMITS.fourcorners[0].message,{exact:true}).first().waitFor();
   await snap(page,'owner-app',width);
   if(!LOOK) {
+    check(`pending preview has an accurate highlighted count ${width}`,await tab.locator('[data-review-state]').innerText()==='1 unpublished change' && await attention(tab.locator('[data-review-state]')));
+    const review=tab.getByRole('link',{name:'Review preview',exact:true});
+    check(`Review preview is the highlighted next action ${width}`,await attention(review));
+    if(width===1180) {
+      const r=await review.boundingBox(), publish=await tab.locator('[data-review-publish]').boundingBox();
+      check(`narrow Publish stays left aligned on its second line ${width}`,Math.abs(r.x-publish.x)<1 && publish.y>r.y);
+    }
     check(`default view hides Local and version history ${width}`, await tab.getByRole('tab',{name:'Preview',exact:true}).getAttribute('aria-selected')==='true' && await tab.locator('[data-app-env]').count()===0 && await tab.locator('[data-version]').count()===0);
     await click(tab,'Ask Boppy');
     check(`Ask Boppy keeps the app beside an unsent draft ${width}`,await tab.isVisible() && (await page.locator('#composer').evaluate(x=>x.value ?? x.textContent)).includes('fourcorners'));
@@ -277,9 +286,9 @@ async function owner(browser,width) {
     await page.keyboard.press('Escape');
     check(`Escape closes password and restores focus ${width}`, await tab.locator('[data-password-popover]').count()===0 && await tab.getByRole('button',{name:'Show password',exact:true}).evaluate(x=>x===document.activeElement));
     const popup=page.waitForEvent('popup');
-    await tab.getByRole('link',{name:'Open preview',exact:true}).click();
+    await tab.getByRole('link',{name:'Review preview',exact:true}).click();
     const preview=await popup; await preview.waitForLoadState();
-    check(`Open preview opens the reviewed address ${width}`, preview.url()===F.FC.preview+'/' && await preview.getByRole('heading',{name:'Sample preview'}).count()===1); await preview.close();
+    check(`Review preview opens the reviewed address ${width}`, preview.url()===F.FC.preview+'/' && await preview.getByRole('heading',{name:'Sample preview'}).count()===1); await preview.close();
     await tab.getByRole('tab',{name:'Live',exact:true}).click();
     check(`Live links to the website and labels GitHub delivery honestly ${width}`, await tab.getByRole('link',{name:'Open website',exact:true}).getAttribute('href')===`https://${F.FC.domain}` && await tab.getByText('Sent to GitHub',{exact:true}).count()===1);
     await tab.getByRole('tab',{name:'Preview',exact:true}).click();
@@ -290,9 +299,11 @@ async function owner(browser,width) {
     await click(tab,'Publish changes');
     const confirm=tab.locator('[data-publish-confirmation]');
     check(`confirmation names version and destination before any request ${width}`, (await confirm.innerText()).includes(F.COMMITS.fourcorners[0].message) && (await confirm.innerText()).includes('OrgoAI/orgo-brandlord') && (await confirm.innerText()).includes('may update automatically') && model.acts.length===n);
+    check(`confirmation quiets the previous review action ${width}`,!await attention(tab.getByRole('link',{name:'Review preview',exact:true})));
     await snap(page,'owner-publish-confirmation',width);
     await click(confirm,'Keep reviewing');
     check(`cancel preserves unpublished changes ${width}`,model.acts.length===n && await tab.locator('[data-review-publish]').isEnabled());
+    check(`cancel restores the review emphasis ${width}`,await attention(tab.getByRole('link',{name:'Review preview',exact:true})));
     await click(tab,'Publish changes');
     appOf('fourcorners').preview.serving=F.id('c3'); await refresh(page);
     check(`a moved preview cannot publish an unseen version ${width}`,await tab.locator('[data-publish-confirmation]').getByRole('button',{name:'Publish changes',exact:true}).isDisabled() && model.acts.length===n);
@@ -311,6 +322,7 @@ async function owner(browser,width) {
     check(`publish keeps the exact preview-pinned request ${width}`,same(model.acts.at(-1),{ws:'ws_main',action:'promote',site:'fourcorners',at:F.FC.head}));
     await refresh(page);
     check(`published preview no longer offers new changes ${width}`,await tab.locator('[data-review-state]').innerText()==='Up to date' && await tab.locator('[data-review-publish]').isDisabled());
+    check(`up-to-date preview is quiet again ${width}`,!await attention(tab.locator('[data-review-state]')) && !await attention(tab.getByRole('link',{name:'Open preview',exact:true})));
     await click(tab,'Technical details');
     check(`technical details retain Local and GitHub menu ${width}`,await tab.locator('[data-app-env="local"]').count()===1 && await tab.locator('[data-prod-menu]').isVisible());
     await tab.locator('[data-prod-menu]').click(); await tab.locator('[data-gh-pull]').click();
@@ -349,9 +361,11 @@ async function sam(browser,width) {
   await page.locator('[data-footer-key="apps"] button').click();
   const fc=page.locator('[data-shared-app="fourcorners"]'); await fc.waitFor(); await snap(page,'admin-home',width);
   if(!LOOK) check(`Admin home opens review without publishing ${width}`,await fc.getByRole('button',{name:'Review changes',exact:true}).count()===1 && await fc.locator('[data-review-content]').count()===0);
+  if(!LOOK) check(`Admin home highlights pending review ${width}`,await attention(fc.getByRole('button',{name:'Review changes',exact:true})));
   await fc.getByRole('button',{name:'Open fourcorners',exact:true}).click();
   await fc.locator('[data-review-content]').waitFor(); await snap(page,'admin-open',width);
   if(!LOOK) {
+    check(`Admin shares the highlighted preview decision ${width}`,await attention(fc.locator('[data-review-state]')) && await attention(fc.getByRole('link',{name:'Review preview',exact:true})));
     check(`Admin sees Preview and Live without Local ${width}`,await fc.getByRole('tab').count()===2 && !/Local/.test(await fc.innerText()));
     await click(fc,'Show password'); check(`Admin can find preview password ${width}`,await fc.locator('[data-password-popover] [data-preview-password]').innerText()===F.FC.password); await page.keyboard.press('Escape');
     await click(fc,'Version history'); await layout(page,fc,`Admin versions ${width}`); await snap(page,'admin-versions',width);
@@ -359,6 +373,7 @@ async function sam(browser,width) {
     check(`Admin restore keeps its request ${width}`,same(model.acts.at(-1),{act:'deploy',app:'fourcorners',at:F.id('c3')}));
     const n=model.acts.length; await click(fc,'Publish changes');
     check(`Admin publishing asks before sending ${width}`,model.acts.length===n && await fc.locator('[data-publish-confirmation]').count()===1);
+    check(`Admin confirmation quiets review ${width}`,!await attention(fc.getByRole('link',{name:'Review preview',exact:true})));
     await click(fc.locator('[data-publish-confirmation]'),'Publish changes');
     check(`Admin Publish keeps its original pinned request ${width}`,same(model.acts.at(-1),{act:'deploy',app:'fourcorners',env:'prod',at:F.FC.head}));
     await click(fc,'Technical details'); await click(fc,'Settings'); await snap(page,'admin-settings',width);

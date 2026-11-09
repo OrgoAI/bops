@@ -14,3 +14,5 @@ Captured from the sample two-person app at 1440px and 1180px. Website, password,
 | Admin · 1180px | [Before](admin-1180-before.png) | [After](admin-1180-after.png) |
 
 The mock was approved before real components changed. The temporary mock routes have been removed.
+
+The latest After pictures include the approved Paper review emphasis: yellow unpublished-change badges and review entries, and a named Review preview link.
