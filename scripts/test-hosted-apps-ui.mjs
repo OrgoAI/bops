@@ -155,13 +155,14 @@ const deployIn = (part, label = "Update preview") => {
   return m ? { tip: m[1] === undefined ? null : unescape(m[1]), disabled: / disabled=""/.test(m[2]) } : null;
 };
 const text = (html) => unescape(html.replace(/<[^>]+>/g, " "));
+const firstLine = (message) => message.split("\n", 1)[0].trim();
 const list = (answer, extra = {}) => renderToStaticMarkup(h(H.HostedAppsList, { ws: "ws_main", answer, onChanged: noop, ...extra }));
 
 await test("the list: one quiet line per app: its name and address, and at its end Publish while a change waits, Update preview while the preview is behind, else what moves", () => {
   const html = list({ enabled: true, apps: APPS });
   assert.ok(html.includes(">On the web<"), "the list is titled");
   assert.deepEqual([...html.matchAll(/data-hosted-app="([^"]+)"/g)].map((m) => m[1]), APPS.map((a) => a.name), "one line per app, in the server's order");
-  for (const a of APPS) assert.match(rowOf(html, a.name), /class="flex h-9 /, `${a.name}'s line is one 36px line`);
+  for (const a of APPS) assert.match(rowOf(html, a.name), /class="flex h-10 /, `${a.name}'s line is one 40px row`);
 
   const shop = rowOf(html, SHOP);
   assert.match(shop, /data-state="succeeded"/);
@@ -248,36 +249,60 @@ const commitOf = (html, c) => {
 };
 const shopApp = (extra = {}) => app("shop", { serving: id("c3"), live: live("succeeded", id("c3"), { url: "https://shop.example" }), domain: "https://shop.example", domains: [{ domain: "shop.example", status: "active" }], ...extra });
 
-await test("the tab's title: its name, Live and Preview as places to open (the preview's password behind a lock), Work on it, Publish (greyed with why, its dot on while a change waits) and Settings", () => {
-  const top = titleBar(tab(shopApp(), { work: { name: "Nova", go: noop } }));
+/** The HTML from `mark` to `end` (plain functions: used before `between` below is defined). */
+const cut = (html, mark, end) => {
+  const a = html.indexOf(mark);
+  if (a < 0) return "";
+  const b = html.indexOf(end, a + mark.length);
+  return html.slice(a, b < 0 ? undefined : b);
+};
+/** The tab's places: Live and the Preview as cards, under the title line, above the versions. */
+const placesOf = (html) => cut(html, "data-places", "data-history");
+/** One card of them. */
+const cardOf = (html, place) => cut(placesOf(html), `data-place="${place}"`, place === "live" ? 'data-place="preview"' : "data-history");
+
+await test("the tab's title: its name, Ask <bot>, Publish (greyed with why, its dot on while a change waits) and Settings; under it Live and the Preview as cards (the preview's password behind a lock), each saying what it serves", () => {
+  const html = tab(shopApp(), { work: { name: "Nova", go: noop } });
+  const top = titleBar(html);
   assert.match(top, /title="shop"[^>]*truncate[^>]*>shop</, "its name, cut short if it must be");
-  assert.match(top, /data-place="live"[^>]*><a href="https:\/\/shop\.example" target="_blank" rel="noreferrer" title="https:\/\/shop\.example"[^>]*>Live</, "Live opens its domain in the browser, the address in its tooltip");
-  assert.ok(!top.includes('data-place="preview"'), "no Preview place before it has a link");
-  assert.ok(!top.includes('aria-label="Copy link"') && !top.includes("bg-[#2BB673]"), "no copy button, no dot");
-  assert.match(top, /data-tip="Opens Nova&#x27;s chat with this typed, not sent"[^>]*>Work on it</, "Work on it, saying it only types");
-  assert.ok(top.indexOf(">Work on it<") < top.indexOf('data-next-action="publish"'), "before Publish");
+  assert.ok(!top.includes("data-place"), "no places in the title line: they're cards under it");
+  assert.match(top, /data-work="true"[^>]*aria-label="Ask Nova" data-tip="Opens Nova&#x27;s chat beside this, with the message begun"/, "Ask Nova, saying the chat opens beside this with the message begun");
+  assert.ok(top.includes(">Ask Nova<") && top.includes("hidden @max-lg:block"), "its words, and its icon for a narrow panel");
+  assert.ok(top.indexOf(">Ask Nova<") < top.indexOf('data-next-action="publish"'), "before Publish");
   assert.equal(deployIn(top, "Publish").disabled, true, "Publish greyed: nothing on the Preview yet");
   assert.ok(deployIn(top, "Publish").tip, "with why, in its tooltip");
-  assert.match(top, /data-tab-settings="true" aria-pressed="false"[^>]*>Settings</, "Settings, shut");
+  assert.match(top, /data-tab-settings="true" aria-label="Settings" aria-pressed="false"/, "Settings, shut");
+  assert.ok(top.includes(">Settings<"), "its word");
   assert.ok(!top.includes("Update preview"), "no Update preview in the title: the Preview's own line has it, in Settings");
-  const ready = titleBar(tab(shopApp({ preview: { projectId: "p_st", url: "https://k7p2qxm4wr3d.orgo.dev", label: "k7p2qxm4wr3d", serving: id("e5"), live: live("succeeded", id("e5")) } })));
-  assert.match(ready, /data-place="preview"[^>]*><a href="https:\/\/k7p2qxm4wr3d\.orgo\.dev"[^>]*>Preview</, "Preview opens its link");
-  assert.match(ready, /data-next-action="publish" data-waits="true"/, "a change waits: Publish with its dot");
-  assert.ok(!tab(shopApp()).includes("data-state-line") && !tab(shopApp()).includes("data-motion"), "no sentence, nothing moving: a quiet page");
-  assert.ok(!titleBar(tab(shopApp())).includes("Work on it"), "no Work on it without a bot to ask");
+  assert.ok(!top.includes("bg-[#2BB673]") && !top.includes('aria-label="Copy link"'), "no dot, no copy button");
+
+  const places = placesOf(html);
+  assert.match(places, /data-place="live"[^>]*>[^]*?<a href="https:\/\/shop\.example" target="_blank" rel="noreferrer" title="https:\/\/shop\.example"[^>]*>[^]*?>shop\.example</, "the Live card opens its domain in the browser, shown without https");
+  assert.ok(!places.includes('data-place="preview"'), "no Preview card before it has a link");
+  const liveCard = cardOf(html, "live");
+  assert.ok(liveCard.includes(">Live<") && liveCard.includes(firstLine(COMMITS.find((c) => c.id === id("c3")).message)), "the Live card says which version it serves, in its words");
+  assert.ok(!/>[0-9a-f]{7}</.test(liveCard), "no id on it");
+  const ready = tab(shopApp({ preview: { projectId: "p_st", url: "https://k7p2qxm4wr3d.orgo.dev", label: "k7p2qxm4wr3d", serving: id("e5"), live: live("succeeded", id("e5")) } }));
+  const previewCard = cardOf(ready, "preview");
+  assert.match(previewCard, /<a href="https:\/\/k7p2qxm4wr3d\.orgo\.dev"[^>]*>[^]*?>k7p2qxm4wr3d\.orgo\.dev</, "the Preview card opens its link");
+  assert.ok(previewCard.includes("Adds the cart"), "and says which version is on it");
+  assert.match(titleBar(ready), /data-next-action="publish" data-waits="true"/, "a change waits: Publish with its dot");
+  assert.ok(!html.includes("data-state-line") && !html.includes("data-motion"), "no sentence, nothing moving: a quiet page");
+  assert.ok(!titleBar(tab(shopApp())).includes("data-work"), "no Ask without a bot to ask");
+  assert.ok(!NO_DASHES.test(text(html)), "no dashes");
 });
 
 await test("the tab's versions: one line per changeset (what it did, who and when), the one served tagged Live, Restore on the others as a line is pointed at (Preview this, on the newest); ids and file counts in the tooltip", () => {
   const html = tab(shopApp());
   assert.ok(html.includes(">Versions<") && !html.includes("data-offline"), "the versions");
   assert.deepEqual([...html.matchAll(/data-commit="([^"]+)"/g)].map((m) => m[1]), COMMITS.map((c) => c.id), "every changeset, newest first");
-  for (const c of COMMITS) assert.match(commitOf(html, c.id), /class="group flex min-h-9 /, `${c.id.slice(0, 7)} is one line`);
+  for (const c of COMMITS) assert.match(commitOf(html, c.id), /class="group grid min-h-9 /, `${c.id.slice(0, 7)} is one line, set in the list's columns`);
 
   const cart = commitOf(html, id("e5"));
   assert.ok(cart.includes(`title="${id("e5").slice(0, 7)} · 3 files: 2 added, 1 changed\nAdds the cart\n\nIt keeps what you picked while you look around."`), "its short id and the files it touched, then all of its message, in its tooltip");
   assert.ok(!cart.includes(`>${id("e5").slice(0, 7)}<`), "no id on the line");
   assert.match(cart, /truncate[^>]*>Adds the cart</, "its message's first line");
-  assert.ok(cart.includes(">Tess Ito<") && cart.includes("· 1m<"), "who and when");
+  assert.ok(cart.includes(">Tess Ito · <") && cart.includes(">1m<"), "who and when (who hidden in a narrow panel: @max-lg)");
   assert.ok(!cart.includes("data-changes") && !/>\+2</.test(cart), "no file counts on the line");
   assert.deepEqual(deployIn(cart, "Preview this"), { tip: null, disabled: false }, "the newest, not on the Preview yet: Preview this");
 
@@ -310,11 +335,11 @@ await test("the tab's versions: one line per changeset (what it did, who and whe
   assert.ok(commitOf(going, id("c3")).includes('data-tag="live"'));
   assert.equal(deployIn(commitOf(going, id("a1")), "Restore").tip, "The preview is deploying. Wait for it to finish.");
   assert.ok(!titleBar(going).includes("data-waits"), "nothing waits on Publish while it updates");
-  assert.match(header(going), /data-motion="working"[^>]*>.*Updating the preview</, "a spinner and the words, once, under the title");
+  assert.ok(cardOf(going, "preview").includes("Updating the preview…"), "the Preview card says so, with a spinner");
   // Published deploying holds nothing of the Preview up: its line's Update preview (in Settings) can be pressed.
   const prodGoing = tab(shopApp({ live: live("running", id("e5")) }));
   assert.ok(commitOf(prodGoing, id("e5")).includes(">Deploying<"));
-  assert.match(header(prodGoing), /data-motion="working"[^>]*>.*Publishing</);
+  assert.ok(cardOf(prodGoing, "live").includes("Publishing…"), "the Live card says so");
   const pvButton = /data-app-env="preview"[^]*?<button data-act="deploy"([^>]*)>Update preview<\/button>/.exec(settingsOf(shopApp({ live: live("running", id("e5")) })));
   assert.ok(pvButton && !/ disabled=""/.test(pvButton[1]), "the Preview line's Update preview can be pressed");
   // A deploy that doesn't say what it builds builds the newest.
@@ -366,8 +391,8 @@ await test("the tab while Ingot can't be reached: one quiet line", () => {
 
 await test("the tab after a deploy failed, and where hosting isn't open", () => {
   const failed = tab(app("menu", { serving: id("c3"), live: live("failed", id("e5"), { error: "npm run build exited with 1" }) }));
-  assert.ok(failed.includes("The last deploy failed: npm run build exited with 1"), "why the last deploy failed");
-  assert.match(header(failed), /data-motion="failed"[^>]*>Publish failed</, "said in red, in two words");
+  assert.ok(placesOf(failed).includes("The last publish failed: npm run build exited with 1"), "why the last publish failed, on the Live card");
+  assert.ok(!failed.includes("data-motion"), "nothing else says it");
   assert.equal(deployIn(titleBar(failed), "Publish").disabled, true, "Publish greyed until a preview is up");
   assert.ok(commitOf(failed, id("c3")).includes('data-tag="live"'), "what's still served after a failed deploy is Live");
 
@@ -376,7 +401,12 @@ await test("the tab after a deploy failed, and where hosting isn't open", () => 
   assert.deepEqual(deployIn(commitOf(closed, id("a1")), "Restore"), { tip: "Sign in to Orgo to deploy.", disabled: true }, "and on every line");
 
   const never = tab(app("draft", { head: null, hosting: null, live: null }), { history: { commits: [], head: null, next: null } });
-  assert.ok(!titleBar(never).includes("data-place") && !header(never).includes("Copy link"), "no place to open before its first deploy");
+  const neverLive = placesOf(never);
+  assert.ok(neverLive.includes('data-place-empty="true"') && neverLive.includes(">Not published yet<") && !neverLive.includes("<a href") && !neverLive.includes("Copy link"), "the Live card has no address to open before its first deploy: Not published yet");
+  assert.ok(!neverLive.includes("data-place-action"), "no Add a domain before it has a Published project (its first settings save makes one; the Domains section offers none either)");
+  const unpublished = placesOf(tab(app("draft", { head: id("a1"), live: null, serving: null }), { history: { commits: [], head: id("a1"), next: null } }));
+  assert.match(unpublished, /data-place-action="true"[^>]*>Add a domain</, "with a project and no domain: Not published yet, and Add a domain (opens Settings at the form)");
+  assert.ok(!placesOf(tab(app("draft", { head: id("a1"), live: null, serving: null }), { answer: { enabled: false, why: "Sign in to Orgo to deploy." } })).includes("data-place-action"), "not where deploying isn't open");
   assert.equal(deployIn(titleBar(never), "Publish").disabled, true, "nothing to publish before its first commit");
   assert.ok(!never.includes("data-motion") && !never.includes("data-state-line"), "and nothing said: a quiet page");
   assert.ok(!never.includes("data-deploy-log"), "and no log");
@@ -438,7 +468,7 @@ await test("the tab's address, then its domains: each with how it's doing, Check
 
   const apex = between(part, 'data-domain="acme.example"', "data-domain=");
   assert.match(apex, /data-status="active"/);
-  assert.match(apex, /data-tip="Live · its HTTPS certificate is issued"[^>]*bg-\[#2BB673\]/, "a green dot, its certificate in the tooltip");
+  assert.match(apex, /data-tip="Live · its HTTPS certificate is issued"[^>]*bg-ink/, "a filled mark, its certificate in the tooltip");
   assert.match(apex, /<a href="https:\/\/acme\.example" target="_blank"[^>]*>acme\.example<\/a>/, "a live one opens in the browser");
   assert.ok(apex.includes(">Live<") && apex.includes(">Bought through Orgo<"));
   assert.ok(!part.includes("data-no-zone"), "its zone is read, so nothing said about it");
@@ -634,11 +664,14 @@ await test("the tab is one you read, named as its repo is, under the Apps footer
   calls.length = 0;
   routes = {};
   const page = renderToStaticMarkup(h(MadeAppsHome, { state, ws: "ws_main" }));
-  const web = page.indexOf(">On the web<");
-  assert.ok(web > page.indexOf(">Your Apps<") && web < page.indexOf("Tip calculator"), "the list is under the page's title, above the made apps");
+  const web = page.indexOf('data-hosted-apps="true"');
+  assert.ok(web > 0 && page.indexOf(">Your Apps<") > web && page.indexOf(">Your Apps<") < page.indexOf("Tip calculator"), "the page's title heads the websites' list, the made apps' rows under it");
+  assert.ok(!page.includes(">On the web<") && !page.includes("Made by your bots"), "one list, no section labels");
+  assert.match(page, /data-made-app="app_1"[^>]*class="flex h-10 /, "a made app is a row of the same shape");
+  assert.ok(between(page, 'data-made-app="app_1"', "</div>").includes(">In Bops<"), "saying it lives in Bops");
   assert.equal(calls.length, 0, "rendering asks nothing: the list is read once it's on screen");
   const outsider = renderToStaticMarkup(h(MadeAppsHome, { state: { ...state, account: { user: { id: "u2", email: "kim@example.com" }, signedInAt: 1 } }, ws: "ws_main" }));
-  assert.equal(outsider.indexOf(">On the web<"), -1, "not for an account outside @orgo.ai for now");
+  assert.equal(outsider.indexOf("data-hosted-apps"), -1, "not for an account outside @orgo.ai for now");
   assert.ok(outsider.includes("Tip calculator"), "the page itself lists the made apps (bops-app.tsx never opens it for them: lib/apps-access.ts)");
   // The New Tab's Apps tile only where bops-app.tsx gives it onApps (an @orgo.ai account).
   const newTab = (onApps) => renderToStaticMarkup(h(NewTab, { state: { ...state, mac: { ready: true } }, onWeb: noop, onComputer: noop, onProfile: noop, onVault: noop, onApps, onMac: noop }));
@@ -961,9 +994,9 @@ await test("Settings, one page in order: Local, Preview and Published, then the 
   const deploys = between(html, "data-deploys", "data-app-end");
   assert.deepEqual([...deploys.matchAll(/data-deploy="([^"]+)"/g)].map((m) => m[1]), ["dep_3", "dep_2", "dep_1"]);
   const live = between(deploys, 'data-deploy="dep_3"', "data-deploy=");
-  assert.ok(live.includes("bg-[#2BB673]") && (live.match(/>Live</g) ?? []).length === 1, "the live one says so, once, with the green dot");
+  assert.ok(live.includes("bg-ink") && (live.match(/>Live</g) ?? []).length === 1, "the live one says so, once, with a filled mark");
   const was = between(deploys, 'data-deploy="dep_1"', "data-deploy-log");
-  assert.ok(was.includes(">Was live<") && !was.includes(">Live<") && !was.includes("bg-[#2BB673]"), "an earlier one that went live and was replaced: Was live, grey, never Live");
+  assert.ok(was.includes(">Was live<") && !was.includes(">Live<") && !was.includes("bg-ink") && !was.includes("bg-[#2BB673]"), "an earlier one that went live and was replaced: Was live, a hollow mark, never Live");
   assert.equal((deploys.match(/>Live</g) ?? []).length, 1, "only one deploy is Live");
   assert.ok(between(deploys, 'data-deploy="dep_2"', "data-deploy=").includes("Failed: The build failed. The log says why."), "a failed one, and why");
   assert.ok(!between(deploys, 'data-deploy="dep_2"', "data-deploy=").includes("Roll back"), "never put back");
@@ -1844,7 +1877,7 @@ await test("the tab of an app with more sites: a list of them with their states,
   const admin = suiteTab({ site: "suite-admin", onSite: noop });
   assert.match(between(admin, "data-sites", "data-address-section"), /data-site="suite-admin" aria-pressed="true"/);
   assert.ok(between(admin, "data-address-section", "data-domains").includes("No domain yet. Published sites live only on their own domain."), "its address: none, never an orgo.dev name");
-  assert.ok(suiteTab({ site: "suite-admin", onSite: noop, atSettings: false }).includes("The last deploy failed: npm run build exited with 1"), "its deploy failed, not the app's own, said on the versions page");
+  assert.ok(placesOf(suiteTab({ site: "suite-admin", onSite: noop, atSettings: false })).includes("The last publish failed: npm run build exited with 1"), "its deploy failed, not the app's own, said on its Live card");
   const till = suiteTab({ site: "suite-till", onSite: noop });
   assert.ok(text(till).includes("No domain yet. Published sites live only on their own domain.") && !till.includes("data-deploys"), "never deployed: no domain yet, no deploys");
   assert.ok(!NO_DASHES.test(text(html + admin)));
@@ -1875,11 +1908,11 @@ await test("the Sites list: one line a site, its state, name and domains (each w
     ["old.suite.example", "pending", "Waiting for its DNS"],
     ["older.suite.example", "verifying", "Checking its DNS"],
   ]);
-  assert.match(own, /aria-label="Live" class="[^"]*bg-\[#2BB673\]/, "a live one's dot");
+  assert.match(own, /aria-label="Live" class="[^"]*bg-ink/, "a live one's mark, filled");
   assert.match(own, /aria-label="Waiting for its DNS" class="[^"]*animate-pulse/, "one waiting for its DNS");
   assert.ok(!own.includes("data-site-address"), "its domains, not its address");
   assert.ok(own.indexOf(">suite<") < own.indexOf("front.suite.example"), "its name, then its domains");
-  assert.ok(own.indexOf("bg-[#2BB673]") < own.indexOf(">suite<"), "its state first");
+  assert.ok(own.indexOf("bg-ink") < own.indexOf(">suite<"), "its state first");
   assert.deepEqual(deployIn(own), { tip: null, disabled: false }, "Update preview, this site's, at its end");
   assert.ok(own.lastIndexOf("Update preview") > own.lastIndexOf("older.suite.example"));
   const admin = lineOf(html, "suite-admin");
@@ -2828,16 +2861,18 @@ await test("Your Apps shared with the user: each site's Preview, where their Dep
   };
   // Up top: what's going on, in a sentence (its Preview deploying).
   assert.match(renderToStaticMarkup(h(SharedAppsPage, { state: state("read", shop()) })), /data-motion="working"[^>]*>.*Updating the preview</);
-  // At Write, opened: its Preview's line with its state and link, and the password with Copy (the owner's own look: preview-password.tsx).
+  // At Write, opened: its Preview as a card with its link, the lock (Password), and what moves there; the password with Copy behind the lock (the owner's own look: preview-password.tsx).
+  const PREVIEW_CARD = '[data-places] [data-place="preview"]';
   const w = await opened(state("write", shop({ previewPassword: PASSWORD })));
-  const line = w.box.querySelector("[data-shared-preview]");
-  assert.equal(line.querySelector("a").getAttribute("href"), LINK);
-  assert.match(words(line), /^Preview Deploying$/, "the place to open and its state; the password behind the lock");
-  assert.ok(!line.textContent.includes(PASSWORD), "not on the page until asked");
-  await click(line.querySelector("[data-password-lock]"));
-  assert.equal(line.querySelector("[data-password-popover] [data-preview-password]").textContent, PASSWORD);
-  assert.ok(line.querySelector('[data-password-popover] button[aria-label="Copy password"]'));
+  const card = w.box.querySelector(PREVIEW_CARD);
+  assert.equal(card.querySelector("a").getAttribute("href"), LINK);
+  assert.match(words(card), /^Preview Password k7p2qxm4wr3d\.orgo\.dev Updating the preview/, "the card: its title, the lock, the link to open, what moves there; the password itself behind the lock");
+  assert.ok(!card.textContent.includes(PASSWORD), "not on the page until asked");
+  await click(card.querySelector("[data-password-lock]"));
+  assert.equal(card.querySelector("[data-password-popover] [data-preview-password]").textContent, PASSWORD);
+  assert.ok(card.querySelector('[data-password-popover] button[aria-label="Copy password"]'));
   assert.ok(words(w.box.querySelector('[data-shared-app="shop"]')).startsWith("shop Updating the preview"), "its name, then what moves");
+  assert.ok(words(w.box.querySelector('[data-places] [data-place="live"]')).startsWith("Live Not on the web yet"), "the Live card: no address yet");
   // Deploys (folded) say where each went, Running on the Preview, Live on Published; Go back is on the Preview's only (the owner's Bops refuses a Published one).
   const back = [...w.box.querySelectorAll("button")].filter((b) => b.textContent === "Go back to this one");
   assert.equal(back.length, 1, "one Go back");
@@ -2847,19 +2882,19 @@ await test("Your Apps shared with the user: each site's Preview, where their Dep
   await w.done();
   // At Read: the link, and who to ask for the password; never one.
   const r = await opened(state("read", shop()));
-  const rl = r.box.querySelector("[data-shared-preview]");
-  assert.match(words(rl), /^Preview Deploying$/);
+  const rl = r.box.querySelector(PREVIEW_CARD);
+  assert.match(words(rl), /^Preview Password k7p2qxm4wr3d\.orgo\.dev Updating the preview/);
   await click(rl.querySelector("[data-password-lock]"));
   assert.ok(rl.querySelector("[data-password-popover]").textContent.includes("Ask the owner for its password."));
   assert.equal(rl.querySelector("[data-preview-password]"), null);
   await r.done();
   // At Write when the owner's Bops couldn't read it: who to ask too. A link that asks for none: nothing said of a password.
   const none = await opened(state("write", shop()));
-  await click(none.box.querySelector("[data-shared-preview] [data-password-lock]"));
+  await click(none.box.querySelector(`${PREVIEW_CARD} [data-password-lock]`));
   assert.ok(none.box.querySelector("[data-password-popover]").textContent.includes("Ask the owner for its password."));
   await none.done();
   const open = await opened(state("write", shop({ previewProtected: undefined })));
-  assert.match(words(open.box.querySelector("[data-shared-preview]")), /^Preview Deploying$/);
+  assert.match(words(open.box.querySelector(PREVIEW_CARD)), /^Preview k7p2qxm4wr3d\.orgo\.dev Updating the preview/);
   assert.equal(open.box.querySelector("[data-password-lock]"), null, "no lock when the link asks for no password");
   await open.done();
   // An owner's Bops from before Preview: its address up top, live and up to date (what's live stands for the newest), no Preview line, Go back as before.
@@ -2868,7 +2903,8 @@ await test("Your Apps shared with the user: each site's Preview, where their Dep
   assert.ok(legacy.includes(">shop.orgo.dev<"));
   assert.ok(!legacy.includes("data-motion") && !legacy.includes("data-next-action") && !legacy.includes("data-state-line"), "live and up to date: nothing to say");
   const old = await opened(state("write", before));
-  assert.equal(old.box.querySelector("[data-shared-preview]"), null);
+  assert.equal(old.box.querySelector('[data-place="preview"]'), null, "no Preview card");
+  assert.ok(words(old.box.querySelector('[data-places] [data-place="live"]')).startsWith("Live shop.orgo.dev"), "the Live card opens its address");
   assert.ok(!/Published/.test(old.box.textContent));
   assert.equal([...old.box.querySelectorAll("button")].filter((b) => b.textContent === "Go back to this one").length, 1);
   await old.done();

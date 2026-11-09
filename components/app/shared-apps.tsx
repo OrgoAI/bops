@@ -5,7 +5,7 @@ import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
 import { appStatus, changesBetween, type AppStatusInput } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
-import { Fold, Motion, PasswordLock, PlaceLink, PublishButton, SiteIcon, Tag } from "./app-status";
+import { AppRow, bare, FILLED, Fold, Motion, OUTLINED, OpenIcon, PasswordLock, PlaceCard, PublishButton, SECTION_TITLE, SiteIcon, Tag, VersionRow } from "./app-status";
 import { memberAct } from "./shared-act";
 import { ago } from "./ui";
 
@@ -111,10 +111,6 @@ export function sharedStatus(a: SharedApp, site: Site | undefined): AppStatusInp
   };
 }
 
-const OUTLINED = "flex h-7 shrink-0 items-center whitespace-nowrap rounded-full px-2.5 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F6F6F4] disabled:opacity-50";
-const FILLED = "rounded-full bg-ink px-3 py-1 text-[12px] font-medium leading-4 text-white disabled:opacity-50";
-const HEAD = "text-[12px] font-semibold leading-4 text-[#9A9A97]";
-const bare = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
 export function SharedAppsPage({ state }: { state: AppState }) {
   const apps = state.shared?.apps;
@@ -127,13 +123,16 @@ export function SharedAppsPage({ state }: { state: AppState }) {
     <div data-shared-apps className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
       <div className="flex flex-col gap-1">
         <span className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">{W.title}</span>
-        <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">{write ? W.writeLine(ws) : W.readLine(ws)}</span>
-        {apps.at > 0 && <span className="text-[12px] leading-4 text-[#9A9A98]">{W.asOf(asOf(apps.at))}</span>}
+        {/* One line under the title: whose apps and what the viewer may do, and when the owner's Mac last read them. */}
+        <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">
+          {write ? W.writeLine(ws) : W.readLine(ws)}
+          {apps.at > 0 && <span className="text-[#9A9A98]">{` ${W.asOf(asOf(apps.at))}.`}</span>}
+        </span>
       </div>
       {!apps.list.length ? (
         <span className="text-[13px] text-[#6B6B6B]">{W.none}</span>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="-mx-3 flex flex-col gap-1">
           {apps.list.map((a) => (
             <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
           ))}
@@ -146,10 +145,11 @@ export function SharedAppsPage({ state }: { state: AppState }) {
 type Pending = NonNullable<NonNullable<AppState["shared"]>["appActs"]>[number];
 
 /**
- * One app, one quiet line: its name and address, and at its end Publish (its dot on) while the preview has a change
- * that isn't live (an Admin's), Update preview while the preview is behind, else what moves. Opened, its Preview (a
- * link, its password behind a lock), its versions (each tagged where it is, Restore as a line is pointed at), and
- * Settings folded: Update preview, its earlier deploys, its build settings, its domains.
+ * One app, one quiet row (the owner's row shape): its name and address, and at its end Publish (its dot on) while the
+ * preview has a change that isn't live (an Admin's), Update preview while the preview is behind, else what moves.
+ * Opened, a card under it: Live and the Preview as cards (its password behind a lock), each saying what it serves; its
+ * versions set in columns (where each is as a tag, Restore as a line is pointed at); Settings folded: Update preview,
+ * its earlier deploys, its build settings, its domains.
  */
 function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean }) {
   const [open, setOpen] = useState(false);
@@ -171,6 +171,12 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
   // Why Publish can't be pressed now: no Preview live yet, nothing on it that isn't published, or no domain to live on.
   const whyNotPublish = !pv || !site.previewServing ? W.needsPreview : site.previewServing === site.serving ? W.samePublished : !status.domain && !status.wasLive ? W.needsDomain : undefined;
   const commits = a.commits ?? [];
+  const words = (id: string | null | undefined, word: string) => {
+    if (!id) return null;
+    const c = commits.find((x) => x.id === id);
+    return { message: (c && c.message.split("\n", 1)[0].trim()) || word, at: c?.at ?? null };
+  };
+  const moving = (st: string | null | undefined) => st === "queued" || st === "running";
   const deploy = () => void send({ act: "deploy", app: a.name });
   const right = !write ? (
     <Motion input={status} />
@@ -186,17 +192,19 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
     <Motion input={status} />
   );
   return (
-    <div data-shared-app={a.name} className="flex flex-col rounded-[14px] bg-white shadow-[0_0_0_1px_#ECECEA]">
-      <div className="flex min-h-11 items-center gap-2.5 px-4 py-2">
-        <SiteIcon className="text-[#6B6B6B]" />
-        <button type="button" onClick={() => setOpen((x) => !x)} aria-expanded={open} title={newest ? actLine(newest) : undefined} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-          <span className="truncate text-[13px] font-semibold leading-4 text-ink">{a.name}</span>
-          {site?.url && <span className="min-w-0 truncate text-[12.5px] leading-4 text-[#6B6B6B]">{bare(site.url)}</span>}
-        </button>
-        {right}
-      </div>
+    <div data-shared-app={a.name} className={`@container flex flex-col ${open ? "rounded-[14px] shadow-[0_0_0_1px_#ECECEA]" : ""}`}>
+      <AppRow
+        attrs={{ "data-shared-app-row": a.name }}
+        expanded={open}
+        title={newest ? actLine(newest) : undefined}
+        onOpen={() => setOpen((x) => !x)}
+        mark={<SiteIcon />}
+        name={a.name}
+        where={site?.url ? <span className="min-w-0 truncate">{bare(site.url)}</span> : undefined}
+        end={right}
+      />
       {(going || acts.some((x) => x.state === "failed") || said) && (
-        <div className="flex flex-col gap-0.5 px-4 pb-2.5 pl-[42px] text-[12px] leading-4">
+        <div className="flex flex-col gap-0.5 px-3 pb-2.5 pl-[42px] text-[12px] leading-4">
           {going && <span className="text-[#6B6B6B]">{going.state === "waiting" ? W.waiting : W.sending}</span>}
           {acts
             .filter((x) => x.state === "failed")
@@ -213,15 +221,30 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
         </div>
       )}
       {newest && !newest.ok && !said && (
-        <span data-act-line className="px-4 pb-2.5 pl-[42px] text-[12px] leading-4 text-[#B42318]">
+        <span data-act-line className="px-3 pb-2.5 pl-[42px] text-[12px] leading-4 text-[#B42318]">
           {actLine(newest)}
         </span>
       )}
-      {!write && open && <span className="px-4 pb-2 text-[12px] leading-4 text-[#6B6B6B]">{W.readOnly}</span>}
+      {!write && open && <span className="px-3 pb-2 pl-[42px] text-[12px] leading-4 text-[#6B6B6B]">{W.readOnly}</span>}
       {open && (
-        <div className="motion-fade-in flex flex-col gap-3 border-t border-[#F0F0EE] px-4 py-3">
-          {/* Its Preview: a place to open, its password behind a lock; of an app with more sites, each site's line. */}
-          {(a.sites ?? []).length > 1 ? (
+        <div className="motion-fade-in flex flex-col gap-4 border-t border-[#F0F0EE] px-4 py-4">
+          {/* Where it can be seen: Live and the Preview as cards, each saying what it serves; of an app with more sites, each site's line too. */}
+          <div data-places className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
+            <PlaceCard place="live" url={site?.url ?? null} serving={words(site?.serving, W.live)} working={moving(site?.live?.state) ? "Publishing…" : null} failed={site?.live?.state === "failed" ? "The last publish failed." : null} empty={W.notOnWeb} nothing="Nothing published yet" />
+            {pv && site.preview && (
+              <PlaceCard
+                place="preview"
+                url={site.preview}
+                aside={site.previewProtected ? write && site.previewPassword ? <PasswordLock password={site.previewPassword} /> : <PasswordLock password={null} waiting={W.askPassword} /> : undefined}
+                serving={words(site.previewServing, W.running)}
+                working={moving(site.previewLive?.state) ? "Updating the preview…" : null}
+                failed={site.previewLive?.state === "failed" ? "The last preview update failed." : null}
+                empty=""
+                nothing="Nothing on the preview yet"
+              />
+            )}
+          </div>
+          {(a.sites ?? []).length > 1 && (
             <Part title={W.sites}>
               {(a.sites ?? []).map((s) => (
                 <span key={s.name} className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
@@ -231,8 +254,6 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
                 </span>
               ))}
             </Part>
-          ) : (
-            site?.preview && <PreviewLine site={site} link={site.preview} write={write} />
           )}
           {!!commits.length && (
             <Part title={W.versions}>
@@ -241,19 +262,23 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
                   const onPreview = pv && c.id === site.previewServing;
                   const isLive = !!site && c.id === site.serving;
                   return (
-                    <span key={c.id} data-commit={c.id} title={c.id} className="group flex min-h-9 items-center gap-3 rounded-lg px-2 hover:bg-[#F6F6F4]">
-                      <span className="min-w-0 flex-1 truncate text-[13px] leading-4 text-ink">{c.message.split("\n", 1)[0].trim() || "No message"}</span>
-                      <span className="shrink-0 whitespace-nowrap text-[12px] leading-4 text-[#9A9A98]">{`${c.author} · ${ago(c.at)}`}</span>
-                      {onPreview && <Tag kind="preview" />}
-                      {isLive && <Tag kind="live" />}
-                      {write && !onPreview && !isLive && (
-                        <span className="flex shrink-0 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
+                    <VersionRow
+                      key={c.id}
+                      id={c.id}
+                      message={c.message.split("\n", 1)[0].trim()}
+                      tip={c.id}
+                      who={c.author}
+                      at={c.at}
+                      serving={isLive}
+                      where={isLive ? <Tag kind="live" title={onPreview ? "On the preview too" : undefined} /> : onPreview ? <Tag kind="preview" /> : undefined}
+                      action={
+                        write && !onPreview && !isLive ? (
                           <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name, at: c.id })} className={OUTLINED}>
                             {W.restore}
                           </button>
-                        </span>
-                      )}
-                    </span>
+                        ) : undefined
+                      }
+                    />
                   );
                 })}
               </div>
@@ -307,9 +332,11 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
 function PreviewLine({ site: s, link, write }: { site: Site; link: string; write: boolean }) {
   return (
     <span data-shared-preview className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
-      <PlaceLink place="preview" url={link}>
-        {s.previewProtected && (write && s.previewPassword ? <PasswordLock password={s.previewPassword} /> : <PasswordLock password={null} waiting={W.askPassword} />)}
-      </PlaceLink>
+      <a href={link} target="_blank" rel="noreferrer" title={link} className="flex items-center gap-1 text-ink hover:underline">
+        {W.preview}
+        <OpenIcon />
+      </a>
+      {s.previewProtected && (write && s.previewPassword ? <PasswordLock password={s.previewPassword} /> : <PasswordLock password={null} waiting={W.askPassword} />)}
       <span className="text-[#6B6B6B]">{stateWord(s.previewLive?.state, "preview")}</span>
     </span>
   );
@@ -318,7 +345,7 @@ function PreviewLine({ site: s, link, write }: { site: Site; link: string; write
 function Part({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <span className={HEAD}>{title}</span>
+      <span className={SECTION_TITLE}>{title}</span>
       {children}
     </div>
   );

@@ -47,7 +47,8 @@ export const ENV_NAMES: Record<AppEnv, string> = { local: "Local", preview: "Pre
 
 /** A state in a word, its dot, and more in its tooltip. */
 type EnvState = { word: string; dot: string; tip?: string };
-const DOTS = { on: "bg-[#2BB673]", bad: "bg-[#B42318]", off: "shadow-[inset_0_0_0_1.5px_#C9C9C6]", grey: "bg-[#9A9A98]" };
+// (Form, not colour: filled while it runs, hollow while nothing does; red only for a failure, which needs a person.)
+const DOTS = { on: "bg-ink", bad: "bg-[#B42318]", off: "shadow-[inset_0_0_0_1.5px_#C9C9C6]", grey: "shadow-[inset_0_0_0_1.5px_#C9C9C6]" };
 
 /** The Preview's or Published's state from what Orgo says of its newest deploy and what it serves (a Preview's link Orgo turned off: Off). */
 export function deployState(x: { live: HostedApp["live"]; serving: string | null; off?: true } | undefined | null): EnvState {
@@ -545,7 +546,7 @@ export function AppEnvs({
   return (
     // (Its lines read the width they have, not the window's: the Apps page's, or its tab's in a panel. Its menu open, it's over the lines after it.)
     <div data-app-envs className={`@container flex flex-col ${compact ? "" : "gap-0.5"} ${menu ? "relative z-10" : ""}`}>
-      {!compact && <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Local, Preview and Published</span>}
+      {!compact && <span className="pb-1 text-[13px] font-semibold leading-4 text-ink">Local, Preview and Published</span>}
       <div className={compact ? "flex flex-col" : "-mx-2 flex flex-col gap-0.5"}>
         {lines.map((l) => {
           const isPicked = picked === l.env;
@@ -631,7 +632,7 @@ export function AppEnvs({
   );
 }
 
-const HEAD = "pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]";
+const HEAD = "pb-1 text-[13px] font-semibold leading-4 text-ink";
 const HINT = "text-[12px] leading-4 text-[#9A9A98]";
 
 /** Open a bot's computer in the panel (bops-app.tsx), its screen showing (`screen`: that one, 99 for Local); null where there's no panel. */

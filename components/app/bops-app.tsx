@@ -863,22 +863,23 @@ function Bops({ state }: { state: AppState | null }) {
       openComputer(fresh.botId);
     }
   };
-  const openChat = (id: string) => {
+  /** A chat in the middle column; the panel goes back to its own tab too, unless `stay` keeps what it shows (an app's tab, asked about). */
+  const openChat = (id: string, stay = false) => {
     setChatId(id);
     setPrefill(null);
     setNewThreadFor(null);
     setThreadId(null);
     setComposing(false);
     setFocus(false);
-    setActive(CHAT_TAB);
+    if (!stay) setActive(CHAT_TAB);
   };
   /**
-   * Ask a bot something (an example on Routines, or Ask <name>): its chat, with `text` in the message box
-   * to change and send, never sent by itself, and the box focused.
+   * Ask a bot something (an example on Routines, Ask <name>, an app's Ask <bot>): its chat, with `text` in the message
+   * box to change and send, never sent by itself, and the box focused. `stay`: the panel keeps its tab (the app asked about).
    */
-  const askBot = (botId: string, text?: string) => {
+  const askBot = (botId: string, text?: string, stay = false) => {
     const id = botChatId(botId);
-    openChat(id);
+    openChat(id, stay);
     if (state.chats.some((c) => c.id === id)) setPrefill({ chatId: id, text: text ?? "", at: Date.now() });
   };
   /** The task Add app started (hosted-apps.tsx): its thread once the window has it, else its bot's chat, where its chip is. */

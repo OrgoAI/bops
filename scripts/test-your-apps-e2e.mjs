@@ -11,7 +11,9 @@
 // it is, and either skips the checks (`--look`). Without --look, every control of the new page is pressed, PASS or FAIL
 // printed per check, and the run fails on any FAIL, page error or console error. <out> is $YOUR_APPS_OUT, else
 // .scratch/your-apps. Everything stays on 127.0.0.1.
-// Usage: node scripts/test-your-apps-e2e.mjs [--shots before|after] [--look] [--width 1440]
+// `--hold` instead opens the two windows (the owner's and sam's) in a Chrome you can see, each at Your Apps with the
+// sample in it, and keeps them answered until that Chrome is closed: for a person to click around, not a check.
+// Usage: node scripts/test-your-apps-e2e.mjs [--shots before|after] [--look] [--width 1440] [--hold]
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,6 +27,7 @@ const arg = (k) => (args.includes(k) ? args[args.indexOf(k) + 1] : undefined);
 const PREFIX = arg("--shots") ?? "after";
 const LOOK = args.includes("--look") || PREFIX === "before";
 const WIDTHS = arg("--width") ? [Number(arg("--width"))] : [1440, 1180];
+const HOLD = args.includes("--hold");
 const { chromium } = await import("playwright");
 
 /* ---------------- The stack ---------------- */
@@ -170,7 +173,8 @@ const words = (t) => t.split(/\s+/).filter(Boolean).length;
 const NO_DASHES = /[–—]| - /;
 
 async function newPage(browser, width, who) {
-  const context = await browser.newContext({ viewport: { width, height: 900 }, deviceScaleFactor: 2, colorScheme: "light" });
+  // (Held for a person, the page fills whatever size they make the window.)
+  const context = await browser.newContext(HOLD ? { viewport: null, colorScheme: "light" } : { viewport: { width, height: 900 }, deviceScaleFactor: 2, colorScheme: "light" });
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(`${who} pageerror: ${e.message}`));
   page.on("console", (m) => {
@@ -216,6 +220,14 @@ async function owner(browser, width) {
   await page.waitForTimeout(600);
   await snap(page, "owner-app-settings", width);
   if (!LOOK) await ownerSettingsChecks(page);
+  // An app not published yet (cclc): its Live card says so and offers Add a domain, which opens Settings at the form.
+  await page.locator('[data-footer-key="apps"] button').click();
+  await page.locator('[data-hosted-app="cclc"]').waitFor();
+  await page.locator('[data-hosted-app="cclc"] > button').first().click();
+  await page.locator('[data-hosted-tab="cclc"] [data-places]').waitFor();
+  await page.waitForTimeout(500);
+  await snap(page, "owner-app-unpublished", width);
+  if (!LOOK) await ownerUnpublishedChecks(page);
   await page.context().close();
 }
 
@@ -250,14 +262,23 @@ async function ownerHomeChecks(page) {
   check("cclc: Not published, quietly", (await page.locator('[data-hosted-app="cclc"] [data-motion="unpublished"]').innerText()).trim() === "Not published" && (await page.locator('[data-hosted-app="cclc"] button[data-next-action]').count()) === 0);
   check("brochure-maker: a spinner and Updating the preview", /Updating the preview/.test(await page.locator('[data-hosted-app="brochure-maker"] [data-motion="working"]').innerText()) && (await page.locator('[data-hosted-app="brochure-maker"] button[data-next-action]').count()) === 0);
   check("no sentences, no Local, Preview and Published lines, no changeset ids on the home", (await list.locator("[data-app-env], [data-state-line]").count()) === 0 && !/[0-9a-f]{7}/.test(await list.innerText()));
-  check("the tools the bots made show as tiles", (await page.locator("[data-made-app-tile]").count()) === 2);
-  check("no dashes on the home", !NO_DASHES.test(await page.locator("[data-made-apps-home]").innerText()));
+  check("the tools the bots made are rows in the same list, saying In Bops", (await page.locator("[data-made-app]").count()) === 2 && (await Promise.all((await page.locator("[data-made-app]").all()).map((r) => r.innerText()))).every((t) => t.includes("In Bops")));
+  const heights = await Promise.all((await page.locator("[data-hosted-app], [data-made-app]").all()).map(async (r) => Math.round((await r.boundingBox())?.height ?? 0)));
+  check("one row shape: every app's row the same height", heights.length === 5 && heights.every((x) => x === heights[0]));
+  const home = await page.locator("[data-made-apps-home]").innerText();
+  check("no section labels on the home", !/On the web|Made by your bots/.test(home));
+  check("no dashes on the home", !NO_DASHES.test(home));
 }
 
 async function ownerAppChecks(page) {
   const tab = page.locator('[data-hosted-tab="fourcorners"]');
-  check("the title: Live and Preview as places to open, Publish with its dot, Settings", (await tab.locator('[data-place="live"] a').getAttribute("href")) === "https://fourcorners.brandlord.agency" && (await tab.locator('[data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev" && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 1 && (await tab.locator("[data-tab-settings]").count()) === 1);
+  check("the title: Ask the bot, Publish with its dot, Settings; no places in it", ((await tab.locator("[data-work]").getAttribute("aria-label")) ?? "").startsWith("Ask ") && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 1 && (await tab.locator("[data-tab-settings]").count()) === 1 && (await tab.locator("[data-tab-settings]").locator("xpath=..").locator("[data-place]").count()) === 0);
+  check("the app's name is readable in the title (not cut to a few letters)", await tab.locator("[data-app-title]").evaluate((e) => e.scrollWidth <= e.clientWidth + 1));
   check("the title says few words (under 12)", words(await tab.locator("[data-tab-settings]").locator("xpath=..").innerText()) <= 12);
+  check("Live and Preview as cards, each opening its address", (await tab.locator('[data-places] [data-place="live"] a').getAttribute("href")) === "https://fourcorners.brandlord.agency" && (await tab.locator('[data-places] [data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev");
+  const liveSays = await tab.locator('[data-place="live"] [data-place-serving]').innerText();
+  const previewSays = await tab.locator('[data-place="preview"] [data-place-serving]').innerText();
+  check("each card says which version it serves, in words, no ids", /IMPROVING/.test(liveSays) && /Home line/.test(previewSays) && !/[0-9a-f]{7}/.test(liveSays + previewSays));
   await tab.locator("[data-password-lock]").click();
   await page.waitForTimeout(300);
   check("the lock opens the preview's password", (await tab.locator("[data-password-popover] [data-preview-password]").innerText()).trim() === "Kw7mQ2p");
@@ -265,6 +286,9 @@ async function ownerAppChecks(page) {
   await tab.locator("[data-history]").click({ position: { x: 4, y: 4 } });
   const versions = tab.locator("[data-history]");
   check("Versions: the newest tagged Preview, the one live tagged Live", (await versions.locator('[data-commit] [data-tag="preview"]').count()) === 1 && (await versions.locator('[data-commit] [data-tag="live"]').count()) === 1);
+  const tagX = await Promise.all((await versions.locator("[data-commit] [data-tag]").all()).map(async (t) => Math.round((await t.boundingBox())?.x ?? -1)));
+  const whenX = await Promise.all((await versions.locator("[data-commit]").all()).map(async (r) => Math.round(((await r.boundingBox())?.x ?? 0) + ((await r.boundingBox())?.width ?? 0))));
+  check("the tags sit in one column, and every line ends at the same edge", tagX.length === 2 && tagX[0] === tagX[1] && whenX.every((x) => x === whenX[0]));
   check("no changeset ids or file counts on the lines", !/[0-9a-f]{7}/.test(await versions.innerText()) && !/\+\d/.test(await versions.innerText()));
   check("no blue on the page, no sentence, nothing moving", !(await tab.innerHTML()).includes("#EEF2FF") && (await tab.locator("[data-state-line], [data-motion]").count()) === 0);
   check("no domains, settings or deploys on the versions page", (await tab.locator("[data-domains], [data-settings], [data-deploys], [data-app-envs]").count()) === 0);
@@ -276,6 +300,13 @@ async function ownerAppChecks(page) {
   check("Publish was sent", model.acts.some((x) => x.action === "promote"));
   await page.waitForTimeout(3800);
   check("after Publish, the dot is off and the newest version is Live", (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0 && (await tab.locator('[data-commit] >> nth=0').locator('[data-tag="live"]').count()) === 1);
+  check("and the Live card now says that version", /Home line/.test(await tab.locator('[data-place="live"] [data-place-serving]').innerText()));
+  // Ask the bot: its chat beside the tab, the message begun, the tab still showing.
+  await tab.locator("[data-work]").click();
+  await page.waitForTimeout(500);
+  const composer = page.locator("#composer");
+  check("Ask the bot: the message box has the ask begun, and the app's tab is still open", /^Change the app/.test((await composer.inputValue().catch(() => "")) ?? "") && (await tab.isVisible()));
+  await composer.fill("").catch(() => {});
   check("no dashes on the tab", !NO_DASHES.test(await tab.innerText()));
 }
 
@@ -288,7 +319,18 @@ async function ownerSettingsChecks(page) {
   check("Update preview was sent", model.acts.some((x) => x.action === "deploy" && x.env === "preview"));
   await tab.locator("[data-tab-settings]").click();
   await page.waitForTimeout(500);
-  check("back on versions while it runs: Updating the preview, and nothing to publish yet", (await tab.locator('[data-motion="working"]').count()) === 1 && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0);
+  check("back on versions while it runs: the Preview card says Updating the preview, and nothing to publish yet", /Updating the preview/.test(await tab.locator('[data-place="preview"] [data-place-serving]').innerText()) && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0);
+}
+
+async function ownerUnpublishedChecks(page) {
+  const tab = page.locator('[data-hosted-tab="cclc"]');
+  check("cclc: the Live card says Not published yet and offers Add a domain; no address to open", (await tab.locator('[data-place="live"] [data-place-empty]').innerText()).trim() === "Not published yet" && (await tab.locator('[data-place="live"] [data-place-action]').innerText()).trim() === "Add a domain" && (await tab.locator('[data-place="live"] a').count()) === 0);
+  check("cclc: Publish greyed, with why", (await tab.locator('[data-next-action="publish"]').isDisabled()) && !!(await tab.locator('[data-next-action="publish"]').locator("xpath=..").getAttribute("data-tip")));
+  await tab.locator('[data-place="live"] [data-place-action]').click();
+  await page.waitForTimeout(900);
+  await snap(page, "owner-app-add-domain", (await page.viewportSize())?.width ?? 1440);
+  const got = [(await tab.locator("[data-app-settings]").count()) === 1, (await tab.locator("[data-add-domain-panel]").count()) === 1, (await tab.locator('[data-tab-settings][aria-pressed="true"]').count()) === 1];
+  check(`Add a domain opens Settings with the domain form (settings ${got[0]}, form ${got[1]}, pressed ${got[2]})`, got.every(Boolean));
 }
 
 async function samHomeChecks(page) {
@@ -301,7 +343,7 @@ async function samHomeChecks(page) {
 
 async function samOpenChecks(page) {
   const fc = page.locator('[data-shared-app="fourcorners"]');
-  check("opened: the preview as a place to open, its password behind a lock", (await fc.locator('[data-shared-preview] [data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev" && (await fc.locator("[data-password-lock]").count()) === 1);
+  check("opened: Live and the Preview as cards, the password behind a lock", (await fc.locator('[data-places] [data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev" && (await fc.locator('[data-places] [data-place="live"] a').getAttribute("href")) === "https://fourcorners.brandlord.agency" && (await fc.locator("[data-password-lock]").count()) === 1);
   await fc.locator("[data-password-lock]").click();
   await page.waitForTimeout(300);
   check("the lock shows the password", (await fc.locator("[data-password-popover] [data-preview-password]").innerText()).trim() === "Kw7mQ2p");
@@ -315,11 +357,47 @@ async function samOpenChecks(page) {
   check("sam's Publish went to the owner's Bops as a prod deploy", model.acts.some((x) => x.act === "deploy" && x.env === "prod" && x.app === "fourcorners"));
 }
 
+/**
+ * The two windows open for a person, at Your Apps, the sample answered behind them (every press moves it on as the checks'
+ * do), until the Chrome is closed. Each window is its own, so a Publish pressed as the owner is seen by sam too.
+ */
+async function hold(browser) {
+  const ownerPage = await newPage(browser, WIDTHS[0], "owner");
+  await ownerRoutes(ownerPage);
+  await ownerPage.goto(urls.owner, { waitUntil: "networkidle" });
+  // (A cold dev server compiles the window on its first opening: minutes, not seconds. A window that never shows the
+  // button leaves a shot of itself and what the page said, so the reason is seen.)
+  const footer = async (page, who) => {
+    try {
+      await page.locator('[data-footer-key="apps"] button').waitFor({ timeout: 240_000 });
+    } catch (e) {
+      await page.screenshot({ path: join(OUT, `hold-${who}-no-apps-button.png`) }).catch(() => {});
+      console.log(`${who}: no Your Apps button at ${page.url()}; the page says: ${(await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 400)}`);
+      for (const x of errors) console.log(`  ${x}`);
+      throw e;
+    }
+    await page.locator('[data-footer-key="apps"] button').click();
+  };
+  await footer(ownerPage, "owner");
+  const samPage = await newPage(browser, WIDTHS[0], "sam");
+  await samRoutes(samPage);
+  await samPage.goto(urls.sam, { waitUntil: "networkidle" });
+  await samPage.locator("[data-footer-key]").first().waitFor({ timeout: 240_000 });
+  // The shared workspace, opened as the switcher opens it: only there does sam have Your Apps.
+  const status = await samPage.evaluate((id) => fetch("/api/workspaces/shared", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ open: id }) }).then((r) => r.status), F.PROJECT.id);
+  if (status !== 200) throw new Error(`sam couldn't open the shared workspace: ${status}`);
+  await footer(samPage, "sam");
+  await ownerPage.bringToFront();
+  console.log(`open: the owner's Bops (${urls.owner}) and sam's, an Admin's (${urls.sam}), each at Your Apps. Close that Chrome to end.`);
+  await new Promise((resolve) => browser.on("disconnected", resolve));
+}
+
 /* ---------------- Run ---------------- */
 
-const browser = await chromium.launch({ channel: "chrome", headless: true });
+const browser = await chromium.launch({ channel: "chrome", headless: !HOLD, args: HOLD ? [`--window-size=${WIDTHS[0]},960`] : [] });
 try {
-  for (const width of WIDTHS) {
+  if (HOLD) await hold(browser);
+  else for (const width of WIDTHS) {
     // The sample as it was, for each width: a Publish pressed at one width isn't live at the next.
     model.apps = F.hostedApps().apps;
     model.acts = [];

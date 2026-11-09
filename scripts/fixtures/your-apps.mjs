@@ -73,7 +73,8 @@ export function hostedApps() {
         name: CCLC.name,
         head: CCLC.head,
         updatedAt: hr(3),
-        hosting: { botId: BOT.id, computerId: COMPUTER.id, preview: CCLC.label },
+        // (Its Published project exists (made at its first settings save), with no domain yet: Add a domain is offered.)
+        hosting: { botId: BOT.id, computerId: COMPUTER.id, projectId: "p_cclc", preview: CCLC.label },
         serving: null,
         live: null,
         preview: { projectId: "pp_cclc", url: CCLC.preview, label: CCLC.label, serving: CCLC.head, live: live("d_cclc_p1", CCLC.head, "succeeded", hr(3)), protected: true, passwordAt: hr(3) },
