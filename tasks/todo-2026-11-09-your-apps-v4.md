@@ -1,22 +1,20 @@
-# Your Apps v4 — waiting for mock approval
+# Your Apps v4 — second mock awaiting review
 
-Goal: finish the attached brief, including Abhay's yes on the mock, real behavior preserved, both-width click proof, one Claude review and a Draft PR. STOP at step 3 until Abhay explicitly approves the mock. No approval has been received.
-
-Work ONLY in `/Users/abhayp/wt/bops-your-apps-v4`, branch `dev/your-apps-v4`, based on origin/main `1e1beae`. Do not touch the dirty source worktree or installed Bops. No main push, no real workspaces, no secrets reads.
+Work ONLY in `/Users/abhayp/wt/bops-your-apps-v4`, branch `dev/your-apps-v4`, base origin/main `1e1beae`. Full goal remains the attached brief: approved mock, real behavior preserved, both-width click proof, one Claude review, Draft PR. No push, real workspaces, installed Bops, secrets or domain feature.
 
 Brief: `/Users/abhayp/.codex/attachments/367388db-35c1-4375-877a-1b888cc14b1e/pasted-text-1.txt`.
 Artifacts: `/Users/abhayp/Downloads/orgo_repo/output/2026-11-09-bops-your-apps-v4/`.
-Read PLAN.md and COMPONENT-AUDIT.md there. wireframes.html covers four screens. before/ has 16 original captures; mock/ has 10 captures (home/app/settings/Admin/restored-preview at 1440/1180). mock-checks.log records all static checks passing. secscan.log is PASS. Real components and lib are unchanged.
 
-Temporary routes: `app/your-apps-v4/page.tsx` (static data + shipped shell) and `references/page.tsx` (imports actual siblings). Three harness files copied from origin/dev/your-apps-redesign, no visual code. test-your-apps-e2e.mjs has --mock and --siblings modes plus a before-only path for main's inline settings. Mock/gallery runs require types/lint and reject real-component changes or handwritten SVG. Before/after mode remains for later real implementation and will need selectors/checks adapted to the approved layout.
+Abhay approved the first mock's look but requested another iteration for nontechnical BrandLord users. Keep it minimal: controls explain the path; no paragraphs/eyebrows. This is NOT approval to implement the real pages. Wait for his yes on the second mock.
 
-References: inspected Lovable list and publish panel look-only. Abhay signed into Vercel himself; then inspected its live Team Deployments list, no writes. Official list image is also in references/. App siblings captured from local sample stack. Private sibling CSS recipes copied only into mock; after yes extract shared pieces and make the sibling import them, rather than fork permanent controls.
+Read PLAN-ITERATION-2.md and PROOF-ITERATION-2.md. Original before/ has 16 captures; first mock/ retained; second mock/iteration-2/ has 24 captures at 1440/1180. mock-intuition-red.log: four missing entry-path checks fail on first mock. mock-iteration-2-checks.log: 69 PASS, no FAIL/errors, exit 0. Types/lint gated before capture. Source components/lib/manifests untouched.
 
-Next:
-1. Wait for Abhay's approval or requested mock changes. Do not infer approval from the Vercel login messages.
-2. After yes: carry only allowed appStatus restored-preview fix, openChat(id,stay), and nested-control propagation fixes. Implement home, app, settings, Admin in slices; preserve every original request body.
-3. Delete both temporary routes before PR. Complete exact type/lint, both-width click and named regression gates in brief. One Claude review. Scan, push branch, Draft PR only. Abhay marks Ready.
+Second mock: home Review changes + unpublished tag; app Preview / Live, Open preview, Show password, Publish changes. Password reveal/copy/Escape tested. Final publish uses actual AskInPlace, names version and GitHub destination, cancellation preserves unpublished state. Current/behind states tested. History and technical detail disclosures hold raw versions/Local. Admin has no Local. Temporary preview route is only a local sample destination; publication/restore change page memory only.
 
-Known boundary: static Restore only moves a mock tag; no publishing/settings/domain operation was implemented or proven. Full real-app behavior tests not run. The sample stack is stopped at handoff. Restart: `TWO_PERSON_MEMBER_ROLE=admin node scripts/dev-two-person.mjs start`. Recreate mock screenshots: set YOUR_APPS_OUT to artifact mock/ and run `node scripts/test-your-apps-e2e.mjs --shots mock --look --mock`.
+Technical fact: Local is Boppy's working folder. GitHub publishing sends the reviewed preview to the repo; it does not prove the website went live. Confirm must say that honestly. REA captured first-party Lovable/Vercel publishing docs, not authenticated deployment actions; evidence and screenshots under references/rea-*. Findings and feedback recorded in vault Bops Your Apps Redesign.md, lesson L798.
+
+Next: iterate mock or receive explicit yes. After yes, carry only allowed appStatus/restored-preview, openChat(id,stay), nested-control fixes; extract shared recipes with sibling imports. Implement home/app/settings/Admin in slices; preserve request bodies. Delete all app/your-apps-v4/ routes before PR. Run every exact gate in brief and Claude review; scan, branch push, Draft PR only.
+
+Sample stack stopped, seven ports clear. Restart: `TWO_PERSON_MEMBER_ROLE=admin node scripts/dev-two-person.mjs start`. Capture: YOUR_APPS_OUT=<artifact>/mock/iteration-2 node scripts/test-your-apps-e2e.mjs --shots mock --look --mock. A stale generated .next/dev route type had duplicate tail bytes; npx next typegen alone targets prod, so stopped stack and used BOPS_NEXT_DIST_DIR=.next/dev npx next typegen; restored tsconfig formatting, types pass. Don't bypass gates.
 
 Skills: app-redesign, staff-engineer-workflow, abhay-language.

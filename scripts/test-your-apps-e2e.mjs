@@ -207,15 +207,19 @@ async function owner(browser, width) {
   if (args.includes("--mock")) {
     await page.goto(`${urls.owner}/your-apps-v4`, {waitUntil:"networkidle"});
     await page.locator('[data-mock-go="home"]').waitFor();
-    for (const screen of ["home", "app", "settings"]) {
-      await page.locator(`[data-mock-go="${screen}"]`).click();
-      await snap(page, `mock-owner-${screen}`, width);
-      await mockChecks(page, `${screen} ${width}`);
-    }
-    await page.locator('[data-mock-go="app"]').click();
-    await page.locator('[data-mock-version]').nth(2).getByRole('button',{name:'Restore'}).click();
-    await snap(page, 'mock-owner-restored-preview', width);
-    check(`restored version keeps Preview and Publish ${width}`, (await page.locator('[data-mock-version]').nth(2).innerText()).includes('Preview') && await page.getByRole('button',{name:'Publish to GitHub',exact:true}).isVisible());
+    await mockEntryChecks(page, width);
+    if (args.includes("--mock-intuition-only")) { await page.context().close(); return; }
+    await snap(page, 'mock-owner-home', width);
+    await mockChecks(page, `home ${width}`);
+    await page.getByRole('button',{name:'Review changes',exact:true}).click();
+    await snap(page, 'mock-owner-app', width);
+    await mockChecks(page, `app ${width}`);
+    await mockInteractionChecks(page, width);
+    await page.getByRole('button',{name:'Settings',exact:true}).click();
+    await snap(page, 'mock-owner-settings', width);
+    await page.getByRole('button',{name:'Technical settings',exact:true}).click();
+    check(`technical settings remain one click away ${width}`, await page.locator('[data-technical-settings] input').count() === 4);
+    await snap(page, 'mock-owner-technical-settings', width);
     await page.context().close();
     return;
   }
@@ -290,6 +294,12 @@ async function sam(browser, width) {
     await page.locator('[data-mock-go="admin"]').click();
     await snap(page, 'mock-admin-open', width);
     await mockChecks(page, `admin ${width}`);
+    await page.getByRole('button',{name:'Show password',exact:true}).click();
+    check(`Admin can find preview password ${width}`, (await page.locator('[data-preview-password]').innerText()) === 'Kw7mQ2p');
+    await page.keyboard.press('Escape');
+    check(`password action keeps Admin row open ${width}`, await page.getByRole('tab',{name:'Preview',exact:true}).isVisible());
+    await page.getByRole('button',{name:'Technical details',exact:true}).click();
+    check(`Admin never gets owner Local controls ${width}`, await page.locator('[data-local-details]').count() === 0);
     await page.context().close();
     return;
   }
@@ -305,6 +315,73 @@ async function sam(browser, width) {
   await snap(page, "admin-open", width);
   if (!LOOK) await samOpenChecks(page);
   await page.context().close();
+}
+
+// The review-first, nontechnical path is acceptance behavior, not a visual snapshot assertion.
+async function mockEntryChecks(page, width) {
+  check(`home offers Review changes rather than an unexplained publish ${width}`, await page.getByRole('button', {name:'Review changes', exact:true}).count() === 1 && await page.getByRole('button', {name:/^Publish/}).count() === 0);
+  const review = page.getByRole('button',{name:'Review changes',exact:true});
+  if (await review.count()) await review.click();
+  else await page.locator('[data-mock-go="app"]').click();
+  check(`Preview and Live are the two primary choices ${width}`, await page.getByRole('tab', {name:'Preview',exact:true}).count() === 1 && await page.getByRole('tab', {name:'Live',exact:true}).count() === 1);
+  check(`preview password has a named visible control ${width}`, await page.getByRole('button', {name:'Show password',exact:true}).count() === 1);
+  check(`Local and GitHub stay out of the default content ${width}`, await page.locator('main').getByText('Local',{exact:true}).count() === 0 && !(await page.locator('main').innerText()).includes('OrgoAI/orgo-brandlord'));
+  await page.locator('[data-mock-go="home"]').click();
+}
+
+// Driven prototype controls. All publication/restoration stays in this page's sample state.
+async function mockInteractionChecks(page, width) {
+  const suffix = String(width);
+  const pass = page.getByRole('button',{name:'Show password',exact:true});
+  await pass.click();
+  check(`password is revealed next to its named control ${suffix}`, await page.getByRole('dialog',{name:'Preview password'}).isVisible() && (await page.locator('[data-preview-password]').innerText()) === 'Kw7mQ2p');
+  await snap(page,'mock-owner-password',width);
+  await page.context().grantPermissions(['clipboard-read','clipboard-write']);
+  await page.getByRole('button',{name:'Copy password',exact:true}).click();
+  check(`Copy password copies exactly the revealed password ${suffix}`, await page.evaluate(()=>navigator.clipboard.readText()) === 'Kw7mQ2p');
+  await page.keyboard.press('Escape');
+  check(`Escape closes password and restores focus ${suffix}`, await page.getByRole('dialog',{name:'Preview password'}).count() === 0 && await pass.evaluate(x=>x===document.activeElement));
+  const [preview] = await Promise.all([page.waitForEvent('popup'), page.getByRole('link',{name:'Open preview',exact:true}).click()]);
+  await preview.waitForLoadState('domcontentloaded');
+  check(`Open preview opens the local preview sample ${suffix}`, new URL(preview.url()).pathname === '/your-apps-v4/preview' && await preview.locator('[data-sample-preview]').count() === 1);
+  await preview.close();
+  await page.getByRole('tab',{name:'Live',exact:true}).click();
+  check(`Live switches to the visitor website action ${suffix}`, await page.getByRole('link',{name:'Open website',exact:true}).isVisible() && await page.getByRole('button',{name:'Show password',exact:true}).count() === 0);
+  await snap(page,'mock-owner-live',width);
+  await page.getByRole('tab',{name:'Preview',exact:true}).click();
+  await page.getByRole('button',{name:'About preview and live',exact:true}).click();
+  check(`Preview and Live have click-accessible explanations ${suffix}`, (await page.locator('[data-view-help]').innerText()).includes('private review copy'));
+  await page.getByRole('button',{name:'About preview and live',exact:true}).click();
+  await page.locator('[data-review-publish]').click();
+  const confirmation = page.getByRole('group',{name:'Publish this preview?',exact:true});
+  check(`publishing names the version and GitHub destination before confirmation ${suffix}`, (await confirmation.innerText()).includes('Updated the home page introduction') && (await confirmation.innerText()).includes('OrgoAI/orgo-brandlord') && (await confirmation.innerText()).includes('may update automatically'));
+  await snap(page,'mock-owner-publish-confirmation',width);
+  await page.getByRole('button',{name:'Keep reviewing',exact:true}).click();
+  check(`cancel keeps changes unpublished ${suffix}`, (await page.locator('[data-review-state]').innerText()) === '1 unpublished change');
+  await page.getByRole('button',{name:'Version history',exact:true}).click();
+  await page.locator('[data-mock-version]').nth(2).getByRole('button').click();
+  check(`Restore says preview and keeps publication separate ${suffix}`, (await page.locator('[data-mock-version]').nth(2).innerText()).includes('Preview') && (await page.locator('[data-review-state]').innerText()) === '1 unpublished change' && await page.locator('[data-review-publish]').isEnabled());
+  await snap(page,'mock-owner-restored-preview',width);
+  await mockChecks(page,`versions ${width}`);
+  await page.getByRole('button',{name:'Technical details',exact:true}).click();
+  check(`Local and version IDs remain available in details ${suffix}`, (await page.locator('[data-technical-details]').innerText()).includes('working copy (Local)') && (await page.locator('[data-technical-details]').innerText()).includes('c3c3c3c'));
+  await snap(page,'mock-owner-technical-details',width);
+  await page.locator('[data-mock-go="app"]').click();
+  await page.locator('[data-mock-stage="current"]').click();
+  check(`no unpublished changes cannot be republished ${suffix}`, (await page.locator('[data-review-state]').innerText()) === 'Up to date' && await page.locator('[data-review-publish]').isDisabled());
+  await snap(page,'mock-owner-up-to-date',width);
+  await page.locator('[data-mock-stage="behind"]').click();
+  check(`unreviewed work must update preview before publish ${suffix}`, (await page.locator('[data-review-publish]').innerText()) === 'Update preview' && await page.locator('[data-publish-confirmation]').count() === 0);
+  await snap(page,'mock-owner-preview-behind',width);
+  await page.locator('[data-review-publish]').click();
+  check(`Update preview returns to review before publishing ${suffix}`, (await page.locator('[data-review-publish]').innerText()) === 'Publish changes' && await page.locator('[data-publish-confirmation]').count() === 0);
+  await page.locator('[data-review-publish]').click();
+  await page.getByRole('group',{name:'Publish this preview?',exact:true}).getByRole('button',{name:'Publish changes',exact:true}).click();
+  check(`sample publish reports GitHub delivery without claiming website success ${suffix}`, (await page.getByRole('status').innerText()) === 'Preview sent to GitHub' && await page.locator('[data-review-publish]').isDisabled());
+  await page.locator('[data-mock-go="home"]').click();
+  check(`home reflects published state instead of offering stale changes ${suffix}`, (await page.locator('[data-mock-row]').first().innerText()).includes('Up to date') && await page.getByRole('button',{name:'Review changes',exact:true}).count() === 0);
+  await page.locator('[data-mock-stage="ready"]').click();
+  await page.locator('[data-mock-go="app"]').click();
 }
 
 // Static mock checks only; these do not prove publishing, rollback or request bodies.
@@ -471,11 +548,11 @@ if (args.includes("--mock") || args.includes("--siblings")) {
   // A gallery import error must stop the run before screenshots can be mistaken for proof.
   const types = spawnSync("npx", ["tsc", "--noEmit", "-p", "tsconfig.json"], {cwd:root, stdio:"inherit"});
   if (types.status !== 0) process.exit(types.status ?? 1);
-  const lint = spawnSync("npx", ["eslint", "app/your-apps-v4/page.tsx", "app/your-apps-v4/references/page.tsx"], {cwd:root, stdio:"inherit"});
+  const lint = spawnSync("npx", ["eslint", "app/your-apps-v4/page.tsx", "app/your-apps-v4/references/page.tsx", "app/your-apps-v4/preview/page.tsx"], {cwd:root, stdio:"inherit"});
   if (lint.status !== 0) process.exit(lint.status ?? 1);
   const scope = spawnSync("git", ["diff", "--name-only", "HEAD", "--", "components", "lib"], {cwd:root, encoding:"utf8"});
   if (scope.status !== 0 || scope.stdout.trim()) throw new Error("Mock approval gate: real components or state logic changed before approval.");
-  for (const p of ["app/your-apps-v4/page.tsx", "app/your-apps-v4/references/page.tsx"]) {
+  for (const p of ["app/your-apps-v4/page.tsx", "app/your-apps-v4/references/page.tsx", "app/your-apps-v4/preview/page.tsx"]) {
     if (/<svg\b/.test(readFileSync(join(root,p),"utf8"))) throw new Error(`Mock approval gate: handwritten icon in ${p}`);
   }
   console.log("PASS mock approval scope, types, lint and icon source");
@@ -489,7 +566,7 @@ try {
     model.apps = F.hostedApps().apps;
     model.acts = [];
     await owner(browser, width);
-    if (!args.includes("--siblings")) await sam(browser, width);
+    if (!args.includes("--siblings") && !args.includes("--mock-intuition-only")) await sam(browser, width);
   }
 } finally {
   await browser.close();
