@@ -346,7 +346,6 @@ await test("on the Preview line in Your Apps: Password, its 7 character value in
   const line = m.box.querySelector('[data-app-env="preview"]');
   const where = line.querySelector("[data-app-env-where]");
   const beside = line.querySelector("[data-password-beside]");
-  const at = line.querySelector("[data-app-env-at]");
   assert.ok(where.contains(beside) && where.querySelector(`a[href="${URL1}"]`), "beside its link, where the line says where it is");
   assert.equal(words(beside), "Password Ab3xY9k");
   const value = beside.querySelector("[data-preview-password]");
@@ -354,7 +353,7 @@ await test("on the Preview line in Your Apps: Password, its 7 character value in
   assert.ok(classes(value).includes("font-mono") && classes(value).includes("whitespace-nowrap") && !classes(value).includes("truncate"), "in mono, never cut short");
   assert.ok(classes(beside).includes("shrink-0") && classes(beside).includes("max-w-full") && !classes(beside).some((c) => /^m[lr]-/.test(c)), "one piece: the line wraps it under the link when they don't fit side by side");
   assert.ok(button(beside, "Copy password"));
-  assert.ok(at.parentNode === line && !where.contains(at) && !beside.contains(at) && at.textContent === AT.slice(0, 7) && at.getAttribute("title") === AT, "what it serves, a piece of its own");
+  assert.equal(line.getAttribute("data-app-env-at"), AT, "what it serves, on the line itself (the sentence above says the rest)");
   assert.deepEqual(placed(line), [], "nothing placed over anything");
   await m.done();
   // While it's read: what's said instead can be cut short, all of it in its tooltip.

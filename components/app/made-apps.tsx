@@ -465,20 +465,21 @@ export function MadeAppsHome({ state, ws }: { state: AppState; ws: string }) {
 function OwnAppsHome({ state, ws }: { state: AppState; ws: string }) {
   const open = useContext(OpenMadeApp);
   const apps = (state.madeApps ?? []).filter((a) => a.ws === ws).sort((a, b) => b.updatedAt - a.updatedAt);
+  const web = appsShown(state);
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
+    <div data-made-apps-home className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
       <div className="flex flex-col gap-1">
         <span className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">Your Apps</span>
-        <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">
-          {apps.length ? `${apps.length} made by your bots · they keep what you put in them` : "Tools your bots make for you. Ask any bot: “make me an app that…”"}
-        </span>
+        {!apps.length && <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">Tools your bots make for you. Ask any bot: “make me an app that…”</span>}
       </div>
-      {appsShown(state) && <HostedApps state={state} ws={ws} />}
+      {web && <HostedApps state={state} ws={ws} />}
+      {/* The tools the bots made, as tiles that show each one live; named as a section when the apps on the web sit above them. */}
+      {web && apps.length > 0 && <span className="-mb-2 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Made by your bots</span>}
       <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
         {apps.map((a) => {
           const maker = state.bots.find((b) => b.id === a.botId);
           return (
-            <button key={a.id} onClick={() => open?.(a.id)} className="group flex flex-col gap-2.5 text-left">
+            <button key={a.id} data-made-app-tile={a.id} onClick={() => open?.(a.id)} className="group flex flex-col gap-2.5 text-left">
               <span className="relative block h-[172px] overflow-hidden rounded-[14px] bg-white shadow-[0_0_0_1px_#ECECEA] group-hover:shadow-[0_0_0_1px_#0A0A0A]">
                 {a.version ? (
                   // The app itself, at half size, and not to be clicked here (the tile opens it).

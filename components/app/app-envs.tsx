@@ -39,6 +39,8 @@ export const openIntent = (name: string) => {
 };
 /** The next opening of app `name`'s tab (OpenHostedApp) at its History (app-change.tsx View changes). */
 export const openAtHistory = (name: string) => void opening.set(name, "history");
+/** The next opening of app `name`'s tab with Add a domain open on Published (Connect a domain, from the Apps page). */
+export const openAtDomain = (name: string) => void opening.set(name, "domain");
 
 /** What each is called where people read it: Prod is what's Published. */
 export const ENV_NAMES: Record<AppEnv, string> = { local: "Local", preview: "Preview", prod: "Published" };
@@ -136,9 +138,9 @@ function Btn({ why, busy, label, doing, onClick, dark, tag }: { why?: string; bu
 }
 
 /** Whether a site has a domain on Published that isn't failed or turned off (a pending one is enough to publish). */
-const hasDomain = (x: { domains?: SiteDomain[] }) => !!x.domains?.some((d) => d.status !== "failed" && d.status !== "disabled");
+export const hasDomain = (x: { domains?: SiteDomain[] }) => !!x.domains?.some((d) => d.status !== "failed" && d.status !== "disabled");
 /** Whether a site's Published ever served something (a legacy one, live with no domain, publishes all the same). */
-const everLive = (x: { serving: string | null; live: HostedApp["live"] }) => !!x.serving || x.live?.state === "succeeded";
+export const everLive = (x: { serving: string | null; live: HostedApp["live"] }) => !!x.serving || x.live?.state === "succeeded";
 /** A site can be published: it has a domain, or it was live before. */
 export const canPublish = (x: { domains?: SiteDomain[]; serving: string | null; live: HostedApp["live"] }) => hasDomain(x) || everLive(x);
 
@@ -385,9 +387,9 @@ export function AppEnvs({
   // Its computer gone: the Preview's and Published's projects went with it.
   const lost: EnvState | null = app.hosting?.lost ? { word: "Needs a new home", dot: DOTS.off, tip: "Its computer is gone, and its projects with it. Deploy a preview to give it a new home." } : null;
   const previewOf = (x: { preview?: PreviewSite }) => x.preview;
-  // (Anything that can be cut short has all of it in its tooltip.)
-  const quiet = (words: string) => (
-    <span data-tip={words} className="min-w-0 max-w-full truncate text-[12px] leading-4 text-[#9A9A98]">
+  // (Anything that can be cut short has all of it in its tooltip; `tip`, more than the words, when there's more to say.)
+  const quiet = (words: string, tip = words) => (
+    <span data-tip={tip} className="min-w-0 max-w-full truncate text-[12px] leading-4 text-[#9A9A98]">
       {words}
     </span>
   );
@@ -424,6 +426,8 @@ export function AppEnvs({
   const neverLive = !shownSites.some((x) => everLive(x));
   const gh = app.hosting?.github;
   const ghWhere = gh ? `GitHub ${gh.repo} ${gh.branch}${gh.path ? `, ${gh.path}/` : ""}${gh.last ? `, at ${gh.last.sha.slice(0, 7)}` : ", not linked yet"}` : "";
+  // (The repo and its folder on the line; the branch and the commit in its tooltip.)
+  const ghShort = gh ? `${gh.repo}${gh.path ? `, ${gh.path}/` : ""}${gh.last ? "" : ", not linked yet"}` : "";
   const prodState: EnvState = gh
     ? gh.last
       ? { word: "On GitHub", dot: DOTS.on, tip: `Publish pushes what the Preview serves to ${gh.repo} ${gh.branch}, where its own workflow deploys it.` }
@@ -464,7 +468,7 @@ export function AppEnvs({
     {
       env: "prod",
       state: prodState,
-      where: gh ? quiet(ghWhere) : domain ? <UrlLink url={domain} /> : pending ? quiet(`${pending.domain}, waiting for DNS`) : quiet(noDomain && !neverLive ? "Live, no domain yet" : "No domain yet"),
+      where: gh ? quiet(ghShort, ghWhere) : domain ? <UrlLink url={domain} /> : pending ? quiet(`${pending.domain}, waiting for DNS`) : quiet(noDomain && !neverLive ? "Live, no domain yet" : "No domain yet"),
       at: gh ? (gh.last?.ingot ?? null) : app.serving,
     },
   ];
@@ -483,13 +487,13 @@ export function AppEnvs({
         <Btn tag="local-start" label="Start" doing="Starting…" busy={busy === `local:start${k}`} why={why} onClick={() => void localDo("start", bot)} />
       );
     }
-    if (env === "preview") return <Btn tag="deploy" label="Deploy" doing="Deploying…" busy={busy === "preview"} why={whyNotEnv(answer, app, "preview", sites)} onClick={() => void deploy()} />;
+    if (env === "preview") return <Btn tag="deploy" label="Update preview" doing="Updating…" busy={busy === "preview"} why={whyNotEnv(answer, app, "preview", sites)} onClick={() => void deploy()} />;
     // No domain and never live: connecting one comes first (Published lives on its domain only).
     if (!gh && !lost && noDomain && neverLive && answer.enabled)
-      return <Btn tag="connect-domain" dark label="Connect a domain" onClick={domainFlow} />;
+      return <Btn tag="connect-domain" label="Connect a domain" onClick={domainFlow} />;
     return (
       <>
-        <Btn tag="promote" dark label={gh ? "Publish to GitHub" : "Publish"} doing={gh ? "Pushing…" : "Publishing…"} busy={busy === "promote" || busy === "reapply"} why={whyNotEnv(answer, app, "prod", sites)} onClick={() => void promote()} />
+        <Btn tag="promote" label={gh ? "Publish to GitHub" : "Publish"} doing={gh ? "Pushing…" : "Publishing…"} busy={busy === "promote" || busy === "reapply"} why={whyNotEnv(answer, app, "prod", sites)} onClick={() => void promote()} />
         <div ref={menuBox} className="relative flex shrink-0" onClick={(e) => e.stopPropagation()}>
           <button data-prod-menu aria-label="More for Published" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(!menu)} className="flex size-6 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
             <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
@@ -551,6 +555,7 @@ export function AppEnvs({
               data-app-env={l.env}
               data-app-env-bot={l.bot}
               data-app-env-state={l.state.word}
+              data-app-env-at={l.at ?? undefined}
               data-app-env-picked={isPicked || undefined}
               onClick={onPick ? () => onPick(l.env) : undefined}
               className={`flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg ${compact ? "min-h-7 py-0.5 pl-[26px] pr-2" : "min-h-8 px-2 py-1"} ${onPick ? "cursor-pointer" : ""} ${isPicked ? "bg-[#F2F2F0] shadow-[0_0_0_1px_#E2E2DF]" : onPick ? "hover:bg-[#F6F6F4]" : ""}`}
@@ -585,11 +590,6 @@ export function AppEnvs({
                 </span>
                 {l.where}
               </span>
-              {l.at && (
-                <span data-app-env-at title={l.at} className="shrink-0 font-mono text-[11px] leading-[14px] text-[#6B6B6B]">
-                  {short(l.at)}
-                </span>
-              )}
               <span className="flex shrink-0 items-center gap-1">{actions(l.env, l.bot)}</span>
             </div>
           );

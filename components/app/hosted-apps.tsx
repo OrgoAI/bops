@@ -2,7 +2,7 @@
 
 import { createContext, Fragment, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { flushSync } from "react-dom";
-import { DNS_TYPES, dnsNeeds } from "@/lib/hosted-apps";
+import { appStatus, changesBetween, DNS_TYPES, dnsNeeds, type AppStatusInput } from "@/lib/hosted-apps";
 import type {
   AddAppAnswer,
   AppCommit,
@@ -50,7 +50,8 @@ import {
 import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
 import { InlineConfirm, undash } from "./side-group";
 import { ago, post } from "./ui";
-import { AppEnvs, LocalSection, openIntent, useLocal } from "./app-envs";
+import { AppEnvs, everLive, hasDomain, LocalSection, openAtDomain, openIntent, useLocal, whyNotEnv } from "./app-envs";
+import { Fold, StatusLine, Tag } from "./app-status";
 import { PasswordSection } from "./preview-password";
 import { actLine } from "./shared-apps";
 import type { MemberAppAct } from "@/lib/hosted-apps";
@@ -154,6 +155,26 @@ export const noAddress = (a: Pick<HostedApp, "serving" | "live">, never = "No do
 
 /** A changeset's short id, as its line shows it (all of it in the tooltip). */
 export const short = (id: string) => id.slice(0, 7);
+
+/**
+ * What an app's status sentence is made of (lib/hosted-apps.ts appStatus), from the app as the list has it (or one
+ * site of it, as siteView makes it): its newest changeset, what its Preview and Published serve (on GitHub, the
+ * changeset last pushed), whether it has a domain to live on, and whether its computer is gone. `more`: how many
+ * changes wait and the newest one's words, when the history says.
+ */
+export function statusOf(a: HostedApp, more: Pick<AppStatusInput, "changes" | "change"> = {}): AppStatusInput {
+  const gh = a.hosting?.github;
+  return {
+    head: a.head,
+    preview: a.preview ? { serving: a.preview.serving, state: a.preview.live?.state ?? null } : null,
+    live: gh ? { serving: gh.last?.ingot ?? null, state: a.live?.state ?? null } : { serving: a.serving, state: a.live?.state ?? null },
+    domain: hasDomain(a),
+    wasLive: everLive(a),
+    ...(a.hosting?.lost ? { lost: true } : {}),
+    ...(gh ? { github: { linked: !!gh.last } } : {}),
+    ...more,
+  };
+}
 
 /** Where a workspace's apps are worked on and run, by repo name, as the app's state has it (Workspace.hostedApps). */
 const hostingIn = (state: Pick<AppState, "workspaces"> | null | undefined, ws: string): Record<string, AppHosting> =>
@@ -495,17 +516,43 @@ function StateDot({ app }: { app: Pick<HostedApp, "live"> }) {
  * (on what holds it: a disabled button gets no pointer events in some browsers). A press never reaches
  * the row it's on.
  */
-function DeployButton({ why, busy, onClick, label = "Deploy", primary }: { why?: string; busy: boolean; onClick: () => void; label?: string; primary?: boolean }) {
+function DeployButton({ why, busy, onClick, label = "Update preview", doing = "Updating…", primary, tag }: { why?: string; busy: boolean; onClick: () => void; label?: string; doing?: string; primary?: boolean; tag?: string }) {
   const look = primary
     ? "rounded-full bg-ink px-3 py-1 font-semibold text-white disabled:bg-[#E6E6E3] disabled:text-[#9A9A98]"
     : "rounded-full px-2.5 py-1 font-medium text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white disabled:text-[#9A9A98] disabled:shadow-[0_0_0_1px_#ECECEA]";
   return (
     <span data-tip={why} onClick={(e) => e.stopPropagation()} className="flex shrink-0">
-      <button disabled={!!why || busy} onClick={onClick} className={`whitespace-nowrap text-[12px] leading-4 ${look}`}>
-        {busy ? "Deploying…" : label}
+      <button data-next-action={tag} disabled={!!why || busy} onClick={onClick} className={`whitespace-nowrap text-[12px] leading-4 ${look}`}>
+        {busy ? doing : label}
       </button>
     </span>
   );
+}
+
+/**
+ * The one thing to press for an app now (lib/hosted-apps.ts appStatus): Update preview (the newest changeset to its
+ * Preview), Publish (what the Preview serves onto Published, or pushed to GitHub), or Connect a domain (Published lives
+ * on its domain only: `onDomain` opens Add a domain). Nothing while something is on its way, or all is well. Greyed
+ * with why while it can't be pressed (a deploy running, nothing committed). The Apps page's and the tab's title's.
+ */
+function NextAction({ ws, answer, app, busy, run, onDomain }: { ws: string; answer: Pick<HostedAppsAnswer, "enabled" | "why">; app: HostedApp; busy: (key: string, name: string) => boolean; run: (key: string, name: string, body: HostedAppAction) => Promise<void>; onDomain: () => void }) {
+  const s = appStatus(statusOf(app));
+  if (!s.action) return null;
+  if (s.action === "connect-domain")
+    return (
+      <span className="flex shrink-0" onClick={(e) => e.stopPropagation()}>
+        <button data-next-action="connect-domain" onClick={onDomain} className="whitespace-nowrap rounded-full bg-ink px-3 py-1 text-[12px] font-semibold leading-4 text-white">
+          Connect a domain
+        </button>
+      </span>
+    );
+  if (s.action === "update-preview")
+    return <DeployButton primary tag="update-preview" why={whyNot(answer, app, undefined, undefined, "preview")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "preview" })} />;
+  const gh = app.hosting?.github;
+  // (One site: the changeset seen goes with it, so a Preview that moved on since is refused rather than published unseen.)
+  const at = app.preview?.serving;
+  const body: HostedAppAction = !app.sites && at ? { ws, action: "promote", site: app.name, at } : { ws, action: "promote" };
+  return <DeployButton primary tag="publish" label={gh ? "Publish to GitHub" : "Publish"} doing={gh ? "Pushing…" : "Publishing…"} why={whyNotEnv(answer, app, "prod", app.sites ?? [app])} busy={busy("publish", app.name)} onClick={() => void run("publish", app.name, body)} />;
 }
 
 export function UrlLink({ url }: { url: string }) {
@@ -595,6 +642,7 @@ export function HostedAppsList({
 }) {
   const open = useContext(OpenHostedApp);
   const [adding, setAdding] = useState(false);
+  const { busy, error, run } = useDeploy(onChanged);
   if (answer && !answer.enabled && !answer.apps.length) return null;
   const why = answer && !answer.enabled ? answer.why || "Apps can't go on the web from here." : undefined;
   const addButton = answer && !adding && (
@@ -657,24 +705,34 @@ export function HostedAppsList({
                 <button title={a.name} className="min-w-0 shrink truncate text-left text-[13px] font-medium leading-4 text-ink">
                   {a.name}
                 </button>
-                {a.hosting?.lost ? (
-                  <span data-lost data-tip={lostTip(a)} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
-                    Needs a new home
-                  </span>
-                ) : url ? (
-                  <UrlLink url={url} />
-                ) : (
-                  <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{noAddress(a)}</span>
-                )}
+                {/* Its address (its domain), where it has one; what it lacks, the sentence says. */}
+                {url && !a.hosting?.lost && <UrlLink url={url} />}
                 {a.sites && (
                   <span data-site-count data-tip={a.sites.map((x) => x.name).join(", ")} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
                     {a.sites.length} sites
                   </span>
                 )}
                 <span className="flex-1" />
+                {/* The one thing to press (its Local, Preview and Published are on its tab). */}
+                <NextAction
+                  ws={ws}
+                  answer={answer}
+                  app={a}
+                  busy={busy}
+                  run={run}
+                  onDomain={() => {
+                    openAtDomain(a.name);
+                    open?.(ws, a.name);
+                  }}
+                />
               </div>
-              {/* Its three environments, all on its computer: Local, Preview (where Deploy goes), Published (Publish). */}
-              <ListedEnvs ws={ws} answer={answer} app={a} onChanged={onChanged} />
+              {/* What's going on with it, in a sentence, under its line. */}
+              <StatusLine input={statusOf(a)} className="-mt-1 pb-1 pl-[26px] pr-2" />
+              {error?.name === a.name && (
+                <span role="alert" className={`${PROBLEM} pl-[26px] pr-2`} title={error.text}>
+                  {error.text}
+                </span>
+              )}
               {theirs && (
                 <span data-member-act className={`-mt-1 truncate pl-[26px] pr-2 text-[11.5px] leading-4 ${theirs.ok ? "text-[#9A9A98]" : "text-[#B42318]"}`}>
                   {actLine(theirs)}
@@ -687,12 +745,6 @@ export function HostedAppsList({
       )}
     </div>
   );
-}
-
-/** An app's three lines on the Apps page (AppEnvs), its Local read from its computer (never one gone). */
-function ListedEnvs({ ws, answer, app, onChanged }: { ws: string; answer: Pick<HostedAppsAnswer, "enabled" | "why">; app: HostedApp; onChanged: (app: HostedApp) => void }) {
-  const local = useLocal(ws, app.name, !app.hosting?.lost);
-  return <AppEnvs compact ws={ws} answer={answer} app={app} sites={app.sites ?? [app]} local={local.answer} onLocal={local.put} onChanged={onChanged} />;
 }
 
 /**
@@ -1044,6 +1096,11 @@ export function HostedAppView({
   const online = history && !history.offline ? history : null;
   // What its site serves, as the list read last says (it's read again while a deploy runs), else as the history does.
   const serving = app.serving ?? (sites ? null : online?.commits.find((c) => c.serving)?.id) ?? null;
+  // How many changes the preview has that aren't live, and the newest one's words, as the history says (the picked site's).
+  const liveAt = app.hosting?.github ? (app.hosting.github.last?.ingot ?? null) : view.serving;
+  const changesWaiting = online ? changesBetween(online.commits, liveAt, view.preview?.serving ?? null) : null;
+  const newestWaiting = changesWaiting && view.preview?.serving ? online?.commits.find((c) => c.id === view.preview?.serving) : undefined;
+  const waiting = { changes: changesWaiting, change: newestWaiting ? firstLine(newestWaiting.message) : null };
   /** The sites that serve a changeset, of one with more than one. */
   const servedBy = (id: string) => sites?.filter((x) => x.serving === id).map((x) => x.name) ?? [];
   // What a deploy waiting or running builds (the newest, when it doesn't say): any site's.
@@ -1059,24 +1116,13 @@ export function HostedAppView({
   const end = (c: AppCommit) => {
     const on = sites ? servedBy(c.id) : c.id === serving ? [app.name] : [];
     const st = previewSites(c.id);
-    const chip = st.length ? (
-      <span data-on-preview className="flex shrink-0 items-center gap-1 rounded-full bg-[#EEF2FF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3346A8]">
-        <span className="size-1.5 shrink-0 rounded-full bg-[#5B6BD6]" />
-        Preview
-      </span>
-    ) : null;
+    // (Where it is, as a form: Live filled, On preview outlined; which sites, of more, in the tooltip.)
+    const chip = st.length ? <Tag kind="preview" title={sites ? `On the preview of ${st.join(", ")}` : undefined} /> : null;
     if (on.length)
       return (
         <span className="flex shrink-0 items-center gap-1">
-        {chip}
-        <span
-          data-live
-          title={sites ? `Live on ${on.join(", ")}` : undefined}
-          className="flex min-w-0 max-w-[180px] shrink-0 items-center gap-1 rounded-full bg-[#EAF7EF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#1E7A4C]"
-        >
-          <span className="size-1.5 shrink-0 rounded-full bg-[#2BB673]" />
-          <span className="truncate">{sites && on.length < sites.length ? `Published: ${on.join(", ")}` : "Published"}</span>
-        </span>
+          {chip}
+          <Tag kind="live" title={sites ? (on.length < sites.length ? `Live on ${on.join(", ")} only` : `Live on ${on.join(", ")}`) : undefined} />
         </span>
       );
     if (chip && !going.has(c.id)) return chip;
@@ -1119,9 +1165,21 @@ export function HostedAppView({
             Work on it
           </button>
         )}
-        <DeployButton primary label={sites ? "Deploy all previews" : "Deploy preview"} why={whyNot(answer, app, undefined, undefined, "preview")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "preview" })} />
+        <NextAction
+          ws={ws}
+          answer={answer}
+          app={app}
+          busy={busy}
+          run={run}
+          onDomain={() => {
+            pickEnv("prod");
+            setAdding((n) => n + 1);
+          }}
+        />
       </div>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-4 py-3">
+        {/* What's going on with it (the picked site), in a sentence: what the preview has, whether live is behind it, what's on its way. */}
+        <StatusLine input={statusOf(view, waiting)} long />
         {lost && (
           <span data-lost className={QUIET}>
             {lostTip(app)}
@@ -1140,7 +1198,7 @@ export function HostedAppView({
                   onPick={() => pick(x.name)}
                   deploy={
                     <DeployButton
-                      label="Deploy preview"
+                      label="Update preview"
                       why={whyNot(answer, app, undefined, x, "preview")}
                       busy={busy(`site:${x.name}`, app.name)}
                       onClick={() => void run(`site:${x.name}`, app.name, { ws, action: "deploy", env: "preview", site: x.name })}
@@ -1183,15 +1241,12 @@ export function HostedAppView({
           }}
         />
         {/* Made again for each site and environment picked: what was typed for one (its settings, a variable, a domain) never follows to another. */}
+        {/* What the picked environment is reached by: Published's address and domains, the Preview's link and password, Local's command. */}
         <AppSite.Provider key={`${siteName ?? app.name}:${env}`} value={siteName}>
           {env === "prod" && (
             <>
               <AppAddress url={domains?.url ?? settings?.url ?? urlOf(view)} published />
               <Domains ws={ws} app={view} answer={domains} failed={domainsFailed} onDns={onDns} onDomains={onDomains} onDomain={onDomain} onRenewal={onRenewal} email={email} adding={adding} />
-              {/* Before its first deploy, there to set where deploying is open (the first save makes its project). */}
-              {settings && (settings.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={settings} onSaved={onSettings} />}
-              {/* One log per deploy: a deploy that ends keeps its log open where it was. */}
-              <AppDeploys ws={ws} app={view} deploys={settings?.deploys ?? []} onChanged={onChanged} log={view.live && <DeployLog key={`${siteName ?? ""}:${view.live.id}`} ws={ws} name={app.name} live={view.live} />} />
             </>
           )}
           {env === "preview" && (
@@ -1199,14 +1254,6 @@ export function HostedAppView({
               <AppAddress url={previewSettings?.url ?? view.preview?.url ?? null} />
               <PasswordSection ws={ws} name={app.name} site={siteName} preview={view.preview} />
               {view.leftOver?.length ? <LeftOvers ws={ws} app={app} onChanged={onChanged} /> : null}
-              {previewSettings && (previewSettings.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={previewSettings} onSaved={onPreviewSettings} />}
-              <AppDeploys
-                ws={ws}
-                app={{ ...view, live: view.preview?.live ?? null, serving: view.preview?.serving ?? null }}
-                deploys={previewSettings?.deploys ?? []}
-                onChanged={onChanged}
-                log={view.preview?.live && <DeployLog key={`preview:${siteName ?? ""}:${view.preview.live.id}`} ws={ws} name={app.name} live={view.preview.live} />}
-              />
             </AppEnvCtx.Provider>
           )}
           {env === "local" && (
@@ -1216,17 +1263,17 @@ export function HostedAppView({
           )}
         </AppSite.Provider>
         <div ref={historyBox} data-history className="flex scroll-mt-3 flex-col">
-          <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">History</span>
+          <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Changes</span>
           {history === null ? (
-            <span className={QUIET}>Reading it…</span>
+            <span className={QUIET}>Reading them…</span>
           ) : history === false ? (
-            <span className={QUIET}>Couldn&apos;t read the history just now.</span>
+            <span className={QUIET}>Couldn&apos;t read the changes just now.</span>
           ) : history.offline ? (
             <span data-offline className={QUIET}>
-              Ingot isn&apos;t answering just now, so the history isn&apos;t here.
+              Ingot isn&apos;t answering just now, so the changes aren&apos;t here.
             </span>
           ) : !history.commits.length ? (
-            <span className={QUIET}>No commits yet.</span>
+            <span className={QUIET}>No changes yet.</span>
           ) : (
             <>
               <div className="-mx-2 flex flex-col">
@@ -1247,6 +1294,30 @@ export function HostedAppView({
             </>
           )}
         </div>
+        {/* What's rarely needed, folded: the picked environment's build settings and variables, and its deploys with the newest one's log. Open before its first deploy, where deploying is open: the first save makes its project. */}
+        <AppSite.Provider key={`fold:${siteName ?? app.name}:${env}`} value={siteName}>
+          {env === "prod" && settings && (settings.settings || (!lost && answer.enabled)) && (
+            <Fold id="settings" title="Build settings and deploys" aside={settingsAside(settings)} open={!settings.settings}>
+              <AppSettingsSection ws={ws} name={app.name} answer={settings} onSaved={onSettings} />
+              {/* One log per deploy: a deploy that ends keeps its log open where it was. */}
+              <AppDeploys ws={ws} app={view} deploys={settings.deploys} onChanged={onChanged} log={view.live && <DeployLog key={`${siteName ?? ""}:${view.live.id}`} ws={ws} name={app.name} live={view.live} />} />
+            </Fold>
+          )}
+          {env === "preview" && previewSettings && (previewSettings.settings || (!lost && answer.enabled)) && (
+            <AppEnvCtx.Provider value="preview">
+              <Fold id="settings" title="Build settings and deploys" aside={settingsAside(previewSettings)} open={!previewSettings.settings}>
+                <AppSettingsSection ws={ws} name={app.name} answer={previewSettings} onSaved={onPreviewSettings} />
+                <AppDeploys
+                  ws={ws}
+                  app={{ ...view, live: view.preview?.live ?? null, serving: view.preview?.serving ?? null }}
+                  deploys={previewSettings.deploys}
+                  onChanged={onChanged}
+                  log={view.preview?.live && <DeployLog key={`preview:${siteName ?? ""}:${view.preview.live.id}`} ws={ws} name={app.name} live={view.preview.live} />}
+                />
+              </Fold>
+            </AppEnvCtx.Provider>
+          )}
+        </AppSite.Provider>
         <AppEnd ws={ws} app={app} site={siteName} onChanged={onChanged} onRemoved={onRemoved} onPicked={pick} />
       </div>
     </div>
@@ -1304,47 +1375,30 @@ function SiteLine({ site: x, picked, lost, onPick, deploy }: { site: HostedSite;
  */
 function CommitLine({ commit: c, serving, end }: { commit: AppCommit; serving: boolean; end: ReactNode }) {
   const message = firstLine(c.message);
+  // (Its id, all of its message and the files it touched are the line's tooltip: a person reads the words, the rest waits there.)
+  const { added = 0, modified = 0, deleted = 0 } = c.changes ?? {};
+  const parts = [added && `${added} added`, modified && `${modified} changed`, deleted && `${deleted} deleted`].filter(Boolean);
+  const files = added + modified + deleted;
+  const tip = [c.id, c.message, files ? `${files} ${files === 1 ? "file" : "files"}: ${parts.join(", ")}` : null].filter(Boolean).join("\n");
   return (
-    <div data-commit={c.id} data-serving={serving || undefined} className="group flex h-8 items-center gap-2 rounded-lg px-2 hover:bg-[#F6F6F4]">
-      <span title={c.id} className="w-[52px] shrink-0 font-mono text-[11.5px] leading-4 text-[#6B6B6B]">
-        {short(c.id)}
-      </span>
-      <span title={c.message} className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${message ? "text-ink" : "text-[#9A9A98]"}`}>
-        {message || "No message"}
-      </span>
+    <div data-commit={c.id} data-serving={serving || undefined} title={tip} className="group flex h-8 items-center gap-2 rounded-lg px-2 hover:bg-[#F6F6F4]">
+      <span className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${message ? "text-ink" : "text-[#9A9A98]"}`}>{message || "No message"}</span>
       <span title={c.author} className="max-w-[110px] shrink-0 truncate text-[12px] leading-4 text-[#6B6B6B]">
         {c.author}
       </span>
       <span title={new Date(c.at).toLocaleString()} className="w-8 shrink-0 text-right text-[12px] leading-4 text-[#9A9A98]">
         {ago(c.at)}
       </span>
-      <Changes changes={c.changes} />
       {end}
     </div>
   );
 }
 
-/** Files added, changed and deleted, as +2 ~1 -1 (the ones with none left out), in words in the tooltip. */
-function Changes({ changes }: { changes?: AppCommit["changes"] | null }) {
-  const { added = 0, modified = 0, deleted = 0 } = changes ?? {};
-  const parts = [
-    { n: added, mark: "+", word: "added", look: "text-[#1E7A4C]" },
-    { n: modified, mark: "~", word: "changed", look: "text-[#6B6B6B]" },
-    { n: deleted, mark: "-", word: "deleted", look: "text-[#B42318]" },
-  ].filter((p) => p.n > 0);
-  if (!parts.length) return null;
-  const files = added + modified + deleted;
-  const tip = `${files} ${files === 1 ? "file" : "files"}: ${parts.map((p) => `${p.n} ${p.word}`).join(", ")}`;
-  return (
-    <span data-changes title={tip} className="flex shrink-0 gap-1 font-mono text-[11px] leading-4">
-      {parts.map((p) => (
-        <span key={p.mark} className={p.look}>
-          {p.mark}
-          {p.n}
-        </span>
-      ))}
-    </span>
-  );
+/** What a fold of build settings says beside its title: its port and how many variables, or that it's before its first deploy. */
+function settingsAside(s: AppSettingsAnswer): string {
+  if (!s.settings) return "Before its first deploy";
+  const vars = s.env.length ? `${s.env.length} ${s.env.length === 1 ? "variable" : "variables"}` : null;
+  return [s.settings.port ? `Port ${s.settings.port}` : null, vars, s.deploys.length ? `${s.deploys.length} ${s.deploys.length === 1 ? "deploy" : "deploys"}` : null].filter(Boolean).join(", ");
 }
 
 /**
@@ -1816,6 +1870,8 @@ function OutsideDns({
   const cf = d.cloudflare;
   const off = d.publish.filter((r) => r.found && r.found !== "ok");
   const allFound = d.publish.length > 0 && d.publish.every((r) => r.found === "ok");
+  // Live with every record found: nothing to do here, so the records wait behind Show records.
+  const [shown, setShown] = useState(!(live && allFound));
   // Set it in Cloudflare while what Orgo looks for isn't all there (live: only once a look found it off).
   const offer = !!cf && (live ? off.length > 0 : !allFound);
   const said = cf
@@ -1848,11 +1904,16 @@ function OutsideDns({
             {reading ? "Reading…" : "Set it in Cloudflare"}
           </button>
         )}
+        {live && allFound && (
+          <button data-dns-records aria-expanded={shown} onClick={() => setShown((x) => !x)} className="shrink-0 whitespace-nowrap text-[12px] leading-4 text-[#6B6B6B] hover:text-ink">
+            {shown ? "Hide records" : "Show records"}
+          </button>
+        )}
         <button data-verify onClick={onVerify} disabled={disabled} className="shrink-0 whitespace-nowrap rounded-full bg-white px-2 py-0.5 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#FBFBFA] disabled:text-[#9A9A98]">
           {busy ? "Verifying…" : "Verify"}
         </button>
       </div>
-      {d.publish.map((r, i) => (
+      {shown && d.publish.map((r, i) => (
         <div key={i} className="flex h-7 min-w-0 items-center gap-2">
           <span className="w-[46px] shrink-0 font-mono text-[11.5px] leading-4 text-[#9A9A98]">{r.type}</span>
           <span title={r.name} className="w-[112px] min-w-0 shrink truncate font-mono text-[11.5px] leading-4 text-[#6B6B6B]">
