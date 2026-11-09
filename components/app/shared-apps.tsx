@@ -5,8 +5,7 @@ import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
 import { appStatus, changesBetween, type AppStatusInput } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
-import { Fold, StatusLine, Tag } from "./app-status";
-import { PasswordShown } from "./preview-password";
+import { Fold, Motion, PasswordLock, PlaceLink, PublishButton, SiteIcon, Tag } from "./app-status";
 import { memberAct } from "./shared-act";
 import { ago } from "./ui";
 
@@ -43,9 +42,11 @@ export const SHARED_APPS_WORDS = {
   goBack: "Go back to this one",
   save: "Save",
   use: "Use",
-  changes: "Changes",
+  versions: "Versions",
+  restore: "Restore",
   earlierDeploys: "Earlier deploys",
   buildSettings: "Build settings",
+  readyToPublish: "Ready to publish",
   settings: "Settings",
   domains: "Domains",
   sites: "Sites",
@@ -110,10 +111,10 @@ export function sharedStatus(a: SharedApp, site: Site | undefined): AppStatusInp
   };
 }
 
-const BUTTON = "rounded-full px-3 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
-const FILLED = `${BUTTON} bg-ink text-white`;
-const OUTLINED = `${BUTTON} text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F6F6F4]`;
+const OUTLINED = "flex h-7 shrink-0 items-center whitespace-nowrap rounded-full px-2.5 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F6F6F4] disabled:opacity-50";
+const FILLED = "rounded-full bg-ink px-3 py-1 text-[12px] font-medium leading-4 text-white disabled:opacity-50";
 const HEAD = "text-[12px] font-semibold leading-4 text-[#9A9A97]";
+const bare = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
 export function SharedAppsPage({ state }: { state: AppState }) {
   const apps = state.shared?.apps;
@@ -132,7 +133,7 @@ export function SharedAppsPage({ state }: { state: AppState }) {
       {!apps.list.length ? (
         <span className="text-[13px] text-[#6B6B6B]">{W.none}</span>
       ) : (
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-2">
           {apps.list.map((a) => (
             <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
           ))}
@@ -145,9 +146,10 @@ export function SharedAppsPage({ state }: { state: AppState }) {
 type Pending = NonNullable<NonNullable<AppState["shared"]>["appActs"]>[number];
 
 /**
- * One app: its name and address, what's going on in a sentence, and Update preview (and an Admin's Publish), the one to
- * press now filled; opened below, its Preview's link and password, its changes (each tagged where it is), and, folded,
- * its earlier deploys, its build settings; then its domains.
+ * One app, one quiet line: its name and address, and at its end Publish (its dot on) while the preview has a change
+ * that isn't live (an Admin's), Update preview while the preview is behind, else what moves. Opened, its Preview (a
+ * link, its password behind a lock), its versions (each tagged where it is, Restore as a line is pointed at), and
+ * Settings folded: Update preview, its earlier deploys, its build settings, its domains.
  */
 function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean }) {
   const [open, setOpen] = useState(false);
@@ -169,47 +171,32 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
   // Why Publish can't be pressed now: no Preview live yet, nothing on it that isn't published, or no domain to live on.
   const whyNotPublish = !pv || !site.previewServing ? W.needsPreview : site.previewServing === site.serving ? W.samePublished : !status.domain && !status.wasLive ? W.needsDomain : undefined;
   const commits = a.commits ?? [];
+  const deploy = () => void send({ act: "deploy", app: a.name });
+  const right = !write ? (
+    <Motion input={status} />
+  ) : next === "publish" && publish ? (
+    <PublishButton waits why={whyNotPublish} busy={!!going} onClick={() => void send({ act: "deploy", app: a.name, env: "prod", ...(pv && site.previewServing && !a.siteNames?.length ? { at: site.previewServing } : {}) })} tag="publish" />
+  ) : next === "publish" ? (
+    <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">{W.readyToPublish}</span>
+  ) : next === "update-preview" ? (
+    <button type="button" data-act="deploy" data-next-action="update-preview" disabled={!!going} onClick={deploy} className={OUTLINED}>
+      {W.deploy}
+    </button>
+  ) : (
+    <Motion input={status} />
+  );
   return (
     <div data-shared-app={a.name} className="flex flex-col rounded-[14px] bg-white shadow-[0_0_0_1px_#ECECEA]">
-      <div className="flex items-center gap-3 px-4 py-3">
-        <span className={`size-2 shrink-0 rounded-full ${site?.live?.state === "succeeded" ? "bg-[#2BB673]" : site?.live?.state === "failed" ? "bg-[#B42318]" : "bg-[#C9C9C6]"}`} />
-        <button type="button" onClick={() => setOpen((x) => !x)} aria-expanded={open} className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-[14px] font-semibold leading-[18px]">{a.name}</span>
-            {site?.url && <span className="min-w-0 truncate font-mono text-[11.5px] leading-4 text-[#6B6B6B]">{site.url.replace(/^https?:\/\//, "")}</span>}
-          </span>
-          <StatusLine input={status} />
+      <div className="flex min-h-11 items-center gap-2.5 px-4 py-2">
+        <SiteIcon className="text-[#6B6B6B]" />
+        <button type="button" onClick={() => setOpen((x) => !x)} aria-expanded={open} title={newest ? actLine(newest) : undefined} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+          <span className="truncate text-[13px] font-semibold leading-4 text-ink">{a.name}</span>
+          {site?.url && <span className="min-w-0 truncate text-[12.5px] leading-4 text-[#6B6B6B]">{bare(site.url)}</span>}
         </button>
-        {write ? (
-          <>
-            <button type="button" data-act="deploy" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name })} className={next === "update-preview" ? FILLED : OUTLINED}>
-              {W.deploy}
-            </button>
-            {/* An Admin's Publish, as the owner's: what its Preview serves goes on Published (the changeset seen here, for an app of one site). */}
-            {publish && (
-              <span data-tip={whyNotPublish} className="flex">
-                <button
-                  type="button"
-                  data-shared-publish
-                  disabled={!!going || !!whyNotPublish}
-                  onClick={() => void send({ act: "deploy", app: a.name, env: "prod", ...(pv && site.previewServing && !a.siteNames?.length ? { at: site.previewServing } : {}) })}
-                  className={next === "publish" ? FILLED : OUTLINED}
-                >
-                  {W.publish}
-                </button>
-              </span>
-            )}
-          </>
-        ) : (
-          <span data-tip={W.readOnly} className="flex">
-            <button type="button" disabled className={`${BUTTON} text-[#9A9A98] shadow-[0_0_0_1px_#ECECEA]`}>
-              {W.deploy}
-            </button>
-          </span>
-        )}
+        {right}
       </div>
-      {(going || acts.some((x) => x.state === "failed") || said || newest) && (
-        <div className="flex flex-col gap-0.5 px-4 pb-2.5 text-[12px] leading-4">
+      {(going || acts.some((x) => x.state === "failed") || said) && (
+        <div className="flex flex-col gap-0.5 px-4 pb-2.5 pl-[42px] text-[12px] leading-4">
           {going && <span className="text-[#6B6B6B]">{going.state === "waiting" ? W.waiting : W.sending}</span>}
           {acts
             .filter((x) => x.state === "failed")
@@ -223,82 +210,89 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
               {said}
             </span>
           )}
-          {newest && <span data-act-line className={newest.ok ? "text-[#6B6B6B]" : "text-[#B42318]"}>{actLine(newest)}</span>}
         </div>
+      )}
+      {newest && !newest.ok && !said && (
+        <span data-act-line className="px-4 pb-2.5 pl-[42px] text-[12px] leading-4 text-[#B42318]">
+          {actLine(newest)}
+        </span>
       )}
       {!write && open && <span className="px-4 pb-2 text-[12px] leading-4 text-[#6B6B6B]">{W.readOnly}</span>}
       {open && (
         <div className="motion-fade-in flex flex-col gap-3 border-t border-[#F0F0EE] px-4 py-3">
-          {/* Its Preview: the link, where Update preview goes, and its password; of an app with more sites, each site's line. */}
+          {/* Its Preview: a place to open, its password behind a lock; of an app with more sites, each site's line. */}
           {(a.sites ?? []).length > 1 ? (
             <Part title={W.sites}>
               {(a.sites ?? []).map((s) => (
-                <span key={s.name} className="flex flex-col gap-0.5">
-                  <span className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
-                    <span className="font-medium">{s.name}</span>
-                    <span className="text-[#6B6B6B]">{stateWord(s.live?.state)}</span>
-                    {s.url && <span className="font-mono text-[11.5px] text-[#3A3A38]">{s.url.replace(/^https?:\/\//, "")}</span>}
-                  </span>
+                <span key={s.name} className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
+                  <span className="font-medium">{s.name}</span>
+                  {s.url && <span className="text-[#6B6B6B]">{bare(s.url)}</span>}
                   {s.preview && <PreviewLine site={s} link={s.preview} write={write} />}
                 </span>
               ))}
             </Part>
           ) : (
-            site?.preview && (
-              <Part title={W.preview}>
-                <PreviewLine site={site} link={site.preview} write={write} />
-              </Part>
-            )
+            site?.preview && <PreviewLine site={site} link={site.preview} write={write} />
           )}
           {!!commits.length && (
-            <Part title={W.changes}>
-              {commits.map((c) => {
-                const onPreview = pv && c.id === site.previewServing;
-                const isLive = !!site && c.id === site.serving;
-                return (
-                  <span key={c.id} data-commit={c.id} title={c.id} className="group flex h-7 items-center gap-2 text-[12.5px] leading-[18px]">
-                    <span className="min-w-0 flex-1 truncate">{c.message.split("\n", 1)[0].trim() || "No message"}</span>
-                    <span className="shrink-0 text-[#9A9A98]">{`${c.author} · ${ago(c.at)}`}</span>
-                    {onPreview && <Tag kind="preview" />}
-                    {isLive && <Tag kind="live" />}
-                    {write && !onPreview && !isLive && (
-                      <span className="flex shrink-0 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
-                        <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name, at: c.id })} className={OUTLINED}>
-                          {W.previewThis}
-                        </button>
-                      </span>
-                    )}
-                  </span>
-                );
-              })}
+            <Part title={W.versions}>
+              <div className="-mx-2 flex flex-col">
+                {commits.map((c) => {
+                  const onPreview = pv && c.id === site.previewServing;
+                  const isLive = !!site && c.id === site.serving;
+                  return (
+                    <span key={c.id} data-commit={c.id} title={c.id} className="group flex min-h-9 items-center gap-3 rounded-lg px-2 hover:bg-[#F6F6F4]">
+                      <span className="min-w-0 flex-1 truncate text-[13px] leading-4 text-ink">{c.message.split("\n", 1)[0].trim() || "No message"}</span>
+                      <span className="shrink-0 whitespace-nowrap text-[12px] leading-4 text-[#9A9A98]">{`${c.author} · ${ago(c.at)}`}</span>
+                      {onPreview && <Tag kind="preview" />}
+                      {isLive && <Tag kind="live" />}
+                      {write && !onPreview && !isLive && (
+                        <span className="flex shrink-0 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
+                          <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name, at: c.id })} className={OUTLINED}>
+                            {W.restore}
+                          </button>
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
             </Part>
           )}
-          {!!a.deploys?.length && (
-            <Fold id="deploys" title={W.earlierDeploys} aside={W.noLogs}>
-              <div className="flex flex-col gap-1.5">
-                {a.deploys.map((d) => (
-                  <span key={d.id} className="flex items-center gap-2 text-[12.5px] leading-[18px]">
-                    <span className="min-w-0 flex-1 truncate">
-                      {[stateWord(d.state, d.env === "preview" ? "preview" : "prod"), d.env === "preview" ? W.preview : d.env === "prod" ? W.published : null, d.site !== a.name ? d.site : null, d.when ? ago(d.when) : null].filter(Boolean).join(" · ")}
+          {write && (
+            <Fold id="settings" title={W.settings} aside={[W.deploy, a.deploys?.length ? W.earlierDeploys.toLowerCase() : null, a.settings ? W.buildSettings.toLowerCase() : null, apps.owned?.length ? W.domains.toLowerCase() : null].filter(Boolean).join(", ")}>
+              <span className="flex items-center gap-2">
+                <button type="button" data-act="deploy" disabled={!!going} onClick={deploy} className={OUTLINED}>
+                  {W.deploy}
+                </button>
+                <span className="text-[12px] leading-4 text-[#9A9A98]">{W.noLogs}</span>
+              </span>
+              {!!a.deploys?.length && (
+                <Part title={W.earlierDeploys}>
+                  {a.deploys.map((d) => (
+                    <span key={d.id} className="flex items-center gap-2 text-[12.5px] leading-[18px]">
+                      <span className="min-w-0 flex-1 truncate">
+                        {[stateWord(d.state, d.env === "preview" ? "preview" : "prod"), d.env === "preview" ? W.preview : d.env === "prod" ? W.published : null, d.site !== a.name ? d.site : null, d.when ? ago(d.when) : null].filter(Boolean).join(" · ")}
+                      </span>
+                      {d.live && <Tag kind={d.env === "preview" ? "preview" : "live"} />}
+                      {/* Members go back on its Preview only (lib/server/member-acts.ts); an Admin who may publish, on Published too. */}
+                      {d.canRollback && !d.live && (d.env !== "prod" || publish) && (
+                        <button type="button" disabled={!!going} onClick={() => void send({ act: "rollback", app: a.name, deployment: d.id, ...(d.site !== a.name ? { site: d.site } : {}), ...(d.env === "prod" ? { env: "prod" as const } : {}) })} className={OUTLINED}>
+                          {W.goBack}
+                        </button>
+                      )}
                     </span>
-                    {d.live && <Tag kind={d.env === "preview" ? "preview" : "live"} />}
-                    {/* Members go back on its Preview only (lib/server/member-acts.ts); an Admin who may publish, on Published too. */}
-                    {write && d.canRollback && !d.live && (d.env !== "prod" || publish) && (
-                      <button type="button" disabled={!!going} onClick={() => void send({ act: "rollback", app: a.name, deployment: d.id, ...(d.site !== a.name ? { site: d.site } : {}), ...(d.env === "prod" ? { env: "prod" as const } : {}) })} className={OUTLINED}>
-                        {W.goBack}
-                      </button>
-                    )}
-                  </span>
-                ))}
-              </div>
+                  ))}
+                </Part>
+              )}
+              {a.settings && (
+                <Part title={W.buildSettings}>
+                  <SettingsPart app={a} disabled={!!going} onSave={(act) => void send(act)} />
+                </Part>
+              )}
+              {!!apps.owned?.length && <DomainPart app={a} owned={apps.owned} disabled={!!going} onUse={(act) => void send(act)} />}
             </Fold>
           )}
-          {write && a.settings && (
-            <Fold id="settings" title={W.buildSettings} aside={W.noVariables}>
-              <SettingsPart app={a} disabled={!!going} onSave={(act) => void send(act)} />
-            </Fold>
-          )}
-          {write && !!apps.owned?.length && <DomainPart app={a} owned={apps.owned} disabled={!!going} onUse={(act) => void send(act)} />}
         </div>
       )}
     </div>
@@ -313,11 +307,10 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
 function PreviewLine({ site: s, link, write }: { site: Site; link: string; write: boolean }) {
   return (
     <span data-shared-preview className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px]">
+      <PlaceLink place="preview" url={link}>
+        {s.previewProtected && (write && s.previewPassword ? <PasswordLock password={s.previewPassword} /> : <PasswordLock password={null} waiting={W.askPassword} />)}
+      </PlaceLink>
       <span className="text-[#6B6B6B]">{stateWord(s.previewLive?.state, "preview")}</span>
-      <a href={link} target="_blank" rel="noreferrer" title={link} className="min-w-0 truncate font-mono text-[11.5px] leading-4 text-[#3A3A38] hover:underline">
-        {link.replace(/^https?:\/\//, "")}
-      </a>
-      {s.previewProtected && (write && s.previewPassword ? <PasswordShown password={s.previewPassword} /> : <span className="text-[12px] leading-4 text-[#9A9A98]">{W.askPassword}</span>)}
     </span>
   );
 }

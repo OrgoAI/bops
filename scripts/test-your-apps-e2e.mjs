@@ -209,10 +209,13 @@ async function owner(browser, width) {
   await page.waitForTimeout(600);
   await snap(page, "owner-app", width);
   if (!LOOK) await ownerAppChecks(page);
+  // Settings: Local, Preview and Published, the picked place's sections.
+  await page.locator('[data-hosted-tab="fourcorners"] [data-tab-settings]').click();
+  await page.locator('[data-hosted-tab="fourcorners"] [data-app-settings]').waitFor();
   await page.locator('[data-hosted-tab="fourcorners"] [data-app-env="preview"]').click();
   await page.waitForTimeout(600);
-  await snap(page, "owner-app-preview", width);
-  if (!LOOK) await ownerPreviewChecks(page);
+  await snap(page, "owner-app-settings", width);
+  if (!LOOK) await ownerSettingsChecks(page);
   await page.context().close();
 }
 
@@ -242,68 +245,72 @@ async function sam(browser, width) {
 
 async function ownerHomeChecks(page) {
   const list = page.locator("[data-hosted-apps]");
-  check("the home says few words per app (each row under 16 words)", (await Promise.all((await page.locator("[data-hosted-app]").all()).map((r) => r.innerText()))).every((t) => words(t) <= 16));
-  const sentence = (name) => page.locator(`[data-hosted-app="${name}"] + [data-state-line]`).innerText();
-  check("fourcorners: the sentence says the preview has a change that isn't live", /isn.t live/.test(await sentence("fourcorners")));
-  check("fourcorners offers Publish (to GitHub, where its production is) as its one action", /^Publish/.test((await page.locator('[data-hosted-app="fourcorners"] [data-next-action]').innerText()).trim()));
-  check("cclc: the preview is ready but there's no domain, so Connect a domain", /Connect a domain to publish it/.test(await sentence("cclc")) && (await page.locator('[data-hosted-app="cclc"] [data-next-action]').innerText()).trim() === "Connect a domain");
-  check("brochure-maker: the preview is updating, so nothing to press", /Updating the preview/.test(await sentence("brochure-maker")) && (await page.locator('[data-hosted-app="brochure-maker"] [data-next-action]').count()) === 0);
-  check("no Local, Preview and Published lines on the home", (await list.locator("[data-app-env]").count()) === 0);
+  check("the home says few words per app (each line under 10 words)", (await Promise.all((await page.locator("[data-hosted-app]").all()).map((r) => r.innerText()))).every((t) => words(t) <= 10));
+  check("fourcorners: Publish with its dot on, and nothing else", (await page.locator('[data-hosted-app="fourcorners"] [data-next-action="publish"][data-waits]').count()) === 1 && (await page.locator('[data-hosted-app="fourcorners"] [data-next-action="publish"]').innerText()).startsWith("Publish"));
+  check("cclc: Not published, quietly", (await page.locator('[data-hosted-app="cclc"] [data-motion="unpublished"]').innerText()).trim() === "Not published" && (await page.locator('[data-hosted-app="cclc"] button[data-next-action]').count()) === 0);
+  check("brochure-maker: a spinner and Updating the preview", /Updating the preview/.test(await page.locator('[data-hosted-app="brochure-maker"] [data-motion="working"]').innerText()) && (await page.locator('[data-hosted-app="brochure-maker"] button[data-next-action]').count()) === 0);
+  check("no sentences, no Local, Preview and Published lines, no changeset ids on the home", (await list.locator("[data-app-env], [data-state-line]").count()) === 0 && !/[0-9a-f]{7}/.test(await list.innerText()));
   check("the tools the bots made show as tiles", (await page.locator("[data-made-app-tile]").count()) === 2);
   check("no dashes on the home", !NO_DASHES.test(await page.locator("[data-made-apps-home]").innerText()));
 }
 
 async function ownerAppChecks(page) {
   const tab = page.locator('[data-hosted-tab="fourcorners"]');
-  check("the tab's one action is Publish (to GitHub)", /^Publish/.test((await tab.locator("[data-next-action]").innerText()).trim()));
-  check("the tab's sentence names the change that isn't live", /1 change that isn.t live/.test(await tab.locator("[data-state-line]").innerText()) && /Pick a project type/.test(await tab.locator("[data-state-line]").innerText()));
-  const changes = tab.locator("[data-history]");
-  check("Changes: the newest is tagged On preview, the one live is tagged Live", (await changes.locator('[data-commit] [data-tag="preview"]').count()) === 1 && (await changes.locator('[data-commit] [data-tag="live"]').count()) === 1);
-  check("no changeset ids or file counts on the lines", (await changes.locator("[data-commit]").first().innerText()).match(/[0-9a-f]{7}/) === null);
-  check("no blue on the page", !(await tab.innerHTML()).includes("#EEF2FF"));
-  check("build settings are folded on Published", (await tab.locator("[data-fold='settings'][aria-expanded='false']").count()) === 1);
-  check("shut, the settings and deploys are kept but out of sight", !(await tab.locator("[data-settings]").isVisible()) && !(await tab.locator("[data-deploys]").isVisible()));
-  await tab.locator("[data-fold='settings'] > button").click();
-  check("opening the fold shows the settings and the deploys", (await tab.locator("[data-settings]").isVisible()) && (await tab.locator("[data-deploys]").isVisible()));
-  await tab.locator("[data-fold='settings'] > button").click();
-  // Publish: the sentence follows it.
-  await tab.locator("[data-next-action]").click();
+  check("the title: Live and Preview as places to open, Publish with its dot, Settings", (await tab.locator('[data-place="live"] a').getAttribute("href")) === "https://fourcorners.brandlord.agency" && (await tab.locator('[data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev" && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 1 && (await tab.locator("[data-tab-settings]").count()) === 1);
+  check("the title says few words (under 12)", words(await tab.locator("[data-tab-settings]").locator("xpath=..").innerText()) <= 12);
+  await tab.locator("[data-password-lock]").click();
+  await page.waitForTimeout(300);
+  check("the lock opens the preview's password", (await tab.locator("[data-password-popover] [data-preview-password]").innerText()).trim() === "Kw7mQ2p");
+  await page.keyboard.press("Escape");
+  await tab.locator("[data-history]").click({ position: { x: 4, y: 4 } });
+  const versions = tab.locator("[data-history]");
+  check("Versions: the newest tagged Preview, the one live tagged Live", (await versions.locator('[data-commit] [data-tag="preview"]').count()) === 1 && (await versions.locator('[data-commit] [data-tag="live"]').count()) === 1);
+  check("no changeset ids or file counts on the lines", !/[0-9a-f]{7}/.test(await versions.innerText()) && !/\+\d/.test(await versions.innerText()));
+  check("no blue on the page, no sentence, nothing moving", !(await tab.innerHTML()).includes("#EEF2FF") && (await tab.locator("[data-state-line], [data-motion]").count()) === 0);
+  check("no domains, settings or deploys on the versions page", (await tab.locator("[data-domains], [data-settings], [data-deploys], [data-app-envs]").count()) === 0);
+  await tab.locator('[data-commit] >> nth=2').hover();
+  check("an older version offers Restore as it's pointed at", (await tab.locator('[data-commit] >> nth=2').locator("button", { hasText: "Restore" }).count()) === 1);
+  // Publish: the dot goes, and the page stays quiet.
+  await tab.locator('[data-next-action="publish"]').click();
   await page.waitForTimeout(400);
   check("Publish was sent", model.acts.some((x) => x.action === "promote"));
   await page.waitForTimeout(3800);
-  check("after Publish, the page says live is up to date", /Live and up to date/.test(await tab.locator("[data-state-line]").innerText()));
+  check("after Publish, the dot is off and the newest version is Live", (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0 && (await tab.locator('[data-commit] >> nth=0').locator('[data-tag="live"]').count()) === 1);
   check("no dashes on the tab", !NO_DASHES.test(await tab.innerText()));
 }
 
-async function ownerPreviewChecks(page) {
+async function ownerSettingsChecks(page) {
   const tab = page.locator('[data-hosted-tab="fourcorners"]');
-  check("Preview picked: its link and password show", (await tab.locator("[data-password-section]").count()) === 1 && (await tab.locator('[data-address-section="preview"]').count()) === 1);
-  check("the Preview's build settings are folded too", (await tab.locator("[data-fold='settings'][aria-expanded='false']").count()) === 1);
-  // Update preview from the Preview line.
+  check("Settings: Local, Preview and Published, with the Preview picked", (await tab.locator("[data-app-envs]").count()) === 1 && (await tab.locator('[data-app-env="preview"][data-app-env-picked]').count()) === 1);
+  check("Settings, Preview picked: its link, password and build settings", (await tab.locator('[data-address-section="preview"]').count()) === 1 && (await tab.locator("[data-password-section]").count()) === 1 && (await tab.locator("[data-settings]").count()) === 1);
   await tab.locator('[data-app-env="preview"] [data-act="deploy"]').click();
   await page.waitForTimeout(400);
   check("Update preview was sent", model.acts.some((x) => x.action === "deploy" && x.env === "preview"));
-  await page.waitForTimeout(600);
-  check("while it runs, the sentence says the preview is updating", /Updating the preview/.test(await tab.locator("[data-state-line]").innerText()));
+  await tab.locator("[data-tab-settings]").click();
+  await page.waitForTimeout(500);
+  check("back on versions while it runs: Updating the preview, and nothing to publish yet", (await tab.locator('[data-motion="working"]').count()) === 1 && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0);
 }
 
 async function samHomeChecks(page) {
   const fc = page.locator('[data-shared-app="fourcorners"]');
-  check("sam sees the same sentence as the owner", /isn.t live/.test(await fc.innerText()));
-  check("sam's buttons are Update preview and Publish, Publish filled", (await fc.locator("[data-shared-publish]").innerText()).trim() === "Publish" && (await fc.locator('[data-act="deploy"]').innerText()).trim() === "Update preview" && (await fc.locator("[data-shared-publish]").getAttribute("class"))?.includes("bg-ink"));
-  check("each card says few words (under 24)", (await Promise.all((await page.locator("[data-shared-app]").all()).map((r) => r.innerText()))).every((t) => words(t) <= 24));
+  check("sam sees Publish with its dot on fourcorners, as the owner does", (await fc.locator('[data-next-action="publish"][data-waits]').count()) === 1 && (await fc.locator('[data-next-action="publish"]').innerText()).trim() === "Publish");
+  check("cclc: Not published; brochure-maker: Updating the preview", (await page.locator('[data-shared-app="cclc"] [data-motion="unpublished"]').count()) === 1 && (await page.locator('[data-shared-app="brochure-maker"] [data-motion="working"]').count()) === 1);
+  check("each card says few words (under 10)", (await Promise.all((await page.locator("[data-shared-app]").all()).map((r) => r.innerText()))).every((t) => words(t) <= 10));
   check("no dashes on sam's page", !NO_DASHES.test(await page.locator("[data-shared-apps]").innerText()));
 }
 
 async function samOpenChecks(page) {
   const fc = page.locator('[data-shared-app="fourcorners"]');
-  check("opened: the preview link and its password", (await fc.locator("[data-shared-preview]").count()) === 1 && (await fc.locator("[data-password-beside]").count()) === 1);
-  check("opened: Changes with Live and On preview tags", (await fc.locator('[data-tag="live"]').count()) >= 1 && (await fc.locator('[data-tag="preview"]').count()) >= 1);
-  check("opened: build settings and earlier deploys are folded", (await fc.locator("[data-fold][aria-expanded='false']").count()) >= 1);
-  check("shut, the Port field is out of sight", !(await fc.locator('input[aria-label="Port"]').isVisible()));
+  check("opened: the preview as a place to open, its password behind a lock", (await fc.locator('[data-shared-preview] [data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev" && (await fc.locator("[data-password-lock]").count()) === 1);
+  await fc.locator("[data-password-lock]").click();
+  await page.waitForTimeout(300);
+  check("the lock shows the password", (await fc.locator("[data-password-popover] [data-preview-password]").innerText()).trim() === "Kw7mQ2p");
+  await page.keyboard.press("Escape");
+  check("opened: Versions with Live and Preview tags, no ids", (await fc.locator('[data-tag="live"]').count()) >= 1 && (await fc.locator('[data-tag="preview"]').count()) >= 1 && !/[0-9a-f]{7}/.test(await fc.locator("[data-history], [data-commit]").first().innerText()));
+  check("opened: Settings folded", (await fc.locator("[data-fold='settings'][aria-expanded='false']").count()) === 1 && !(await fc.locator('input[aria-label="Port"]').isVisible()));
   await fc.locator("[data-fold='settings'] > button").click();
-  check("opened fold: the Port field shows", await fc.locator('input[aria-label="Port"]').isVisible());
-  await fc.locator("[data-shared-publish]").click();
+  check("opened fold: Update preview, earlier deploys, the Port field, a domain to use", (await fc.locator('[data-fold="settings"] [data-act="deploy"]').isVisible()) && (await fc.locator('input[aria-label="Port"]').isVisible()) && (await fc.locator("[data-shared-domain]").isVisible()));
+  await fc.locator('[data-next-action="publish"]').click();
   await page.waitForTimeout(400);
   check("sam's Publish went to the owner's Bops as a prod deploy", model.acts.some((x) => x.act === "deploy" && x.env === "prod" && x.app === "fourcorners"));
 }
