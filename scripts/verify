@@ -1,0 +1,17 @@
+#!/usr/bin/env node
+// Focused entry point. Add other feature checks when their code paths change.
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+if (process.argv[2] !== 'your-apps') {
+  console.error('Usage: scripts/verify your-apps [--ui]');
+  process.exit(2);
+}
+const touched = ['components/app/app-controls.tsx','components/app/app-review.tsx','components/app/app-envs.tsx','components/app/app-settings.tsx','components/app/hosted-apps.tsx','components/app/made-apps.tsx','components/app/shared-apps.tsx','components/app/preview-password.tsx','components/app/bops-app.tsx','components/app/crm.tsx','components/app/ui.tsx','lib/hosted-apps.ts','lib/app-review.ts'];
+const steps = [['npx',['tsc','--noEmit','-p','tsconfig.json']],['npx',['eslint',...touched]],...['hosted-apps-ui','app-status','preview-password-ui','shared'].map(name=>[process.execPath,[`scripts/test-${name}.mjs`]])];
+if (process.argv.includes('--ui')) steps.push([process.execPath,['scripts/test-your-apps-e2e.mjs']]);
+for (const [command,args] of steps) {
+  console.log(`\nChecking ${args.join(' ')}`);
+  const r=spawnSync(command,args,{cwd:root,stdio:'inherit'});
+  if(r.status!==0) process.exit(r.status??1);
+}

@@ -1,5 +1,11 @@
 "use client";
 
+import { ChevronDown, ChevronRight } from "lucide-react";
+import { appStatus, changesBetween, type DeployState } from "@/lib/hosted-apps";
+import { reviewLabel } from "@/lib/app-review";
+import { AppDisclosure, appIcon, appList, appOutline, appRow } from "./app-controls";
+import { AppPassword, AppReview, AppVersions } from "./app-review";
+import { Fold } from "./fold";
 import { useState } from "react";
 import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
@@ -77,28 +83,22 @@ const BUTTON = "rounded-full px-3 py-1 text-[12px] font-medium leading-4 disable
 
 export function SharedAppsPage({ state }: { state: AppState }) {
   const apps = state.shared?.apps;
-  const ws = state.shared?.name ?? "";
   if (!apps) return null;
   const write = apps.level === "write";
   // An Admin whose owner's Bops publishes for them (Bops Cloud says so only then: ADMIN_PUBLISH_MIN_VERSION).
   const publish = write && state.shared?.role === "admin" && state.shared.adminPublish === true;
   return (
-    <div data-shared-apps className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
-      <div className="flex flex-col gap-1">
-        <span className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">{W.title}</span>
-        <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">{write ? W.writeLine(ws) : W.readLine(ws)}</span>
-        {apps.at > 0 && <span className="text-[12px] leading-4 text-[#9A9A98]">{W.asOf(asOf(apps.at))}</span>}
-      </div>
+    <div data-shared-apps className="@container flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
+      <header className="flex flex-wrap items-baseline justify-between gap-3"><h1 className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">{W.title}</h1>{apps.at > 0 && <span data-apps-asof className="text-[12px] leading-4 text-pencil">{W.asOf(asOf(apps.at))}</span>}</header>
       {!apps.list.length ? (
         <span className="text-[13px] text-[#6B6B6B]">{W.none}</span>
       ) : (
-        <div className="flex flex-col gap-3">
+        <div className={appList}>
           {apps.list.map((a) => (
             <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
           ))}
         </div>
       )}
-      <span className="text-[12px] leading-4 text-[#9A9A98]">{[W.noVariables, W.noLogs, W.noBuying].join(" ")}</span>
     </div>
   );
 }
@@ -109,6 +109,7 @@ type Pending = NonNullable<NonNullable<AppState["shared"]>["appActs"]>[number];
 function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean }) {
   const [open, setOpen] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
+  const [env, setEnv] = useState<"preview" | "prod">("preview");
   const write = apps.level === "write";
   // Up top, its own site's Preview, where a member's Deploy goes; Published's from an owner's Bops that sends no Preview.
   // By its link: Bops Cloud drops a null previewLive (a Preview with no deploy yet).
@@ -121,43 +122,20 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
     setSaid(null);
     const r = await memberAct(act);
     if (!r.ok) setSaid(r.error ?? W.failed);
+    return r.ok;
   };
   const newest = a.acts?.[0];
+  const deployState = (s: string | null | undefined): DeployState | null => s === "queued" || s === "running" || s === "succeeded" || s === "failed" || s === "cancelled" || s === "superseded" ? s : null;
+  const status = appStatus({ head: a.head?.id ?? null, preview: pv ? { serving: serving ?? null, state: deployState(live?.state) } : null, live: { serving: site?.serving ?? null, state: deployState(site?.live?.state) }, domain: !!site?.domains?.some(d => d.status !== "failed" && d.status !== "disabled"), wasLive: !!site?.serving, lost: a.lost, changes: changesBetween(a.commits ?? [], site?.serving ?? null, serving ?? null) });
   return (
-    <div data-shared-app={a.name} className="flex flex-col rounded-[14px] bg-white shadow-[0_0_0_1px_#ECECEA]">
-      <div className="flex items-center gap-3 px-4 py-3">
-        <span className={`size-2 shrink-0 rounded-full ${live?.state === "succeeded" ? "bg-[#2BB673]" : live?.state === "failed" ? "bg-[#B42318]" : "bg-[#C9C9C6]"}`} />
-        <button type="button" onClick={() => setOpen((x) => !x)} aria-expanded={open} className="flex min-w-0 flex-1 flex-col text-left">
-          <span className="truncate text-[14px] font-semibold leading-[18px]">{a.name}</span>
-          <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">
-            {[pv ? W.preview : null, stateWord(live?.state), serving ? shortId(serving) : null, pv ? site.preview : a.url].filter(Boolean).join(" · ")}
-          </span>
+    <div data-shared-app={a.name} className="flex min-w-0 flex-col">
+      <div className={appRow}>
+        <button type="button" onClick={() => setOpen(x => !x)} aria-expanded={open} aria-label={`Open ${a.name}`} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+          {open ? <ChevronDown {...appIcon}/> : <ChevronRight {...appIcon}/>}
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5"><span className="truncate text-[14px] font-medium leading-[18px]">{a.name}</span><span className="truncate text-[12.5px] leading-[17px] text-pencil">{a.url?.replace(/^https?:\/\//, "") ?? site?.preview?.replace(/^https?:\/\//, "") ?? "No preview yet"}</span></span>
         </button>
-        {write ? (
-          <>
-            <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name })} className={`${BUTTON} bg-ink text-white`}>
-              {W.deploy}
-            </button>
-            {/* An Admin's Publish, as the owner's: what its Preview serves goes on Published (the changeset seen here, for an app of one site). */}
-            {publish && (
-              <button
-                type="button"
-                data-shared-publish
-                disabled={!!going || !pv || !site.previewServing}
-                onClick={() => void send({ act: "deploy", app: a.name, env: "prod", ...(pv && site.previewServing && !a.siteNames?.length ? { at: site.previewServing } : {}) })}
-                className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}
-              >
-                {W.publish}
-              </button>
-            )}
-          </>
-        ) : (
-          <span data-tip={W.readOnly} className="flex">
-            <button type="button" disabled className={`${BUTTON} text-[#9A9A98] shadow-[0_0_0_1px_#ECECEA]`}>
-              {W.deploy}
-            </button>
-          </span>
-        )}
+        <span className="hidden w-[120px] shrink-0 text-right text-[12px] text-pencil @[600px]:block">{open ? "" : reviewLabel(status)}</span>
+        <span className="flex w-[120px] shrink-0 justify-end">{!open && <button className={appOutline} onClick={() => setOpen(true)}>{status.action === "publish" ? "Review changes" : "Open app"}</button>}</span>
       </div>
       {(going || acts.some((x) => x.state === "failed") || said || newest) && (
         <div className="flex flex-col gap-0.5 px-4 pb-2.5 text-[12px] leading-4">
@@ -177,9 +155,14 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
           {newest && <span data-act-line className={newest.ok ? "text-[#6B6B6B]" : "text-[#B42318]"}>{actLine(newest)}</span>}
         </div>
       )}
-      {!write && open && <span className="px-4 pb-2 text-[12px] leading-4 text-[#6B6B6B]">{W.readOnly}</span>}
-      {open && (
-        <div className="motion-fade-in flex flex-col gap-3 border-t border-[#F0F0ED] px-4 py-3">
+      <Fold lazy open={open}><div className="flex min-w-0 flex-col gap-5 border-b border-rule px-4 py-4">
+        {!write && <span className="text-[13px] text-pencil">{W.readOnly}</span>}
+        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={site?.serving ?? null} versions={a.commits} env={env} onEnv={setEnv} destination="Publishing destination configured by the owner" publishLine="Sends this reviewed preview to the owner's Bops for publishing." busy={!!going}
+          password={site?.previewProtected ? <AppPassword password={write ? site.previewPassword ?? null : null}/> : undefined}
+          onUpdate={write ? () => void send({ act: "deploy", app: a.name }) : undefined}
+          onPublish={publish ? at => send({ act: "deploy", app: a.name, env: "prod", ...(pv && !a.siteNames?.length ? { at } : {}) }) : undefined}
+          history={a.commits?.length ? <AppVersions versions={a.commits} preview={serving ?? null} published={site?.serving ?? null} busy={!!going} onRestore={write ? id => void send({ act: "deploy", app: a.name, at: id }) : undefined}/> : undefined}
+          technical={<div data-technical-details className="flex flex-col gap-4 rounded-xl bg-desk p-4">
           <Part title={W.sites}>
             {(a.sites ?? []).map((s) => (
               <span key={s.name} className="flex flex-col gap-0.5">
@@ -198,22 +181,6 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
               </span>
             ))}
           </Part>
-          {!!a.commits?.length && (
-            <Part title={W.history}>
-              {a.commits.map((c) => (
-                <span key={c.id} className="flex items-center gap-2 text-[12.5px] leading-[18px]">
-                  <span className="font-mono text-[11.5px] text-[#9A9A98]">{shortId(c.id)}</span>
-                  <span className="min-w-0 flex-1 truncate">{c.message}</span>
-                  <span className="shrink-0 text-[#9A9A98]">{`${c.author} · ${ago(c.at)}`}</span>
-                  {write && (
-                    <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name, at: c.id })} className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}>
-                      {W.deploy}
-                    </button>
-                  )}
-                </span>
-              ))}
-            </Part>
-          )}
           {!!a.deploys?.length && (
             <Part title={W.deploys}>
               {a.deploys.map((d) => (
@@ -232,10 +199,11 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
               ))}
             </Part>
           )}
-          {write && a.settings && <SettingsPart app={a} disabled={!!going} onSave={(act) => void send(act)} />}
+          {write && a.settings && <AppDisclosure title="Settings"><SettingsPart app={a} disabled={!!going} onSave={(act) => void send(act)}/></AppDisclosure>}
           {write && !!apps.owned?.length && <DomainPart app={a} owned={apps.owned} disabled={!!going} onUse={(act) => void send(act)} />}
-        </div>
-      )}
+            <span className="text-[12px] text-pencil">{[W.noVariables, W.noLogs, W.noBuying].join(" ")}</span>
+          </div>}/>
+      </div></Fold>
     </div>
   );
 }

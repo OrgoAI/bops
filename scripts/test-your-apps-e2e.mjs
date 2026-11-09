@@ -124,7 +124,7 @@ async function ownerRoutes(page) {
       return json(route, { app: a });
     }
     if (part === "commits") return json(route, { commits: F.COMMITS[name].map((c) => ({ ...c, serving: c.id === a.serving })), head: a.head, next: null });
-    if (part === "settings") return json(route, req.method() === "GET" ? F.settings(name, env) : { ...F.settings(name, body.env), said: "Saved." });
+    if (part === "settings") { if (req.method() !== "GET") model.acts.push(body); return json(route, req.method() === "GET" ? F.settings(name, env) : { ...F.settings(name, body.env), said: "Saved." }); }
     if (part === "dns") return json(route, F.dns(name));
     if (part === "local") {
       if (req.method() === "GET") return json(route, F.local(name));
@@ -172,8 +172,6 @@ const check = (name, ok) => {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}`);
   if (!ok) fails++;
 };
-const words = (t) => t.split(/\s+/).filter(Boolean).length;
-const NO_DASHES = /[–—]| - /;
 
 async function newPage(browser, width, who) {
   // (Held for a person, the page fills whatever size they make the window.)
@@ -192,320 +190,12 @@ async function newPage(browser, width, who) {
   return page;
 }
 const snap = async (page, screen, width) => {
-  if (args.includes("--mock")) { await page.evaluate(() => document.fonts.ready); await page.waitForTimeout(350); }
+  await page.evaluate(() => document.fonts.ready);
   shot++;
   const file = `${PREFIX}-${String(shot).padStart(2, "0")}-${screen}${width === 1440 ? "" : `-${width}`}.png`;
-  await page.screenshot({ path: join(OUT, file), ...(args.includes("--mock") ? { style: "[data-mock-navigation] { visibility: hidden; }" } : {}) });
+  await page.screenshot({ path: join(OUT, file) });
   console.log(`shot ${file}`);
 };
-
-/** The owner's Your Apps: the home (the footer's button), then an app's tab. */
-async function owner(browser, width) {
-  const page = await newPage(browser, width, "owner");
-  await ownerRoutes(page);
-  await page.goto(urls.owner, { waitUntil: "networkidle" });
-  if (args.includes("--mock")) {
-    await page.goto(`${urls.owner}/your-apps-v4`, {waitUntil:"networkidle"});
-    await page.locator('[data-mock-go="home"]').waitFor();
-    await mockEntryChecks(page, width);
-    if (args.includes("--mock-intuition-only")) { await page.context().close(); return; }
-    await snap(page, 'mock-owner-home', width);
-    await mockChecks(page, `home ${width}`);
-    await page.getByRole('button',{name:'Review changes',exact:true}).click();
-    await snap(page, 'mock-owner-app', width);
-    await mockChecks(page, `app ${width}`);
-    await mockInteractionChecks(page, width);
-    await page.getByRole('button',{name:'Settings',exact:true}).click();
-    await snap(page, 'mock-owner-settings', width);
-    await page.getByRole('button',{name:'Technical settings',exact:true}).click();
-    check(`technical settings remain one click away ${width}`, await page.locator('[data-technical-settings] input').count() === 4);
-    await snap(page, 'mock-owner-technical-settings', width);
-    await page.context().close();
-    return;
-  }
-  if (args.includes("--siblings")) {
-    const data = {name:"Sample pipeline", columns:["Name","Stage","Value"], rows:[["Jordan Lee","Proposal","12000"],["Priya Shah","Won","4800"]], version:"sample-v1", updatedAt:Date.now()};
-    await page.route(u => u.pathname === "/api/crm/file", r => json(r, data));
-    await page.goto(`${urls.owner}/your-apps-v4/references`, {waitUntil:"networkidle"});
-    for (const screen of ["chat", "computer", "crm", "issues", "team"]) {
-      await page.locator(`[data-reference="${screen}"]`).click();
-      await page.waitForTimeout(800);
-      await snap(page, `sibling-${screen}`, width);
-    }
-    await page.context().close();
-    return;
-  }
-  await page.locator('[data-footer-key="apps"] button').waitFor({ timeout: 60_000 });
-  await page.locator('[data-footer-key="apps"] button').click();
-  await page.locator("[data-hosted-apps]").waitFor();
-  await page.locator('[data-hosted-app="fourcorners"]').waitFor();
-  await page.waitForTimeout(1200);
-  await snap(page, "owner-home", width);
-  if (!LOOK) await ownerHomeChecks(page);
-  await page.locator('[data-hosted-app="fourcorners"] > button').first().click();
-  await page.locator('[data-hosted-tab="fourcorners"]').waitFor();
-  await page.locator("[data-history] [data-commit]").first().waitFor();
-  await page.waitForTimeout(600);
-  await snap(page, "owner-app", width);
-  if (!LOOK) await ownerAppChecks(page);
-  if (PREFIX === "before") {
-    // Main has environment sections inline. Capture the actual layout, without requiring v3's controls.
-    for (const env of ["preview", "local", "prod"]) {
-      await page.locator(`[data-hosted-tab="fourcorners"] [data-app-env="${env}"]`).click();
-      await page.waitForTimeout(500);
-      await snap(page, `owner-app-${env}-settings`, width);
-    }
-    await page.locator('[data-footer-key="apps"] button').click();
-    await page.locator('[data-hosted-app="cclc"] > button').first().click();
-    await page.locator('[data-hosted-tab="cclc"] [data-app-envs]').waitFor();
-    await page.waitForTimeout(500);
-    await snap(page, "owner-app-unpublished", width);
-  } else {
-  // Settings: Local, Preview and Published, the picked place's sections.
-  await page.locator('[data-hosted-tab="fourcorners"] [data-tab-settings]').click();
-  await page.locator('[data-hosted-tab="fourcorners"] [data-app-settings]').waitFor();
-  await page.locator('[data-hosted-tab="fourcorners"] [data-app-env="preview"]').click();
-  await page.waitForTimeout(600);
-  await snap(page, "owner-app-settings", width);
-  if (!LOOK) await ownerSettingsChecks(page);
-  // An app not published yet (cclc): its Live card says so and offers Add a domain, which opens Settings at the form.
-  await page.locator('[data-footer-key="apps"] button').click();
-  await page.locator('[data-hosted-app="cclc"]').waitFor();
-  await page.locator('[data-hosted-app="cclc"] > button').first().click();
-  await page.locator('[data-hosted-tab="cclc"] [data-places]').waitFor();
-  await page.waitForTimeout(500);
-  await snap(page, "owner-app-unpublished", width);
-  if (!LOOK) await ownerUnpublishedChecks(page);
-  }
-  await page.context().close();
-}
-
-/** Sam's Your Apps in the shared workspace: the page, then an app opened. */
-async function sam(browser, width) {
-  const page = await newPage(browser, width, "sam");
-  await samRoutes(page);
-  await page.goto(urls.sam, { waitUntil: "networkidle" });
-  await page.locator("[data-footer-key]").first().waitFor({ timeout: 60_000 });
-  // The shared workspace, opened as the switcher opens it (the window's own route).
-  const status = await page.evaluate((id) => fetch("/api/workspaces/shared", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ open: id }) }).then((r) => r.status), F.PROJECT.id);
-  if (status !== 200) throw new Error(`sam couldn't open the shared workspace: ${status}`);
-  if (args.includes("--mock")) {
-    await page.goto(`${urls.sam}/your-apps-v4`, {waitUntil:"networkidle"});
-    await page.locator('[data-mock-go="admin"]').click();
-    await snap(page, 'mock-admin-open', width);
-    await mockChecks(page, `admin ${width}`);
-    await page.getByRole('button',{name:'Show password',exact:true}).click();
-    check(`Admin can find preview password ${width}`, (await page.locator('[data-preview-password]').innerText()) === 'Kw7mQ2p');
-    await page.keyboard.press('Escape');
-    check(`password action keeps Admin row open ${width}`, await page.getByRole('tab',{name:'Preview',exact:true}).isVisible());
-    await page.getByRole('button',{name:'Technical details',exact:true}).click();
-    check(`Admin never gets owner Local controls ${width}`, await page.locator('[data-local-details]').count() === 0);
-    await page.context().close();
-    return;
-  }
-
-  await page.locator('[data-footer-key="apps"] button').waitFor({ timeout: 60_000 });
-  await page.locator('[data-footer-key="apps"] button').click();
-  await page.locator("[data-shared-apps]").waitFor();
-  await page.waitForTimeout(800);
-  await snap(page, "admin-home", width);
-  if (!LOOK) await samHomeChecks(page);
-  await page.locator('[data-shared-app="fourcorners"] button[aria-expanded]').click();
-  await page.waitForTimeout(500);
-  await snap(page, "admin-open", width);
-  if (!LOOK) await samOpenChecks(page);
-  await page.context().close();
-}
-
-// The review-first, nontechnical path is acceptance behavior, not a visual snapshot assertion.
-async function mockEntryChecks(page, width) {
-  check(`home offers Review changes rather than an unexplained publish ${width}`, await page.getByRole('button', {name:'Review changes', exact:true}).count() === 1 && await page.getByRole('button', {name:/^Publish/}).count() === 0);
-  const review = page.getByRole('button',{name:'Review changes',exact:true});
-  if (await review.count()) await review.click();
-  else await page.locator('[data-mock-go="app"]').click();
-  check(`Preview and Live are the two primary choices ${width}`, await page.getByRole('tab', {name:'Preview',exact:true}).count() === 1 && await page.getByRole('tab', {name:'Live',exact:true}).count() === 1);
-  check(`preview password has a named visible control ${width}`, await page.getByRole('button', {name:'Show password',exact:true}).count() === 1);
-  check(`Local and GitHub stay out of the default content ${width}`, await page.locator('main').getByText('Local',{exact:true}).count() === 0 && !(await page.locator('main').innerText()).includes('OrgoAI/orgo-brandlord'));
-  await page.locator('[data-mock-go="home"]').click();
-}
-
-// Driven prototype controls. All publication/restoration stays in this page's sample state.
-async function mockInteractionChecks(page, width) {
-  const suffix = String(width);
-  const pass = page.getByRole('button',{name:'Show password',exact:true});
-  await pass.click();
-  check(`password is revealed next to its named control ${suffix}`, await page.getByRole('dialog',{name:'Preview password'}).isVisible() && (await page.locator('[data-preview-password]').innerText()) === 'Kw7mQ2p');
-  await snap(page,'mock-owner-password',width);
-  await page.context().grantPermissions(['clipboard-read','clipboard-write']);
-  await page.getByRole('button',{name:'Copy password',exact:true}).click();
-  check(`Copy password copies exactly the revealed password ${suffix}`, await page.evaluate(()=>navigator.clipboard.readText()) === 'Kw7mQ2p');
-  await page.keyboard.press('Escape');
-  check(`Escape closes password and restores focus ${suffix}`, await page.getByRole('dialog',{name:'Preview password'}).count() === 0 && await pass.evaluate(x=>x===document.activeElement));
-  const [preview] = await Promise.all([page.waitForEvent('popup'), page.getByRole('link',{name:'Open preview',exact:true}).click()]);
-  await preview.waitForLoadState('domcontentloaded');
-  check(`Open preview opens the local preview sample ${suffix}`, new URL(preview.url()).pathname === '/your-apps-v4/preview' && await preview.locator('[data-sample-preview]').count() === 1);
-  await preview.close();
-  await page.getByRole('tab',{name:'Live',exact:true}).click();
-  check(`Live switches to the visitor website action ${suffix}`, await page.getByRole('link',{name:'Open website',exact:true}).isVisible() && await page.getByRole('button',{name:'Show password',exact:true}).count() === 0);
-  await snap(page,'mock-owner-live',width);
-  await page.getByRole('tab',{name:'Preview',exact:true}).click();
-  await page.getByRole('button',{name:'About preview and live',exact:true}).click();
-  check(`Preview and Live have click-accessible explanations ${suffix}`, (await page.locator('[data-view-help]').innerText()).includes('private review copy'));
-  await page.getByRole('button',{name:'About preview and live',exact:true}).click();
-  await page.locator('[data-review-publish]').click();
-  const confirmation = page.getByRole('group',{name:'Publish this preview?',exact:true});
-  check(`publishing names the version and GitHub destination before confirmation ${suffix}`, (await confirmation.innerText()).includes('Updated the home page introduction') && (await confirmation.innerText()).includes('OrgoAI/orgo-brandlord') && (await confirmation.innerText()).includes('may update automatically'));
-  await snap(page,'mock-owner-publish-confirmation',width);
-  await page.getByRole('button',{name:'Keep reviewing',exact:true}).click();
-  check(`cancel keeps changes unpublished ${suffix}`, (await page.locator('[data-review-state]').innerText()) === '1 unpublished change');
-  await page.getByRole('button',{name:'Version history',exact:true}).click();
-  await page.locator('[data-mock-version]').nth(2).getByRole('button').click();
-  check(`Restore says preview and keeps publication separate ${suffix}`, (await page.locator('[data-mock-version]').nth(2).innerText()).includes('Preview') && (await page.locator('[data-review-state]').innerText()) === '1 unpublished change' && await page.locator('[data-review-publish]').isEnabled());
-  await snap(page,'mock-owner-restored-preview',width);
-  await mockChecks(page,`versions ${width}`);
-  await page.getByRole('button',{name:'Technical details',exact:true}).click();
-  check(`Local and version IDs remain available in details ${suffix}`, (await page.locator('[data-technical-details]').innerText()).includes('working copy (Local)') && (await page.locator('[data-technical-details]').innerText()).includes('c3c3c3c'));
-  await snap(page,'mock-owner-technical-details',width);
-  await page.locator('[data-mock-go="app"]').click();
-  await page.locator('[data-mock-stage="current"]').click();
-  check(`no unpublished changes cannot be republished ${suffix}`, (await page.locator('[data-review-state]').innerText()) === 'Up to date' && await page.locator('[data-review-publish]').isDisabled());
-  await snap(page,'mock-owner-up-to-date',width);
-  await page.locator('[data-mock-stage="behind"]').click();
-  check(`unreviewed work must update preview before publish ${suffix}`, (await page.locator('[data-review-publish]').innerText()) === 'Update preview' && await page.locator('[data-publish-confirmation]').count() === 0);
-  await snap(page,'mock-owner-preview-behind',width);
-  await page.locator('[data-review-publish]').click();
-  check(`Update preview returns to review before publishing ${suffix}`, (await page.locator('[data-review-publish]').innerText()) === 'Publish changes' && await page.locator('[data-publish-confirmation]').count() === 0);
-  await page.locator('[data-review-publish]').click();
-  await page.getByRole('group',{name:'Publish this preview?',exact:true}).getByRole('button',{name:'Publish changes',exact:true}).click();
-  check(`sample publish reports GitHub delivery without claiming website success ${suffix}`, (await page.getByRole('status').innerText()) === 'Preview sent to GitHub' && await page.locator('[data-review-publish]').isDisabled());
-  await page.locator('[data-mock-go="home"]').click();
-  check(`home reflects published state instead of offering stale changes ${suffix}`, (await page.locator('[data-mock-row]').first().innerText()).includes('Up to date') && await page.getByRole('button',{name:'Review changes',exact:true}).count() === 0);
-  await page.locator('[data-mock-stage="ready"]').click();
-  await page.locator('[data-mock-go="app"]').click();
-}
-
-// Static mock checks only; these do not prove publishing, rollback or request bodies.
-async function mockChecks(page, name) {
-  const sizes = await page.locator('[data-mock-row]').evaluateAll(xs=>xs.map(x=>x.getBoundingClientRect().height));
-  if (sizes.length) check(`mock equal row heights ${name}`, Math.max(...sizes)-Math.min(...sizes)<1);
-  const tags = await page.locator('[data-mock-tag]').evaluateAll(xs=>xs.map(x=>x.getBoundingClientRect().x));
-  if (tags.length) check(`mock aligned version tags ${name}`, Math.max(...tags)-Math.min(...tags)<1);
-  check(`mock content fits ${name}`, await page.locator('main').evaluate(x=>x.scrollWidth<=x.clientWidth));
-  check(`mock fixed lucide icons ${name}`, await page.locator('main svg.lucide').evaluateAll(xs=>xs.every(x=>x.getAttribute('width')==='16'&&x.getAttribute('height')==='16'&&x.getAttribute('stroke-width')==='1.5')));
-}
-
-/* ---------------- The checks (the page as it is) ---------------- */
-
-async function ownerHomeChecks(page) {
-  const list = page.locator("[data-hosted-apps]");
-  check("the home says few words per app (each line under 10 words)", (await Promise.all((await page.locator("[data-hosted-app]").all()).map((r) => r.innerText()))).every((t) => words(t) <= 10));
-  check("fourcorners: Publish with its dot on, and nothing else", (await page.locator('[data-hosted-app="fourcorners"] [data-next-action="publish"][data-waits]').count()) === 1 && (await page.locator('[data-hosted-app="fourcorners"] [data-next-action="publish"]').innerText()).startsWith("Publish"));
-  check("cclc: Not published, quietly", (await page.locator('[data-hosted-app="cclc"] [data-motion="unpublished"]').innerText()).trim() === "Not published" && (await page.locator('[data-hosted-app="cclc"] button[data-next-action]').count()) === 0);
-  check("brochure-maker: a spinner and Updating the preview", /Updating the preview/.test(await page.locator('[data-hosted-app="brochure-maker"] [data-motion="working"]').innerText()) && (await page.locator('[data-hosted-app="brochure-maker"] button[data-next-action]').count()) === 0);
-  check("no sentences, no Local, Preview and Published lines, no changeset ids on the home", (await list.locator("[data-app-env], [data-state-line]").count()) === 0 && !/[0-9a-f]{7}/.test(await list.innerText()));
-  check("the tools the bots made are rows in the same list, saying In Bops", (await page.locator("[data-made-app]").count()) === 2 && (await Promise.all((await page.locator("[data-made-app]").all()).map((r) => r.innerText()))).every((t) => t.includes("In Bops")));
-  const heights = await Promise.all((await page.locator("[data-hosted-app], [data-made-app]").all()).map(async (r) => Math.round((await r.boundingBox())?.height ?? 0)));
-  check("one row shape: every app's row the same height", heights.length === 5 && heights.every((x) => x === heights[0]));
-  const home = await page.locator("[data-made-apps-home]").innerText();
-  check("no section labels on the home", !/On the web|Made by your bots/.test(home));
-  check("no dashes on the home", !NO_DASHES.test(home));
-}
-
-async function ownerAppChecks(page) {
-  const tab = page.locator('[data-hosted-tab="fourcorners"]');
-  check("the title: Ask the bot, Publish with its dot, Settings; no places in it", ((await tab.locator("[data-work]").getAttribute("aria-label")) ?? "").startsWith("Ask ") && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 1 && (await tab.locator("[data-tab-settings]").count()) === 1 && (await tab.locator("[data-tab-settings]").locator("xpath=..").locator("[data-place]").count()) === 0);
-  check("the app's name is readable in the title (not cut to a few letters)", await tab.locator("[data-app-title]").evaluate((e) => e.scrollWidth <= e.clientWidth + 1));
-  check("the title says few words (under 12)", words(await tab.locator("[data-tab-settings]").locator("xpath=..").innerText()) <= 12);
-  check("Live and Preview as cards, each opening its address", (await tab.locator('[data-places] [data-place="live"] a').getAttribute("href")) === "https://fourcorners.brandlord.agency" && (await tab.locator('[data-places] [data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev");
-  const liveSays = await tab.locator('[data-place="live"] [data-place-serving]').innerText();
-  const previewSays = await tab.locator('[data-place="preview"] [data-place-serving]').innerText();
-  check("each card says which version it serves, in words, no ids", /IMPROVING/.test(liveSays) && /Home line/.test(previewSays) && !/[0-9a-f]{7}/.test(liveSays + previewSays));
-  await tab.locator("[data-password-lock]").click();
-  await page.waitForTimeout(300);
-  check("the lock opens the preview's password", (await tab.locator("[data-password-popover] [data-preview-password]").innerText()).trim() === "Kw7mQ2p");
-  await page.keyboard.press("Escape");
-  await tab.locator("[data-history]").click({ position: { x: 4, y: 4 } });
-  const versions = tab.locator("[data-history]");
-  check("Versions: the newest tagged Preview, the one live tagged Live", (await versions.locator('[data-commit] [data-tag="preview"]').count()) === 1 && (await versions.locator('[data-commit] [data-tag="live"]').count()) === 1);
-  const tagX = await Promise.all((await versions.locator("[data-commit] [data-tag]").all()).map(async (t) => Math.round((await t.boundingBox())?.x ?? -1)));
-  const whenX = await Promise.all((await versions.locator("[data-commit]").all()).map(async (r) => Math.round(((await r.boundingBox())?.x ?? 0) + ((await r.boundingBox())?.width ?? 0))));
-  check("the tags sit in one column, and every line ends at the same edge", tagX.length === 2 && tagX[0] === tagX[1] && whenX.every((x) => x === whenX[0]));
-  check("no changeset ids or file counts on the lines", !/[0-9a-f]{7}/.test(await versions.innerText()) && !/\+\d/.test(await versions.innerText()));
-  check("no blue on the page, no sentence, nothing moving", !(await tab.innerHTML()).includes("#EEF2FF") && (await tab.locator("[data-state-line], [data-motion]").count()) === 0);
-  check("no domains, settings or deploys on the versions page", (await tab.locator("[data-domains], [data-settings], [data-deploys], [data-app-envs]").count()) === 0);
-  await tab.locator('[data-commit] >> nth=2').hover();
-  await page.waitForTimeout(250);
-  const restore = tab.locator('[data-commit] >> nth=2').locator("button", { hasText: "Restore" });
-  check("an older version offers Restore as it's pointed at", (await restore.count()) === 1 && (await restore.evaluate((b) => getComputedStyle(b.parentElement.parentElement).opacity)) === "1");
-  await page.mouse.move(0, 0);
-  await restore.focus();
-  await page.waitForTimeout(250);
-  check("Restore is reached by the keyboard too: focused, it shows", (await restore.evaluate((b) => document.activeElement === b && getComputedStyle(b.parentElement.parentElement).opacity === "1")) === true);
-  check("the live version offers Restore too, to put it back on the preview", (await tab.locator('[data-commit][data-serving]').locator("button", { hasText: "Restore" }).count()) === 1);
-  // Publish: the dot goes, and the page stays quiet.
-  const previewAt = appOf("fourcorners").preview.serving;
-  await tab.locator('[data-next-action="publish"]').click();
-  await page.waitForTimeout(400);
-  // (The exact version: what the sample's Preview served as Publish was pressed, read before the press moved the sample on.)
-  check("Publish was sent as a promote of exactly what the preview serves", model.acts.some((x) => x.action === "promote" && x.site === "fourcorners" && x.at === previewAt));
-  await page.waitForTimeout(3800);
-  check("after Publish, the dot is off and the newest version is Live", (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0 && (await tab.locator('[data-commit] >> nth=0').locator('[data-tag="live"]').count()) === 1);
-  check("and the Live card now says that version", /Home line/.test(await tab.locator('[data-place="live"] [data-place-serving]').innerText()));
-  // Ask the bot: its chat beside the tab, the message begun, the tab still showing.
-  await tab.locator("[data-work]").click();
-  await page.waitForTimeout(500);
-  const composer = page.locator("#composer");
-  check("Ask the bot: the message box has the ask begun, and the app's tab is still open", /^Change the app/.test((await composer.inputValue().catch(() => "")) ?? "") && (await tab.isVisible()));
-  await composer.fill("").catch(() => {});
-  check("no dashes on the tab", !NO_DASHES.test(await tab.innerText()));
-}
-
-async function ownerSettingsChecks(page) {
-  const tab = page.locator('[data-hosted-tab="fourcorners"]');
-  check("Settings: Local, Preview and Published, with the Preview picked", (await tab.locator("[data-app-envs]").count()) === 1 && (await tab.locator('[data-app-env="preview"][data-app-env-picked]').count()) === 1);
-  check("Settings, Preview picked: its link, password and build settings", (await tab.locator('[data-address-section="preview"]').count()) === 1 && (await tab.locator("[data-password-section]").count()) === 1 && (await tab.locator("[data-settings]").count()) === 1);
-  await tab.locator('[data-app-env="preview"] [data-act="deploy"]').click();
-  await page.waitForTimeout(400);
-  check("Update preview was sent", model.acts.some((x) => x.action === "deploy" && x.env === "preview"));
-  await tab.locator("[data-tab-settings]").click();
-  await page.waitForTimeout(500);
-  check("back on versions while it runs: the Preview card says Updating the preview, and nothing to publish yet", /Updating the preview/.test(await tab.locator('[data-place="preview"] [data-place-serving]').innerText()) && (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0);
-}
-
-async function ownerUnpublishedChecks(page) {
-  const tab = page.locator('[data-hosted-tab="cclc"]');
-  check("cclc: the Live card says Not published yet and offers Add a domain; no address to open", (await tab.locator('[data-place="live"] [data-place-empty]').innerText()).trim() === "Not published yet" && (await tab.locator('[data-place="live"] [data-place-action]').innerText()).trim() === "Add a domain" && (await tab.locator('[data-place="live"] a').count()) === 0);
-  check("cclc: Publish greyed, with why", (await tab.locator('[data-next-action="publish"]').isDisabled()) && !!(await tab.locator('[data-next-action="publish"]').locator("xpath=..").getAttribute("data-tip")));
-  await tab.locator('[data-place="live"] [data-place-action]').click();
-  await page.waitForTimeout(900);
-  await snap(page, "owner-app-add-domain", (await page.viewportSize())?.width ?? 1440);
-  const got = [(await tab.locator("[data-app-settings]").count()) === 1, (await tab.locator("[data-add-domain-panel]").count()) === 1, (await tab.locator('[data-tab-settings][aria-pressed="true"]').count()) === 1];
-  check(`Add a domain opens Settings with the domain form (settings ${got[0]}, form ${got[1]}, pressed ${got[2]})`, got.every(Boolean));
-}
-
-async function samHomeChecks(page) {
-  const fc = page.locator('[data-shared-app="fourcorners"]');
-  check("sam sees Publish with its dot on fourcorners, as the owner does", (await fc.locator('[data-next-action="publish"][data-waits]').count()) === 1 && (await fc.locator('[data-next-action="publish"]').innerText()).trim() === "Publish");
-  check("cclc: Not published; brochure-maker: Updating the preview", (await page.locator('[data-shared-app="cclc"] [data-motion="unpublished"]').count()) === 1 && (await page.locator('[data-shared-app="brochure-maker"] [data-motion="working"]').count()) === 1);
-  check("each card says few words (under 10)", (await Promise.all((await page.locator("[data-shared-app]").all()).map((r) => r.innerText()))).every((t) => words(t) <= 10));
-  check("no dashes on sam's page", !NO_DASHES.test(await page.locator("[data-shared-apps]").innerText()));
-}
-
-async function samOpenChecks(page) {
-  const fc = page.locator('[data-shared-app="fourcorners"]');
-  check("opened: Live and the Preview as cards, the password behind a lock", (await fc.locator('[data-places] [data-place="preview"] a').getAttribute("href")) === "https://ggn7sjpkwnz8.orgo.dev" && (await fc.locator('[data-places] [data-place="live"] a').getAttribute("href")) === "https://fourcorners.brandlord.agency" && (await fc.locator("[data-password-lock]").count()) === 1);
-  await fc.locator("[data-password-lock]").click();
-  await page.waitForTimeout(300);
-  check("the lock shows the password", (await fc.locator("[data-password-popover] [data-preview-password]").innerText()).trim() === "Kw7mQ2p");
-  await page.keyboard.press("Escape");
-  check("opened: Versions with Live and Preview tags, no ids", (await fc.locator('[data-tag="live"]').count()) >= 1 && (await fc.locator('[data-tag="preview"]').count()) >= 1 && !/[0-9a-f]{7}/.test(await fc.locator("[data-history], [data-commit]").first().innerText()));
-  check("opened: Settings folded (its button says so)", (await fc.locator("[data-fold='settings'] > button[aria-expanded='false']").count()) === 1 && !(await fc.locator('input[aria-label="Port"]').isVisible()));
-  await fc.locator("[data-fold='settings'] > button").click();
-  check("opened fold: Update preview, earlier deploys, the Port field, a domain to use", (await fc.locator('[data-fold="settings"] [data-act="deploy"]').isVisible()) && (await fc.locator('input[aria-label="Port"]').isVisible()) && (await fc.locator("[data-shared-domain]").isVisible()));
-  await fc.locator('[data-next-action="publish"]').click();
-  await page.waitForTimeout(400);
-  check("sam's Publish went to the owner's Bops as a prod deploy", model.acts.some((x) => x.act === "deploy" && x.env === "prod" && x.app === "fourcorners"));
-}
 
 /**
  * The two windows open for a person, at Your Apps, the sample answered behind them (every press moves it on as the checks'
@@ -542,37 +232,154 @@ async function hold(browser) {
   await new Promise((resolve) => browser.on("disconnected", resolve));
 }
 
-/* ---------------- Run ---------------- */
 
-if (args.includes("--mock") || args.includes("--siblings")) {
-  // A gallery import error must stop the run before screenshots can be mistaken for proof.
-  const types = spawnSync("npx", ["tsc", "--noEmit", "-p", "tsconfig.json"], {cwd:root, stdio:"inherit"});
-  if (types.status !== 0) process.exit(types.status ?? 1);
-  const lint = spawnSync("npx", ["eslint", "app/your-apps-v4/page.tsx", "app/your-apps-v4/references/page.tsx", "app/your-apps-v4/preview/page.tsx"], {cwd:root, stdio:"inherit"});
-  if (lint.status !== 0) process.exit(lint.status ?? 1);
-  const scope = spawnSync("git", ["diff", "--name-only", "HEAD", "--", "components", "lib"], {cwd:root, encoding:"utf8"});
-  if (scope.status !== 0 || scope.stdout.trim()) throw new Error("Mock approval gate: real components or state logic changed before approval.");
-  for (const p of ["app/your-apps-v4/page.tsx", "app/your-apps-v4/references/page.tsx", "app/your-apps-v4/preview/page.tsx"]) {
-    if (/<svg\b/.test(readFileSync(join(root,p),"utf8"))) throw new Error(`Mock approval gate: handwritten icon in ${p}`);
+const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+async function refresh(page) { await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await page.waitForTimeout(500); }
+async function click(page, name) { await page.getByRole('button',{name,exact:true}).click(); await (page.page?.() ?? page).waitForTimeout(250); }
+async function layout(page, root, name) {
+  check(`content fits ${name}`, await root.evaluate(x=>x.scrollWidth<=x.clientWidth));
+  const heights=await root.locator('[data-hosted-app], [data-made-app]').evaluateAll(xs=>xs.map(x=>x.getBoundingClientRect().height));
+  if(heights.length) check(`every home row has the same height ${name}`, heights.length===5 && Math.max(...heights)-Math.min(...heights)<1);
+  const tags=await root.locator('[data-version-tag]').evaluateAll(xs=>xs.filter(x=>x.checkVisibility()).map(x=>x.getBoundingClientRect().x));
+  if(tags.length) check(`version tag columns align ${name}`, Math.max(...tags)-Math.min(...tags)<1);
+}
+async function owner(browser,width) {
+  const page=await newPage(browser,width,'owner');
+  await ownerRoutes(page);
+  await page.context().grantPermissions(['clipboard-read','clipboard-write'],{origin:urls.owner});
+  await page.context().route(F.FC.preview, r=>r.fulfill({contentType:'text/html',body:'<h1>Sample preview</h1>'}));
+  await page.goto(urls.owner,{waitUntil:'networkidle'});
+  await page.locator('[data-footer-key="apps"] button').click({timeout:60000});
+  const home=page.locator('[data-hosted-apps]');
+  await home.locator('[data-hosted-app="fourcorners"]').waitFor();
+  await snap(page,'owner-home',width);
+  if(!LOOK) {
+    check(`home leads to review before publishing ${width}`, await home.getByRole('button',{name:'Review changes',exact:true}).count()===1 && !/Publish changes|Local|On the web/.test(await home.innerText()));
+    check(`home has five rows including tools ${width}`, await home.locator('[data-made-app]').count()===2);
+    await layout(page,home,`home ${width}`);
   }
-  console.log("PASS mock approval scope, types, lint and icon source");
+  await home.locator('[data-hosted-app="fourcorners"] button').first().click();
+  const tab=page.locator('[data-hosted-tab="fourcorners"]');
+  await tab.locator('[data-review-content]').waitFor();
+  await tab.getByText(F.COMMITS.fourcorners[0].message,{exact:true}).first().waitFor();
+  await snap(page,'owner-app',width);
+  if(!LOOK) {
+    check(`default view hides Local and version history ${width}`, await tab.getByRole('tab',{name:'Preview',exact:true}).getAttribute('aria-selected')==='true' && await tab.locator('[data-app-env]').count()===0 && await tab.locator('[data-version]').count()===0);
+    await click(tab,'Ask Boppy');
+    check(`Ask Boppy keeps the app beside an unsent draft ${width}`,await tab.isVisible() && (await page.locator('#composer').evaluate(x=>x.value ?? x.textContent)).includes('fourcorners'));
+    await page.locator('#composer').fill('');
+
+    await click(tab,'Show password');
+    check(`password reveals the current value ${width}`, await tab.locator('[data-password-popover] [data-preview-password]').innerText()===F.FC.password);
+    await click(tab,'Copy password');
+    check(`copy contains exactly the preview password ${width}`, await page.evaluate(()=>navigator.clipboard.readText())===F.FC.password);
+    await snap(page,'owner-password',width);
+    await page.keyboard.press('Escape');
+    check(`Escape closes password and restores focus ${width}`, await tab.locator('[data-password-popover]').count()===0 && await tab.getByRole('button',{name:'Show password',exact:true}).evaluate(x=>x===document.activeElement));
+    const popup=page.waitForEvent('popup');
+    await tab.getByRole('link',{name:'Open preview',exact:true}).click();
+    const preview=await popup; await preview.waitForLoadState();
+    check(`Open preview opens the reviewed address ${width}`, preview.url()===F.FC.preview+'/' && await preview.getByRole('heading',{name:'Sample preview'}).count()===1); await preview.close();
+    await tab.getByRole('tab',{name:'Live',exact:true}).click();
+    check(`Live links to the website and labels GitHub delivery honestly ${width}`, await tab.getByRole('link',{name:'Open website',exact:true}).getAttribute('href')===`https://${F.FC.domain}` && await tab.getByText('Sent to GitHub',{exact:true}).count()===1);
+    await tab.getByRole('tab',{name:'Preview',exact:true}).click();
+    await tab.getByRole('button',{name:'About preview and live',exact:true}).click();
+    check(`explanation works on click ${width}`, await tab.locator('[data-view-help]').isVisible());
+    await tab.getByRole('button',{name:'About preview and live',exact:true}).click();
+    const n=model.acts.length;
+    await click(tab,'Publish changes');
+    const confirm=tab.locator('[data-publish-confirmation]');
+    check(`confirmation names version and destination before any request ${width}`, (await confirm.innerText()).includes(F.COMMITS.fourcorners[0].message) && (await confirm.innerText()).includes('OrgoAI/orgo-brandlord') && (await confirm.innerText()).includes('may update automatically') && model.acts.length===n);
+    await snap(page,'owner-publish-confirmation',width);
+    await click(confirm,'Keep reviewing');
+    check(`cancel preserves unpublished changes ${width}`,model.acts.length===n && await tab.locator('[data-review-publish]').isEnabled());
+    await click(tab,'Publish changes');
+    appOf('fourcorners').preview.serving=F.id('c3'); await refresh(page);
+    check(`a moved preview cannot publish an unseen version ${width}`,await tab.locator('[data-publish-confirmation]').getByRole('button',{name:'Publish changes',exact:true}).isDisabled() && model.acts.length===n);
+    await click(tab.locator('[data-publish-confirmation]'),'Keep reviewing');
+    appOf('fourcorners').preview.serving=F.FC.head; await refresh(page);
+
+    await click(tab,'Version history'); await tab.locator('[data-version]').first().waitFor();
+    await layout(page,tab,`versions ${width}`); await snap(page,'owner-versions',width);
+    await tab.locator('[data-version]').nth(2).getByRole('button',{name:/Restore/}).click();
+    check(`restore sends the original preview request ${width}`,same(model.acts.at(-1),{ws:'ws_main',action:'deploy',env:'preview',at:F.id('c3')}));
+    await page.waitForTimeout(1900); await refresh(page);
+    check(`an older preview remains publishable ${width}`,await tab.locator('[data-review-publish]').innerText()==='Publish changes' && await tab.locator('[data-review-publish]').isEnabled());
+    await tab.locator('[data-version]').first().getByRole('button',{name:/Restore/}).click();
+    await page.waitForTimeout(1900); await refresh(page);
+    await click(tab,'Publish changes'); await click(tab.locator('[data-publish-confirmation]'),'Publish changes');
+    check(`publish keeps the exact preview-pinned request ${width}`,same(model.acts.at(-1),{ws:'ws_main',action:'promote',site:'fourcorners',at:F.FC.head}));
+    await refresh(page);
+    check(`published preview no longer offers new changes ${width}`,await tab.locator('[data-review-state]').innerText()==='Up to date' && await tab.locator('[data-review-publish]').isDisabled());
+    await click(tab,'Technical details');
+    check(`technical details retain Local and GitHub menu ${width}`,await tab.locator('[data-app-env="local"]').count()===1 && await tab.locator('[data-prod-menu]').isVisible());
+    await tab.locator('[data-prod-menu]').click(); await tab.locator('[data-gh-pull]').click();
+    check(`GitHub pull retains its request ${width}`,same(model.acts.at(-1),{ws:'ws_main',action:'githubPull'}));
+    await tab.locator('[data-app-env="local"] [data-act="local-start"]').click();
+    check(`local start retains its request ${width}`,same(model.acts.at(-1),{ws:'ws_main',action:'start'}));
+    await snap(page,'owner-technical-details',width);
+  }
+  await click(tab,'Settings');
+  await snap(page,'owner-settings',width);
+  await click(tab,'Technical settings');
+  const settings=tab.locator('[data-settings]'); await settings.waitFor();
+  await snap(page,'owner-technical-settings',width);
+  if(!LOOK) {
+    await settings.getByRole('textbox',{name:'Build command',exact:true}).fill('npm run build:site');
+    await settings.getByRole('button',{name:'Save',exact:true}).click();
+    check(`preview settings retain the selected environment ${width}`,same(model.acts.at(-1),{ws:'ws_main',env:'preview',build:'npm run build:site'}));
+  }
+  await click(tab,'Back to Your Apps');
+  await home.locator('[data-hosted-app="cclc"] button').first().click();
+  const cclc=page.locator('[data-hosted-tab="cclc"]');
+  await cclc.locator('[data-review-content]').waitFor();
+  await snap(page,'owner-unpublished',width);
+  await click(cclc,'Add a domain');
+  check(`Add a domain opens the existing form ${width}`,await cclc.locator('[data-add-domain-panel]').count()===1 || await cclc.getByText('Add a domain',{exact:true}).count()>0);
+  await snap(page,'owner-domain-settings',width);
+  await page.context().close();
 }
 
-const browser = await chromium.launch({ channel: "chrome", headless: !HOLD, args: HOLD ? [`--window-size=${WIDTHS[0]},960`] : [] });
+async function sam(browser,width) {
+  const page=await newPage(browser,width,'sam'); await samRoutes(page);
+  await page.goto(urls.sam,{waitUntil:'networkidle'});
+  await page.locator('[data-footer-key]').first().waitFor({timeout:60000});
+  const status=await page.evaluate(id=>fetch('/api/workspaces/shared',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({open:id})}).then(r=>r.status),F.PROJECT.id);
+  if(status!==200) throw new Error(`sam shared workspace: ${status}`);
+  await page.locator('[data-footer-key="apps"] button').click();
+  const fc=page.locator('[data-shared-app="fourcorners"]'); await fc.waitFor(); await snap(page,'admin-home',width);
+  if(!LOOK) check(`Admin home opens review without publishing ${width}`,await fc.getByRole('button',{name:'Review changes',exact:true}).count()===1 && await fc.locator('[data-review-content]').count()===0);
+  await fc.getByRole('button',{name:'Open fourcorners',exact:true}).click();
+  await fc.locator('[data-review-content]').waitFor(); await snap(page,'admin-open',width);
+  if(!LOOK) {
+    check(`Admin sees Preview and Live without Local ${width}`,await fc.getByRole('tab').count()===2 && !/Local/.test(await fc.innerText()));
+    await click(fc,'Show password'); check(`Admin can find preview password ${width}`,await fc.locator('[data-password-popover] [data-preview-password]').innerText()===F.FC.password); await page.keyboard.press('Escape');
+    await click(fc,'Version history'); await layout(page,fc,`Admin versions ${width}`); await snap(page,'admin-versions',width);
+    await fc.locator('[data-version]').nth(2).getByRole('button',{name:/Restore/}).click();
+    check(`Admin restore keeps its request ${width}`,same(model.acts.at(-1),{act:'deploy',app:'fourcorners',at:F.id('c3')}));
+    const n=model.acts.length; await click(fc,'Publish changes');
+    check(`Admin publishing asks before sending ${width}`,model.acts.length===n && await fc.locator('[data-publish-confirmation]').count()===1);
+    await click(fc.locator('[data-publish-confirmation]'),'Publish changes');
+    check(`Admin Publish keeps its original pinned request ${width}`,same(model.acts.at(-1),{act:'deploy',app:'fourcorners',env:'prod',at:F.FC.head}));
+    await click(fc,'Technical details'); await click(fc,'Settings'); await snap(page,'admin-settings',width);
+    const port=fc.getByRole('textbox',{name:'Port',exact:true}); await port.fill('3001'); await click(fc,'Save');
+    check(`Admin settings keep the original site body ${width}`,same(model.acts.at(-1),{act:'settings',app:'fourcorners',port:3001}));
+    check(`Admin never receives Local controls ${width}`,await fc.locator('[data-app-env="local"]').count()===0);
+  }
+  await page.context().close();
+}
+
+const browser=await chromium.launch({channel:'chrome',headless:!HOLD,args:HOLD?[`--window-size=${WIDTHS[0]},960`]:[]});
 try {
-  if (HOLD) await hold(browser);
-  else for (const width of WIDTHS) {
-    // The sample as it was, for each width: a Publish pressed at one width isn't live at the next.
-    model.apps = F.hostedApps().apps;
-    model.acts = [];
-    await owner(browser, width);
-    if (!args.includes("--siblings") && !args.includes("--mock-intuition-only")) await sam(browser, width);
+  if(HOLD) await hold(browser);
+  else for(const width of WIDTHS) {
+    model.apps=F.hostedApps().apps; model.acts=[];
+    await owner(browser,width); await sam(browser,width);
   }
 } finally {
   await browser.close();
-  if (started) spawnSync(process.execPath, [join(root, "scripts", "dev-two-person.mjs"), "stop"], { stdio: "inherit" });
+  if(started) spawnSync(process.execPath,[join(root,'scripts','dev-two-person.mjs'),'stop'],{stdio:'inherit'});
 }
-for (const e of errors) console.log(`FAIL ${e}`);
-if (LOOK) console.log(`shots in ${OUT}${errors.length ? ", with page errors" : ""}`);
-else console.log(fails || errors.length ? `${fails} FAIL, ${errors.length} page errors` : "all PASS");
-process.exit(fails || errors.length ? 1 : 0);
+for(const error of errors) console.log(`FAIL ${error}`);
+console.log(fails||errors.length?`${fails} FAIL, ${errors.length} page errors`:'all PASS');
+process.exit(fails||errors.length?1:0);

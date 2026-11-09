@@ -61,10 +61,10 @@ check("preview and live the same: up to date; with no domain and never live, not
   assert.deepEqual(appStatus({ ...base, live: { serving: "h2", state: "succeeded" }, github: { linked: true }, domain: false, wasLive: false }), { sentence: "Live and up to date.", tone: "quiet" });
 });
 check("the preview ahead with no domain and never live: Connect a domain", () => assert.deepEqual(appStatus({ ...base, domain: false, wasLive: false }), { sentence: "The preview is ready. Connect a domain to publish it.", action: "connect-domain", tone: "waits" }));
-check("the preview ahead of live: Publish, with how many changes (1 when not known) and the newest one's words", () => {
-  assert.deepEqual(appStatus(base), { sentence: "The preview has 1 change that isn't live.", action: "publish", tone: "waits" });
+check("the preview ahead of live: Publish, with the known count only and the newest change", () => {
+  assert.deepEqual(appStatus(base), { sentence: "The preview has changes that aren't live.", action: "publish", tone: "waits" });
   assert.deepEqual(appStatus({ ...base, changes: 3, change: "Home line" }), { sentence: "The preview has 3 changes that aren't live.", detail: "Home line", action: "publish", tone: "waits" });
-  assert.deepEqual(appStatus({ ...base, changes: null }).sentence, "The preview has 1 change that isn't live.");
+  assert.deepEqual(appStatus({ ...base, changes: null }).sentence, "The preview has changes that aren't live.");
   assert.deepEqual(appStatus({ ...base, domain: false, wasLive: true }).action, "publish", "live before with no domain publishes all the same");
   assert.deepEqual(appStatus({ ...base, domain: false, wasLive: false, github: { linked: true } }).action, "publish", "GitHub production needs no domain");
 });

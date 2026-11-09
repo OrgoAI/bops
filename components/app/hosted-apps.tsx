@@ -1,11 +1,13 @@
 "use client";
 
-import { createContext, Fragment, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Children, createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { flushSync } from "react-dom";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Globe, Lock, Pencil, Plus, Trash2 } from "lucide-react";
+import { AppDisclosure, appGhost, appIcon, appList, appOutline, appRow, segmented, segment } from "./app-controls";
+import { reviewLabel, statusForApp } from "@/lib/app-review";
 import { DNS_TYPES, dnsNeeds } from "@/lib/hosted-apps";
 import type {
   AddAppAnswer,
-  AppCommit,
   AppCommitsAnswer,
   AppDnsInput,
   AppDnsRecord,
@@ -47,9 +49,10 @@ import {
   setAutoRenew,
   type RenewalFlip,
 } from "./app-settings";
-import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
+import { rowIconBtn, rowTrashBtn } from "./apps";
 import { InlineConfirm, undash } from "./side-group";
-import { ago, post } from "./ui";
+import { AppVersions } from "./app-review";
+import { ago, post, RoundButton } from "./ui";
 import { AppEnvs, LocalSection, openIntent, useLocal } from "./app-envs";
 import { PasswordSection } from "./preview-password";
 import { actLine } from "./shared-apps";
@@ -535,14 +538,9 @@ export function CopyLink({ url, label = "Copy link" }: { url: string; label?: st
       className="flex size-6 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"
     >
       {copied ? (
-        <svg width="12" height="12" viewBox="0 0 14 14">
-          <path d="M3 7.5l2.5 2.5L11 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <Check {...appIcon}/>
       ) : (
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
-          <rect x="4.5" y="4.5" width="7.5" height="7.5" rx="1.6" stroke="currentColor" strokeWidth="1.3" />
-          <path d="M9.5 2.6A1.6 1.6 0 0 0 8 2H3.6A1.6 1.6 0 0 0 2 3.6V8a1.6 1.6 0 0 0 .6 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-        </svg>
+        <Copy {...appIcon}/>
       )}
     </button>
   );
@@ -558,13 +556,13 @@ export const PROBLEM = "truncate text-[12px] leading-4 text-[#B42318]";
  * The Apps page's "On the web" list (made-apps.tsx MadeAppsHome), read from the server (again when this
  * Mac queues a deploy: appsStamp).
  */
-export function HostedApps({ state, ws }: { state?: Pick<AppState, "workspaces" | "bots"> | null; ws: string }) {
+export function HostedApps({ state, ws, tools }: { state?: Pick<AppState, "workspaces" | "bots"> | null; ws: string; tools?: ReactNode }) {
   const { answer, failed, put } = useHostedApps(ws, appsStamp(state, ws));
   const started = useContext(OpenAppTask);
   const builder = state?.bots?.find((b) => b.isMain && workspaceOf(b) === ws)?.name ?? null;
   // What people with Your Apps did to each app, newest first (lib/server/apps-for-members.ts): its row says the newest.
   const seen = state?.workspaces?.find((w) => w.id === ws)?.appsForMembers?.apps;
-  return <HostedAppsList ws={ws} answer={answer} failed={failed} onChanged={put} builder={builder} onStarted={started ?? undefined} actOf={(name) => seen?.[name]?.acts?.[0]} />;
+  return <HostedAppsList tools={tools} ws={ws} answer={answer} failed={failed} onChanged={put} builder={builder} onStarted={started ?? undefined} actOf={(name) => seen?.[name]?.acts?.[0]} />;
 }
 
 /**
@@ -579,7 +577,7 @@ export function HostedAppsList({
   ws,
   answer,
   failed,
-  onChanged,
+  tools,
   builder,
   onStarted,
   actOf,
@@ -588,6 +586,7 @@ export function HostedAppsList({
   answer: HostedAppsAnswer | null;
   failed?: boolean;
   onChanged: (app: HostedApp) => void;
+  tools?: ReactNode;
   builder?: string | null;
   onStarted?: (a: AddAppAnswer) => void;
   /** The newest thing someone the workspace is shared with did to an app (Your Apps at Write), said under its row. */
@@ -595,7 +594,7 @@ export function HostedAppsList({
 }) {
   const open = useContext(OpenHostedApp);
   const [adding, setAdding] = useState(false);
-  if (answer && !answer.enabled && !answer.apps.length) return null;
+  const hasTools = Children.toArray(tools).length > 0;
   const why = answer && !answer.enabled ? answer.why || "Apps can't go on the web from here." : undefined;
   const addButton = answer && !adding && (
     <span data-tip={why} className="flex shrink-0">
@@ -605,17 +604,15 @@ export function HostedAppsList({
         onClick={() => setAdding(true)}
         className="flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F6F6F4] disabled:text-[#9A9A98] disabled:shadow-[0_0_0_1px_#ECECEA]"
       >
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-          <path d="M5 1.5v7M1.5 5h7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-        </svg>
+<Plus {...appIcon}/>
         Add app
       </button>
     </span>
   );
   return (
-    <div data-hosted-apps className="flex flex-col gap-1">
+    <div data-hosted-apps className="@container flex flex-col gap-6">
       <div className="flex min-h-7 items-center gap-2">
-        <span className="text-[12px] font-semibold leading-4 text-[#6B6B6B]">On the web</span>
+        <h1 className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">Your Apps</h1>
         <span className="flex-1" />
         {!!answer?.apps.length && addButton}
       </div>
@@ -640,59 +637,26 @@ export function HostedAppsList({
           </div>
         )
       ) : (
-        <div className="-mx-2 flex flex-col">
+        <div className={appList}>
           {answer.apps.map((a) => {
-            const url = urlOf(a);
+            const status = statusForApp(a);
+            const label = a.hosting?.lost ? "Needs a new home" : a.preview?.serving && !a.serving && !a.hosting?.github ? "Not live" : reviewLabel(status);
             const theirs = actOf?.(a.name);
-            return (
-              <Fragment key={a.name}>
-              <div
-                data-hosted-app={a.name}
-                data-state={a.live?.state ?? "none"}
-                onClick={() => open?.(ws, a.name)}
-                className="flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 hover:bg-[#F6F6F4]"
-              >
-                <StateDot app={a} />
-                {/* The row's button for the keyboard: its press comes up to the row. */}
-                <button title={a.name} className="min-w-0 shrink truncate text-left text-[13px] font-medium leading-4 text-ink">
-                  {a.name}
-                </button>
-                {a.hosting?.lost ? (
-                  <span data-lost data-tip={lostTip(a)} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
-                    Needs a new home
-                  </span>
-                ) : url ? (
-                  <UrlLink url={url} />
-                ) : (
-                  <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{noAddress(a)}</span>
-                )}
-                {a.sites && (
-                  <span data-site-count data-tip={a.sites.map((x) => x.name).join(", ")} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
-                    {a.sites.length} sites
-                  </span>
-                )}
-                <span className="flex-1" />
-              </div>
-              {/* Its three environments, all on its computer: Local, Preview (where Deploy goes), Published (Publish). */}
-              <ListedEnvs ws={ws} answer={answer} app={a} onChanged={onChanged} />
-              {theirs && (
-                <span data-member-act className={`-mt-1 truncate pl-[26px] pr-2 text-[11.5px] leading-4 ${theirs.ok ? "text-[#9A9A98]" : "text-[#B42318]"}`}>
-                  {actLine(theirs)}
-                </span>
-              )}
-              </Fragment>
-            );
+            return <div key={a.name} data-hosted-app={a.name} data-state={a.live?.state ?? "none"} className={appRow}>
+              <button aria-label={`Open ${a.name}`} onClick={() => open?.(ws, a.name)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                <Globe {...appIcon} className="shrink-0 text-pencil"/>
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5"><span className="truncate text-[14px] font-medium leading-[18px]">{a.name}</span><span data-member-act={!!theirs || undefined} className={`truncate text-[12.5px] leading-[17px] ${theirs && !theirs.ok ? "text-[#B42318]" : "text-pencil"}`} title={theirs ? actLine(theirs) : a.preview?.url ?? undefined}>{theirs ? actLine(theirs) : <><span className="hidden @[600px]:inline">{urlOf(a)?.replace(/^https?:\/\//, "") ?? a.preview?.url?.replace(/^https?:\/\//, "") ?? "No preview yet"}</span><span className="@[600px]:hidden">{label}</span></>}</span></span>
+              </button>
+              <span data-review-state className="hidden @[600px]:block w-[120px] shrink-0 text-right text-[12px] text-pencil" data-tip={status.sentence}>{label}</span>
+              <span className="flex w-[120px] shrink-0 justify-end"><button className={appOutline} onClick={(e) => { e.stopPropagation(); open?.(ws, a.name); }}>{status.action === "publish" ? "Review changes" : "Open app"}</button></span>
+            </div>;
           })}
+          {tools}
         </div>
       )}
+      {(!answer || !answer.apps.length) && hasTools && <div className={appList}>{tools}</div>}
     </div>
   );
-}
-
-/** An app's three lines on the Apps page (AppEnvs), its Local read from its computer (never one gone). */
-function ListedEnvs({ ws, answer, app, onChanged }: { ws: string; answer: Pick<HostedAppsAnswer, "enabled" | "why">; app: HostedApp; onChanged: (app: HostedApp) => void }) {
-  const local = useLocal(ws, app.name, !app.hosting?.lost);
-  return <AppEnvs compact ws={ws} answer={answer} app={app} sites={app.sites ?? [app]} local={local.answer} onLocal={local.put} onChanged={onChanged} />;
 }
 
 /**
@@ -705,7 +669,9 @@ export function HostedAppTab({
   ws,
   name,
   onAsk,
+  onBack,
 }: {
+  onBack?: () => void;
   state?: (Pick<AppState, "workspaces" | "bots" | "chats"> & Partial<Pick<AppState, "account">>) | null;
   ws: string;
   name: string;
@@ -715,7 +681,7 @@ export function HostedAppTab({
   const [picked, setPicked] = useState<string | undefined>(undefined);
   // Which of its environments the sections are about (Prod by default), and Add a domain opened from Domain in Prod's menu.
   const [intent] = useState(() => openIntent(name));
-  const [env, setEnv] = useState<AppEnv>("prod");
+  const [env, setEnv] = useState<AppEnv>(intent === "domain" ? "prod" : "preview");
   const local = useLocal(ws, name);
   // (Read again when another site is picked too: the lines of the others then say what Orgo says now, a
   // domain the one left was checking gone live, say.)
@@ -753,6 +719,7 @@ export function HostedAppTab({
   const ask = onAsk && workOn(state, ws, app);
   return (
     <HostedAppView
+      onBack={onBack}
       ws={ws}
       answer={answer}
       app={app}
@@ -927,7 +894,6 @@ function useHistory(ws: string, name: string, stamp: string) {
 }
 
 /** A commit's message as its line shows it: the first line. */
-const firstLine = (message: string) => message.split("\n", 1)[0].trim();
 
 /**
  * An app: its state, name, address (open, copy), "Work on it" (`work`: its bot's chat with words typed in,
@@ -948,6 +914,7 @@ const firstLine = (message: string) => message.split("\n", 1)[0].trim();
  * changeset Live on the sites that serve it. One whose computer is gone says it needs a new home.
  */
 export function HostedAppView({
+  onBack,
   ws,
   answer,
   app,
@@ -976,6 +943,7 @@ export function HostedAppView({
   addDomain = false,
   atHistory = false,
 }: {
+  onBack?: () => void;
   ws: string;
   answer: Pick<HostedAppsAnswer, "enabled" | "why">;
   app: HostedApp;
@@ -1018,19 +986,10 @@ export function HostedAppView({
   atHistory?: boolean;
 }) {
   const { busy, error, run } = useDeploy(onChanged);
-  // Opened at its History: scrolled to once there's a history to show (a page read later doesn't move it again).
-  const historyBox = useRef<HTMLDivElement>(null);
-  const historyShown = useRef(!atHistory);
-  const historyRead = history !== null;
-  useEffect(() => {
-    if (historyShown.current || !historyRead || !historyBox.current) return;
-    historyShown.current = true;
-    historyBox.current.scrollIntoView?.({ block: "start", behavior: "smooth" });
-  }, [historyRead]);
-  const [envMine, setEnvMine] = useState<AppEnv>(addDomain ? "prod" : "prod");
-  const env = onEnv ? (picked ?? "prod") : envMine;
+  const [settingsOpen, setSettingsOpen] = useState(addDomain);
+  const [envMine, setEnvMine] = useState<AppEnv>(addDomain ? "prod" : "preview");
+  const env = onEnv ? (picked ?? "preview") : envMine;
   const pickEnv = (x: AppEnv) => (onEnv ? onEnv(x) : setEnvMine(x));
-  // Add a domain opened from Prod's menu here (or the Apps page's): Prod picked, its Domains' Add a domain open.
   const [adding, setAdding] = useState(addDomain ? 1 : 0);
   const [mine, setMine] = useState<string | undefined>(undefined);
   const sites = app.sites;
@@ -1040,88 +999,31 @@ export function HostedAppView({
   const siteName = current && current.name !== app.name ? current.name : undefined;
   const view = siteView(app, current);
   const lost = !!app.hosting?.lost;
-  const url = urlOf(app);
   const online = history && !history.offline ? history : null;
-  // What its site serves, as the list read last says (it's read again while a deploy runs), else as the history does.
-  const serving = app.serving ?? (sites ? null : online?.commits.find((c) => c.serving)?.id) ?? null;
-  /** The sites that serve a changeset, of one with more than one. */
-  const servedBy = (id: string) => sites?.filter((x) => x.serving === id).map((x) => x.name) ?? [];
-  // What a deploy waiting or running builds (the newest, when it doesn't say): any site's.
-  const going = new Set(
-    [app, ...(sites ?? [])]
-      .flatMap((x) => [x, ...(x.preview ? [x.preview] : [])])
-      .filter(deploying)
-      .map((x) => x.live?.at ?? online?.head ?? app.head),
-  );
-  /** Where a changeset is on the Preview: the sites whose Preview serves it (the app, for one with one site). */
-  const previewSites = (id: string) => (sites ? sites.filter((x) => x.preview?.serving === id).map((x) => x.name) : app.preview?.serving === id ? [app.name] : []);
-  /** The end of a changeset's line: Live (its site serves it; the ones that do, of more), Deploying, else "Deploy this one". */
-  const end = (c: AppCommit) => {
-    const on = sites ? servedBy(c.id) : c.id === serving ? [app.name] : [];
-    const st = previewSites(c.id);
-    const chip = st.length ? (
-      <span data-on-preview className="flex shrink-0 items-center gap-1 rounded-full bg-[#EEF2FF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3346A8]">
-        <span className="size-1.5 shrink-0 rounded-full bg-[#5B6BD6]" />
-        Preview
-      </span>
-    ) : null;
-    if (on.length)
-      return (
-        <span className="flex shrink-0 items-center gap-1">
-        {chip}
-        <span
-          data-live
-          title={sites ? `Live on ${on.join(", ")}` : undefined}
-          className="flex min-w-0 max-w-[180px] shrink-0 items-center gap-1 rounded-full bg-[#EAF7EF] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#1E7A4C]"
-        >
-          <span className="size-1.5 shrink-0 rounded-full bg-[#2BB673]" />
-          <span className="truncate">{sites && on.length < sites.length ? `Published: ${on.join(", ")}` : "Published"}</span>
-        </span>
-        </span>
-      );
-    if (chip && !going.has(c.id)) return chip;
-    if (going.has(c.id))
-      return (
-        <span data-going className="flex shrink-0 items-center gap-1 rounded-full bg-[#F2F2F0] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3A3A38]">
-          <span className={`size-1.5 rounded-full ${PULSE}`} />
-          Deploying
-        </span>
-      );
-    return (
-      // Shown as its line is pointed at or reached with the keyboard, so the history reads as a list.
-      <span className="flex shrink-0 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
-        <DeployButton label={sites ? "Preview this one, all sites" : "Preview this one"} why={whyNot(answer, app, c.id, undefined, "preview")} busy={busy(c.id, app.name)} onClick={() => void run(c.id, app.name, { ws, action: "deploy", env: "preview", at: c.id })} />
-      </span>
-    );
-  };
+  const gh = app.hosting?.github;
+  const published = gh ? gh.last?.ingot ?? null : view.serving ?? (!sites ? online?.commits.find(c => c.serving)?.id ?? null : null);
+  const historyBox = useRef<HTMLDivElement>(null);
+  const historyShown = useRef(false);
+  const historyReady = history !== null;
+  useEffect(() => {
+    if (!atHistory || !historyReady || historyShown.current || !historyBox.current) return;
+    historyShown.current = true;
+    historyBox.current.scrollIntoView?.({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  }, [atHistory, historyReady]);
+  const versions = <div data-history-panel ref={historyBox}>
+    {history === null ? <span className={QUIET}>Reading history…</span> : history === false ? <span className={QUIET}>Couldn&apos;t read the history just now.</span> : history.offline ? <span data-offline className={QUIET}>History is unavailable while its computer is offline.</span> : !history.commits.length ? <span className={QUIET}>No versions yet.</span> : <AppVersions versions={history.commits} preview={view.preview?.serving ?? null} published={published} busy={isSending(app.name) || deploying(view.preview ?? { live: null })} whyRestore={id => whyNot(answer, app, id, undefined, "preview")} onRestore={id => void run(id, app.name, { ws, action: "deploy", env: "preview", at: id })}>
+      {history.next && older && <button data-older className={`${appGhost} self-start`} disabled={older.reading} onClick={older.go}>{older.reading ? "Reading…" : older.failed ? "Couldn't read older ones. Try again" : "Show older"}</button>}
+    </AppVersions>}
+  </div>;
   return (
     <div data-hosted-tab={app.name} className="flex min-h-0 flex-1 flex-col bg-white">
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[#F0F0EE] px-4">
-        <StateDot app={app} />
-        <span title={app.name} className="min-w-0 shrink truncate text-[13px] font-semibold leading-4 text-ink">
-          {app.name}
-        </span>
-        {url ? (
-          <>
-            <UrlLink url={url} />
-            <CopyLink url={url} />
-          </>
-        ) : (
-          <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{lost ? "Needs a new home" : noAddress(app)}</span>
-        )}
-        <span className="flex-1" />
-        {work && (
-          <button
-            onClick={work.go}
-            data-tip={`Opens ${work.name}'s chat with this typed, not sent`}
-            className="shrink-0 whitespace-nowrap rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F6F6F4]"
-          >
-            Work on it
-          </button>
-        )}
-        <DeployButton primary label={sites ? "Deploy all previews" : "Deploy preview"} why={whyNot(answer, app, undefined, undefined, "preview")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "preview" })} />
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-4 py-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-auto px-8 py-8">
+        <header className="flex flex-wrap items-center gap-3">
+          {onBack && <RoundButton label="Back to Your Apps" onClick={onBack}><ArrowLeft {...appIcon}/></RoundButton>}
+          <h1 className="min-w-0 flex-1 truncate text-[20px] font-semibold leading-6 tracking-[-0.01em]" title={app.name}>{app.name}{settingsOpen && <span className="font-normal text-pencil"> / Settings</span>}</h1>
+          {work && <button className={appGhost} onClick={work.go} data-tip={`Opens ${work.name}'s chat with this typed, not sent`}>Ask {work.name}</button>}
+          <button className={appOutline} onClick={() => setSettingsOpen(!settingsOpen)}>{settingsOpen ? "Back to app" : "Settings"}</button>
+        </header>
         {lost && (
           <span data-lost className={QUIET}>
             {lostTip(app)}
@@ -1129,7 +1031,7 @@ export function HostedAppView({
         )}
         {sites && current && (
           <div data-sites className="flex flex-col">
-            <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Sites</span>
+            <div className="flex items-center gap-3"><span className="flex-1 text-[13px] font-medium">Sites</span><DeployButton label="Update all previews" why={whyNot(answer, app, undefined, undefined, "preview")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "preview" })}/></div>
             <div className="-mx-2 flex flex-col gap-0.5">
               {sites.map((x) => (
                 <SiteLine
@@ -1166,7 +1068,10 @@ export function HostedAppView({
           </div>
         )}
         {/* Its three environments, all on its computer (the picked site's): a line pressed picks what the sections under it are about. */}
-        <AppEnvs
+        {!settingsOpen && <AppEnvs
+          commits={online?.commits ?? []}
+          history={versions}
+          historyOpen={atHistory}
           ws={ws}
           answer={answer}
           app={view}
@@ -1180,9 +1085,15 @@ export function HostedAppView({
           onDomain={() => {
             pickEnv("prod");
             setAdding((n) => n + 1);
+            setSettingsOpen(true);
           }}
-        />
+        />}
         {/* Made again for each site and environment picked: what was typed for one (its settings, a variable, a domain) never follows to another. */}
+        {settingsOpen && <div className="flex flex-col gap-5">
+          <PasswordSection ws={ws} name={app.name} site={siteName} preview={view.preview}/>
+          <AppDisclosure title="Technical settings" initiallyOpen={adding > 0}>
+            <div className="flex flex-col gap-4">
+              <div className={`${segmented} self-start`}>{(["preview", "prod", "local"] as const).map(x => <button key={x} className={segment(env === x)} aria-pressed={env === x} onClick={() => pickEnv(x)}>{x === "prod" ? "Live" : x === "local" ? "Local" : "Preview"}</button>)}</div>
         <AppSite.Provider key={`${siteName ?? app.name}:${env}`} value={siteName}>
           {env === "prod" && (
             <>
@@ -1197,7 +1108,7 @@ export function HostedAppView({
           {env === "preview" && (
             <AppEnvCtx.Provider value="preview">
               <AppAddress url={previewSettings?.url ?? view.preview?.url ?? null} />
-              <PasswordSection ws={ws} name={app.name} site={siteName} preview={view.preview} />
+
               {view.leftOver?.length ? <LeftOvers ws={ws} app={app} onChanged={onChanged} /> : null}
               {previewSettings && (previewSettings.settings || (!lost && answer.enabled)) && <AppSettingsSection ws={ws} name={app.name} answer={previewSettings} onSaved={onPreviewSettings} />}
               <AppDeploys
@@ -1215,39 +1126,11 @@ export function HostedAppView({
             </AppEnvCtx.Provider>
           )}
         </AppSite.Provider>
-        <div ref={historyBox} data-history className="flex scroll-mt-3 flex-col">
-          <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">History</span>
-          {history === null ? (
-            <span className={QUIET}>Reading it…</span>
-          ) : history === false ? (
-            <span className={QUIET}>Couldn&apos;t read the history just now.</span>
-          ) : history.offline ? (
-            <span data-offline className={QUIET}>
-              Ingot isn&apos;t answering just now, so the history isn&apos;t here.
-            </span>
-          ) : !history.commits.length ? (
-            <span className={QUIET}>No commits yet.</span>
-          ) : (
-            <>
-              <div className="-mx-2 flex flex-col">
-                {history.commits.map((c) => (
-                  <CommitLine key={c.id} commit={c} serving={sites ? servedBy(c.id).length > 0 : c.id === serving} end={end(c)} />
-                ))}
-              </div>
-              {history.next && older && (
-                <button
-                  data-older
-                  onClick={older.go}
-                  disabled={older.reading}
-                  className="-mx-2 mt-0.5 h-7 self-start rounded-lg px-2 text-[12px] leading-4 text-[#6B6B6B] hover:bg-[#F6F6F4] hover:text-ink disabled:text-[#9A9A98] disabled:hover:bg-transparent"
-                >
-                  {older.reading ? "Reading…" : older.failed ? "Couldn't read older ones. Try again" : "Show older"}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-        <AppEnd ws={ws} app={app} site={siteName} onChanged={onChanged} onRemoved={onRemoved} onPicked={pick} />
+            </div>
+          </AppDisclosure>
+          <AppDisclosure title="Manage app"><AppEnd ws={ws} app={app} site={siteName} onChanged={onChanged} onRemoved={onRemoved} onPicked={pick}/></AppDisclosure>
+        </div>}
+
       </div>
     </div>
   );
@@ -1295,55 +1178,6 @@ function SiteLine({ site: x, picked, lost, onPick, deploy }: { site: HostedSite;
       </button>
       <span className="relative flex shrink-0">{deploy}</span>
     </div>
-  );
-}
-
-/**
- * One changeset: its short id (all of it in the tooltip), its message's first line (all of it in the
- * tooltip), who and when, how many files it added, changed and deleted, and how its line ends (`end`).
- */
-function CommitLine({ commit: c, serving, end }: { commit: AppCommit; serving: boolean; end: ReactNode }) {
-  const message = firstLine(c.message);
-  return (
-    <div data-commit={c.id} data-serving={serving || undefined} className="group flex h-8 items-center gap-2 rounded-lg px-2 hover:bg-[#F6F6F4]">
-      <span title={c.id} className="w-[52px] shrink-0 font-mono text-[11.5px] leading-4 text-[#6B6B6B]">
-        {short(c.id)}
-      </span>
-      <span title={c.message} className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${message ? "text-ink" : "text-[#9A9A98]"}`}>
-        {message || "No message"}
-      </span>
-      <span title={c.author} className="max-w-[110px] shrink-0 truncate text-[12px] leading-4 text-[#6B6B6B]">
-        {c.author}
-      </span>
-      <span title={new Date(c.at).toLocaleString()} className="w-8 shrink-0 text-right text-[12px] leading-4 text-[#9A9A98]">
-        {ago(c.at)}
-      </span>
-      <Changes changes={c.changes} />
-      {end}
-    </div>
-  );
-}
-
-/** Files added, changed and deleted, as +2 ~1 -1 (the ones with none left out), in words in the tooltip. */
-function Changes({ changes }: { changes?: AppCommit["changes"] | null }) {
-  const { added = 0, modified = 0, deleted = 0 } = changes ?? {};
-  const parts = [
-    { n: added, mark: "+", word: "added", look: "text-[#1E7A4C]" },
-    { n: modified, mark: "~", word: "changed", look: "text-[#6B6B6B]" },
-    { n: deleted, mark: "-", word: "deleted", look: "text-[#B42318]" },
-  ].filter((p) => p.n > 0);
-  if (!parts.length) return null;
-  const files = added + modified + deleted;
-  const tip = `${files} ${files === 1 ? "file" : "files"}: ${parts.map((p) => `${p.n} ${p.word}`).join(", ")}`;
-  return (
-    <span data-changes title={tip} className="flex shrink-0 gap-1 font-mono text-[11px] leading-4">
-      {parts.map((p) => (
-        <span key={p.mark} className={p.look}>
-          {p.mark}
-          {p.n}
-        </span>
-      ))}
-    </span>
   );
 }
 
@@ -1397,9 +1231,7 @@ function DeployLog({ ws, name, live }: { ws: string; name: string; live: NonNull
   return (
     <div data-deploy-log className="flex flex-col gap-1.5">
       <button onClick={() => setOpen(!open)} aria-expanded={open} className="-mx-2 flex h-8 items-center gap-2 rounded-lg px-2 text-left hover:bg-[#F6F6F4]">
-        <svg width="10" height="10" viewBox="0 0 10 10" className={`shrink-0 text-[#6B6B6B] transition-transform ${open ? "rotate-90" : ""}`}>
-          <path d="M3.5 2l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <ChevronRight {...appIcon} className={`shrink-0 text-pencil transition-transform motion-reduce:transition-none ${open ? "rotate-90" : ""}`}/>
         <span className="shrink-0 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Deploy log</span>
         <span className="min-w-0 truncate text-[12px] leading-4 text-[#9A9A98]">{facts}</span>
       </button>
@@ -1454,7 +1286,7 @@ const CHECKS = 30;
  * user's Cloudflare, is checked every few seconds until it's live (a couple of minutes at most), its line
  * saying so. Each line is one 32px line, so what's read comes in under it a line at a time.
  */
-function Domains({
+export function Domains({
   ws,
   app,
   answer,
@@ -1608,9 +1440,7 @@ function Domains({
             onClick={() => setAdding(true)}
             className="-mx-2 mt-0.5 flex h-7 items-center gap-1.5 self-start rounded-lg px-2 text-[12px] leading-4 text-[#6B6B6B] hover:bg-[#F6F6F4] hover:text-ink"
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-              <path d="M5 1.5v7M1.5 5h7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
+            <Plus {...appIcon}/>
             Add a domain
           </button>
         ))}
@@ -1721,7 +1551,7 @@ function DomainLine({
               }}
               className={rowTrashBtn}
             >
-              <TrashIcon />
+              <Trash2 {...appIcon}/>
             </button>
           </span>
         )}
@@ -1894,10 +1724,7 @@ function OutsideDns({
 
 function LockIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
-      <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
+    <Lock {...appIcon}/>
   );
 }
 
@@ -2082,9 +1909,7 @@ export function DnsZone({
               disabled={busy}
               className="-mx-2 mt-0.5 flex h-7 items-center gap-1.5 self-start rounded-lg px-2 text-[12px] leading-4 text-[#6B6B6B] hover:bg-[#F6F6F4] hover:text-ink disabled:text-[#9A9A98]"
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-                <path d="M5 1.5v7M1.5 5h7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-              </svg>
+              <Plus {...appIcon}/>
               Add record
             </button>
           )}
@@ -2118,10 +1943,10 @@ function RecordLine({ r, busy, onEdit, onRemove }: { r: AppDnsRecord; busy: bool
       ) : (
         <span className={ON_HOVER}>
           <button aria-label={`Change the ${r.type} record at ${atName(r.name)}`} data-tip="Change" disabled={busy} onClick={onEdit} className={rowIconBtn}>
-            <PencilIcon />
+            <Pencil {...appIcon}/>
           </button>
           <button aria-label={`Remove the ${r.type} record at ${atName(r.name)}`} data-tip="Remove" disabled={busy} onClick={onRemove} className={rowTrashBtn}>
-            <TrashIcon />
+            <Trash2 {...appIcon}/>
           </button>
         </span>
       )}
@@ -2208,9 +2033,7 @@ export function DnsRecordForm({
               </option>
             ))}
           </select>
-          <svg width="10" height="10" viewBox="0 0 12 12" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" aria-hidden>
-            <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <ChevronDown {...appIcon} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2"/>
         </span>
         <input
           aria-label="Name"
