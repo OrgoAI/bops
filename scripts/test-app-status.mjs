@@ -49,6 +49,12 @@ check("the preview behind the newest change (or none yet): Update preview", () =
   assert.deepEqual(appStatus({ ...base, preview: { serving: "h1", state: "succeeded" } }), { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" });
   assert.deepEqual(appStatus({ ...base, preview: null }), { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" });
 });
+check("an earlier version put back on the preview (Restore): Publish, to go back to it, never Update preview; a newer one than live, behind the head: Publish too", () => {
+  assert.deepEqual(appStatus({ ...base, head: "h3", preview: { serving: "h1", state: "succeeded" }, live: { serving: "h2", state: "succeeded" }, changes: 0, change: "First look" }), { sentence: "The preview has an earlier version than live.", detail: "First look", action: "publish", tone: "waits" });
+  assert.deepEqual(appStatus({ ...base, head: "h3", preview: { serving: "h2", state: "succeeded" }, live: { serving: "h1", state: "succeeded" }, changes: 1 }), { sentence: "The preview has 1 change that isn't live.", action: "publish", tone: "waits" });
+  assert.equal(appStatus({ ...base, head: "h3", preview: { serving: "h1", state: "succeeded" }, live: { serving: "h1", state: "succeeded" } }).action, "update-preview", "the preview at what's live, behind the head: Update preview");
+  assert.equal(appStatus({ ...base, head: "h3", preview: { serving: "h1", state: "succeeded" }, live: { serving: "h2", state: "failed" }, changes: 0 }).action, "publish", "a failed publish with an earlier version on the preview: publish it again");
+});
 check("on GitHub but not linked: the link comes first (in Published's menu), nothing to press here", () => assert.deepEqual(appStatus({ ...base, github: { linked: false } }), { sentence: "The preview is ready. Link it to GitHub to publish.", tone: "waits" }));
 check("preview and live the same: up to date; with no domain and never live, not published yet: Connect a domain", () => {
   assert.deepEqual(appStatus({ ...base, live: { serving: "h2", state: "succeeded" } }), { sentence: "Live and up to date.", tone: "quiet" });

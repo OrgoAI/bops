@@ -18,9 +18,6 @@ import { ago } from "./ui";
  * and a fold for what's rarely needed (Fold), shut by default.
  */
 
-/** What the one thing to press is called. */
-export const ACTION_WORDS = { "update-preview": "Update preview", publish: "Publish", "connect-domain": "Connect a domain" } as const;
-
 /** A website, in a list: a window with a title bar. */
 export function SiteIcon({ size = 16, className = "" }: { size?: number; className?: string }) {
   return (
@@ -101,7 +98,10 @@ export function AppRow({ mark, name, where, end, onOpen, title, attrs, expanded 
       </button>
       {where && <span className="flex min-w-0 shrink-[2] items-center text-[13px] leading-4 text-[#6B6B6B]">{where}</span>}
       <span className="flex-1" />
-      {end}
+      {/* A control at the row's end (Update preview, Publish) acts without opening the row; words there still open it. */}
+      <span onClick={(e) => (e.target as HTMLElement).closest("button, a") && e.stopPropagation()} className="flex shrink-0 items-center">
+        {end}
+      </span>
     </div>
   );
 }
@@ -336,8 +336,8 @@ export function Motion({ input, className = "" }: { input: AppStatusInput; class
 export function Fold({ id, title, aside, open: start = false, children }: { id: string; title: string; aside?: string; open?: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(start);
   return (
-    <div data-fold={id} aria-expanded={open} className="flex flex-col">
-      <button type="button" onClick={() => setOpen((x) => !x)} className="-mx-2 flex h-8 items-center gap-2 rounded-lg px-2 text-left hover:bg-[#F6F6F4]">
+    <div data-fold={id} data-open={open || undefined} className="flex flex-col">
+      <button type="button" aria-expanded={open} onClick={() => setOpen((x) => !x)} className="-mx-2 flex h-8 items-center gap-2 rounded-lg px-2 text-left hover:bg-[#F6F6F4]">
         <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className={`shrink-0 text-[#6B6B6B] transition-transform motion-reduce:transition-none ${open ? "rotate-90" : ""}`}>
           <path d="M3.5 2l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
         </svg>

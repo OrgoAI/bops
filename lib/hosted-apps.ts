@@ -872,13 +872,19 @@ export function appStatus(i: AppStatusInput): { sentence: string; detail?: strin
   if (going(i.preview?.state)) return { sentence: "Updating the preview…", tone: "working" };
   if (going(i.live.state)) return { sentence: i.github ? "Pushing to GitHub…" : "Publishing…", tone: "working" };
   if (i.preview?.state === "failed") return { sentence: "The last preview update failed.", action: "update-preview", tone: "failed" };
+  // What the preview holds that isn't live is there to publish, the newest change or an earlier version put back on it
+  // (Restore): the preview is "behind" only while it has nothing, or what's live already, and the newest change isn't on it.
+  const holds = !!i.preview?.serving && i.preview.serving !== i.live.serving;
+  const behind = !i.preview?.serving || (i.preview.serving !== i.head && !holds);
   // (The press that can go through now: the preview to update first when it's behind, else publishing again.)
-  if (i.live.state === "failed") return { sentence: "The last publish failed.", action: !i.preview || i.preview.serving !== i.head ? "update-preview" : "publish", tone: "failed" };
-  if (!i.preview || i.preview.serving !== i.head) return { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" };
+  if (i.live.state === "failed") return { sentence: "The last publish failed.", action: behind ? "update-preview" : "publish", tone: "failed" };
+  if (behind || !i.preview) return { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" };
   if (i.github && !i.github.linked) return { sentence: "The preview is ready. Link it to GitHub to publish.", tone: "waits" };
   const canLive = i.domain || i.wasLive || !!i.github;
   if (i.preview.serving === i.live.serving) return canLive ? { sentence: "Live and up to date.", tone: "quiet" } : { sentence: "Not published yet.", action: "connect-domain", tone: "waits" };
   if (!canLive) return { sentence: "The preview is ready. Connect a domain to publish it.", action: "connect-domain", tone: "waits" };
+  // (An earlier version put back on the preview, to go back to: the history counts no change between live and it.)
+  if (i.preview.serving !== i.head && i.changes === 0) return { sentence: "The preview has an earlier version than live.", ...(i.change ? { detail: i.change } : {}), action: "publish", tone: "waits" };
   const n = i.changes ?? 1;
   const sentence = n === 1 ? "The preview has 1 change that isn't live." : `The preview has ${n} changes that aren't live.`;
   return { sentence, ...(i.change ? { detail: i.change } : {}), action: "publish", tone: "waits" };

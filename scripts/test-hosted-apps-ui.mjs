@@ -312,7 +312,8 @@ await test("the tab's versions: one line per changeset (what it did, who and whe
 
   const served = commitOf(html, id("c3"));
   assert.ok(served.includes('data-tag="live"') && served.includes(">Live<") && served.includes('data-serving="true"'), "the one its site serves is tagged Live");
-  assert.ok(!deployIn(served, "Restore") && !deployIn(served, "Preview this"), "and isn't offered again");
+  assert.deepEqual(deployIn(served, "Restore"), { tip: null, disabled: false }, "and can go back onto the preview too (dropping what the preview holds)");
+  assert.ok(!deployIn(commitOf(tab(shopApp({ preview: { projectId: "p_st", url: "https://k7p2qxm4wr3d.orgo.dev", label: "k7p2qxm4wr3d", serving: id("c3"), live: live("succeeded", id("c3")) } })), id("c3")), "Restore"), "not while the preview serves it already");
   assert.equal([...html.matchAll(/data-tag="live"/g)].length, 1, "one live");
   for (const c of [id("d4"), id("b2"), id("a1")]) assert.deepEqual(deployIn(commitOf(html, c), "Restore"), { tip: null, disabled: false }, `${c.slice(0, 7)} can be restored onto the Preview`);
   assert.match(commitOf(html, id("a1")), /opacity-0[^"]*group-hover:opacity-100[^>]*><span[^>]*><button[^>]*>Restore</, "shown as its line is pointed at");
@@ -2810,7 +2811,7 @@ await test("Your Apps in a workspace shared with the user: the apps as the owner
   await click(m.box.querySelector('[data-shared-app="shop"] button[aria-expanded]'));
   const card = m.box.querySelector('[data-shared-app="shop"]');
   assert.ok(card.textContent.includes("Versions") && card.querySelector("[data-commit]"), "its versions");
-  assert.ok(card.querySelector('[data-fold="settings"][aria-expanded="false"]'), "settings (Update preview, earlier deploys, build settings, domains) folded");
+  assert.ok(card.querySelector('[data-fold="settings"] > button[aria-expanded="false"]'), "settings (Update preview, earlier deploys, build settings, domains) folded, its button saying so");
   assert.ok(card.querySelector('[data-fold="settings"]').textContent.includes("Build logs show in the owner's Bops."));
   assert.equal([...card.querySelectorAll("button")].filter((b) => b.textContent === "Go back to this one").length, 1, "only the deploy that can go back");
   assert.ok(card.querySelector("[data-shared-settings]"));

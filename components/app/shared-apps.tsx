@@ -272,7 +272,7 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
                       serving={isLive}
                       where={isLive ? <Tag kind="live" title={onPreview ? "On the preview too" : undefined} /> : onPreview ? <Tag kind="preview" /> : undefined}
                       action={
-                        write && !onPreview && !isLive ? (
+                        write && !onPreview ? (
                           <button type="button" disabled={!!going} onClick={() => void send({ act: "deploy", app: a.name, at: c.id })} className={OUTLINED}>
                             {W.restore}
                           </button>

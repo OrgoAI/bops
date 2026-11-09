@@ -39,9 +39,6 @@ export const openIntent = (name: string) => {
 };
 /** The next opening of app `name`'s tab (OpenHostedApp) at its History (app-change.tsx View changes). */
 export const openAtHistory = (name: string) => void opening.set(name, "history");
-/** The next opening of app `name`'s tab with Add a domain open on Published (Connect a domain, from the Apps page). */
-export const openAtDomain = (name: string) => void opening.set(name, "domain");
-
 /** What each is called where people read it: Prod is what's Published. */
 export const ENV_NAMES: Record<AppEnv, string> = { local: "Local", preview: "Preview", prod: "Published" };
 

@@ -1122,11 +1122,13 @@ export function HostedAppView({
   const end = (c: AppCommit): { where?: ReactNode; action?: ReactNode } => {
     const on = sites ? servedBy(c.id) : c.id === serving ? [app.name] : [];
     const st = previewSites(c.id);
-    if (on.length) return { where: <Tag kind="live" title={sites ? (on.length < sites.length ? `Live on ${on.join(", ")} only` : `Live on ${on.join(", ")}`) : st.length ? "On the preview too" : undefined} /> };
+    const word = c.id === (online?.head ?? app.head) ? "Preview this" : "Restore";
+    // (The live version too, while the preview holds another: Restore puts it back on the preview, dropping what's there.)
+    const restore = <DeployButton label={sites ? `${word}, all sites` : word} why={whyNot(answer, app, c.id, undefined, "preview")} busy={busy(c.id, app.name)} onClick={() => void run(c.id, app.name, { ws, action: "deploy", env: "preview", at: c.id })} />;
+    if (on.length) return { where: <Tag kind="live" title={sites ? (on.length < sites.length ? `Live on ${on.join(", ")} only` : `Live on ${on.join(", ")}`) : st.length ? "On the preview too" : undefined} />, ...(st.length || going.has(c.id) ? {} : { action: restore }) };
     if (going.has(c.id)) return { where: <Deploying /> };
     if (st.length) return { where: <Tag kind="preview" title={sites ? `On the preview of ${st.join(", ")}` : undefined} /> };
-    const word = c.id === (online?.head ?? app.head) ? "Preview this" : "Restore";
-    return { action: <DeployButton label={sites ? `${word}, all sites` : word} why={whyNot(answer, app, c.id, undefined, "preview")} busy={busy(c.id, app.name)} onClick={() => void run(c.id, app.name, { ws, action: "deploy", env: "preview", at: c.id })} /> };
+    return { action: restore };
   };
   // What each place serves now, in the history's words (else the deploy's), and what moves or failed there.
   const serves = (id: string | null | undefined, when: number | null | undefined, word: string): Serves => {

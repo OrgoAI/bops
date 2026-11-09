@@ -296,11 +296,18 @@ async function ownerAppChecks(page) {
   check("no blue on the page, no sentence, nothing moving", !(await tab.innerHTML()).includes("#EEF2FF") && (await tab.locator("[data-state-line], [data-motion]").count()) === 0);
   check("no domains, settings or deploys on the versions page", (await tab.locator("[data-domains], [data-settings], [data-deploys], [data-app-envs]").count()) === 0);
   await tab.locator('[data-commit] >> nth=2').hover();
-  check("an older version offers Restore as it's pointed at", (await tab.locator('[data-commit] >> nth=2').locator("button", { hasText: "Restore" }).count()) === 1);
+  await page.waitForTimeout(250);
+  const restore = tab.locator('[data-commit] >> nth=2').locator("button", { hasText: "Restore" });
+  check("an older version offers Restore as it's pointed at", (await restore.count()) === 1 && (await restore.evaluate((b) => getComputedStyle(b.parentElement.parentElement).opacity)) === "1");
+  await page.mouse.move(0, 0);
+  await restore.focus();
+  await page.waitForTimeout(250);
+  check("Restore is reached by the keyboard too: focused, it shows", (await restore.evaluate((b) => document.activeElement === b && getComputedStyle(b.parentElement.parentElement).opacity === "1")) === true);
+  check("the live version offers Restore too, to put it back on the preview", (await tab.locator('[data-commit][data-serving]').locator("button", { hasText: "Restore" }).count()) === 1);
   // Publish: the dot goes, and the page stays quiet.
   await tab.locator('[data-next-action="publish"]').click();
   await page.waitForTimeout(400);
-  check("Publish was sent", model.acts.some((x) => x.action === "promote"));
+  check("Publish was sent as a promote of what the preview serves", model.acts.some((x) => x.action === "promote" && x.site === "fourcorners" && typeof x.at === "string" && x.at.length > 6));
   await page.waitForTimeout(3800);
   check("after Publish, the dot is off and the newest version is Live", (await tab.locator('[data-next-action="publish"][data-waits]').count()) === 0 && (await tab.locator('[data-commit] >> nth=0').locator('[data-tag="live"]').count()) === 1);
   check("and the Live card now says that version", /Home line/.test(await tab.locator('[data-place="live"] [data-place-serving]').innerText()));
@@ -352,7 +359,7 @@ async function samOpenChecks(page) {
   check("the lock shows the password", (await fc.locator("[data-password-popover] [data-preview-password]").innerText()).trim() === "Kw7mQ2p");
   await page.keyboard.press("Escape");
   check("opened: Versions with Live and Preview tags, no ids", (await fc.locator('[data-tag="live"]').count()) >= 1 && (await fc.locator('[data-tag="preview"]').count()) >= 1 && !/[0-9a-f]{7}/.test(await fc.locator("[data-history], [data-commit]").first().innerText()));
-  check("opened: Settings folded", (await fc.locator("[data-fold='settings'][aria-expanded='false']").count()) === 1 && !(await fc.locator('input[aria-label="Port"]').isVisible()));
+  check("opened: Settings folded (its button says so)", (await fc.locator("[data-fold='settings'] > button[aria-expanded='false']").count()) === 1 && !(await fc.locator('input[aria-label="Port"]').isVisible()));
   await fc.locator("[data-fold='settings'] > button").click();
   check("opened fold: Update preview, earlier deploys, the Port field, a domain to use", (await fc.locator('[data-fold="settings"] [data-act="deploy"]').isVisible()) && (await fc.locator('input[aria-label="Port"]').isVisible()) && (await fc.locator("[data-shared-domain]").isVisible()));
   await fc.locator('[data-next-action="publish"]').click();
@@ -412,8 +419,6 @@ try {
   if (started) spawnSync(process.execPath, [join(root, "scripts", "dev-two-person.mjs"), "stop"], { stdio: "inherit" });
 }
 for (const e of errors) console.log(`FAIL ${e}`);
-const wide = await Promise.resolve(true);
-void wide;
 if (LOOK) console.log(`shots in ${OUT}${errors.length ? ", with page errors" : ""}`);
 else console.log(fails || errors.length ? `${fails} FAIL, ${errors.length} page errors` : "all PASS");
 process.exit(fails || errors.length ? 1 : 0);
