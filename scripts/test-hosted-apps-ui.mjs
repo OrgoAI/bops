@@ -351,6 +351,18 @@ await test("the tab's versions: one line per changeset (what it did, who and whe
   assert.ok(tab(shopApp(), { history: false }).includes("Couldn&#x27;t read the versions just now."), "when they couldn't be");
 });
 
+await test("who made a version, on its line: the name before via or on (Ingot's authors), an address's part before @; the whole author in the tooltip", async () => {
+  const { shortWho, VersionRow } = await import(pathToFileURL(`${root}/components/app/app-status.tsx`).href);
+  assert.equal(shortWho("Tiger Wang via tiger@orgo.ai"), "Tiger Wang");
+  assert.equal(shortWho("Bops via tiger@orgo.ai"), "Bops");
+  assert.equal(shortWho("Boppy on boppy-3-mvq5wg"), "Boppy");
+  assert.equal(shortWho("tiger@orgo.ai"), "tiger");
+  assert.equal(shortWho("Tess Ito <tess@example.com>"), "Tess Ito");
+  assert.equal(shortWho("Four Corners"), "Four Corners");
+  const row = renderToStaticMarkup(h(VersionRow, { id: "v1", message: "Adds the cart", who: "Tiger Wang via tiger@orgo.ai", at: Date.now() - 60_000 }));
+  assert.ok(row.includes('title="Tiger Wang via tiger@orgo.ai"') && row.includes(">Tiger Wang · <") && !row.includes(">Tiger Wang via"), "short on the line, whole in the tooltip");
+});
+
 await test("the tab's history a page at a time", () => {
   const go = () => {};
   const paged = { ...HISTORY, next: id("a1") };

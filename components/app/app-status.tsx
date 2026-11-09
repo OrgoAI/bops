@@ -269,8 +269,18 @@ export function Deploying() {
 const VERSION_COLUMNS = "grid-cols-[minmax(0,1fr)_84px_minmax(0,172px)] @max-lg:grid-cols-[minmax(0,1fr)_84px_56px]";
 
 /**
+ * Who made a version, short: Ingot writes "Tiger Wang via tiger@orgo.ai", "Bops via tiger@orgo.ai" or "Boppy on
+ * boppy-3-mvq5wg" as the author; the line says the name before "via" or "on" (an address alone: the part before @),
+ * and the whole author stays in the tooltip.
+ */
+export function shortWho(author: string): string {
+  const name = author.replace(/<[^>]*>/g, "").replace(/\s+(?:via|on)\s+.*$/i, "").trim();
+  return (name.includes("@") ? name.split("@")[0] : name) || author;
+}
+
+/**
  * One version, on its line: what it did (its words; the rest in the tooltip), where it is (a Tag, or Deploying),
- * who made it and when. Pointed at (or reached with the keyboard), its action (`action`: Restore, Preview this)
+ * who made it (shortWho) and when. Pointed at (or reached with the keyboard), its action (`action`: Restore, Preview this)
  * shows where who and when were, so the line stays the same width and nothing moves.
  */
 export function VersionRow({ id, message, tip, where, who, at, action, serving }: { id: string; message: string; tip?: string; where?: ReactNode; who: string; at: number; action?: ReactNode; serving?: boolean }) {
@@ -280,7 +290,7 @@ export function VersionRow({ id, message, tip, where, who, at, action, serving }
       <span className="flex min-w-0 items-center">{where}</span>
       <span className="relative flex min-w-0 items-center justify-end">
         <span className={`min-w-0 truncate whitespace-nowrap text-[12.5px] leading-4 text-[#9A9A98] ${action ? "group-hover:opacity-0 group-focus-within:opacity-0" : ""}`}>
-          <span title={who} className="@max-lg:hidden">{`${who} · `}</span>
+          <span title={who} className="@max-lg:hidden">{`${shortWho(who)} · `}</span>
           <span title={`${who}, ${new Date(at).toLocaleString()}`}>{ago(at)}</span>
         </span>
         {action && <span className="absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">{action}</span>}
