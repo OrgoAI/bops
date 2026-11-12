@@ -434,21 +434,24 @@ const GITHUB_ACT = new Set(["github", "githubLink", "githubPull"]);
 const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
 /**
  * An app's GitHub production as shown (repo and branch, as the owner's Bops or Bops Cloud checked them when set), or none
- * when malformed. At Write (`write`) also its folder, the paths left alone, the workflow it runs and where it was last the
- * same as GitHub (`linked`, of its point: never more than its commits' ids and when), so Your Apps links it and brings
- * GitHub's changes in.
+ * when malformed; at every level `at`, the changeset last sent there (github.last.ingot: a Link, a Publish or a Bring in,
+ * by the owner's Mac or a runner), which is what its Live is, or null when it isn't linked yet. At Write (`write`) also its
+ * folder, the paths left alone, the workflow it runs and where it was last the same as GitHub (`linked`, of its point:
+ * never more than its commits' ids and when), so Your Apps links it and brings GitHub's changes in.
  */
 const githubOf = (g: unknown, write = false): SharedApp["github"] | undefined => {
   if (!isObject(g) || typeof g.repo !== "string" || typeof g.branch !== "string" || g.repo.length > 201 || g.branch.length > 200) return undefined;
-  if (!write) return { repo: g.repo, branch: g.branch };
   const words = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max;
+  const last = isObject(g.last) && words(g.last.sha, 64) && words(g.last.ingot, 64) && typeof g.last.when === "number" ? g.last : undefined;
+  const at = last ? (last.ingot as string) : null;
+  if (!write) return { repo: g.repo, branch: g.branch, at };
   const keep = Array.isArray(g.keep) ? g.keep.filter((k): k is string => words(k, 300)).slice(0, 50) : [];
   const d = isObject(g.dispatch) && words(g.dispatch.workflow, 120) ? g.dispatch : undefined;
   const inputs = d && isObject(d.inputs) ? Object.fromEntries(Object.entries(d.inputs).filter((e): e is [string, string] => e[0].length <= 50 && words(e[1], 200)).slice(0, 10)) : undefined;
-  const last = isObject(g.last) && words(g.last.sha, 64) && words(g.last.ingot, 64) && typeof g.last.when === "number" ? g.last : undefined;
   return {
     repo: g.repo,
     branch: g.branch,
+    at,
     ...(words(g.path, 300) ? { path: g.path } : {}),
     ...(keep.length ? { keep } : {}),
     ...(d ? { dispatch: { workflow: d.workflow as string, ...(inputs && Object.keys(inputs).length ? { inputs } : {}) } } : {}),

@@ -438,7 +438,7 @@ async function readGithub(gh: GitHub, cfg: GithubMirror) {
  */
 export async function mirrorPublish(wsId: string, name: string, at: string, cfg: GithubMirror, author: string): Promise<MirrorDone> {
   const last = cfg.last;
-  if (!last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first, in the menu beside Publish.`, 409, { code: "NOT_LINKED" });
+  if (!last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first, from Technical details in Your Apps.`, 409, { code: "NOT_LINKED" });
   if (!(await atOrAfter(wsId, name, at, last.ingot)))
     throw new MirrorError("The preview is older than what GitHub has (its changes came into Ingot since). Deploy the newest to the preview first, then publish.", 409, { code: "PREVIEW_BEHIND" });
   const gh = github(wsId);
@@ -468,7 +468,7 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
   const newer = (headFiles: Files) => {
     for (const [p, f] of theirs) if (!unlinked.has(p) && !same(headFiles.get(p), baseFiles.get(p)) && !same(headFiles.get(p), f) && !both.includes(p)) both.push(p);
     if (both.length)
-      throw new MirrorError(`Both Ingot and GitHub changed ${list(both)} since they were last the same. Bring in GitHub's changes (in the menu beside Publish) to take GitHub's version, then make Ingot's change again. Nothing was published.`, 409, { code: "BOTH_CHANGED", paths: both });
+      throw new MirrorError(`Both Ingot and GitHub changed ${list(both)} since they were last the same. Bring in GitHub's changes (from Technical details in Your Apps) to take GitHub's version, then make Ingot's change again. Nothing was published.`, 409, { code: "BOTH_CHANGED", paths: both });
   };
   const ingotHead = await ingot.head(wsId, name);
   newer(theirs.size && ingotHead && ingotHead !== at ? (await ingotSide(wsId, name, ingotHead, (p) => !theirs.has(p))).files : oursNow.files);
@@ -560,7 +560,7 @@ async function pushUp(
  * history), and the point moves to the branch's newest. What only Ingot changed stays, for the next Publish.
  */
 export async function mirrorPull(wsId: string, name: string, cfg: GithubMirror, author: string): Promise<MirrorDone> {
-  if (!cfg.last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first, in the menu beside Publish.`, 409, { code: "NOT_LINKED" });
+  if (!cfg.last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first, from Technical details in Your Apps.`, 409, { code: "NOT_LINKED" });
   const gh = github(wsId);
   const { head, baseFiles, theirs, unlinked } = await readGithub(gh, cfg);
   massDelete(baseFiles, theirs, "GitHub");

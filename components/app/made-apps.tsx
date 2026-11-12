@@ -1,5 +1,7 @@
 "use client";
 
+import { LayoutGrid } from "lucide-react";
+import { appIcon, appList, appOutline, appRow } from "./app-controls";
 import { appsShown } from "@/lib/apps-access";
 import { SharedAppsPage } from "./shared-apps";
 import { createContext, createElement, useContext, useEffect, useRef, useState } from "react";
@@ -465,48 +467,17 @@ export function MadeAppsHome({ state, ws }: { state: AppState; ws: string }) {
 function OwnAppsHome({ state, ws }: { state: AppState; ws: string }) {
   const open = useContext(OpenMadeApp);
   const apps = (state.madeApps ?? []).filter((a) => a.ws === ws).sort((a, b) => b.updatedAt - a.updatedAt);
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
-      <div className="flex flex-col gap-1">
-        <span className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">Your Apps</span>
-        <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">
-          {apps.length ? `${apps.length} made by your bots · they keep what you put in them` : "Tools your bots make for you. Ask any bot: “make me an app that…”"}
-        </span>
-      </div>
-      {appsShown(state) && <HostedApps state={state} ws={ws} />}
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
-        {apps.map((a) => {
-          const maker = state.bots.find((b) => b.id === a.botId);
-          return (
-            <button key={a.id} onClick={() => open?.(a.id)} className="group flex flex-col gap-2.5 text-left">
-              <span className="relative block h-[172px] overflow-hidden rounded-[14px] bg-white shadow-[0_0_0_1px_#ECECEA] group-hover:shadow-[0_0_0_1px_#0A0A0A]">
-                {a.version ? (
-                  // The app itself, at half size, and not to be clicked here (the tile opens it).
-                  <span className="pointer-events-none absolute left-0 top-0 block h-[344px] w-[200%] origin-top-left scale-50" inert>
-                    <AppFrame key={`${a.id}:${a.version}`} app={a} version={a.version} className="h-full w-full border-0 bg-white" />
-                  </span>
-                ) : (
-                  <span className="flex h-full items-center justify-center gap-2 text-[12px] text-[#6B6B6B]">
-                    <span className="size-2 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />
-                    {a.building ? "Building…" : "Not built"}
-                  </span>
-                )}
-              </span>
-              <span className="flex items-center gap-2 pl-0.5">
-                <AppMark app={a} size={18} />
-                <span className="flex min-w-0 flex-col">
-                  <span className="truncate text-[14px] font-medium leading-[18px] text-ink">{a.title}</span>
-                  <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">
-                    {maker?.name ?? "A bot"} · {a.building ? "building now" : `updated ${ago(a.updatedAt)}`}
-                  </span>
-                </span>
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
+  const tools = apps.map(a => <div key={a.id} data-made-app={a.id} className={appRow}>
+    <button aria-label={`Open ${a.title}`} onClick={() => open?.(a.id)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+      <LayoutGrid {...appIcon} className="shrink-0 text-pencil"/>
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5"><span className="truncate text-[14px] font-medium leading-[18px]">{a.title}</span><span className="truncate text-[12.5px] leading-[17px] text-pencil">In Bops</span></span>
+    </button>
+    <span className="hidden w-[120px] shrink-0 text-right text-[12px] text-pencil @[600px]:block">{a.building ? "Building" : ""}</span>
+    <span className="flex w-[120px] shrink-0 justify-end"><button className={appOutline} onClick={() => open?.(a.id)}>Open</button></span>
+  </div>);
+  return <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-auto px-8 py-8">
+    {appsShown(state) ? <HostedApps state={state} ws={ws} tools={tools.length ? tools : undefined}/> : <><h1 className="text-[26px] font-bold leading-8 tracking-[-0.025em]">Your Apps</h1>{tools.length ? <div className={appList}>{tools}</div> : <span className="text-[13.5px] leading-[18px] text-pencil">Ask a bot to make an app for you.</span>}</>}
+  </div>;
 }
 
 /** The line a build leaves in the chat: building (with Show), made or changed (Open, Undo), or why it couldn't. */

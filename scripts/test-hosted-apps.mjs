@@ -2084,7 +2084,7 @@ await check("deploy_app in the chat: to its Preview at its fixed link unless Ale
   const now = H.hostedAppsLine("boppy");
   assert.ok(now.startsWith("Your workspace's apps on the web, each an Ingot repo, its source: "), now);
   // The three environments, the command for each, and the default flow for a change, with nothing to improvise.
-  assert.match(now, /Local, the live view while you work .*local_app starts, stops or reads it\. Preview, its fixed link to test and share \(Deploy in Your Apps\): deploy_app puts a commit there\./);
+  assert.match(now, /Local, the live view while you work .*local_app starts, stops or reads it\. Preview, its fixed link to test and share \(Update preview in Your Apps\): deploy_app puts a commit there\./);
   assert.match(now, /Published, its production \(Publish in Your Apps\): deploy_app with where prod puts what Preview serves there/);
   assert.match(now, /When Alex asks for any change to an app, call work_on_app at once, with no question first: it makes the change in its working folder, commits it to Ingot and deploys that commit to its Preview/);
   assert.match(now, /never through GitHub \(its API, a branch, a pull request, change_files\) or by calling Orgo yourself/);
@@ -2194,7 +2194,7 @@ await check("Link and Bring in asked from a shared workspace (githubJob): on a b
   try {
     const before = structuredClone(hostedApps()["recipe-box"]);
     // Bring in before it's linked: said, nothing read.
-    assert.deepEqual(await job("githubPull"), { ok: false, said: "recipe-box isn't linked to GitHub yet. Link it first, in the menu beside Publish." });
+    assert.deepEqual(await job("githubPull"), { ok: false, said: "recipe-box isn't linked to GitHub yet. Link it first, from Technical details in Your Apps." });
     assert.deepEqual(web.github.calls, []);
     const linked = hear(await job());
     assert.deepEqual(linked, { ok: true, said: "Linked recipe-box to GitHub acme/site main, folder app at 1111111. GitHub has no app/ folder yet, so the next Publish puts all of it there." });

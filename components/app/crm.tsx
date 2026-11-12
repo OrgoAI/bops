@@ -1,5 +1,7 @@
 "use client";
 
+import { segmented, segment } from "./app-controls";
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -1035,7 +1037,7 @@ export function CrmView({
             </option>
           ))}
         </Pick>
-        <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
+        <div className={segmented}>
           {(["bar", "line"] as const).map((k) => {
             const on = (k === "line") === lineWanted;
             const blocked = k === "line" && typeOf(by) !== "date";
@@ -1046,7 +1048,7 @@ export function CrmView({
                 aria-disabled={blocked || undefined}
                 data-tip={blocked ? "Line needs a date column, like Close date." : undefined}
                 onClick={() => !blocked && setView({ ...view, kind: k })}
-                className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : blocked ? "cursor-default text-[#C9C9C6]" : "text-[#6B6B6B] hover:text-ink"}`}
+                className={segment(on, blocked)}
               >
                 {k === "bar" ? "Bar" : "Line"}
               </button>
