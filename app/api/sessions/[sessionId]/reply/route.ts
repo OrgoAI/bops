@@ -1,3 +1,4 @@
+import { askDeployAgain } from "@/lib/server/hosted-apps";
 import { offerMove, replyToSession } from "@/lib/server/sessions";
 import { watchInstead } from "@/lib/server/watches";
 import { getState, session } from "@/lib/server/store";
@@ -17,7 +18,11 @@ export async function POST(request: Request, ctx: RouteContext<"/api/sessions/[s
   // Not one of the thread's own next steps the user picked: it offered to do that, so it does it.
   const picked = s.options?.includes(text.trim());
   const watch = picked ? null : await watchInstead(sessionId, text.trim()).catch(() => null);
-  if (!watch) replyToSession(sessionId, text.trim());
+  // A task on an app that put a change on its Preview puts this one there too, unless they say not to (askDeployAgain).
+  if (!watch) {
+    askDeployAgain(sessionId, text.trim());
+    replyToSession(sessionId, text.trim());
+  }
   // Words about their Mac in a cloud thread ("do it on my Mac", "do it locally") offer the move ("Move to your Mac?"),
   // and the user taps it: words alone also match "anywhere but on my Mac" or "a sleeve for my MacBook Air".
   // The Mac thread starts with what they told this one (sessions.ts cloudRecord).

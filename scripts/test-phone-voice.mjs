@@ -3,8 +3,9 @@
 // whole bot (work handed to its chat as a call in the app does it), anyone else a bot that only takes a
 // message; who's calling is Bops Cloud's verdict when there is one; a first call that claimed the line
 // links that phone; the call's transcript lands in the bot's chat; slow answers stream a filler first.
-// Also the webhook route (a forged verdict on a direct delivery is ignored) and texts that follow the
-// cloud's verdict (lib/server/phone.ts). OpenAI is a fake on localhost and the state a throwaway file
+// Also the webhook route (a forged verdict on a direct delivery is ignored), texts that follow the
+// cloud's verdict, and a publish asked by text answered with one text, its Published line kept in Bops
+// (lib/server/phone.ts). OpenAI is a fake on localhost and the state a throwaway file
 // store in a temporary folder: nothing reaches OpenAI, AgentPhone or Orgo, and nobody is texted.
 // Usage: node --conditions=react-server scripts/test-phone-voice.mjs
 import assert from "node:assert/strict";
@@ -66,6 +67,8 @@ globalThis.bopsOrgoKeyMissAt = Infinity;
 const asked = [];
 /** What a call's next turn answers: the words, tool calls, and how long it takes. */
 let phoneReply = () => ({ text: "Hi there." });
+/** What the bot's chat answers (a call's work handed to it, a text). */
+let chatReply = () => ({ text: "On it, sending now." });
 const responseOf = (r) => ({
   id: `resp_${asked.length}`,
   object: "response",
@@ -86,7 +89,7 @@ const fake = createServer(async (req, res) => {
   const phone = names.includes("end_call");
   asked.push({ phone, body });
   // The bot's chat (handed a call's work): it just answers.
-  const r = phone ? phoneReply(body) : { text: "On it, sending now." };
+  const r = phone ? phoneReply(body) : chatReply(body);
   if (r.delayMs) await new Promise((done) => setTimeout(done, r.delayMs));
   res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(responseOf(r)));
 });
@@ -316,6 +319,34 @@ const until = async (check, what, ms = 5000) => {
   assert.equal(P.verdictOf("yes"), undefined);
   assert.equal(P.verdictOf({ owner: "true" }), undefined);
   assert.equal(P.verdictOf(null), undefined);
+}
+
+/* ---------------- A publish asked by text ---------------- */
+
+{
+  // The owner texts "publish the recipe app": the publish went, and Bops said it in the chat as the bot during the turn
+  // (an app note, chat.ts deploy_app). Only the bot's own answer is texted back, once; the Published line stays in Bops.
+  const published = "Published: publishing recipe-box at abc1234, what its Preview serves. It's live on its domain once its DNS points at Orgo.";
+  let said = false;
+  chatReply = () => {
+    if (!said) S.addMessage({ chatId, role: "bot", botId: main.id, text: published, appNote: true, bops: true });
+    said = true;
+    return { text: "It's published." };
+  };
+  const from = messages().length;
+  const texted = () => messages().slice(from).filter((m) => m.role === "system" && m.text.startsWith("[dry run] would text +1 (415) 555-0100 "));
+  try {
+    P.agentPhoneEvent({ event: "agent.message", channel: "sms", agentId: "agt_ws", data: { id: "ap_pub", from: OWNER, to: LINE, message: "publish the recipe app" } }, "d_pub", { owner: true });
+    await until(() => texted().some((m) => m.text.endsWith(": It's published.")), "the bot's answer texted back");
+    assert.deepEqual(
+      texted().map((m) => m.text.replace(/^.*?\(sms\): /, "")),
+      ["It's published."],
+      "one text back: the bot's answer, not the app note",
+    );
+    assert.equal(messages().filter((m) => m.appNote && m.bops && m.text === published).length, 1, "the Published line stays in the chat");
+  } finally {
+    chatReply = () => ({ text: "On it, sending now." });
+  }
 }
 
 /* ---------------- Picking where a bot's number is from ---------------- */

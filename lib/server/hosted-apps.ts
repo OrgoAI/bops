@@ -5018,6 +5018,46 @@ export function askDeploy(sessionId: string, app: { wsId: string; name: string }
   });
 }
 
+/** Where words name its Preview or a deploy (deploy it, redeploying, the Preview). */
+const NAMES_PREVIEW = /\b(?:re-?)?deploy\w*|\bpreviews?\b/gi;
+/**
+ * Said not to, in the same clause just before (don't put it on the Preview, never deploy, hold off on deploying, wait
+ * to deploy, but not on the Preview, keep it off the Preview, no deploy); "I don't see it on the Preview" isn't...
+ */
+const HOLD_BEFORE =
+  /(?:\b(?:(?:don['’]?t|do not|dont)(?!\s+(?:forget|see|think|know)\b)|never|without|hold off(?: on)?|wait (?:to|before|until)|no need to|(?:but|and) not)\s+(?:[\w'’-]+\s+){0,4}|\boff\s+(?:of\s+)?(?:the|its|our|my)\s+|\bno\s+)$/i;
+/** ...or just after (deploy it later). */
+const HOLD_AFTER = /^\s+(?:(?:it|this|that|them)\s+)?later\b/i;
+
+/**
+ * Whether the speaker's words, sent straight to a task on an app, say not to put its change on its Preview (askDeployAgain):
+ * no model reads them on the way (a reply to one of its messages, its reply box), so these words are what tell_task's
+ * deploy false is to the bot. "It's not on the Preview yet" or "the Preview still shows the old title" asks for it.
+ */
+export function keepsOffPreview(words: string): boolean {
+  for (const m of words.matchAll(NAMES_PREVIEW)) {
+    const at = m.index ?? 0;
+    const clause = words.slice(0, at).split(/[.?!;:\n]/).pop() ?? "";
+    if (HOLD_BEFORE.test(clause) || HOLD_AFTER.test(words.slice(at + m[0].length))) return true;
+  }
+  return false;
+}
+
+/**
+ * More asked of a task on an app that already put a change on its Preview (`from`: keepHeads and deployAfterTask set it
+ * only on a task asked to deploy, and deployAfterTask took that ask off once it deployed): its next commit goes there
+ * too (askDeploy), asked before the run is queued, so it ends with the deploy. A task started with deploy false (no
+ * `from`) stays as it is. For the speaker's own words sent to it: chat.ts tell_task (its deploy, on work_on_app's rule),
+ * and, with `words` (none said not to: keepsOffPreview), a reply to one of its messages (chat.ts continueThread), its
+ * reply box (app/api/sessions/[sessionId]/reply) and a member's reply there (member-acts.ts). Never for a note Bops
+ * sends it (signed in, its terminal closed, a takeover) or someone else's words.
+ */
+export function askDeployAgain(sessionId: string, words?: string) {
+  const x = session(sessionId)?.app;
+  if (!x || x.from === undefined || x.deployAfter || (words !== undefined && keepsOffPreview(words))) return;
+  askDeploy(sessionId, x);
+}
+
 /**
  * POST /api/hosted-apps (the Apps page's Add app): a new app, built by the workspace's main bot on its
  * computer, as work_on_app starts one (appWork, then a task through the normal task path), and put live once
@@ -5103,6 +5143,9 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   update((st) => {
     const x = appOfTask(st, sessionId);
     if (!x?.deployAfter) return;
+    // Picked up again while Ingot was asked (more asked of it: chat.ts tell_task, whose askDeploy found the ask still
+    // on): the ask stays for that run, whose end deploys its newest commit, this one's too.
+    if (st.sessions.find((y) => y.id === sessionId)?.status !== "done") return;
     delete x.deployAfter;
     if (head !== undefined) x.from = head;
     mine = true;
@@ -5218,6 +5261,13 @@ async function markIfGood(wsId: string, name: string, site: string, port: number
 /** What a bot says when an environment of an app didn't change (deploy_app, a task's deploy after): which one, why, and that nothing went live. */
 const unchanged = (env: "Preview" | "Published", name: string, why: string) => `${env} of ${name} not changed: ${why.trim().replace(/[.\s]+$/, "")}. Nothing went live.`;
 
+/**
+ * Whether deployForBot's words for a Publish say it went: "Published: publishing ..." (on Orgo) or "Published (on GitHub): ..."
+ * (the mirror pushed). Every refusal ("Published not changed: ...", unchanged's "Published of <app> not changed: ...", a
+ * partial failure's own message) is false. The chat says a publish that went as Bops (chat.ts deploy_app).
+ */
+export const publishWent = (said: string) => /^Published(?: \(on GitHub\))?: /.test(said);
+
 /** How many pages of an app's log (200 each) a short id is looked for in. */
 const LOOK_PAGES = 10;
 
@@ -5308,7 +5358,16 @@ async function previewForBot(wsId: string, name: string, id: string | undefined,
   // (Whether its link asks for one, as Orgo said in the read after the deploy.)
   const pv = (x: string) => (x === name ? now.preview : now.sites?.find((y) => y.name === x)?.preview);
   const locked = deployed.some((d) => pv(d.site)?.protected === true);
-  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.`;
+  // Where Publish goes: GitHub, for an app whose production is there; else Published, said as not what visitors see
+  // while none of its domains points at Orgo yet (pending: a new one, or one still pointing at another server).
+  const gh = now.hosting?.github;
+  const waiting = !gh && !now.domain && now.domains?.length && now.domains.every((d) => d.status !== "active") ? now.domains.map((d) => d.domain) : [];
+  const publish = gh
+    ? `Published is as it was: once it looks right, say publish or press Publish in Your Apps to send what Preview serves to GitHub (${gh.repo}, ${gh.branch}), where its own deploy puts it live.`
+    : waiting.length
+      ? `Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on Published once it looks right. Visitors to ${waiting.join(" and ")} won't see it until ${waiting.length === 1 ? "its" : "their"} DNS points at Orgo.`
+      : "Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.";
+  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}${publish}`;
   const more = said ? ` ${said}` : "";
   if (deployed.length > 1) {
     const each = deployed.map((d) => (d.url ? `${d.site} at ${d.url}` : d.site));

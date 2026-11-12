@@ -11,6 +11,7 @@ import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
 import { compactThread, dismissWaiting, replyToSession, setWhere, stopSession } from "./sessions";
+import { askDeployAgain } from "./hosted-apps";
 import { compactChat } from "./chat-summary";
 import { changeRefused, doChange, refuseChange } from "./change-acts";
 import { addMessage, bot, chat, getState, ownerName, pullState, session, update } from "./store";
@@ -344,7 +345,9 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
     }
     case "reply": {
       if (session(act.sessionId)?.replies.some((r) => r.member?.ref === p.key)) return;
-      // Never made into a watch (the owner's reply route may): a member's words go to the thread as they are.
+      // Never made into a watch (the owner's reply route may): a member's words go to the thread as they are. One on an
+      // app (theirs at Write: refused) that put a change on its Preview puts this one there too, unless they say not to.
+      askDeployAgain(act.sessionId, act.text);
       replyToSession(act.sessionId, act.text, undefined, undefined, said);
       return;
     }

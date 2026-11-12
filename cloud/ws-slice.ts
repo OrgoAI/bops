@@ -364,6 +364,9 @@ const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, cha
 const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
 const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, env: true, ok: true, said: true, at: true };
 const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
+/** An app's GitHub production as shown (repo and branch, as the owner's Bops checked them when set), or none when malformed. */
+const githubOf = (g: unknown): { repo: string; branch: string } | undefined =>
+  isObject(g) && typeof g.repo === "string" && typeof g.branch === "string" && g.repo.length <= 201 && g.branch.length <= 200 ? { repo: g.repo, branch: g.branch } : undefined;
 /** The most apps a member is shown. */
 const MAX_SHARED_APPS = 30;
 
@@ -416,6 +419,8 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
         ...(typeof host.botId === "string" && botsSeen.has(host.botId) ? { botId: host.botId } : {}),
         ...(typeof host.url === "string" ? { url: host.url } : {}),
         ...(typeof host.lost === "number" ? { lost: true } : {}),
+        // Its production on GitHub (lib/hosted-apps.ts AppHosting.github): where Publish sends it, its repo and branch only.
+        ...(githubOf(host.github) ? { github: githubOf(host.github) } : {}),
         ...(sites.length ? { siteNames: sites } : {}),
         ...(got.head === null ? { head: null } : isObject(got.head) ? { head: keep(got.head, { id: true, message: true, at: true }) } : {}),
         ...(Array.isArray(got.sites) ? { sites: write ? withCloudPasswords(name, keep(got.sites, [SITE_SEEN_WRITE]), passwords) : keep(got.sites, [SITE_SEEN]) } : {}),

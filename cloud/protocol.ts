@@ -872,6 +872,8 @@ export type SharedApp = {
   url?: string;
   /** Its computer went: it needs a new home (a deploy gives it one). */
   lost?: true;
+  /** Its production is on GitHub (lib/hosted-apps.ts AppHosting.github): Publish sends what its Preview serves to this repo and branch, whose own deploy puts it live. */
+  github?: { repo: string; branch: string };
   head?: { id: string; message: string; at: number } | null;
   /**
    * `url`: Published's address (none: no domain yet). Its Preview, where members deploy, from an owner's Bops that sends
