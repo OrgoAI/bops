@@ -28,7 +28,9 @@ import { appVersion } from "./app-version";
  * - redirects are followed by hand, at most 5, each new address checked the same way, and never to a
  *   bare address the site's name didn't have (a home's own public address, reached from inside);
  * - 10 seconds for everything, at most 2 MB of page read (cut there, not refused), and only text
- *   that reads as a page: HTML, plain text, JSON or XML.
+ *   that reads as a page: HTML, plain text, JSON or XML. A picture (safeFetchPicture, a link a person
+ *   wrote in a chat: chat-pictures.ts) goes through the same checks, 12 MB at most (refused past it),
+ *   PNG, JPEG, WebP or GIF, its first bytes what its type says.
  *
  * The same checks guard a page read in a browser (lib/server/web-render.ts): every request it makes goes
  * through lib/server/render-guard.ts, which asks guardAddresses below.
@@ -281,8 +283,12 @@ function pinned(addresses: LookupAddress[]): LookupFunction {
 
 const userAgent = () => `Bops/${appVersion() ?? "dev"} (+https://bops.bot)`;
 
+/** What a page read asks for, and what a picture's does. */
+const PAGE_ACCEPT = "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,application/xml;q=0.7";
+const PICTURE_ACCEPT = "image/png,image/jpeg,image/webp,image/gif;q=0.9,image/*;q=0.5";
+
 /** One GET to one checked address; resolves with the response once its headers are in. */
-function get(u: URL, addresses: LookupAddress[], signal: AbortSignal): Promise<http.IncomingMessage> {
+function get(u: URL, addresses: LookupAddress[], signal: AbortSignal, accept = PAGE_ACCEPT): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
     const req = (u.protocol === "https:" ? https : http).request(
       {
@@ -293,7 +299,7 @@ function get(u: URL, addresses: LookupAddress[], signal: AbortSignal): Promise<h
         method: "GET",
         headers: {
           "User-Agent": userAgent(),
-          Accept: "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,application/xml;q=0.7",
+          Accept: accept,
           "Accept-Encoding": "gzip, deflate, br",
         },
         // A connection of its own: never a pooled socket another lookup opened.
@@ -384,13 +390,10 @@ function plain(e: unknown, u: URL, signal: AbortSignal): Error {
 }
 
 /**
- * GET a public web page, with every check above. Returns the final URL, the status (a 404 or 500
- * comes back with its body; callers decide), the media type and the text. A redirect loop, a
- * private address anywhere along the way, a file that isn't a page or a slow site throws.
+ * A GET through its redirects, with every check above at each one: the address it ended at and that answer, its
+ * headers in. A redirect loop or a private address anywhere along the way throws, in plain words.
  */
-export async function safeFetch(url: string, opts: { maxBytes?: number; timeoutMs?: number } = {}): Promise<Fetched> {
-  const maxBytes = Math.max(1, opts.maxBytes ?? MAX_BYTES);
-  const signal = AbortSignal.timeout(Math.max(1, opts.timeoutMs ?? TIMEOUT_MS));
+async function follow(url: string, signal: AbortSignal, accept: string): Promise<{ u: URL; res: http.IncomingMessage }> {
   let u = checkUrl(url);
   // Every address the pages so far were reached at: a redirect to a bare address must be one of them.
   const reached = new Set<string>();
@@ -398,40 +401,95 @@ export async function safeFetch(url: string, opts: { maxBytes?: number; timeoutM
     try {
       const addresses = await addressesOf(u, signal);
       for (const a of addresses) reached.add(a.address);
-      const res = await get(u, addresses, signal);
+      const res = await get(u, addresses, signal, accept);
       const status = res.statusCode ?? 0;
       const location = res.headers.location;
-      if (REDIRECTS.has(status) && location) {
-        res.destroy();
-        if (hop >= MAX_REDIRECTS) throw new Error("That page sent Bops through too many redirects.");
-        let next: URL;
-        try {
-          next = new URL(location, u);
-        } catch {
-          throw new Error("That page redirected to an address that isn't valid.");
-        }
-        u = checkUrl(next);
-        // A page sent to a bare address (not a name): only one its own name had. Otherwise it could be the
-        // home's own public address, which a home router answers from inside as itself.
-        if (isIP(bare(u.hostname)) && !reached.has(bare(u.hostname)) && !allowedForTests(u)) throw new FetchRefused("That page redirected to a bare network address, so Bops won't follow it.");
-        continue;
+      if (!REDIRECTS.has(status) || !location) return { u, res };
+      res.destroy();
+      if (hop >= MAX_REDIRECTS) throw new Error("That page sent Bops through too many redirects.");
+      let next: URL;
+      try {
+        next = new URL(location, u);
+      } catch {
+        throw new Error("That page redirected to an address that isn't valid.");
       }
-      const [type, ...params] = String(res.headers["content-type"] ?? "").split(";");
-      const contentType = type.trim().toLowerCase();
-      if (!PAGE_TYPE.test(contentType)) {
-        res.destroy();
-        // An error answer that isn't a page still says what went wrong: its status.
-        if (status < 200 || status >= 300) return { url: u.href, status, contentType, body: "", truncated: false };
-        throw notAPage(contentType);
-      }
-      const charset = params
-        .map((p) => /^\s*charset\s*=\s*"?([^";\s]+)"?/i.exec(p)?.[1])
-        .find(Boolean)
-        ?.toLowerCase();
-      const { bytes, truncated } = await readBody(res, maxBytes);
-      return { url: u.href, status, contentType, body: decode(bytes, charset, contentType.includes("html")), truncated };
+      u = checkUrl(next);
+      // A page sent to a bare address (not a name): only one its own name had. Otherwise it could be the
+      // home's own public address, which a home router answers from inside as itself.
+      if (isIP(bare(u.hostname)) && !reached.has(bare(u.hostname)) && !allowedForTests(u)) throw new FetchRefused("That page redirected to a bare network address, so Bops won't follow it.");
     } catch (e) {
       throw plain(e, u, signal);
     }
+  }
+}
+
+/**
+ * GET a public web page, with every check above. Returns the final URL, the status (a 404 or 500
+ * comes back with its body; callers decide), the media type and the text. A redirect loop, a
+ * private address anywhere along the way, a file that isn't a page or a slow site throws.
+ */
+export async function safeFetch(url: string, opts: { maxBytes?: number; timeoutMs?: number } = {}): Promise<Fetched> {
+  const maxBytes = Math.max(1, opts.maxBytes ?? MAX_BYTES);
+  const signal = AbortSignal.timeout(Math.max(1, opts.timeoutMs ?? TIMEOUT_MS));
+  const { u, res } = await follow(url, signal, PAGE_ACCEPT);
+  try {
+    const status = res.statusCode ?? 0;
+    const [type, ...params] = String(res.headers["content-type"] ?? "").split(";");
+    const contentType = type.trim().toLowerCase();
+    if (!PAGE_TYPE.test(contentType)) {
+      res.destroy();
+      // An error answer that isn't a page still says what went wrong: its status.
+      if (status < 200 || status >= 300) return { url: u.href, status, contentType, body: "", truncated: false };
+      throw notAPage(contentType);
+    }
+    const charset = params
+      .map((p) => /^\s*charset\s*=\s*"?([^";\s]+)"?/i.exec(p)?.[1])
+      .find(Boolean)
+      ?.toLowerCase();
+    const { bytes, truncated } = await readBody(res, maxBytes);
+    return { url: u.href, status, contentType, body: decode(bytes, charset, contentType.includes("html")), truncated };
+  } catch (e) {
+    throw plain(e, u, signal);
+  }
+}
+
+/** The pictures Bops takes from a link (as lib/server/uploads.ts saves attached ones), and the most of one. */
+const PICTURE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
+export const PICTURE_MAX = 12 * 1024 * 1024;
+/** Whether a picture's first bytes are what its type says. */
+const looksLike = (type: string, b: Buffer) =>
+  type === "image/png"
+    ? b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    : type === "image/jpeg"
+      ? b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff
+      : type === "image/gif"
+        ? b.subarray(0, 4).toString("latin1") === "GIF8"
+        : b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP";
+
+/**
+ * GET a picture at a public link, with every check above: PNG, JPEG, WebP or GIF, at most PICTURE_MAX (refused past it,
+ * never cut), its first bytes what its type says, 20 seconds for everything. Returns where it ended up, its type and its
+ * bytes; anything else throws in plain words.
+ */
+export async function safeFetchPicture(url: string, opts: { timeoutMs?: number } = {}): Promise<{ url: string; type: string; bytes: Buffer }> {
+  const signal = AbortSignal.timeout(Math.max(1, opts.timeoutMs ?? 20_000));
+  const { u, res } = await follow(url, signal, PICTURE_ACCEPT);
+  try {
+    const status = res.statusCode ?? 0;
+    const type = String(res.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    if (status < 200 || status >= 300) {
+      res.destroy();
+      throw new FetchRefused(`That link answered ${status}, not a picture.`);
+    }
+    if (!PICTURE_TYPE.test(type)) {
+      res.destroy();
+      throw new FetchRefused(`That link isn't a picture Bops can use (PNG, JPEG, WebP or GIF)${type ? `: it's ${type}` : ""}.`);
+    }
+    const { bytes, truncated } = await readBody(res, PICTURE_MAX);
+    if (truncated) throw new FetchRefused("That picture is too big (12 MB at most).");
+    if (!looksLike(type, bytes)) throw new FetchRefused(`That link says it's a ${type.slice(6).toUpperCase()} picture, but it isn't one.`);
+    return { url: u.href, type, bytes };
+  } catch (e) {
+    throw plain(e, u, signal);
   }
 }
