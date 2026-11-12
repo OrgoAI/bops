@@ -7,6 +7,7 @@ import { Mascot, Spinner } from "./mascot";
 import { IssuesIcon, IssuesPage, isOpen, issuesSoon, useIssues } from "./orbit-issues";
 import { SkillsPage, skillsIn } from "./skills";
 import type { AppState } from "@/lib/types";
+import { sharedSkillsWho } from "@/lib/shared";
 import { isFavoriteKind, type FavoriteKind } from "@/lib/favorites";
 import { menuPoint, PinIcon, SideMenu, useFavorites, type Favorites } from "./favorites";
 import { Fold } from "./fold";
@@ -747,6 +748,8 @@ function KnowledgeView({
 }) {
   // A workspace shared with the user: its Knowledge is kept on the owner's Bops, so none is read here (view-only.ts would refuse it).
   const owners = state?.shared ? `Knowledge in ${state.shared.name} is kept on the owner's Bops, so it doesn't show here. To find something out, ask a bot in its chat.` : undefined;
+  // Its skills, for an Admin there: kept in Orgo, so they show and change here with the owner's Mac off (skills.tsx, shared-skills.ts).
+  const sharedSkills = !!state?.shared && sharedSkillsWho(state.shared);
   const { snap, act, failed, retry } = useMemoryCategories(ws, user, !owners);
   const { list } = useIssues(ws, user, !owners);
   const forgetting = useForget(ws, user, !owners);
@@ -777,7 +780,8 @@ function KnowledgeView({
       .catch(() => ({ error: "Couldn't reach Bops." }) as Answer & { error?: string });
     return r.error ?? r;
   }, [ws]);
-  if (owners) return <MemoryPage snap={null} owners={owners} act={act} forgetting={forgetting} category="all" onCategory={onCategory} onClose={onClose} />;
+  if (owners && sharedSkills && category === "skills" && state) return <SkillsPage state={state} only="skill" focus={focus} focusAt={focusAt} onClose={onClose} />;
+  if (owners) return <MemoryPage snap={null} owners={owners} onSkills={sharedSkills ? () => onCategory("skills") : undefined} act={act} forgetting={forgetting} category="all" onCategory={onCategory} onClose={onClose} />;
   if (category === "issues")
     return (
       <IssuesPage
@@ -947,6 +951,7 @@ export function MemoryPage({
   failed,
   onRetry,
   owners,
+  onSkills,
   act,
   ask,
   forgetting,
@@ -968,6 +973,8 @@ export function MemoryPage({
   onRetry?: () => void;
   /** A workspace shared with the user: what the page says in place of its Knowledge, which is the owner's (no kinds, nothing to add or ask). */
   owners?: string;
+  /** With `owners`: its skills show here for this viewer (an Admin there), opened from under the line. */
+  onSkills?: () => void;
   act: MemoryAct;
   ask?: (question: string) => Promise<Answer | string>;
   /** Forget, with Undo (useForget). */
@@ -1128,7 +1135,14 @@ export function MemoryPage({
   const listView = (
     <div ref={list} key={category} className="motion-fade-in flex flex-col gap-5">
       {owners ? (
-        <p className="mx-auto max-w-[400px] py-12 text-center text-[13.5px] leading-5 text-[#6B6B6B]">{owners}</p>
+        <div className="flex flex-col items-center gap-3 py-12 text-center">
+          <p className="max-w-[400px] text-[13.5px] leading-5 text-[#6B6B6B]">{owners}</p>
+          {onSkills && (
+            <button onClick={onSkills} data-open-skills className={BUTTON}>
+              Open Skills
+            </button>
+          )}
+        </div>
       ) : !snap && failed ? (
         <div role="alert" className="flex flex-col items-center gap-3 py-12 text-center">
           <span className="max-w-[360px] text-[13.5px] leading-5 text-[#6B6B6B]">{failed}</span>

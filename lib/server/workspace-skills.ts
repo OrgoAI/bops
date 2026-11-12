@@ -1558,6 +1558,32 @@ export function updateFromFolder(wsId: string, folder: string, kind: SkillKind, 
   return { ref: findRef(wsId, kind, slug)!, skipped: checked.skipped, warnings: checked.warnings, drafted: checked.drafted, published };
 }
 
+/** A bundle's files as orgo-web takes them: text as content, a binary file (a program) as content_base64. */
+export const orgoFiles = (files: BundleFile[]) =>
+  files.map((f) => (f.content !== null ? { path: f.path, content: f.content, executable: f.executable } : { path: f.path, content_base64: f.data!.toString("base64"), executable: f.executable }));
+
+/**
+ * A folder on this Mac, for a workspace whose skills are kept in Orgo alone here (a shared workspace's Skills:
+ * shared-skills.ts), read and checked as importFolder checks a new one, or with `slug` as updateFromFolder checks an
+ * existing skill's next version (its SKILL.md name, when it says one, that skill's), then strictly as a save is (no
+ * secret, the caps): its name, description, SKILL.md text and files as orgo-web takes them. Nothing is kept here.
+ */
+export function folderPayload(folder: string, slug?: string) {
+  const checked = readFolder(folder);
+  const said = checked.frontmatter.name;
+  if (slug && said !== undefined && said !== slug) throw new SkillError(`That folder is another skill: its SKILL.md says ${JSON.stringify(said)}, and this one is ${JSON.stringify(slug)}.`, 400, [{ path: "SKILL.md", reason: `frontmatter name: must be ${JSON.stringify(slug)}` }]);
+  const name = cut(oneLine(checked.name), 120);
+  const description = oneLine(checked.description);
+  if (!/[\p{L}\p{N}]/u.test(name)) throw new SkillError("A skill needs a name.");
+  if (!description) throw new SkillError("Say what it does and when to use it.");
+  const fm = frontmatterOf(slug ?? checked.slugBase, description, { ...checked.frontmatter, name: slug ?? checked.slugBase });
+  noSecretsIn(name, description, fm);
+  const problems = validateFrontmatter(fm);
+  if (problems.length) throw new SkillError("The frontmatter has a problem.", 400, problems);
+  const { files } = checkFiles(checked.body, checked.files.map((f) => ({ path: f.path, content: f.content, data: f.data, executable: f.executable })));
+  return { name, description, skillMd: renderSkillMd(fm, checked.body), files: orgoFiles(files), skipped: checked.skipped, warnings: checked.warnings, drafted: checked.drafted };
+}
+
 /* ---------------- Procedures from before ---------------- */
 
 /** A procedure as SKILL.md text: when to use it, its steps, its pitfalls. */
@@ -1824,9 +1850,9 @@ type RemoteSkill = { id: string; slug: string; name: string; description: string
 /** One of Orgo's record of deletions (GET …/skills?since=): a skill deleted after `since`, never one live now. */
 type RemoteDeletion = { id: string; slug: string; type: string; deleted_at: string };
 
-const remoteType = (kind: SkillKind) => (kind === "app" ? "app" : "skill");
+export const remoteType = (kind: SkillKind) => (kind === "app" ? "app" : "skill");
 // "software" is what an older orgo-web called an app.
-const localKind = (type: string): SkillKind => (type === "software" || type === "app" ? "app" : "skill");
+export const localKind = (type: string): SkillKind => (type === "software" || type === "app" ? "app" : "skill");
 
 /** One call to orgo-web's skills routes for a workspace, with the signed-in key. Null when Orgo didn't answer. */
 async function skillsCall<T>(projectId: string, path: string, init: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown } = {}) {
@@ -2284,7 +2310,7 @@ function payloadOf(wsId: string, r: SkillRef) {
   return {
     shas: b.files.map((f) => f.sha256),
     body: renderSkillMd(withLabel(frontmatterOf(r.slug, r.description, b.frontmatter), sentLabelOf(r)), b.body),
-    files: b.files.map((f) => (f.content !== null ? { path: f.path, content: f.content, executable: f.executable } : { path: f.path, content_base64: f.data!.toString("base64"), executable: f.executable })),
+    files: orgoFiles(b.files),
   };
 }
 

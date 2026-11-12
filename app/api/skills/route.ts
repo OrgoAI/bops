@@ -2,6 +2,7 @@ import { chatThreads, draftSkill, saveSkillDraft } from "@/lib/server/procedures
 import { notReady } from "@/lib/server/ready";
 import { bot, chat, getState } from "@/lib/server/store";
 import { sharedOpen } from "@/lib/server/shared";
+import { sharedSkillAct, sharedSkillsList } from "@/lib/server/shared-skills";
 import { acceptProposal, proposalDiff, rejectProposal } from "@/lib/server/skill-proposals";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import {
@@ -40,7 +41,9 @@ export const dynamic = "force-dynamic";
  * (ui-token.ts): a page a bot's Chrome reached this server with mustn't teach a bot steps or approve a script.
  * Which labels each bot has (Who has what), a label's name and about line, Suggest labels with AI, and a bot's proposed change
  * (skill-proposals.ts: accept, reject, or its diff on what the skill is now) are the owner's too: never while a
- * workspace shared with the user is open.
+ * workspace shared with the user is open. While one is open, every call here is about that workspace's skills alone,
+ * in orgo-web with the user's own Orgo key, for an Admin there (lib/server/shared-skills.ts), never this Mac's folders
+ * or the user's own workspace of the id a request names.
  */
 const notFromWindow = (request: Request) => (fromBopsWindow(request) ? null : Response.json({ error: "Skills can only be changed in the Bops app." }, { status: 403 }));
 
@@ -62,6 +65,7 @@ function fromOf(v: unknown): SkillRef["from"] {
 export async function GET(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
+  if (sharedOpen()) return sharedSkillsList().then((r) => Response.json(r), failed);
   const url = new URL(request.url);
   const wsId = url.searchParams.get("ws") ?? getState().workspace ?? MAIN_WORKSPACE;
   if (!workspaceById(wsId)) return Response.json({ error: "That workspace is gone." }, { status: 404 });
@@ -75,11 +79,10 @@ export async function POST(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  if (sharedOpen()) return sharedSkillAct(b).then((r) => Response.json(r), failed);
   const wsId = str(b.ws) ?? getState().workspace ?? MAIN_WORKSPACE;
   const kind = kindOf(b.kind);
   const slug = str(b.slug) ?? "";
-  const ownerOnly = new Set(["bot-label", "bot-labels", "label-rename", "label-about", "label-suggest", "proposal"]);
-  if (ownerOnly.has(String(b.action)) && sharedOpen()) return Response.json({ error: "In a shared workspace, only its owner changes this." }, { status: 403 });
   try {
     switch (b.action) {
       case "detail":

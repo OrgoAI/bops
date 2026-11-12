@@ -207,6 +207,8 @@ const hear = (...xs) => (said.push(...xs.map((x) => (typeof x === "string" ? x :
 const S = await import(`${root}/lib/server/store.ts`);
 const W = await import(`${root}/lib/server/workspace-skills.ts`);
 const B = await import(`${root}/lib/server/skill-bundle.ts`);
+// How many of Bops' own skills are under its apps label (lib/builtin-skills.ts): what a prompt counts there.
+const OWN_APPS = (await import(`${root}/lib/builtin-skills.ts`)).builtinSkills(true).filter((x) => x.label === "Apps and source control").length;
 const Route = await import(`${root}/app/api/skills/route.ts`);
 const route = async (body, method = "POST") => {
   const res = await Route[method](new Request(`http://localhost:3210/api/skills${method === "GET" ? body ?? "" : ""}`, { method, headers: { "content-type": "application/json", "x-bops-window": UI }, ...(method === "GET" ? {} : { body: JSON.stringify(body) }) }));
@@ -281,7 +283,7 @@ await check("A new skill is a folder and a draft: its bots don't see it until it
   assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), '---\nname: weekly-report\ndescription: "Sums up the week when asked for \\"the weekly report\\""\n---\n\n# Weekly report\n\n1. Read the chat.\n');
   assert.notEqual(statSync(join(dir, "scripts", "sum.sh")).mode & 0o111, 0, "its script executable in its folder");
   assert.deepEqual(W.skillsFor("boppy"), [], "a draft isn't any bot's yet");
-  assert.equal(W.readSkill("boppy", "Weekly report"), 'No skill called "Weekly report". Your labels: Apps and source control (5). Open one with read_skill and label to see its skills.', "Bops' own only");
+  assert.equal(W.readSkill("boppy", "Weekly report"), `No skill called "Weekly report". Your labels: Apps and source control (${OWN_APPS}). Open one with read_skill and label to see its skills.`, "Bops' own only");
   // The same name again: its own slug.
   const twin = W.createSkill("ws_main", { name: "Weekly report", description: "Another", body: "# Two\n" }).ref;
   assert.equal(twin.slug, "weekly-report-2");
@@ -471,10 +473,10 @@ await check("Versions are version shaped (never a path); a key in a description 
 await check("The prompts list skills and apps under their labels: up to 15 of its own by name and description, more as one line per label", async () => {
   W.publishSkill("ws_main", "app", "orgo-doctor");
   const note = hear(W.skillsNote("max"));
-  assert.match(note, /^Your skills: [^\n]+\nApps and source control \(5\): [^\n]+\nWriting \(1\):\n- Weekly report: [^\n]+\nUnsorted \(1\):\n- Orgo doctor \(app\): Finds what's wrong with a computer and says the fix\.$/);
+  assert.match(note, new RegExp(`^Your skills: [^\\n]+\\nApps and source control \\(${OWN_APPS}\\): [^\\n]+\\nWriting \\(1\\):\\n- Weekly report: [^\\n]+\\nUnsorted \\(1\\):\\n- Orgo doctor \\(app\\): Finds what's wrong with a computer and says the fix\\.$`));
   for (let i = 0; i < 20; i++) W.createSkill("ws_main", { name: `Many ${i}`, description: `Number ${i}`, body: `# ${i}\n`, status: "published" });
   const many = W.skillsNote("max");
-  assert.deepEqual(many.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(0, l.indexOf(":"))), ["- Apps and source control (5)", "- Writing (1)", "- Unsorted (21)"]);
+  assert.deepEqual(many.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(0, l.indexOf(":"))), [`- Apps and source control (${OWN_APPS})`, "- Writing (1)", "- Unsorted (21)"]);
   assert.match(many, /\n- Unsorted \(21\): Orgo doctor \(app\), Many 0, Many 1, /);
   assert.doesNotMatch(many, /Number \d/, "past 15 of its own, no descriptions: read_skill with the label lists them");
   for (let i = 0; i < 20; i++) await W.deleteSkill("ws_main", "skill", `many-${i}`);

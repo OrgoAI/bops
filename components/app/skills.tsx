@@ -24,11 +24,20 @@ import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
  * it's for (the line its bots' prompts show). Suggest labels with AI (the owner's) turns off a small model's pick
  * of a label for a new skill. The lists are the app's state (Workspace.skills, Workspace.apps,
  * Workspace.skillLabelInfo, the bots), so they're as current as everything else.
+ *
+ * In a workspace shared with the user, for an Admin there (lib/shared.ts sharedSkillsWho), the page is that workspace's
+ * skills as Orgo keeps them (GET /api/skills: lib/server/shared-skills.ts, with the user's own Orgo key), read again after
+ * each change: Publish on a draft, Import a skill folder (a new draft), Update from folder (its next version, published
+ * once they say so), Roll back, Delete, a skill's own bots, and its scripts to approve. Its labels, Who has what and
+ * Suggest labels stay the owner's, and nothing of this Mac's folders shows (no Open in Finder).
  */
 
 type Problem = { path: string; reason: string; line?: number };
 type FileInfo = { path: string; size: number; sha256: string; executable: boolean; script: boolean; approved: boolean; binary?: boolean };
-type Detail = { ref: SkillRef; body: string; frontmatter: Record<string, unknown>; files: FileInfo[]; dir: string | null; missing: boolean; changed: boolean };
+type Detail = { ref: SkillRef; body: string; frontmatter: Record<string, unknown>; files: FileInfo[]; dir: string | null; missing: boolean; changed: boolean; shared?: true };
+/** What an import or an Update from folder did, said over the page. `published`: in a shared workspace, it's in use at once. */
+type ImportResult = { name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean; published?: boolean };
+type Lists = { skills: SkillRef[]; apps: SkillRef[] };
 
 /** The Mac app's bridge for skills (desktop/preload.cjs): a folder picked in Finder, and a folder shown there. */
 type Bridge = { pickFolder?: () => Promise<string | null>; revealFolder?: (dir: string) => Promise<boolean> };
@@ -167,7 +176,28 @@ async function call<T>(body: Record<string, unknown>): Promise<{ ok: true; json:
 export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { state: AppState; only?: SkillKind; focus?: string; focusAt?: number; nav?: ReactNode; onClose: () => void }) {
   const ws = currentWorkspace(state);
   const team = teamOf(state);
-  const { skills, apps } = skillsIn(state, ws);
+  // A workspace shared with the user: its skills as Orgo keeps them, read here (never the state's: the owner's are on their Mac).
+  const shared = state.shared;
+  const [remote, setRemote] = useState<{ ws: string; lists: Lists | null; error?: string } | null>(null);
+  const [reads, setReads] = useState(0);
+  const reload = useCallback(() => setReads((n) => n + 1), []);
+  useEffect(() => {
+    if (!shared) return;
+    let gone = false;
+    void fetch("/api/skills", { cache: "no-store" })
+      .then(async (r) => ({ ok: r.ok, json: (await r.json().catch(() => ({}))) as Partial<Lists> & { error?: string } }))
+      .then(({ ok, json }) => {
+        if (gone) return;
+        if (ok) setRemote({ ws, lists: { skills: json.skills ?? [], apps: json.apps ?? [] } });
+        else setRemote((was) => ({ ws, lists: was?.ws === ws ? was.lists : null, error: json.error ?? "Couldn't read its skills. Try again." }));
+      })
+      .catch(() => !gone && setRemote((was) => ({ ws, lists: was?.ws === ws ? was.lists : null, error: "Couldn't reach Bops. Try again." })));
+    return () => {
+      gone = true;
+    };
+  }, [shared, ws, reads]);
+  const here = shared ? (remote?.ws === ws ? remote.lists : null) : null;
+  const { skills, apps } = shared ? (here ?? { skills: [], apps: [] }) : skillsIn(state, ws);
   const [open, setOpen] = useState<string | null>(focus ?? null);
   const [asked, setAsked] = useState({ focus, focusAt });
   if (asked.focus !== focus || asked.focusAt !== focusAt) {
@@ -175,10 +205,11 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
     if (focus) setOpen(focus);
   }
   const [importing, setImporting] = useState<SkillKind | null>(null);
-  const [imported, setImported] = useState<{ name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean } | null>(null);
+  const [imported, setImported] = useState<ImportResult | null>(null);
   const [orgo, setOrgo] = useState(false);
   // Opened: kept in step with Orgo, where the workspace has its own and Orgo has the routes.
   useEffect(() => {
+    if (shared) return;
     let gone = false;
     void fetch(`/api/skills?sync=1&ws=${encodeURIComponent(ws)}`, { cache: "no-store" })
       .then((r) => r.json())
@@ -187,7 +218,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
     return () => {
       gone = true;
     };
-  }, [ws]);
+  }, [ws, shared]);
   const picker = bridge()?.pickFolder;
 
   const importFolder = async (kind: SkillKind) => {
@@ -200,10 +231,13 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
     if (r.ok) {
       setImported({ name: r.json.ref.name, skipped: r.json.skipped, warnings: r.json.warnings });
       setOpen(`${kind}:${r.json.ref.slug}`);
+      reload();
     } else setImported({ error: r.error, skipped: r.problems ?? [], warnings: [] });
   };
 
   const ref = open ? [...skills, ...apps].find((r) => `${r.kind}:${r.slug}` === open) : undefined;
+  // Apps aren't offered in a shared workspace (Bops' apps are the owner's there).
+  const importKinds = (only ? [only] : (["skill", "app"] as SkillKind[])).filter((k) => !shared || k === "skill");
   const info = state.workspaces?.find((w) => w.id === ws)?.skillLabelInfo ?? [];
   // Bops' own Apps and source control skills only where apps are shown (lib/apps-access.ts): never in a shared workspace.
   const appsHere = appsOwnShown(state);
@@ -236,7 +270,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{only === "app" ? "Apps" : "Skills"}</span>
             <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
-              {about} {orgo ? "Kept in step with Orgo." : "Kept on this Mac."}
+              {about} {shared ? `Kept in Orgo for everyone in ${shared.name}.` : orgo ? "Kept in step with Orgo." : "Kept on this Mac."}
             </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
@@ -244,16 +278,30 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
         {!ref && nav}
 
         {imported && <ImportNote result={imported} onDismiss={() => setImported(null)} />}
+        {shared && remote?.error && (
+          <span role="alert" className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[18px] text-[#B42318]">
+            {remote.error}
+            <button onClick={reload} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2">
+              Try again
+            </button>
+          </span>
+        )}
+        {shared && !here && !remote?.error && (
+          <span role="status" className="flex items-center gap-2 text-[13px] text-[#6B6B6B]">
+            <Spinner size={12} color="#6B6B6B" />
+            Reading its skills
+          </span>
+        )}
 
         {ref ? (
-          <SkillView key={open} state={state} ws={ws} skill={ref} team={team} labels={labelChoices(skills, appsHere)} onBack={() => setOpen(null)} onUpdated={setImported} />
+          <SkillView key={open} state={state} ws={ws} skill={ref} team={team} labels={labelChoices(skills, appsHere)} onBack={() => setOpen(null)} onUpdated={setImported} onChanged={reload} />
         ) : ours ? (
           <BuiltinView key={open} skill={ours} onBack={() => setOpen(null)} />
         ) : (
           <>
-            {picker && (
+            {picker && importKinds.length > 0 && (
               <div className="flex flex-wrap gap-2">
-                {kinds.map((k) => (
+                {importKinds.map((k) => (
                   <button key={k} disabled={!!importing} onClick={() => void importFolder(k)} className={`${PILL} flex items-center gap-1.5 bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]`}>
                     {importing === k && <Spinner size={11} color="#6B6B6B" />}
                     {k === "skill" ? "Import a skill folder" : "Import an app folder"}
@@ -277,11 +325,13 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
                     ))}
                   </LabelSection>
                 ))}
-                {!s.list.length && (
+                {!s.list.length && (!shared || here) && (
                   <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
                     {s.kind === "app"
-                      ? `No apps yet.${picker ? " Import a folder with the program and its files." : ""}`
-                      : `No skills of your own yet. Save one from a chat\u2019s menu${picker ? ", or import a folder" : ""}.`}
+                      ? `No apps yet.${picker && !shared ? " Import a folder with the program and its files." : ""}`
+                      : shared
+                        ? `No skills here yet. Ask a bot to save how it does a job${picker ? ", or import a folder" : ""}.`
+                        : `No skills of your own yet. Save one from a chat\u2019s menu${picker ? ", or import a folder" : ""}.`}
                   </span>
                 )}
               </section>
@@ -527,12 +577,12 @@ export function LabelMenu({ current, labels, onPick, onClose }: { current: strin
 }
 
 /** What an import did: what it's called now, and what it left out and why (paths only). */
-function ImportNote({ result: r, onDismiss }: { result: { name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean }; onDismiss: () => void }) {
+function ImportNote({ result: r, onDismiss }: { result: ImportResult; onDismiss: () => void }) {
   const lines = [...r.skipped, ...r.warnings];
   return (
     <div role="status" className={`flex flex-col gap-1.5 rounded-2xl px-3.5 py-3 text-[12.5px] leading-[18px] ${r.error ? "bg-[#FEF3F2] text-[#3A3A38]" : "bg-[#F7F7F6] text-[#3A3A38]"}`}>
       <span className="flex items-start gap-2">
-        <span className="min-w-0 flex-1 font-medium">{r.error ?? `${r.updated ? `Updated ${r.name} from the folder. Publish it to have its bots use it.` : `Imported ${r.name} as a draft.`}${r.skipped.length ? ` Left out ${r.skipped.length} file${r.skipped.length === 1 ? "" : "s"}:` : ""}`}</span>
+        <span className="min-w-0 flex-1 font-medium">{r.error ?? `${r.updated ? (r.published ? `Published ${r.name} from the folder as its next version.` : `Updated ${r.name} from the folder. Publish it to have its bots use it.`) : `Imported ${r.name} as a draft.`}${r.skipped.length ? ` Left out ${r.skipped.length} file${r.skipped.length === 1 ? "" : "s"}:` : ""}`}</span>
         <button onClick={onDismiss} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink">
           Dismiss
         </button>
@@ -561,6 +611,7 @@ function SkillView({
   labels,
   onBack,
   onUpdated,
+  onChanged,
 }: {
   state: AppState;
   ws: string;
@@ -569,14 +620,19 @@ function SkillView({
   labels: string[];
   onBack: () => void;
   /** What Update from folder left out, said over the page as an import's is. */
-  onUpdated: (result: { name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean }) => void;
+  onUpdated: (result: ImportResult) => void;
+  /** Something changed it: the page's list is read again (a shared workspace's, which isn't in the state). */
+  onChanged?: () => void;
 }) {
+  const shared = !!state.shared;
   const [detail, setDetail] = useState<Detail | null>(null);
   const [version, setVersion] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [problems, setProblems] = useState<Problem[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [sure, setSure] = useState(false);
+  // In a shared workspace, a folder picked for Update from folder, waiting for the user to say publish it.
+  const [folder, setFolder] = useState<string | null>(null);
   // Read again after a change here, and whenever the state says it changed (a publish, a roll back, a sync from Orgo, an approval).
   const [tick, setTick] = useState(0);
   const read = useCallback(async () => setTick((n) => n + 1), []);
@@ -613,14 +669,18 @@ function SkillView({
       return false;
     }
     await read();
+    onChanged?.();
     return true;
   };
   const reveal = bridge()?.revealFolder;
   const picker = bridge()?.pickFolder;
   // Update from folder: a folder picked in Finder is its next version (a draft to publish), checked as an import is.
-  const fromFolder = async () => {
-    const path = await picker?.().catch(() => null);
+  const fromFolder = async (picked?: string) => {
+    const path = picked ?? (await picker?.().catch(() => null));
     if (!path) return;
+    // In a shared workspace the folder is published at once: the user says so first.
+    if (shared && !picked) return setFolder(path);
+    setFolder(null);
     setBusy("folder");
     setError(null);
     setProblems([]);
@@ -631,11 +691,14 @@ function SkillView({
       setProblems(res.problems ?? []);
       return;
     }
-    onUpdated({ name: res.json.ref.name, skipped: res.json.skipped, warnings: res.json.warnings, updated: true });
+    onUpdated({ name: res.json.ref.name, skipped: res.json.skipped, warnings: res.json.warnings, updated: true, published: shared });
     await read();
+    onChanged?.();
   };
-  const latest = r.versions?.at(-1)?.version;
-  const canPublish = !version && (r.status === "draft" || !!detail?.changed);
+  // A shared workspace's versions are Orgo's (its detail says them); Publish there is a draft's alone.
+  const versions = shared ? (detail?.ref.versions ?? []) : (r.versions ?? []);
+  const latest = versions.at(-1)?.version;
+  const canPublish = !version && (shared ? r.status === "draft" : r.status === "draft" || !!detail?.changed);
   const word = r.kind === "app" ? "app" : "skill";
 
   return (
@@ -647,7 +710,12 @@ function SkillView({
         <span className="flex flex-wrap items-center gap-1.5">
           <span className="text-[17px] font-semibold leading-[22px]">{r.name}</span>
           {r.status === "draft" ? <span className={DRAFT}>Draft</span> : <span className={CHIP}>v{r.version}</span>}
-          {r.kind === "skill" && <LabelChip label={labels.find((l) => sameLabel(l, cleanLabel(r.label))) ?? cleanLabel(r.label)} labels={labels} busy={!!busy} auto={suggestedLabel(r)} onPick={(l) => void act("label", labelEdit(l))} />}
+          {r.kind === "skill" &&
+            (shared ? (
+              <span className={CHIP}>{cleanLabel(r.label)}</span>
+            ) : (
+              <LabelChip label={labels.find((l) => sameLabel(l, cleanLabel(r.label))) ?? cleanLabel(r.label)} labels={labels} busy={!!busy} auto={suggestedLabel(r)} onPick={(l) => void act("label", labelEdit(l))} />
+            ))}
           {r.risk && <span className={CHIP}>{RISK[r.risk] ?? r.risk}</span>}
           {r.runsOn && <span className={CHIP}>Runs {r.runsOn === "local" ? "on its computer" : `on ${r.runsOn}`}</span>}
         </span>
@@ -659,16 +727,16 @@ function SkillView({
       <div className="flex flex-wrap items-center gap-2">
         {canPublish && (
           <button disabled={!!busy} onClick={() => void act("publish", { action: "publish" })} className={`${PILL} bg-ink text-white`}>
-            {busy === "publish" ? "Publishing…" : r.status === "draft" && !latest ? "Publish" : "Publish a new version"}
+            {busy === "publish" ? "Publishing…" : r.status === "draft" && (shared || !latest) ? "Publish" : "Publish a new version"}
           </button>
         )}
-        {reveal && detail?.dir && !detail.missing && (
+        {!shared && reveal && detail?.dir && !detail.missing && (
           <button onClick={() => void reveal(detail.dir!)} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
             Open in Finder
           </button>
         )}
         {picker && !version && (
-          <button disabled={!!busy} onClick={() => void fromFolder()} data-tip="Pick a folder to be its next version. Publish it after." className={`${PILL} flex items-center gap-1.5 bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button disabled={!!busy} onClick={() => void fromFolder()} data-tip={shared ? "Pick a folder to publish as its next version." : "Pick a folder to be its next version. Publish it after."} className={`${PILL} flex items-center gap-1.5 bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
             {busy === "folder" && <Spinner size={11} color="#6B6B6B" />}
             Update from folder
           </button>
@@ -677,9 +745,24 @@ function SkillView({
           Delete
         </button>
       </div>
+      {folder && (
+        <div data-folder-confirm className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#F7F7F6] px-3 py-2">
+          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38] [overflow-wrap:anywhere]">
+            Publish the folder {folder.split("/").filter(Boolean).pop()} as its next version? Its bots use it at once.
+          </span>
+          <button disabled={!!busy} onClick={() => void fromFolder(folder)} className={`${PILL} bg-ink text-white`}>
+            {busy === "folder" ? "Publishing…" : "Publish"}
+          </button>
+          <button onClick={() => setFolder(null)} className={`${PILL} bg-white hover:bg-[#EFEFED]`}>
+            Cancel
+          </button>
+        </div>
+      )}
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
-          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">Delete this {word}, its folder and every version? Its bots stop using it.</span>
+          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
+            {shared ? `Delete this ${word} and every version, for everyone here? Its bots stop using it.` : `Delete this ${word}, its folder and every version? Its bots stop using it.`}
+          </span>
           <button disabled={!!busy} onClick={() => void act("delete", { action: "delete" }).then((ok) => ok && onBack())} className={`${PILL} bg-[#B42318] text-white`}>
             {busy === "delete" ? "Deleting…" : "Delete"}
           </button>
@@ -699,11 +782,16 @@ function SkillView({
         </div>
       )}
 
-      {team.length > 0 && (
+      {team.length > 0 && shared && !r.botIds.length && (
+        <Group title="Bots">
+          <span className="px-4 pb-3 pt-1 text-[12.5px] leading-[18px] text-[#6B6B6B]">Every bot with the label {cleanLabel(r.label)} has it. The owner picks which bots have a label.</span>
+        </Group>
+      )}
+      {team.length > 0 && (!shared || r.botIds.length > 0) && (
         <Group title="Bots">
           <div className="flex flex-wrap gap-1.5 px-4 pb-3 pt-1">
             {team.map((b) => {
-              const on = botHasSkill(r, b);
+              const on = shared ? r.botIds.includes(b.id) : botHasSkill(r, b);
               return (
                 <button
                   key={b.id}
@@ -723,21 +811,21 @@ function SkillView({
         </Group>
       )}
 
-      {!!r.versions?.length && (
+      {!!versions.length && (
         <Group title="Versions">
-          {[...r.versions].reverse().map((v, i, all) => {
+          {[...versions].reverse().map((v, i, all) => {
             const current = v.version === r.version;
             const viewing = version === v.version;
             return (
               <div key={v.version} className={`flex items-center gap-2 px-4 py-2 ${i === all.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
                 <span className="text-[13px] font-medium leading-4">v{v.version}</span>
-                <span className="text-[12px] leading-4 text-[#9A9A98]">{new Date(v.at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+                {v.at > 0 && <span className="text-[12px] leading-4 text-[#9A9A98]">{new Date(v.at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>}
                 {current && <span className={CHIP}>In use</span>}
                 <span className="flex-1" />
                 <button onClick={() => setVersion(viewing ? undefined : v.version)} className="text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
-                  {viewing ? "Back to the folder" : "View"}
+                  {viewing ? (shared ? "Back" : "Back to the folder") : "View"}
                 </button>
-                {!current && (
+                {!current && (!shared || r.status === "published") && (
                   <button disabled={!!busy} onClick={() => void act(`rollback:${v.version}`, { action: "rollback", version: v.version })} className="text-[12px] font-medium leading-4 text-ink disabled:opacity-50">
                     {busy === `rollback:${v.version}` ? "Rolling back…" : "Roll back to this"}
                   </button>
@@ -756,7 +844,7 @@ function SkillView({
           </span>
         )
       ) : detail.missing ? (
-        <span className="text-[13px] leading-[19px] text-[#6B6B6B]">Its folder isn&apos;t on this Mac.</span>
+        <span className="text-[13px] leading-[19px] text-[#6B6B6B]">{shared ? "Orgo has no version of it yet." : "Its folder isn't on this Mac."}</span>
       ) : (
         <>
           {detail.files.length > 0 && (
@@ -791,22 +879,24 @@ function FileRow({ ws, skill: r, file: f, version, last, onApproved }: { ws: str
   };
   const approve = async (on: boolean) => {
     setBusy(true);
-    const res = await call<unknown>({ action: "approve", ws, sha256: f.sha256, on });
+    const res = await call<unknown>({ action: "approve", ws, sha256: f.sha256, path: f.path, on });
     setBusy(false);
     if (!res.ok) return setError(res.error);
     setText(null);
     await onApproved();
   };
   const size = f.size < 1024 ? `${f.size} B` : f.size < 1024 * 1024 ? `${Math.round(f.size / 1024)} KB` : `${(f.size / 1024 / 1024).toFixed(1)} MB`;
+  // Read, its first line can make it a script (skill-bundle.ts isScript), which a shared workspace's list can't say.
+  const script = f.script || !!text?.startsWith("#!");
   return (
     <div className={`flex flex-col gap-1.5 px-4 py-2 ${last ? "pb-3" : "border-b border-black/[0.05]"}`}>
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-4">{f.path}</span>
         <span className="shrink-0 text-[11.5px] leading-4 text-[#9A9A98]">{f.binary ? `Binary, ${size}` : size}</span>
-        {f.script && (f.approved ? <span className={CHIP}>Approved</span> : <span className="rounded-full bg-[#FFF4E5] px-2 py-px text-[11px] leading-4 text-[#9A5B00]">Needs approval</span>)}
-        {(!f.binary || f.script) && (
+        {script && (f.approved ? <span className={CHIP}>Approved</span> : <span className="rounded-full bg-[#FFF4E5] px-2 py-px text-[11px] leading-4 text-[#9A5B00]">Needs approval</span>)}
+        {(!f.binary || script) && (
           <button onClick={() => void review()} className="shrink-0 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
-            {text !== null ? "Hide" : f.script && !f.approved ? "Review" : "View"}
+            {text !== null ? "Hide" : script && !f.approved ? "Review" : "View"}
           </button>
         )}
       </div>
@@ -817,7 +907,7 @@ function FileRow({ ws, skill: r, file: f, version, last, onApproved }: { ws: str
           ) : (
             <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[11.5px] leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">{text}</pre>
           )}
-          {f.script && (
+          {script && (
             <span className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-[11px] text-[#9A9A98]">sha256 {f.sha256.slice(0, 16)}</span>
               <span className="flex-1" />

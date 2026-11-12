@@ -1375,8 +1375,11 @@ await check("while one is open, every write to the app's server is answered View
   for (const ok of ["/api/vault", "/api/account/checkout", "/api/owner", "/api/owner-email"]) assert.equal(callAllowed("POST", ok), true, ok);
   // Keys go: since a shared workspace has keys of its own, its keys routes act on those alone while it's open (below).
   assert.equal(callAllowed("POST", "/api/keys"), true, "a shared workspace's own keys");
+  // Skills go too: while it's open its skills routes act on its skills in Orgo alone, for an Admin (lib/server/shared-skills.ts).
+  assert.equal(callAllowed("POST", "/api/skills"), true, "a shared workspace's own skills");
+  assert.equal(callAllowed("GET", "/api/skills?ws=x"), true, "a shared workspace's own skills");
   // Reads the server answers from the user's own bot or workspace of that id: never the shared one's.
-  for (const no of ["/api/memory?bot=boppy", "/api/memory/categories?ws=x", "/api/orbit/issues?ws=shared_p1", "/api/skills?ws=x", "/api/routines/suggestions?botId=boppy", "/api/vnc?bot=boppy&display=1", "/api/computer?bot=boppy", "/api/reader?bot=boppy", "/api/crm?ws=x", "/api/made-apps/app_x", "/api/hosted-apps?ws=x", "/api/domains?ws=x", "/api/domains/search?ws=x&q=acme", "/api/domains/6a6a6a6a-1111-4222-8333-444455556666?ws=x"])
+  for (const no of ["/api/memory?bot=boppy", "/api/memory/categories?ws=x", "/api/orbit/issues?ws=shared_p1", "/api/routines/suggestions?botId=boppy", "/api/vnc?bot=boppy&display=1", "/api/computer?bot=boppy", "/api/reader?bot=boppy", "/api/crm?ws=x", "/api/made-apps/app_x", "/api/hosted-apps?ws=x", "/api/domains?ws=x", "/api/domains/search?ws=x&q=acme", "/api/domains/6a6a6a6a-1111-4222-8333-444455556666?ws=x"])
     assert.equal(callAllowed("GET", no), false, no);
   assert.equal(callAllowed("GET", "/api/vault"), true);
   wire.length = 0;
