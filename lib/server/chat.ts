@@ -2726,6 +2726,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           .then((said) => {
             // A publish that went: said in the chat as Bops, the way a Preview deploy is (hosted-apps.ts deployAfterTask), so
             // the person sees it went and the bot's later turns ("is it live?") have it; a refusal is the model's to put in words.
+            // An app note: never texted or posted to a channel (phone.ts, channels.ts), where the bot's answer says it.
             if (prod && publishWent(said)) addMessage({ chatId, role: "bot", botId, text: said, appNote: true, bops: true });
             return said + note;
           })
