@@ -595,7 +595,11 @@ export type AppSettingsAnswer = {
   said?: string;
   /** Of the Preview's (env=preview): Published's variables' names, so the window says which the Preview doesn't have. */
   prodEnv?: string[];
+  /** The variables it gets from Keys at each build (lib/server/app-keys.ts), names only; `missing`: Keys has none now. */
+  keyed?: AppKeyed[];
 };
+/** A variable an app gets from Keys: its name, the key's, and whether the link is the app's own or every app's. */
+export type AppKeyed = { name: string; key: string; from: "app" | "workspace"; missing?: true };
 export type AppSettingsChange = { ws: string; site?: string; env?: "preview" | "prod"; port?: number | string; install?: string; build?: string; start?: string; health?: string };
 export type AppEnvChange = { ws: string; site?: string; where?: AppEnv; env: Record<string, string | null> };
 

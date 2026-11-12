@@ -3309,5 +3309,52 @@ await test("production on GitHub (AppHosting.github): Published says where on Gi
   assert.deepEqual(E.ghMirrorOf({ repo: "a/b", branch: "main", path: "", keep: "", workflow: "", inputs: "" }), { repo: "a/b", branch: "main", path: "" });
 });
 
+await test("apps that use a key from Keys (app-key-links.tsx): an app's keys from Keys by name, its own with Remove and every app's, the picker for who may; the Keys row's Every app switch for This workspace's own keys; a line for an older Orgo; plain words", async () => {
+  const K = await import(pathToFileURL(`${root}/components/app/app-key-links.tsx`).href);
+  const can = { every: true, app: true };
+  /** What it says, its HTML entities read back. */
+  const said = (html) => text(html).replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+  const links = [
+    { app: "*", name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY" },
+    { app: "*", name: "OPENAI_API_KEY", key: "OPENAI_API_KEY" },
+    { app: "notes", name: "OPENAI_API_KEY", key: "OPENAI_PROJECT_KEY", missing: true },
+    { app: "other", name: "GITHUB_TOKEN", key: "GITHUB_TOKEN" },
+  ];
+  const vars = (answer) => renderToStaticMarkup(h(K.KeyVariablesList, { app: "notes", answer }));
+  let html = vars({ links, can });
+  assert.match(said(html), /ANTHROPIC_API_KEY\s*from Keys \(ANTHROPIC_API_KEY\), every app/);
+  assert.match(said(html), /OPENAI_API_KEY\s*from Keys \(OPENAI_PROJECT_KEY\), Keys has none now/, "its own link over every app's of that name");
+  assert.ok(!/from Keys \(OPENAI_API_KEY\)/.test(said(html)), "every app's link of the name its own link sets isn't shown");
+  assert.ok(!html.includes("GITHUB_TOKEN"), "another app's isn't");
+  assert.ok(html.includes('aria-label="Stop OPENAI_API_KEY using OPENAI_PROJECT_KEY"'), "its own link has Remove");
+  assert.ok(!html.includes("Stop ANTHROPIC_API_KEY"), "every app's is changed in Keys, not here");
+  for (const w of [K.APP_KEYS_WORDS.use, K.APP_KEYS_WORDS.readable, K.APP_KEYS_WORDS.reach]) assert.ok(said(html).includes(w), w);
+  // Someone who may see them but not change this app's: the rows alone.
+  html = vars({ links, can: { every: true, app: false } });
+  assert.ok(html.includes("ANTHROPIC_API_KEY") && !said(html).includes(K.APP_KEYS_WORDS.use) && !html.includes("aria-label=\"Stop "));
+  assert.equal(vars({ links: [], can: { every: true, app: false } }), "", "nothing to show, nothing to change");
+  assert.equal(vars(null), "", "not read yet, or no Keys");
+  assert.ok(said(vars({ links: [], can })).includes(K.APP_KEYS_WORDS.use), "none yet: the picker");
+  assert.equal(said(vars({ links: [], can: { every: false, app: false }, old: true, said: "Orgo can't link keys to apps yet." })), "Orgo can't link keys to apps yet.");
+  // The Keys row's switch.
+  const row = (k, answer = { links, can }) => renderToStaticMarkup(h(K.EveryAppRow, { k, answer }));
+  html = row({ name: "ANTHROPIC_API_KEY", scope: "workspace" });
+  assert.ok(html.includes('role="switch"') && html.includes('aria-checked="true"') && said(html).includes(K.APP_KEYS_WORDS.every) && said(html).includes(K.APP_KEYS_WORDS.everyOn));
+  assert.ok(row({ name: "STRIPE_SECRET_KEY", scope: "workspace" }).includes('aria-checked="false"'));
+  for (const k of [{ name: "ANTHROPIC_API_KEY", scope: "all" }, { name: "ANTHROPIC_API_KEY", scope: "workspace", owner: true }, { name: "ANTHROPIC_API_KEY", scope: "workspace", from: "ws_other" }]) {
+    assert.equal(row(k), "", `never for ${JSON.stringify(k)}: the owner's for all their workspaces stay theirs`);
+  }
+  assert.equal(row({ name: "ANTHROPIC_API_KEY", scope: "workspace" }, null), "");
+  assert.equal(said(row({ name: "ANTHROPIC_API_KEY", scope: "workspace" }, { links: [], can: { every: false, app: false }, old: true, said: "Orgo can't link keys to apps yet." })), "Orgo can't link keys to apps yet.");
+  for (const w of Object.values(K.APP_KEYS_WORDS)) {
+    assert.ok(!NO_DASHES.test(w), `no dashes: ${w}`);
+    assert.ok(!/orbit/i.test(w), `Knowledge, never Orbit: ${w}`);
+  }
+  // Each mount is one line where #186 rewrites Your Apps, and keeps working there.
+  for (const [file, mount] of [["app-settings.tsx", "<KeyVariables app={name} />"], ["shared-apps.tsx", "<KeyVariables app={a.name} />"], ["keys.tsx", "<EveryAppSwitch k={k} />"]]) {
+    assert.ok(readFileSync(`${root}/components/app/${file}`, "utf8").includes(mount), `${file} mounts it`);
+  }
+});
+
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
 process.exit(failed ? 1 : 0);

@@ -22,6 +22,7 @@ import type {
   AppDomainRemoved,
   AppDomainsAnswer,
   AppHosting,
+  AppKeyed,
   AppProjectBehind,
   AppRenewal,
   AppRestoreConfirm,
@@ -2413,6 +2414,14 @@ const deployOf = (d: OrgoDeployment): AppDeploy => ({
   canRollback: !!d.can_rollback && d.state === "succeeded",
 });
 
+/** What a project gets from Keys, as orgo-web names it (names only; anything else it sent is dropped). */
+const keyedOf = (v: unknown[]): AppKeyed[] =>
+  v.flatMap((x) => {
+    const { name, key, from, missing } = (x ?? {}) as Record<string, unknown>;
+    if (typeof name !== "string" || !ENV_NAME.test(name) || typeof key !== "string" || !key || (from !== "app" && from !== "workspace")) return [];
+    return [{ name, key, from, ...(missing === true ? { missing: true as const } : {}) }];
+  });
+
 /** A project's settings as the window shows them; `url`: its address (a Preview's link; Published's first active domain, or null). */
 const settingsOf = (p: OrgoDeployProject, url: string | null): AppSettingsAnswer => ({
   url,
@@ -2424,6 +2433,7 @@ const settingsOf = (p: OrgoDeployProject, url: string | null): AppSettingsAnswer
     ...(typeof p.health_path === "string" ? { health: p.health_path } : {}),
   },
   env: [...new Set((p.env_keys ?? []).filter((k) => typeof k === "string"))].sort(),
+  ...(Array.isArray(p.env_from_keys) ? { keyed: keyedOf(p.env_from_keys) } : {}),
   deploys: [...(p.deployments ?? [])]
     .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))
     .slice(0, DEPLOYS_SHOWN)
@@ -4849,7 +4859,7 @@ export function appWork(botId: string, a: { app: string | null; name: string | n
       : `Work on ${owner}'s app ${name}. It's the Ingot repo ${repo} (Ingot is Orgo's source control; name it in full wherever a command takes a repo), and its working folder on this computer is ${dir}: Bops cloned it there, or pulled the newest into it, as this task started.`,
     `What to do: ${change}`,
     WHERE_THINGS_ARE(owner),
-    "1. Make the change in that folder. An app that runs a server listens on the port in $PORT, which Orgo sets when it deploys it and bops-local sets for its Local; a plain site needs only an index.html. Keep secrets out of the folder: .env files are never committed. Read its own address from AUTH_URL (or NEXTAUTH_URL) rather than writing one in: Bops sets it to its Local's address for its Local, its preview link for its Preview, and its domain once published.",
+    "1. Make the change in that folder. An app that runs a server listens on the port in $PORT, which Orgo sets when it deploys it and bops-local sets for its Local; a plain site needs only an index.html. Keep secrets out of the folder: .env files are never committed. Read its own address from AUTH_URL (or NEXTAUTH_URL) rather than writing one in: Bops sets it to its Local's address for its Local, its preview link for its Preview, and its domain once published. A key from the workspace's Keys (ANTHROPIC_API_KEY, say) comes to it as a variable on every deploy, and to its Local after its first Preview: read it from the environment, and never write a key into the folder, a commit or a chat.",
     `2. Run it as its Local and leave it running: bops-local start ${word} ${site} (it runs its dev script, else its start script, with hot reload, and prints a BOPS_LOCAL line whose fourth word is its port). ${owner} watches it live in Bops beside this chat while you save. Check each change with curl -i http://127.0.0.1:<that port>/. If it fails, bops-local status ${word} and /root/.bops/local/${word}--${site}.log say why. Don't run another server on that port, and don't stop its Local when you're done.`,
     `3. Commit it from the folder: ingot commit -m "<what changed, in one clear line>" (or the Ingot tools' repo_commit). ${SYNC_WORDS}`,
     ...(others ? [OTHERS_WORDS(name)] : []),

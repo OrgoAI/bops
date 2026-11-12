@@ -8,6 +8,7 @@ import type { AppState } from "@/lib/types";
 import { PasswordShown } from "./preview-password";
 import { memberAct } from "./shared-act";
 import { ago } from "./ui";
+import { KeyVariables } from "./app-key-links";
 
 /*
  * Your Apps in a workspace someone shared with the user, when its owner gave them Your Apps (lib/shared.ts SharedOpen.apps,
@@ -317,6 +318,7 @@ function SettingsPart({ app: a, disabled, onSave }: { app: SharedApp; disabled: 
         </button>
         <span className="text-[12px] text-[#9A9A98]">{W.noVariables}</span>
       </span>
+      <KeyVariables app={a.name} />
     </Part>
   );
 }

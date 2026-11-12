@@ -680,6 +680,8 @@ const projectView = (p) => ({
   // (Said once it was changed: before, the fake is an orgo-web that doesn't say it, as Bops' first one didn't.)
   ...(p.health_path !== undefined ? { health_path: p.health_path } : {}),
   env_keys: [...(web.envs?.get(p.id)?.keys() ?? [])],
+  // What it gets from Keys, from an orgo-web that says it (a test sets it).
+  ...(web.keyed?.has(p.id) ? { env_from_keys: web.keyed.get(p.id) } : {}),
   current: newestFirst(p).find((d) => d.state === "succeeded") ?? null,
   deployments: newestFirst(p).map(({ log, ...d }) => (void log, d)),
 });
@@ -3226,6 +3228,28 @@ await check("Its variables: set and removed on its deploy project, the values go
   walk(scratch);
   assert.ok(files.some((f) => f.endsWith(".json")), "the state's files are among them");
   for (const f of files) assert.ok(!readFileSync(f).includes(SECRET), `not on disk: ${f}`);
+});
+
+await check("What it gets from Keys: orgo-web's env_from_keys, by name and where each comes from, into keyed; nothing else orgo-web sent; none from an orgo-web that doesn't say", async () => {
+  const p = recipeProject();
+  assert.equal((await H.appSettings(WS, "recipe-box")).keyed, undefined, "an older orgo-web: not said");
+  web.keyed = new Map([[p.id, [
+    { name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY", from: "workspace" },
+    { name: "AI_KEY", key: "OPENAI_API_KEY", from: "app", missing: true, value: "sk-made-up-never-shown" },
+    { name: "bad name", key: "X", from: "app" },
+    { name: "OTHER", key: "Y", from: "elsewhere" },
+  ]]]);
+  try {
+    const got = await H.appSettings(WS, "recipe-box");
+    assert.deepEqual(got.keyed, [
+      { name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY", from: "workspace" },
+      { name: "AI_KEY", key: "OPENAI_API_KEY", from: "app", missing: true },
+    ]);
+    assert.ok(!JSON.stringify(got).includes("sk-made-up-never-shown"), "never a value");
+    assert.deepEqual(got.env, (await H.appSettings(WS, "recipe-box")).env, "its own variables as before");
+  } finally {
+    web.keyed = undefined;
+  }
 });
 
 await check("Roll back: an earlier deploy of its own that went live and is still on the computer put back without a build, the app answered with it queued; the live one, a failed one, one that isn't its, or a made-up id refused before Orgo is asked; Orgo's refusals in words", async () => {

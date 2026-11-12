@@ -14,6 +14,8 @@ import { KeyIcon } from "./screen-cards";
 import { DiffRow } from "./skill-proposals";
 import { Chevron, undash } from "./side-group";
 import { post, teamOf } from "./ui";
+import { appsShown } from "@/lib/apps-access";
+import { EveryAppSwitch } from "./app-key-links";
 
 /*
  * Keys (lib/server/keys.ts): the user's API keys their bots may call services with. They're kept in the
@@ -671,6 +673,7 @@ function KeyLine({
         </span>
       )}
       {routines}
+      {appsShown(state) && <EveryAppSwitch k={k} />}
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
           <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
