@@ -494,9 +494,11 @@ export type ScriptApproval = {
   synced?: boolean;
   /**
    * Made in a Bops window by the person signed in (approveScript), not taken from Orgo. One taken from
-   * Orgo counts only while Orgo says that person made it: another member's approval never runs a script here.
+   * Orgo counts only while Orgo says the owner or an Admin made it: a Member's approval never runs a script here.
    */
   inBops?: boolean;
+  /** Whose it was, as Orgo said when it was taken from there: the owner's or an Admin's (lib/server/workspace-skills.ts approvalCounts). */
+  by?: "owner" | "admin";
 };
 
 export type WorkspaceLine = {

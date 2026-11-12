@@ -813,7 +813,7 @@ function bindLater() {
  * hadn't taken when Bops last quit goes now, as its retries lived in memory only: each one's skills are
  * synced (a create, an edit or a bot dropped since its last sync, SkillRef.updatedAt past syncedAt, and
  * what Orgo has), and its Orbit is sent where its index still holds what Orgo hasn't taken (deletes,
- * items or facts: orbitOutbox).
+ * items or facts: orbitOutbox). Then skills are looked at in Orgo every couple of minutes (startSkillsPoll).
  */
 export function startProjectBinding() {
   if (g.bopsWsBindStarted || onRunner() || !stateReady() || stateTooNew()) return;
@@ -823,6 +823,8 @@ export function startProjectBinding() {
   // A deleted workspace's memory that memory didn't take before Bops last quit.
   void import("./memory-deletes").then((m) => m.memoryDeletesOnStart()).catch((e: Error) => console.warn(`[memory] deletes from before: ${e.message}`));
   void pushBoundOnStart().catch((e: Error) => console.warn(`[workspaces] sending what waited from before: ${e.message}`));
+  // From then on, what an Admin changed in a workspace's skills in Orgo comes here every couple of minutes.
+  void import("./workspace-skills").then((m) => m.startSkillsPoll()).catch((e: Error) => console.warn(`[skills] poll: ${e.message}`));
 }
 
 async function pushBoundOnStart() {
