@@ -334,6 +334,7 @@ export function AskInPlace({
   action,
   danger = false,
   busy = false,
+  disabled = false,
   error,
   focus = "action",
   compact = false,
@@ -348,6 +349,7 @@ export function AskInPlace({
   action: string;
   danger?: boolean;
   busy?: boolean;
+  disabled?: boolean;
   error?: string | null;
   focus?: "action" | "cancel";
   compact?: boolean;
@@ -400,7 +402,7 @@ export function AskInPlace({
         <button ref={cancel} type="button" disabled={busy} onClick={onCancel} className={`${pill} bg-white shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]`}>
           {cancelLabel}
         </button>
-        <button ref={first} type="button" disabled={busy} onClick={onConfirm} className={`${pill} flex min-w-[72px] items-center justify-center text-white ${danger ? "bg-[#B42318]" : "bg-ink"}`}>
+        <button ref={first} type="button" disabled={busy || disabled} onClick={onConfirm} className={`${pill} flex min-w-[72px] items-center justify-center text-white ${danger ? "bg-[#B42318]" : "bg-ink"}`}>
           {busy ? <Spinner size={12} color="#FFFFFF" /> : action}
         </button>
       </div>

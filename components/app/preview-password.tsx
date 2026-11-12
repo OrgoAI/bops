@@ -1,5 +1,7 @@
 "use client";
 
+import { Lock } from "lucide-react";
+import { appIcon } from "./app-controls";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { PASS_COOKIE, type PreviewPassword, type PreviewSite } from "@/lib/hosted-apps";
 import { CopyLink } from "./hosted-apps";
@@ -151,10 +153,7 @@ export function usePreviewTabPassword(ws: string, name: string, site: string | u
 
 function LockIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden>
-      <rect x="2.75" y="6.25" width="8.5" height="6" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M4.75 6.25V4.5a2.25 2.25 0 0 1 4.5 0v1.75" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
+    <Lock {...appIcon}/>
   );
 }
 

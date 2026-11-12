@@ -1,28 +1,52 @@
 #!/usr/bin/env node
+// One entry point for each feature's checks (docs/FEATURES.md). Usage: scripts/verify [browser-speed|browser-input|your-apps [--ui]],
+// or --list for every target. No target: browser-speed.
 import { spawnSync } from 'node:child_process';
-const feature = process.argv[2] ?? 'browser-speed';
-if (feature === '--list') {
-    console.log('browser-speed\nbrowser-input');
-    process.exit(0);
-}
-if (feature !== 'browser-speed' && feature !== 'browser-input')
-    throw new Error('Use scripts/verify browser-speed or browser-input; see docs/FEATURES.md');
-// The browser tab's input socket: the app server's sending (fake Bops Cloud), Bops Cloud's checks (needs the test database, cloud/test/edge-fakes.ts), types and lint.
-const steps = feature === 'browser-input' ? [
-    [process.execPath, ['scripts/test-browser-view.mjs']],
-    [process.execPath, ['--test', 'cloud/test/core-browser.test.ts', 'cloud/test/edge-browser.test.ts']],
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const node = process.execPath;
+
+// Your Apps: what the review flow touches, linted; its UI, status, password and sharing checks. --ui adds the browser pass.
+// (Bops Cloud's slice of it, SharedApp.github, is checked by cloud/test/core-members.test.ts, which needs the test database.)
+const yourAppsFiles = ['components/app/app-controls.tsx', 'components/app/app-review.tsx', 'components/app/app-envs.tsx', 'components/app/app-settings.tsx', 'components/app/hosted-apps.tsx', 'components/app/made-apps.tsx', 'components/app/shared-apps.tsx', 'components/app/preview-password.tsx', 'components/app/bops-app.tsx', 'components/app/crm.tsx', 'components/app/ui.tsx', 'lib/hosted-apps.ts', 'lib/app-review.ts', 'cloud/ws-slice.ts', 'cloud/protocol.ts'];
+
+const TARGETS = {
+  'browser-speed': () => [
+    [node, ['--test', 'scripts/test-browser-probe.mjs']],
+    [node, ['--check', 'scripts/verify']],
+    ['npx', ['tsc', '--noEmit']],
+    ['npx', ['eslint', 'scripts/browser-speed', 'scripts/probe-browser-speed.mjs', 'scripts/probe-computer-side.mjs', 'scripts/dev-two-person.mjs', 'scripts/test-browser-probe.mjs', 'cloud/browser-probe.ts', 'cloud/browser.ts', 'lib/browser-relay.ts', 'components/app/bot-browser.tsx', 'next.config.ts']],
+  ],
+  // The browser tab's input socket: the app server's sending (fake Bops Cloud), Bops Cloud's checks (needs the test database, cloud/test/edge-fakes.ts), types and lint.
+  'browser-input': () => [
+    [node, ['scripts/test-browser-view.mjs']],
+    [node, ['--test', 'cloud/test/core-browser.test.ts', 'cloud/test/edge-browser.test.ts']],
     ['npx', ['tsc', '--noEmit']],
     ['npx', ['tsc', '--noEmit', '-p', 'cloud']],
     ['npx', ['eslint', 'cloud/browser.ts', 'cloud/http.ts', 'cloud/live.ts', 'cloud/protocol.ts', 'cloud/test/edge-browser.test.ts', 'lib/server/browser-view.ts', 'scripts/test-browser-view.mjs', 'components/app/bot-browser.tsx', 'components/app/browser-cursor.tsx', 'scripts/browser-speed/link.mjs', 'scripts/test-browser-probe.mjs']],
-] : [
-    [process.execPath, ['--test', 'scripts/test-browser-probe.mjs']],
-    [process.execPath, ['--check', 'scripts/verify']],
-    ['npx', ['tsc', '--noEmit']],
-    ['npx', ['eslint', 'scripts/browser-speed', 'scripts/probe-browser-speed.mjs', 'scripts/probe-computer-side.mjs', 'scripts/dev-two-person.mjs', 'scripts/test-browser-probe.mjs', 'cloud/browser-probe.ts', 'cloud/browser.ts', 'lib/browser-relay.ts', 'components/app/bot-browser.tsx', 'next.config.ts']],
-];
-for (const [cmd, args] of steps) {
-    const r = spawnSync(cmd, args, { stdio: 'inherit' });
-    if (r.status !== 0)
-        process.exit(r.status ?? 1);
-    console.log(`PASS ${cmd} ${args.join(' ')}`);
+  ],
+  'your-apps': (ui) => [
+    ['npx', ['tsc', '--noEmit', '-p', 'tsconfig.json']],
+    ['npx', ['tsc', '--noEmit', '-p', 'cloud']],
+    ['npx', ['eslint', ...yourAppsFiles]],
+    ...['hosted-apps-ui', 'app-status', 'preview-password-ui', 'shared'].map((name) => [node, [`scripts/test-${name}.mjs`]]),
+    ...(ui ? [[node, ['scripts/test-your-apps-e2e.mjs']]] : []),
+  ],
+};
+
+const feature = process.argv[2] ?? 'browser-speed';
+if (feature === '--list') {
+  console.log(Object.keys(TARGETS).join('\n'));
+  process.exit(0);
+}
+if (!Object.hasOwn(TARGETS, feature)) {
+  console.error(`Use scripts/verify ${Object.keys(TARGETS).join(', ')} (your-apps takes --ui), or --list; see docs/FEATURES.md`);
+  process.exit(2);
+}
+for (const [cmd, args] of TARGETS[feature](process.argv.includes('--ui'))) {
+  console.log(`\nChecking ${cmd === node ? 'node' : cmd} ${args.join(' ')}`);
+  const r = spawnSync(cmd, args, { cwd: root, stdio: 'inherit' });
+  if (r.status !== 0) process.exit(r.status ?? 1);
+  console.log(`PASS ${cmd === node ? 'node' : cmd} ${args.join(' ')}`);
 }

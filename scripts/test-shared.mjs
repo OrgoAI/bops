@@ -46,6 +46,11 @@ registerHooks({
   },
 });
 
+// Initialize React before the client graph: CJS icon imports can otherwise see a partial React module under Node hooks.
+await import("react");
+await import("react/jsx-runtime");
+
+
 // A window, enough of one (nothing here runs effects: it's rendered to HTML).
 globalThis.window = globalThis;
 globalThis.location = { origin: "http://localhost:3210" };

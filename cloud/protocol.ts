@@ -881,11 +881,13 @@ export type SharedApp = {
   lost?: true;
   /**
    * Its production is on GitHub (lib/hosted-apps.ts AppHosting.github): Publish sends what its Preview serves to this repo
-   * and branch, whose own deploy puts it live. At Write also its folder, the paths left alone, the workflow it runs, and
-   * where it was last the same as GitHub (`linked`: Link, Publish or Bring in; none: it isn't linked yet), so an Admin, or
-   * a Member with App secrets, links it and brings GitHub's changes in (SharedWsSlice.appGithub).
+   * and branch, whose own deploy puts it live. `at`: the changeset last sent there, which is its Live (null: not linked
+   * yet), at every level (none from a Bops Cloud before it: Live is then read from `linked`, or from Published as before).
+   * At Write also its folder, the paths left alone, the workflow it runs, and where it was last the same as GitHub
+   * (`linked`: Link, Publish or Bring in; none: it isn't linked yet), so an Admin, or a Member with App secrets, links it
+   * and brings GitHub's changes in (SharedWsSlice.appGithub).
    */
-  github?: { repo: string; branch: string; path?: string; keep?: string[]; dispatch?: { workflow: string; inputs?: Record<string, string> }; linked?: { sha: string; ingot: string; when: number } };
+  github?: { repo: string; branch: string; at?: string | null; path?: string; keep?: string[]; dispatch?: { workflow: string; inputs?: Record<string, string> }; linked?: { sha: string; ingot: string; when: number } };
   head?: { id: string; message: string; at: number } | null;
   /**
    * `url`: Published's address (none: no domain yet). Its Preview, where members deploy, from an owner's Bops that sends

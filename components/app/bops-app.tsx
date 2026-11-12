@@ -864,22 +864,22 @@ function Bops({ state }: { state: AppState | null }) {
       openComputer(fresh.botId);
     }
   };
-  const openChat = (id: string) => {
+  const openChat = (id: string, stay = false) => {
     setChatId(id);
     setPrefill(null);
     setNewThreadFor(null);
     setThreadId(null);
     setComposing(false);
     setFocus(false);
-    setActive(CHAT_TAB);
+    if (!stay) setActive(CHAT_TAB);
   };
   /**
    * Ask a bot something (an example on Routines, or Ask <name>): its chat, with `text` in the message box
    * to change and send, never sent by itself, and the box focused.
    */
-  const askBot = (botId: string, text?: string) => {
+  const askBot = (botId: string, text?: string, stay = false) => {
     const id = botChatId(botId);
-    openChat(id);
+    openChat(id, stay);
     if (state.chats.some((c) => c.id === id)) setPrefill({ chatId: id, text: text ?? "", at: Date.now() });
   };
   /** The task Add app started (hosted-apps.tsx): its thread once the window has it, else its bot's chat, where its chip is. */
@@ -1296,7 +1296,7 @@ function Bops({ state }: { state: AppState | null }) {
                   ) : tab?.kind === "made-apps" ? (
                     <MadeAppsHome state={state} ws={tab.ws} />
                   ) : tab?.kind === "hosted-app" ? (
-                    <HostedAppTab key={tab.id} state={state} ws={tab.ws} name={tab.name} onAsk={askBot} />
+                    <HostedAppTab onBack={openApps} key={tab.id} state={state} ws={tab.ws} name={tab.name} onAsk={(id, text) => askBot(id, text, true)} />
                   ) : tab?.kind === "crm" ? (
                     // These two pages fade in from here (the others in their own files). The key is on the
                     // wrapper, so the page remounts exactly when it did before.

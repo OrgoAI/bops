@@ -812,3 +812,78 @@ export const MEMBER_ACTS_KEPT = 10;
 
 /** An app's sites by name: its own (named as the app), then AppHosting.sites in order. */
 export const sitesOfHosting = (h: Pick<AppHosting, "sites">, name: string): string[] => [name, ...(h.sites ?? []).map((s) => s.name)];
+
+/* ---------------- What's going on with an app, in a sentence, and the one thing to press ---------------- */
+
+/** The one thing to press for an app now (undefined: nothing; it's up to date, or something is on its way). */
+export type AppNextAction = "update-preview" | "publish" | "connect-domain";
+
+/** What an app's status is made of, however the window has the app (the owner's HostedApp, or a member's SharedApp). */
+export type AppStatusInput = {
+  /** The newest changeset on main (null: nothing committed yet). */
+  head: string | null;
+  /** Its Preview: what it serves and its newest deploy's state (null: no Preview yet). */
+  preview: { serving: string | null; state: DeployState | null } | null;
+  /** Published: what it serves (on GitHub, the changeset last pushed) and its newest deploy's state. */
+  live: { serving: string | null; state: DeployState | null };
+  /** It has a domain Published can live on (or, on GitHub, a repo it's linked to). */
+  domain: boolean;
+  /** Published served something before (a legacy site with no domain publishes all the same). */
+  wasLive: boolean;
+  /** Its computer is gone, and its deploy projects with it. */
+  lost?: boolean;
+  /** Production is on GitHub, and whether it was linked there yet. */
+  github?: { linked: boolean };
+  /** How many changes on main are on the Preview but not live, when the history says (null or absent: not known). */
+  changes?: number | null;
+  /** The newest change's words, when there's one not live, for the long form. */
+  change?: string | null;
+};
+
+/**
+ * An app's status in one plain sentence: what the preview has, whether live is behind it, and what's on its way; with
+ * the one thing to press now (`action`) and how it reads (`tone`: quiet, something waits on the person, something is
+ * being done, or something failed). `detail` names the change that isn't live, for a page with the room for it.
+ */
+export function appStatus(i: AppStatusInput): { sentence: string; detail?: string; action?: AppNextAction; tone: "quiet" | "waits" | "working" | "failed" } {
+  const going = (s: DeployState | null | undefined) => s === "queued" || s === "running";
+  if (i.lost) return { sentence: "Its computer is gone. Update the preview to give it a new home.", action: "update-preview", tone: "waits" };
+  if (!i.head) return { sentence: "Nothing built yet.", tone: "quiet" };
+  if (going(i.preview?.state)) return { sentence: "Updating the preview…", tone: "working" };
+  if (going(i.live.state)) return { sentence: i.github ? "Pushing to GitHub…" : "Publishing…", tone: "working" };
+  // What the preview holds that isn't live is there to publish, the newest change or an earlier version put back on it
+  // (Restore): the preview is "behind" only while it has nothing, or what's live already, and the newest change isn't on it.
+  const holds = !!i.preview?.serving && i.preview.serving !== i.live.serving;
+  const behind = !i.preview?.serving || (i.preview.serving !== i.head && !holds);
+  const canLive = i.domain || i.wasLive || !!i.github;
+  // A failed preview update leaves the preview serving what it did: when that isn't live and can go live, publishing it
+  // is still the press (the failed build is retried with Update preview, beside it or in Technical details).
+  if (i.preview?.state === "failed")
+    return holds && canLive && (!i.github || i.github.linked)
+      ? { sentence: "The last preview update failed. What the preview still has can be published.", action: "publish", tone: "failed" }
+      : { sentence: "The last preview update failed.", action: "update-preview", tone: "failed" };
+  // (The press that can go through now: the preview to update first when it's behind, else publishing again.)
+  if (i.live.state === "failed") return { sentence: "The last publish failed.", action: behind ? "update-preview" : "publish", tone: "failed" };
+  if (behind || !i.preview) return { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" };
+  if (i.github && !i.github.linked) return { sentence: "The preview is ready. Link it to GitHub to publish.", tone: "waits" };
+  if (i.preview.serving === i.live.serving) return canLive ? { sentence: "Live and up to date.", tone: "quiet" } : { sentence: "Not published yet.", action: "connect-domain", tone: "waits" };
+  if (!canLive) return { sentence: "The preview is ready. Connect a domain to publish it.", action: "connect-domain", tone: "waits" };
+  // (An earlier version put back on the preview, to go back to: the history counts no change between live and it.)
+  if (i.preview.serving !== i.head && i.changes === 0) return { sentence: "The preview has an earlier version than live.", ...(i.change ? { detail: i.change } : {}), action: "publish", tone: "waits" };
+  const n = i.changes;
+  const sentence = n == null ? "The preview has changes that aren't live." : n === 1 ? "The preview has 1 change that isn't live." : `The preview has ${n} changes that aren't live.`;
+  return { sentence, ...(i.change ? { detail: i.change } : {}), action: "publish", tone: "waits" };
+}
+
+/**
+ * How many changes on main sit between what's live and what the preview serves, from the history (newest first):
+ * null when either isn't in it (an older page, or nothing live yet), 0 when they're the same.
+ */
+export function changesBetween(commits: { id: string }[], live: string | null, preview: string | null): number | null {
+  if (!preview) return null;
+  const p = commits.findIndex((c) => c.id === preview);
+  if (p < 0) return null;
+  if (!live) return null;
+  const l = commits.findIndex((c) => c.id === live);
+  return l < 0 ? null : Math.max(0, l - p);
+}

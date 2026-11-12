@@ -41,6 +41,11 @@ registerHooks({
     return { format: "module", source: out.outputText, shortCircuit: true };
   },
 });
+
+// Initialize React before the client graph: CJS icon imports can otherwise see a partial React module under Node hooks.
+await import("react");
+await import("react/jsx-runtime");
+
 const emitWarning = process.emitWarning.bind(process);
 process.emitWarning = (warning, ...rest) => (rest[0]?.code === "MODULE_TYPELESS_PACKAGE_JSON" ? undefined : emitWarning(warning, ...rest));
 
@@ -333,40 +338,24 @@ await test("the tab bar's lock shows the password with Copy; Open in browser say
 const classes = (el) => (el?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
 const placed = (el) => [el, ...el.querySelectorAll("[class]")].filter((x) => classes(x).some((c) => /^(?:@[\w-]+:)?(?:absolute|fixed)$/.test(c)));
 
-await test("on the Preview line in Your Apps: Password, its 7 character value in mono and Copy, one piece where the line says where it is, never cut short; what the line serves a piece of its own after it; nothing placed over anything; while it's read, what's said cut short whole in its tooltip", async () => {
+await test("Your Apps reveals the current preview password only on request, with Copy and Escape", async () => {
   fresh();
-  const E = await import(pathToFileURL(`${root}/components/app/app-envs.tsx`).href);
-  const AT = "5e1f0c2".repeat(9).slice(0, 40);
-  // (Its Preview as the list says it now: a newer password than the one kept, after fresh(), is read again.)
-  const envs = () => {
-    const app = { name: "shop", head: AT, updatedAt: base, hosting: { botId: "nova", computerId: "c1" }, serving: null, live: null, preview: preview({ serving: AT, live: { id: "d_1", at: AT, state: "succeeded", when: base, error: null, url: URL1 } }) };
-    return h(E.AppEnvs, { compact: true, ws: "ws_main", answer: { enabled: true }, app, sites: [app], local: null, onLocal: () => {}, onChanged: () => {} });
-  };
-  const m = await mount(envs());
-  const line = m.box.querySelector('[data-app-env="preview"]');
-  const where = line.querySelector("[data-app-env-where]");
-  const beside = line.querySelector("[data-password-beside]");
-  const at = line.querySelector("[data-app-env-at]");
-  assert.ok(where.contains(beside) && where.querySelector(`a[href="${URL1}"]`), "beside its link, where the line says where it is");
-  assert.equal(words(beside), "Password Ab3xY9k");
-  const value = beside.querySelector("[data-preview-password]");
-  assert.equal(value.textContent.length, 7);
-  assert.ok(classes(value).includes("font-mono") && classes(value).includes("whitespace-nowrap") && !classes(value).includes("truncate"), "in mono, never cut short");
-  assert.ok(classes(beside).includes("shrink-0") && classes(beside).includes("max-w-full") && !classes(beside).some((c) => /^m[lr]-/.test(c)), "one piece: the line wraps it under the link when they don't fit side by side");
-  assert.ok(button(beside, "Copy password"));
-  assert.ok(at.parentNode === line && !where.contains(at) && !beside.contains(at) && at.textContent === AT.slice(0, 7) && at.getAttribute("title") === AT, "what it serves, a piece of its own");
-  assert.deepEqual(placed(line), [], "nothing placed over anything");
-  await m.done();
-  // While it's read: what's said instead can be cut short, all of it in its tooltip.
-  fresh();
-  routes = {};
-  const n = await mount(envs());
-  const waiting = n.box.querySelector("[data-password-beside]");
-  assert.equal(words(waiting), "Password Couldn't read it just now.");
-  assert.ok(classes(waiting).includes("min-w-0"));
-  const said = waiting.lastElementChild;
-  assert.ok(classes(said).includes("min-w-0") && classes(said).includes("truncate") && said.getAttribute("data-tip") === "Couldn't read it just now.");
-  await n.done();
+  const E=await import(pathToFileURL(`${root}/components/app/app-envs.tsx`).href);
+  const at="5e1f0c2".repeat(9).slice(0,40);
+  const app={name:"shop",head:at,updatedAt:base,hosting:{botId:"nova",computerId:"c1"},serving:null,live:null,preview:preview({serving:at,live:{id:"d_1",at,state:"succeeded",when:base,error:null,url:URL1}})};
+  const props={ws:"ws_main",answer:{enabled:true},app,sites:[app],local:null,onLocal:()=>{},onChanged:()=>{}};
+  const m=await mount(h(E.AppEnvs,props));
+  try {
+    assert.ok(!m.box.querySelector('[data-preview-password]'));
+    await click(button(m.box,"Show password"));
+    const pop=m.box.querySelector('[data-password-popover]');
+    assert.equal(pop.querySelector('[data-preview-password]').textContent,"Ab3xY9k");
+    assert.ok(button(pop,"Copy password"));
+    assert.equal(pop.getAttribute('role'),'dialog');
+    await act(async () => { const e=new win.Event('keydown',{bubbles:true,cancelable:true}); Object.defineProperty(e,'key',{value:'Escape'}); document.dispatchEvent(e); }); assert.ok(!m.box.querySelector('[data-password-popover]'));
+  } finally { await m.done(); }
+  fresh(); routes={}; const n=await mount(h(E.AppEnvs,{...props,app:{...app,preview:{...app.preview,passwordAt:base}}}));
+  try { await click(button(n.box,"Show password")); assert.match(n.box.querySelector('[data-password-popover]').textContent,/Couldn't read it just now/); } finally { await n.done(); }
 });
 
 await test("its tab's Password section wraps New password and the switch, together, under its value in a narrow panel, never squeezing it; the tab bar's tools and widths wrap together under which one it shows", async () => {
@@ -395,7 +384,8 @@ await test("where preview-tab.tsx, app-envs.tsx and hosted-apps.tsx put it", asy
   const envs = readFileSync(`${root}/components/app/app-envs.tsx`, "utf8");
   assert.match(envs, /<UrlLink url=\{app\.preview\.url\} \/>\n\s*\{\/\*[^*]*\*\/\}\n\s*<PasswordBeside ws=\{ws\} name=\{app\.name\} site=\{site\} preview=\{app\.preview\} \/>/);
   const apps = readFileSync(`${root}/components/app/hosted-apps.tsx`, "utf8");
-  assert.match(apps, /<AppAddress url=\{previewSettings\?\.url \?\? view\.preview\?\.url \?\? null\} \/>\n\s*<PasswordSection ws=\{ws\} name=\{app\.name\} site=\{siteName\} preview=\{view\.preview\} \/>/);
+  assert.match(apps, /<PasswordSection ws=\{ws\} name=\{app\.name\} site=\{siteName\} preview=\{view\.preview\}\/>/);
+  assert.match(envs, /usePreviewPassword\(ws, app.name, site, app.preview\)/);
 });
 
 console.log(`preview password ui: ${passed} passed, ${failed} failed`);

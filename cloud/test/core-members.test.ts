@@ -1966,16 +1966,22 @@ test("Your Apps at Read, in a workspace of Orgo's team: the apps by name, their 
   assert.deepEqual(s.workspace, { id: "ws_apps", name: "Apps" }, "the workspace's own fields stay as they were");
 });
 
-test("Your Apps says where an app whose production is on GitHub publishes to (its repo and branch), never its folder, kept files or point; nothing for a malformed setting", () => {
+test("Your Apps says where an app whose production is on GitHub publishes to (its repo and branch) and the changeset last sent there, never its folder, kept files or GitHub commit; nothing for a malformed setting", () => {
   const github = { repo: "acme/shop-site", branch: "main", path: "web", keep: [".env.example"], dispatch: { workflow: "deploy.yml", inputs: { client: "shop" } }, last: { sha: "abc123", ingot: "cs-2", when: 9 } };
   const blob = appsBlob({ apps: "read" });
   const ws = (blob.workspaces as Record<string, Record<string, Record<string, Record<string, unknown>>>>[])[0];
   ws.hostedApps.shop.github = github;
   ws.hostedApps.notes.github = { repo: 7, branch: "main" };
   const s = sharedSlice(blob, "ws_apps", TOM_VIEW);
-  assert.deepEqual(s.apps?.list[0].github, { repo: "acme/shop-site", branch: "main" });
+  // (`at`: what its Live is, so a member's review compares the Preview with GitHub, not with Orgo's Published.)
+  assert.deepEqual(s.apps?.list[0].github, { repo: "acme/shop-site", branch: "main", at: "cs-2" });
   assert.equal(s.apps?.list[1].github, undefined, "a malformed setting shows nothing");
   for (const hidden of ["web", ".env.example", "deploy.yml", "abc123"]) assert.ok(!JSON.stringify(s.apps).includes(`"${hidden}"`), `"${hidden}" isn't shown`);
+  // Not linked yet (no `last`), or a `last` with no changeset: null, said as such.
+  ws.hostedApps.shop.github = { repo: "acme/shop-site", branch: "main", path: "" };
+  assert.deepEqual(sharedSlice(blob, "ws_apps", TOM_VIEW).apps?.list[0].github, { repo: "acme/shop-site", branch: "main", at: null });
+  ws.hostedApps.shop.github = { repo: "acme/shop-site", branch: "main", path: "", last: { sha: "abc123", when: 9 } };
+  assert.deepEqual(sharedSlice(blob, "ws_apps", TOM_VIEW).apps?.list[0].github, { repo: "acme/shop-site", branch: "main", at: null });
 });
 
 test("Your Apps at Write adds each site's settings and the workspace's domains, whatever the member's email; nothing for None, an older entry, the owner, a workspace whose owner isn't Orgo's team, or no apps", () => {
@@ -2432,17 +2438,18 @@ test("the slice: GitHub's folder, paths left alone, workflow and point at Write 
   assert.deepEqual(site.github, {
     repo: "example-org/web",
     branch: "main",
+    at: "b".repeat(64),
     path: "formula",
     keep: ["proxy.ts"],
     dispatch: { workflow: "deploy.yml", inputs: { client: "acme" } },
     linked: { sha: "a".repeat(40), ingot: "b".repeat(64), when: 7 },
   });
-  assert.deepEqual(sam.apps!.list.find((a) => a.name === "blog")!.github, { repo: "example-org/web", branch: "main", path: "blog" }, "set, not linked");
+  assert.deepEqual(sam.apps!.list.find((a) => a.name === "blog")!.github, { repo: "example-org/web", branch: "main", at: null, path: "blog" }, "set, not linked");
   assert.equal(sam.appGithub, true);
   assert.deepEqual(site.acts?.map((a) => [a.act, a.going]), [["githubPull", true], ["deploy", undefined]]);
-  // At Read: where Publish goes, nothing more, and no GitHub buttons.
+  // At Read: where Publish goes and what its Live is (the changeset last sent there), nothing more, and no GitHub buttons.
   const rob = s(ghViewer("member", "rob@example.com", { githubActs: true, githubSeen: true }));
-  assert.deepEqual(rob.apps!.list.find((a) => a.name === "site")!.github, { repo: "example-org/web", branch: "main" });
+  assert.deepEqual(rob.apps!.list.find((a) => a.name === "site")!.github, { repo: "example-org/web", branch: "main", at: "b".repeat(64) });
   assert.equal(rob.appGithub, undefined);
   // A Member at Write without App secrets, or anyone while the owner's last Mac is older: none.
   assert.equal(s(ghViewer("member", "ivy@example.com", { githubActs: true })).appGithub, undefined);
