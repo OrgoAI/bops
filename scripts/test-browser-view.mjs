@@ -6,7 +6,10 @@
 // - Bops Cloud saying an act didn't go (its computer isn't connected): the next goes by POST, so its words come back.
 // - Bops Cloud closing the socket: the next act opens another.
 // - A refusal marked as the socket route's (403): that act goes by POST, which answers in words; the next tries again.
-// - A Bops Cloud from before the socket (a plain 404): every act by POST from then on, without asking again.
+// - A Bops Cloud from before the socket (a plain 404): every act by POST for a while, without asking again; then asked
+//   again (it may have been updated since). Another Bops Cloud isn't held to it.
+// - A socket that stops answering pings (a network change can leave it dead without a close) goes, and the next act
+//   opens another; one that answers stays.
 // Usage: node scripts/test-browser-view.mjs
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -33,8 +36,12 @@ registerHooks({
     return next(specifier, context);
   },
 });
-/** A fresh copy of the module (its "by POST for good" is per process). */
-const fresh = (n) => import(`${root}/lib/server/browser-view.ts?${n}`);
+/** A fresh copy of the module (its sockets and "by POST for a while" are per process), with its timing as given. */
+const fresh = async (n, timing = {}) => {
+  const v = await import(`${root}/lib/server/browser-view.ts?${n}`);
+  Object.assign(v.browserViewForTests?.timing ?? {}, timing);
+  return v;
+};
 
 let passed = 0;
 const test = async (name, f) => {
@@ -50,7 +57,10 @@ async function until(check, what, ms = 5000) {
   assert.fail(`timed out waiting for ${what}`);
 }
 
-/** A fake Bops Cloud: `upgrade` is "accept", 404 (a plain one: from before the socket) or 403 (marked as the route's). */
+/**
+ * A fake Bops Cloud: `upgrade` is "accept", 404 (a plain one: from before the socket) or 403 (marked as the route's), read
+ * at each upgrade. `pong: false`: its sockets never answer a ping (a connection a network change left dead).
+ */
 async function fakeCloud(o) {
   const c = { posts: [], said: [], upgrades: 0, sockets: [], asked: [] };
   const server = createServer(async (req, res) => {
@@ -59,7 +69,7 @@ async function fakeCloud(o) {
     c.posts.push(JSON.parse(body));
     res.writeHead(o.postStatus ?? 202, { "content-type": "application/json" }).end(JSON.stringify(o.postStatus ? { error: "In Bops Cloud's words." } : { ok: true }));
   });
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, autoPong: o.pong !== false });
   server.on("upgrade", (req, socket, head) => {
     c.upgrades++;
     c.asked.push({ url: req.url, auth: req.headers.authorization, device: req.headers["x-bops-device"] });
@@ -68,10 +78,11 @@ async function fakeCloud(o) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       c.sockets.push(ws);
       ws.on("message", (m) => c.said.push(JSON.parse(String(m))));
+      ws.on("close", () => (ws.ended = true));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  globalThis.__cloudUrl = `http://127.0.0.1:${server.address().port}`;
+  c.url = globalThis.__cloudUrl = `http://127.0.0.1:${server.address().port}`;
   c.close = async () => {
     for (const ws of wss.clients) ws.terminate();
     server.closeAllConnections();
@@ -136,18 +147,61 @@ await test("a refusal marked as the socket's (403): that act by POST, answered i
   }
 });
 
-await test("a Bops Cloud from before the socket (a plain 404): every act by POST from then on, without asking again", async () => {
-  const v = await fresh(3);
-  const c = await fakeCloud({ upgrade: 404 });
+await test("a Bops Cloud from before the socket (a plain 404): every act by POST for a while, without asking again; then asked again; another Bops Cloud isn't held to it", async () => {
+  const v = await fresh(3, { noSocketMs: 300 });
+  const o = { upgrade: 404 };
+  const c = await fakeCloud(o);
+  let other;
   try {
     const waiting = await Promise.all([1, 2, 3].map((x) => v.actBrowser(move(x), "")));
     assert.ok(waiting.every((a) => a.status === 202));
     assert.deepEqual(c.posts.map((p) => p.params.x), [1, 2, 3], "the ones waiting for the socket, by POST in order");
     for (const x of [4, 5]) assert.equal((await v.actBrowser(move(x), "")).status, 202);
-    assert.equal(c.upgrades, 1, "never asked again");
+    assert.equal(c.upgrades, 1, "not asked again for a while");
     assert.deepEqual(c.posts.map((p) => p.params.x), [1, 2, 3, 4, 5]);
+    // Another Bops Cloud (signed in to elsewhere) is asked for its own socket.
+    other = await fakeCloud({ upgrade: "accept" });
+    assert.equal((await v.actBrowser(move(6), "")).status, 202);
+    await until(() => other.said.length === 1, "the act on the other Bops Cloud's socket");
+    assert.equal(other.posts.length, 0);
+    // Bops Cloud updated since: once the while is up, the next act asks again and goes on the socket.
+    globalThis.__cloudUrl = c.url;
+    o.upgrade = "accept";
+    await new Promise((r) => setTimeout(r, 350));
+    assert.equal((await v.actBrowser(move(7), "")).status, 202);
+    await until(() => c.said.length === 1, "the act on the socket");
+    assert.equal(c.upgrades, 2, "asked again");
+    assert.deepEqual(c.posts.map((p) => p.params.x), [1, 2, 3, 4, 5], "nothing more by POST");
   } finally {
     await c.close();
+    await other?.close();
+  }
+});
+
+await test("a socket that stops answering pings goes, and the next act opens another; one that answers stays", async () => {
+  const v = await fresh(4, { pingMs: 40 });
+  const here = await fakeCloud({ upgrade: "accept" });
+  try {
+    await v.actBrowser(move(1), "");
+    await until(() => here.said.length === 1, "the act on the socket");
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal((await v.actBrowser(move(2), "")).status, 202);
+    await until(() => here.said.length === 2, "the next on the same socket");
+    assert.equal(here.upgrades, 1, "pings answered: one socket");
+  } finally {
+    await here.close();
+  }
+  const dead = await fakeCloud({ upgrade: "accept", pong: false });
+  try {
+    await v.actBrowser(move(3), "");
+    await until(() => dead.said.length === 1, "the act on the socket");
+    await until(() => dead.sockets[0].ended, "the socket that never answers to go", 1000);
+    assert.equal((await v.actBrowser(move(4), "")).status, 202);
+    await until(() => dead.said.length === 2, "the next act on a new socket");
+    assert.equal(dead.upgrades, 2, "another socket");
+    assert.equal(dead.posts.length, 0);
+  } finally {
+    await dead.close();
   }
 });
 
