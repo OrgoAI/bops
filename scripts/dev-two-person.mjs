@@ -285,7 +285,7 @@ function scriptedModel(b) {
 function cleanEnv() {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO|POSTHOG|SENTRY|ANTHROPIC|NEXT_PUBLIC)_/.test(k)) env[k] = v;
-  return { ...env, NEXT_TELEMETRY_DISABLED: "1", BOPS_TELEMETRY: "0", DO_NOT_TRACK: "1" };
+  return { ...env, NEXT_TELEMETRY_DISABLED: "1", BOPS_TELEMETRY: "0", DO_NOT_TRACK: "1", ...(process.env.BOPS_BROWSER_PROBE === "1" ? { BOPS_BROWSER_PROBE: "1" } : {}) };
 }
 
 /** macOS's `security`, with a folder for a Keychain (as scripts/test-delete-messages-cloud.mjs). */
@@ -521,6 +521,21 @@ async function serve() {
     });
     await waitFor("Bops Cloud", () => cloud.output().includes(`listening on 127.0.0.1:${ports.cloud}`), 60_000);
 
+    // Probe only: delay the app-to-Cloud link, leaving the runner's link untouched.
+    if (process.env.TWO_PERSON_BROWSER_LINK_MS !== undefined) {
+      const delay = Number(process.env.TWO_PERSON_BROWSER_LINK_MS);
+      if (![0, 35].includes(delay)) throw new Error("TWO_PERSON_BROWSER_LINK_MS must be 0 or 35");
+      const { startLink } = await import("./browser-speed/link.mjs");
+      const logFile = join(HERE, "link.jsonl");
+      writeFileSync(logFile, "");
+      const proxy = await startLink(urls.cloud, delay, logFile);
+      servers.push(proxy.server);
+      urls.browserProxy = proxy.url;
+      ports.browserProxy = Number(new URL(proxy.url).port);
+      state.probe = { delay, timing: process.env.BOPS_BROWSER_PROBE === "1", logFile };
+      save();
+    }
+
     /* The owner's state, before either app starts: the bot on the stand-in computer, and sam's access. */
     const pg = require("pg");
     const db = new pg.Client({ connectionString: DB });
@@ -605,7 +620,7 @@ async function serve() {
           HOME: home,
           PATH: `${bin}:${process.env.PATH}`,
           BOPS_TEST_KEYCHAIN: keychain,
-          BOPS_CLOUD_URL: urls.cloud,
+          BOPS_CLOUD_URL: urls.browserProxy ?? urls.cloud,
           BOPS_ORGO_ORIGIN: ORGO,
           ...(dist ? { BOPS_NEXT_DIST_DIR: dist } : {}),
         },

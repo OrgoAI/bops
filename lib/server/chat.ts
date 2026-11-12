@@ -29,7 +29,7 @@ import { aboutBops, ASKING, tidyAnswer, WRITING } from "./style";
 import { howIWork, plainLinks } from "@/cloud/style";
 import { whenText } from "@/cloud/schedule";
 import { buildApp, madeApp } from "./made-apps";
-import { appWork, askDeploy, botSite, deployForBot, hostedAppsLine, localForBot, publishWent, readReposAhead } from "./hosted-apps";
+import { appWork, askDeploy, askDeployAgain, botSite, deployForBot, hostedAppsLine, localForBot, publishWent, readReposAhead } from "./hosted-apps";
 import { savePage } from "./pages";
 import { onRunner } from "./persist";
 import { currentTurn, noteActing, stillTurn } from "./turn-context";
@@ -988,6 +988,10 @@ async function continueThread(chatId: string, text: string, replyTo?: string, me
   // one of the standing things that are the owner's to set up.
   if (!member && (await watchInstead(target.id, text).catch(() => null))) return true;
   if (!ours()) return true;
+  // The speaker's own words, read here from nothing outside Bops (a member's, only on an app they have at Write:
+  // memberThreadOk): a task on an app that put a change on its Preview puts this one there too, unless they say not to
+  // (hosted-apps.ts askDeployAgain), as tell_task does.
+  askDeployAgain(target.id, text);
   replyToSession(target.id, text, undefined, undefined, member ? saidOf(member) : undefined);
   // In a bot's own chat the reply comes from that bot, even when the thread is one it handed off.
   const c = chat(chatId)!;
@@ -2189,6 +2193,11 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
                   type: "boolean",
                   description: `True when a task running in the cloud should carry on on ${owner}'s Mac (they asked for their Mac, or it needs their home internet). A cloud task can't reach the Mac itself. When ${owner}'s own message asks for their Mac, Bops moves it there once its cloud run stops, with a record of what it did; otherwise the message goes to the task and ${owner} is offered the move. Otherwise false.`,
                 },
+                // Every turn, whichever task it's for (the tools shouldn't change: prompt caching).
+                deploy: {
+                  type: "boolean",
+                  description: `For a task on one of your workspace's apps: true (the default), once it's committed Bops deploys it to its Preview again, never its domain. False only when ${owner} says not to put it on its Preview: then it's only committed. Ignored for a task on no app.`,
+                },
                 ...SAY,
               },
             ),
@@ -3061,7 +3070,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       const args = JSON.parse(item.arguments) as { bot_id?: string; title: string; goal: string; say?: string; schedule?: RawSchedule; where?: "auto" | "cloud" | "mac"; then_on_mac?: string | null; skill?: string | null; part_of?: string | null; message?: string; agent?: string | null };
       if ((item.name === "start_task" || item.name === "hand_off" || item.name === "tell_task") && args.say?.trim()) says.push(args.say.trim());
       if (item.name === "tell_task") {
-        const a = JSON.parse(item.arguments) as { thread_id: string; message: string; on_mac?: boolean };
+        const a = JSON.parse(item.arguments) as { thread_id: string; message: string; on_mac?: boolean; deploy?: boolean };
         const s = followUps.find((x) => x.id === a.thread_id);
         const message = a.message?.trim();
         if (!s || !message) notes.push("Couldn't find that task");
@@ -3085,11 +3094,25 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             sessionIds.push(moved.id);
             notes.push(`Moved ${s.title} to your Mac: “${message}”`);
           } else {
+            // More asked of a task on an app that already put a change on its Preview (`from`: hosted-apps.ts keepHeads
+            // and deployAfterTask set it only on a task asked to deploy, and deployAfterTask took that ask off): its next
+            // commit goes there too (hosted-apps.ts askDeployAgain), on work_on_app's rule: unless the call says not to
+            // (deploy false: the user said to keep it off its Preview), on the user's own turn, and after an outside read
+            // only when their own words asked to deploy, else a note says it won't. Set before the run is queued, so it
+            // ends with the deploy.
+            const appNow = () => getState().sessions.find((x) => x.id === s.id)?.app;
+            const was = appNow();
+            const again = !!was && was.from !== undefined && a.deploy !== false && !bg && !opts.outside;
+            const deploy = again && (!outsideRead || (await ownerAskedForSite(chatId, botId, "deploy", member)));
+            if (deploy) askDeployAgain(s.id);
+            // (One still asked to, from before: its run's end deploys it as it would have.)
+            const held = again && !deploy && !appNow()?.deployAfter;
             // Passed on from someone else's email: the task gets it as information from them, not the user's words.
             replyToSession(s.id, message, undefined, outsideFrom, member ? saidOf(member) : undefined);
             sessionIds.push(s.id);
             // What the task got, in the bot's words, so a wrong send is plain to see.
             notes.push(`Sent to ${s.title}: “${message}”`);
+            if (held && was) appNote(`Won't put ${was.name} on its Preview after: this turn read something from outside Bops, so apps go on the web only when ${ownerName()} asks for it themselves`);
             if (cloud && a.on_mac === true && asked && !mac?.ready) notes.push(`Couldn't move ${s.title} to your Mac: ${mac?.reason ?? "your Mac isn't set up for bots yet"}`);
             // Suggested, but not asked for by the user: they decide ("Move to your Mac?" under its chip).
             else if (cloud && (a.on_mac === true || mentionsMac(ownWords)) && mac?.ready) offerMove(s.id);

@@ -2345,6 +2345,129 @@ await check("Asked of a task already on the app (foldInto hands that one back): 
   assert.match(twin, /foldInto\(twin, s\.goal, where, opts\);\n.*\n\s*if \(s\.app\?\.deployAfter\) askDeploy\(twin\.id, s\.app\);/);
 });
 
+await check("More asked of a task on the app that already put a change on its Preview (tell_task): the next commit goes there too; not for a task never asked to deploy, nor when the call says not to (Alex said to keep it off its Preview), nor on a turn that read something from outside Bops unless Alex's own words asked to deploy (a note says so)", async () => {
+  // Each thread its own title, so the chat's note says which one got it; the bot's say ends the turn (one answer),
+  // a web_fetch first takes a second.
+  const tell = async (id, text, { before = [], deploy = true } = {}) => {
+    const call = toolCall("tell_task", { thread_id: id, message: "Put the old title back.", on_mac: false, deploy, say: "Passing it on." });
+    if (before.length) answers.push(calling(...before), calling(call));
+    else answers.push(calling(call));
+    const n = asked.length;
+    const m = messages().length;
+    await Chat.handleMessage(chatId, text);
+    assert.equal(answers.length, 0, "every answer read");
+    // Asked every turn, whichever task it's for (the tools stay the same: prompt caching).
+    const tool = asked[n].tools.find((x) => x.name === "tell_task");
+    assert.deepEqual(Object.keys(tool.parameters.properties), ["thread_id", "message", "on_mac", "deploy", "say"]);
+    assert.deepEqual(tool.parameters.required, ["thread_id", "message", "on_mac", "deploy", "say"]);
+    assert.equal(tool.parameters.properties.deploy.type, "boolean");
+    assert.match(hear(tool.parameters.properties.deploy.description), /^For a task on one of your workspace's apps: true \(the default\), once it's committed Bops deploys it to its Preview again, never its domain\. False only when Alex says not to put it on its Preview: then it's only committed\. Ignored for a task on no app\.$/);
+    // What's said after the note that says which task got it.
+    const lines = messages().slice(m).filter((x) => x.role === "system");
+    const at = lines.findIndex((x) => x.text === `Sent to Work on ${id}: “Put the old title back.”`);
+    assert.ok(at >= 0, "sent to it");
+    return lines.slice(at + 1);
+  };
+  const done = (id, app) => appSession(id, { title: `Work on ${id}`, status: "done", endedAt: Date.now(), app });
+  // Deployed once: deployAfterTask took the ask off and kept what it deployed (from).
+  done("ses_again", { ...RECIPE, from: recipeHead() });
+  assert.deepEqual(await tell("ses_again", "Now put the old title back"), [], "nothing more said");
+  assert.equal(sessionOf("ses_again").app.deployAfter, true, "the follow-up's commit goes to the Preview");
+  // Alex says to keep this one off the Preview: the call says deploy false, and it's only committed.
+  done("ses_hold", { ...RECIPE, from: recipeHead() });
+  assert.deepEqual(await tell("ses_hold", "Also try a red footer, but don't put it on the Preview yet, the client is looking at it", { deploy: false }), []);
+  assert.equal(sessionOf("ses_hold").app.deployAfter, undefined, "deploy false");
+  // Started with deploy false (Alex said not to put it on its Preview): never asked, so a follow-up isn't either.
+  done("ses_never", { ...RECIPE });
+  await tell("ses_never", "Now put the old title back");
+  assert.equal(sessionOf("ses_never").app.deployAfter, undefined);
+  done("ses_out", { ...RECIPE, from: recipeHead() });
+  const held = await tell("ses_out", "Use the title from that page", { before: [toolCall("web_fetch", { url: "https://example.com/menu" })] });
+  assert.equal(sessionOf("ses_out").app.deployAfter, undefined, "a turn that read the web");
+  // Said, as work_on_app says it, so the bot's "it'll be on the Preview shortly" isn't the last word.
+  assert.deepEqual(
+    held.map((x) => [hear(x.text), x.appNote]),
+    [["Won't put recipe-box on its Preview after: this turn read something from outside Bops, so apps go on the web only when Alex asks for it themselves", true]],
+  );
+  // Nothing said when the call kept it off the Preview anyway.
+  assert.deepEqual(await tell("ses_out", "Use the title from that page, but don't deploy it", { before: [toolCall("web_fetch", { url: "https://example.com/menu" })], deploy: false }), []);
+  assert.equal(sessionOf("ses_out").app.deployAfter, undefined);
+  assert.deepEqual(await tell("ses_out", "Use the title from that page and deploy it", { before: [toolCall("web_fetch", { url: "https://example.com/menu" })] }), [], "no note");
+  assert.equal(sessionOf("ses_out").app.deployAfter, true, "Alex's own words asked");
+});
+
+await check("More asked of that task straight from the chat, with no bot turn (a reply to its Preview note, its reply box; a member's reply: test-member-acts): the next commit goes to the Preview too, unless the words say not to; never for a task never asked to deploy", async () => {
+  const done = (id, app) => appSession(id, { title: `Work on ${id}`, status: "done", endedAt: Date.now(), app });
+  // deployAfterTask's note, under the task's chip, as the bot: Alex taps Reply on it.
+  const note = (id) => S.addMessage({ chatId, role: "bot", botId: "boppy", text: "Preview: deploying recipe-box. What changed: A green title", sessionIds: [id], appNote: true, bops: true });
+  const replyTo = async (id, text) => {
+    const n = asked.length;
+    const m = messages().length;
+    await Chat.handleMessage(chatId, text, note(id).id);
+    // Gone straight to the task: no bot turn (the one ask is acknowledge's short line), and its line under the task's chip.
+    assert.ok(asked.slice(n).every((b) => !b.tools?.some((x) => x.name === "tell_task")), "no bot turn");
+    assert.deepEqual(messages().slice(m).at(-1)?.sessionIds, [id]);
+  };
+  done("ses_reply", { ...RECIPE, from: recipeHead() });
+  await replyTo("ses_reply", "Now put the old title back");
+  assert.equal(sessionOf("ses_reply").app.deployAfter, true, "a reply to its note");
+  done("ses_reply_hold", { ...RECIPE, from: recipeHead() });
+  await replyTo("ses_reply_hold", "Also try a red footer, but don't put it on the Preview yet");
+  assert.equal(sessionOf("ses_reply_hold").app.deployAfter, undefined, "Alex said not to");
+  done("ses_reply_never", { ...RECIPE });
+  await replyTo("ses_reply_never", "Now put the old title back");
+  assert.equal(sessionOf("ses_reply_never").app.deployAfter, undefined, "never asked to deploy");
+  // The thread's own reply box.
+  const ReplyRoute = await import(`${root}/app/api/sessions/[sessionId]/reply/route.ts`);
+  const box = async (id, text) => {
+    const res = await ReplyRoute.POST(new Request(`http://localhost:3210/api/sessions/${id}/reply`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) }), { params: Promise.resolve({ sessionId: id }) });
+    assert.deepEqual(await res.json(), { ok: true, watch: null });
+  };
+  done("ses_box", { ...RECIPE, from: recipeHead() });
+  await box("ses_box", "Now put the old title back");
+  assert.equal(sessionOf("ses_box").app.deployAfter, true, "its reply box");
+  done("ses_box_hold", { ...RECIPE, from: recipeHead() });
+  await box("ses_box_hold", "Keep it off the Preview for now and make the footer red");
+  assert.equal(sessionOf("ses_box_hold").app.deployAfter, undefined);
+  // A task on no app, or one that's gone: nothing.
+  H.askDeployAgain("ses_nothing_here", "Now put the old title back");
+  done("ses_plain", undefined);
+  H.askDeployAgain("ses_plain", "Now put the old title back");
+  assert.equal(sessionOf("ses_plain").app, undefined);
+});
+
+await check("Words sent straight to a task that say not to put it on its Preview (keepsOffPreview); a question or a complaint about the Preview isn't one", () => {
+  for (const w of [
+    "don't put it on the Preview yet",
+    "Also try a red footer, but don't put it on the Preview yet, the client is looking at it",
+    "Do not deploy this",
+    "dont redeploy",
+    "Hold off on deploying it",
+    "wait until tomorrow to deploy",
+    "Keep it off the preview for now",
+    "make it red but not on the preview",
+    "no deploy this time",
+    "Never deploy on a Friday",
+    "Deploy it later",
+    "Make it red. Don’t put it on the Preview.",
+  ])
+    assert.equal(H.keepsOffPreview(w), true, w);
+  for (const w of [
+    "Now put the old title back",
+    "The Preview still shows the old title",
+    "It's not on the Preview yet, and make the footer red",
+    "Why didn't it deploy? Put the old title back",
+    "I don't see it on the Preview",
+    "I don't think the preview updated",
+    "Don't change the header, deploy the rest",
+    "Don't forget to deploy it",
+    "No, make it bigger and deploy",
+    "Take the logo off and deploy",
+    "Put it on the Preview",
+  ])
+    assert.equal(H.keepsOffPreview(w), false, w);
+});
+
 await check("As a task first starts, the app's newest commit is noted, once (picked up again, it's kept): where its changes start (startHead), and for one asked to deploy, what a new commit is told from; a task that started before reads nothing more of Ingot", async () => {
   appSession("ses_dep");
   const head = recipeHead();
@@ -2406,6 +2529,26 @@ await check("Asked again of that task with nothing new committed since it went l
   await H.deployAfterTask("ses_dep");
   assert.equal(deploysSince(n).length, 1);
   assert.equal(stagingDeploys()[0].source_version, c2.id);
+  assert.equal(sessionOf("ses_dep").app.deployAfter, undefined);
+});
+
+await check("Picked up again while its end still reads Ingot (more asked of it, as tell_task queues it): that end deploys nothing and keeps the ask, so the next run's end deploys its newest commit", async () => {
+  H.askDeploy("ses_dep", RECIPE);
+  const c4 = commit("recipe-box", "A red title", { id: "boppy", name: "Boppy" });
+  const n = web.calls.length;
+  const m = messages().length;
+  const ending = H.deployAfterTask("ses_dep");
+  S.patchSession("ses_dep", { status: "queued" });
+  await ending;
+  assert.deepEqual(deploysSince(n), [], "not the run that ended");
+  assert.equal(messages().length, m, "nothing said");
+  assert.equal(sessionOf("ses_dep").app.deployAfter, true, "the ask stays");
+  const c5 = commit("recipe-box", "The old title back", { id: "boppy", name: "Boppy" });
+  S.patchSession("ses_dep", { status: "done" });
+  await H.deployAfterTask("ses_dep");
+  assert.equal(deploysSince(n).length, 1, "once");
+  assert.equal(stagingDeploys()[0].source_version, c5.id, "the newest, with the earlier commit in it");
+  assert.notEqual(c4.id, c5.id);
   assert.equal(sessionOf("ses_dep").app.deployAfter, undefined);
 });
 

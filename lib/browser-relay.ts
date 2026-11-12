@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { probeInput, probeTiming } from "@/cloud/browser-probe";
 import { isBrowserMethod, POINTER_KINDS, type BrowserActivity, type BrowserFrameMeta, type BrowserPerson, type BrowserPointer, type BrowserTab, type BrowserToRunner, type RunnerToBrowser } from "@/cloud/protocol";
 
 /**
@@ -31,7 +32,7 @@ import { isBrowserMethod, POINTER_KINDS, type BrowserActivity, type BrowserFrame
  *   or reach, and each goes to the viewers labelled with who drove it: the person in control, else the bot. So the bot's
  *   cursor shows however it moves (xdotool on the screen, Playwright over CDP), and so does a person's. Never kept.
  *
- * It imports only `ws` and the protocol, so plain Node runs it (the stand-in) as well as the Next server.
+ * Its dependencies are `ws`, the protocol and optional safe timing logs; plain Node runs it as well as Next.
  */
 
 export { BOPS_DEVICE_HEADER as DEVICE_HEADER } from "@/cloud/protocol";
@@ -391,6 +392,7 @@ class Screen {
         void cdp.send("Page.screencastFrameAck", { sessionId: p.sessionId }).catch(() => {});
         if (this.cdp !== cdp) return;
         const frame = { data: String(p.data ?? ""), meta: p.metadata as BrowserFrameMeta };
+        probeTiming("source_frame", { timestamp: frame.meta.timestamp, bytes: Buffer.byteLength(frame.data, "base64") });
         this.last.frame = frame;
         if (this.watchers().length && this.relay.send({ t: "frame", bots: this.watchers(), ...frame }, true)) this.framesSent++;
       });
@@ -675,7 +677,7 @@ class RelayCore {
 
   private heard(m: BrowserToRunner) {
     if (!m || typeof m !== "object" || typeof m.bot !== "string") return;
-    if (m.t === "watch") return this.watch(m.bot, Array.isArray(m.viewers) ? m.viewers : []);
+    if (m.t === "watch") return this.watch(m.bot, Array.isArray(m.viewers) ? m.viewers : [], m.joined === true);
     const sc = this.screenOf(m.bot);
     if (!sc) return m.who && this.refuse(m.bot, m.who.id, "Its browser isn't open right now.");
     if (m.t === "take") {
@@ -689,6 +691,7 @@ class RelayCore {
       return;
     }
     if (m.t === "input") {
+      probeInput("runner_got", m.method, m.params);
       if (!isBrowserMethod(m.method)) return this.refuse(m.bot, m.who.id, "The browser tab can't do that.");
       if (sc.controller?.who.id !== m.who.id) return this.refuse(m.bot, m.who.id, "Take over first.");
       const params = cleanInput(m.method, m.params);
@@ -698,7 +701,7 @@ class RelayCore {
   }
 
   /** Who watches a bot's browser now: its screen captured while anyone does; a person in control who left hands it back. */
-  private watch(bot: string, viewers: BrowserPerson[]) {
+  private watch(bot: string, viewers: BrowserPerson[], joined: boolean) {
     const had = this.screenOf(bot);
     const want = viewers.length ? this.screen(this.botScreen.get(bot) ?? this.o.screenFor(bot) ?? this.o.screens()[0]?.display ?? -1) : null;
     if (had && had !== want) {
@@ -713,8 +716,9 @@ class RelayCore {
     this.botScreen.set(bot, want.display);
     want.watch();
     if (want.controller && !want.watchedBy(want.controller.who.id)) want.setController(null);
-    // Someone new: they see the screen at once, not at its next paint.
-    if (viewers.some((v) => !before.some((b) => b.id === v.id))) want.catchUp([bot]);
+    // Someone new, or a stream just opened (someone already watching, on another Mac or window): they see the screen at
+    // once, not at its next paint.
+    if (joined || viewers.some((v) => !before.some((b) => b.id === v.id))) want.catchUp([bot]);
   }
 
   status() {
