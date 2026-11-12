@@ -1364,7 +1364,7 @@ await test("Add a domain from Cloudflare: From Cloudflare first, above Your doma
     assert.ok(panel().innerHTML.indexOf("data-cloudflare") < panel().innerHTML.indexOf('role="tablist"'), "above the two ways");
     const zone = () => panel().querySelector('[data-cloudflare-domain="acme.test"]');
     const other = panel().querySelector('[data-cloudflare-domain="example.com"]');
-    assert.ok(!other.querySelector("input") && other.textContent.includes("example.com") && other.textContent.includes("Side"), "the domain, its account, Use");
+    assert.ok(!other.querySelector("input") && [...other.querySelectorAll("*")].some((e) => e.textContent === "example.com") && other.textContent.includes("Side"), "the domain, its account, Use");
     assert.equal(zone().querySelector("[data-owned-hint]").textContent, "acme.test is on shop. Type a name under it.");
     assert.ok(zone().textContent.includes("Acme"));
     assert.ok(block.textContent.includes("Showing your first 200 Cloudflare domains."), "more than 200: says so");
