@@ -362,6 +362,16 @@ export type Workspace = {
    */
   appsForMembers?: AppsForMembers;
   /**
+   * Each site's newest Preview password, by "<app>/<site>" (the app's own site named as the app): the link it's for, the
+   * password, and when Bops Cloud took it, by its clock. Only Bops Cloud writes it, as whoever set the password tells it
+   * (cloud/preview-passwords.ts: this Mac, or the app's own computer's runner, which can set one but never read one
+   * back: lib/server/preview-password-share.ts), so people with Your Apps at Write get each new one whether this Mac is
+   * on or not (cloud/ws-slice.ts appsFor). This Mac only carries it along, and tells Bops Cloud what Orgo has where a
+   * share missed (lib/server/apps-for-members.ts fixCloudCopy): never in a bot's chat or prompt, never read
+   * by a computer (cloud/computer-scope.ts forComputer), and never in a window that doesn't show apps (lib/apps-access.ts).
+   */
+  previewPasswords?: Record<string, { url: string; password: string; at: number }>;
+  /**
    * The keys this workspace's bots see (lib/server/keys.ts keysOf), by name and whose, as this Mac last read the vault:
    * what people with Keys are shown (cloud/ws-slice.ts keyNamesOf), so they switch bots on and off for any of them. Only
    * there while anyone else is in the workspace (lib/server/keys.ts seeKeysFor); never a value. A Bops from before never

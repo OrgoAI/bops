@@ -391,6 +391,29 @@ await check("what a computer reads (forComputer): only its bots' things and a te
   assert.equal(C.carriesPasswords(C.forComputer(pass, scope)), false);
   assert.equal(C.carriesPasswords(pass), true);
   assert.deepEqual(C.withHeldBack(pass, C.forComputer(pass, scope), scope), pass);
+  // Bops Cloud's own copy of each Preview password (Workspace.previewPasswords), with no copy of the Mac's beside it: never
+  // read (with a scope or without), a write that carries one refused before it's compared, and one of what it read kept.
+  const KEPT = { "a/w": { url: "https://k7p2qxm4wr3d.orgo.dev", password: "Kq7mZ3x", at: 1 } };
+  const cloudPass = { ...base, workspaces: [{ id: "ws_main", name: "Acme", previewPasswords: KEPT }] };
+  for (const view of [C.forComputer(cloudPass, scope), C.forComputer(cloudPass)]) {
+    assert.ok(!JSON.stringify(view).includes("Kq7mZ3x"));
+    assert.equal(C.carriesPasswords(view), false);
+    assert.equal(view.workspaces[0].name, "Acme", "the rest of the workspace as it is");
+  }
+  assert.equal(C.carriesPasswords(cloudPass), true);
+  assert.equal(C.carriesPasswords({ ...base, workspaces: [{ id: "ws_main", name: "Acme", previewPasswords: {} }] }), true, "even an empty one");
+  const putBack = C.withHeldBack(cloudPass, structuredClone(C.forComputer(cloudPass, scope)), scope);
+  assert.deepEqual(putBack, cloudPass, "put back as kept");
+  assert.deepEqual(C.writeDenials(cloudPass, putBack, scope), []);
+  // A runner's own copy (one it made up, or the right one) never stands: Bops Cloud's is put back.
+  const sent = structuredClone(C.forComputer(cloudPass, scope));
+  sent.workspaces[0].previewPasswords = { "a/w": { ...KEPT["a/w"], password: "Zz9yXw8" } };
+  assert.deepEqual(C.keepAllowed(cloudPass, sent, scope).blob.workspaces[0].previewPasswords, KEPT);
+  // Both copies at once: both left out, both put back.
+  const both = { ...base, workspaces: [{ ...pass.workspaces[0], previewPasswords: KEPT }] };
+  const bothSeen = C.forComputer(both, scope);
+  assert.ok(!JSON.stringify(bothSeen).includes("p4ss") && !JSON.stringify(bothSeen).includes("Kq7mZ3x"));
+  assert.deepEqual(C.withHeldBack(both, structuredClone(bothSeen), scope), both);
 });
 
 await check("its apps on the web: what its deploys, Previews and Locals keep lands over what it read (a workspace without its Preview passwords), the passwords kept; another workspace's app never", () => {
