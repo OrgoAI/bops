@@ -344,10 +344,11 @@ const SITE_SEEN_WRITE: Spec = { ...SITE_SEEN, previewPassword: true };
 /**
  * A Write viewer's sites (as SITE_SEEN_WRITE kept them) with each Preview's password as Bops Cloud keeps it from whoever
  * set it last (Workspace.previewPasswords, cloud/preview-passwords.ts: "<app>/<site>"), for a site whose Preview link is
- * the one it was set for: that one over the copy the owner's Mac read (appsForMembers), which stays for a site Bops
- * Cloud has none for. One for a link the site no longer has is never shown. One a share never reached is put right by
- * the owner's Mac as it reads Orgo for members (lib/server/apps-for-members.ts fixCloudCopy), and each sender keeps
- * trying its newest for about 20 minutes (lib/server/preview-password-share.ts).
+ * the one it was set for (the owner's Mac's read, or the link Bops Cloud filled in from that entry: sitesFilled): that one
+ * over the copy the owner's Mac read (appsForMembers), which stays for a site Bops Cloud has none for. One for a link the
+ * site no longer has is never shown. One a share never reached is put right by the owner's Mac as it reads Orgo for
+ * members (lib/server/apps-for-members.ts fixCloudCopy), and each sender keeps trying its newest for about 20 minutes
+ * (lib/server/preview-password-share.ts).
  */
 function withCloudPasswords(app: string, sites: unknown, kept: Record<string, unknown>): unknown {
   if (!Array.isArray(sites)) return sites;
@@ -359,6 +360,67 @@ function withCloudPasswords(app: string, sites: unknown, kept: Record<string, un
     return { ...s, previewProtected: true, previewPassword: p.password, ...(typeof p.at === "number" ? { previewPasswordAt: p.at } : {}) };
   });
 }
+
+/** How many sites an app can have (lib/hosted-apps.ts MAX_SITES), its own among them: as many as the owner's Mac reads for members. */
+const MAX_SITES = 5;
+/**
+ * A Preview's link as Orgo makes one (https://<label>.orgo.dev, or under another of Orgo's names in orgo.dev, as
+ * web.orgo.dev or staging.orgo.dev: which one is orgo-web's to say, so a label alone can't give the link), and nothing
+ * else: no port, path, query or sign in, exactly as written.
+ */
+const PREVIEW_LINK = /^https:\/\/([a-z0-9]{12})\.(?:[a-z0-9-]{1,63}\.){0,4}orgo\.dev\/?$/;
+
+/**
+ * A site's Preview link as Bops Cloud knows it with the owner's Mac off: the link its newest password was shared for
+ * (`entry`: Workspace.previewPasswords' url, from the app's own computer or the owner's Bops), only when that's a
+ * Preview's link (PREVIEW_LINK) whose label is the site's own label copy on the app's record (`label`). A computer keeps
+ * as that copy only a label sealed for the app and site (computer-scope.ts sealedFor), and shares only its own apps'
+ * passwords (appHomeHere), so no runner puts a link of its choosing in Your Apps; an entry for a link the record no
+ * longer names (an app made again, a site given a new link) is never one. Never reads the password.
+ */
+function previewLinkOf(label: unknown, entry: unknown): string | undefined {
+  if (typeof label !== "string" || !isObject(entry) || typeof entry.url !== "string" || entry.url.length > 256) return undefined;
+  const m = PREVIEW_LINK.exec(entry.url);
+  return m && m[1] === label ? entry.url : undefined;
+}
+
+/** An app's sites as its record has them (lib/hosted-apps.ts AppHosting: its own first, named as the app), each with its Preview label copy and whether the owner turned its password off. */
+function recordSites(name: string, host: Record<string, unknown>): { site: string; label: unknown; off: boolean }[] {
+  const out = [{ site: name, label: host.preview, off: host.passwordOff === true }];
+  for (const s of Array.isArray(host.sites) ? host.sites : [])
+    if (isObject(s) && typeof s.name === "string" && /^[a-z0-9-]{1,64}$/.test(s.name) && !out.some((x) => x.site === s.name)) out.push({ site: s.name, label: s.preview, off: s.passwordOff === true });
+  return out.slice(0, MAX_SITES);
+}
+
+/**
+ * An app's sites as a member is shown them, before the allow list: the owner's Mac's read (`mac`, appsForMembers), with
+ * each Preview link Bops Cloud knows (previewLinkOf) where that read has none, so a new app's Preview (a bot made it on
+ * its computer, the owner's Mac off) is there at once: on a site read before its Preview was made, and as a row of its
+ * own for a site never read. With no read at all, one row for each site of the record, the app's own first (what Your
+ * Apps shows up top). A link Bops Cloud fills in asks for a password (a password was shared for it); the password itself
+ * is withCloudPasswords', at Write. A link the owner's Mac read stands as it is. Nothing for an app that lost its
+ * computer (its Preview went with it), nor a site whose password the owner turned off (no share says its link: the
+ * owner's Mac's read does). Undefined: no sites to show.
+ */
+function sitesFilled(name: string, host: Record<string, unknown>, mac: unknown[] | undefined, links: Record<string, unknown>): unknown[] | undefined {
+  if (host.lost !== undefined) return mac;
+  const sites = recordSites(name, host);
+  const linkOf = new Map<string, string>();
+  for (const s of sites) {
+    const key = `${name}/${s.site}`;
+    const link = s.off ? undefined : previewLinkOf(s.label, Object.hasOwn(links, key) ? links[key] : undefined);
+    if (link) linkOf.set(s.site, link);
+  }
+  if (!linkOf.size) return mac;
+  const row = (site: string) => ({ name: site, url: null, preview: linkOf.get(site) ?? null, ...(linkOf.has(site) ? { previewProtected: true } : {}), serving: null, live: null });
+  // (None read, or only a member's act kept on it: lib/server/apps-for-members.ts noteMemberAct.)
+  if (!mac?.length) return sites.map((s) => row(s.site));
+  const read = new Set(mac.flatMap((r) => (isObject(r) && typeof r.name === "string" ? [r.name] : [])));
+  const filled = mac.map((r) => (isObject(r) && typeof r.name === "string" && typeof r.preview !== "string" && linkOf.has(r.name) ? { ...r, preview: linkOf.get(r.name), previewProtected: true } : r));
+  const more = sites.filter((s) => linkOf.has(s.site) && !read.has(s.site)).map((s) => row(s.site));
+  return [...filled, ...more.slice(0, Math.max(0, MAX_SITES - filled.length))];
+}
+
 const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
 /** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
 const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
@@ -373,8 +435,12 @@ const githubOf = (g: unknown): { repo: string; branch: string; at: string | null
   isObject(g) && typeof g.repo === "string" && typeof g.branch === "string" && g.repo.length <= 201 && g.branch.length <= 200
     ? { repo: g.repo, branch: g.branch, at: isObject(g.last) && typeof g.last.ingot === "string" && g.last.ingot.length <= 100 ? g.last.ingot : null }
     : undefined;
-/** The most apps a member is shown. */
-const MAX_SHARED_APPS = 30;
+/**
+ * The most apps a member is shown: as many as a workspace's computers may make (computer-scope.ts MAX_APPS_FROM_COMPUTER),
+ * as new ones come last. The owner's Mac reads the first 30 for members (lib/hosted-apps.ts MEMBER_APPS); each one after
+ * those is shown by name, with its Preview's link and password once its computer shared them (sitesFilled).
+ */
+const MAX_SHARED_APPS = 100;
 
 /**
  * Whether a workspace's apps are shown to `viewer` (apps-team.ts): "write" (as far as their level goes) when orgo-web
@@ -393,10 +459,12 @@ export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer
  * Admin always has Write: viewerAccess). A workspace with no apps yet gives an empty list. Allow lists only: of each app's record its name, its
  * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
  * members (Workspace.appsForMembers) its head, sites (each with its Preview's link and state), history, deploys and
- * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. The
- * password is the one Bops Cloud keeps from whoever set it last (Workspace.previewPasswords: withCloudPasswords), else
- * the owner's Mac's copy; it changes their slice, so a Write viewer watching gets a new fingerprint and reads it. Never
- * its variables, tokens, keys, logs, error text, computer or project ids.
+ * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. A site's
+ * Preview link the owner's Mac hasn't read (a new app a bot made on its computer while the Mac was off) is the one its
+ * password was shared for, when the app's record names it (sitesFilled), at Read too: that it asks for a password, never
+ * the password. The password is the one Bops Cloud keeps from whoever set it last (Workspace.previewPasswords:
+ * withCloudPasswords), else the owner's Mac's copy; it changes their slice, so a Write viewer watching gets a new
+ * fingerprint and reads it. Never its variables, tokens, keys, logs, error text, computer or project ids.
  */
 export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>): SharedApps | undefined {
   const open = appsOpenFor(viewer);
@@ -410,8 +478,10 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   if (!isObject(workspace.hostedApps)) return { level: write ? "write" : "read", at: 0, list: [] };
   const seen = isObject(workspace.appsForMembers) ? workspace.appsForMembers : {};
   const seenApps = isObject(seen.apps) ? seen.apps : {};
-  // Each Preview's password as whoever set it last told Bops Cloud: Write only, over the owner's Mac's copy.
-  const passwords = write && isObject(workspace.previewPasswords) ? workspace.previewPasswords : {};
+  // Each Preview's password as whoever set it last told Bops Cloud, with the link it's for: that link at every level, where
+  // the owner's Mac read none (sitesFilled reads its url alone); the password at Write only, over the owner's Mac's copy.
+  const links = isObject(workspace.previewPasswords) ? workspace.previewPasswords : {};
+  const passwords = write ? links : {};
   const list: SharedApp[] = Object.entries(workspace.hostedApps)
     .filter(([name, h]) => /^[a-z0-9-]{1,64}$/.test(name) && isObject(h))
     .slice(0, MAX_SHARED_APPS)
@@ -420,6 +490,7 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
       const got = isObject(seenApps[name]) ? (seenApps[name] as Record<string, unknown>) : {};
       const settings = write && isObject(got.settings) ? Object.fromEntries(Object.entries(got.settings).filter(([site, v]) => /^[a-z0-9-]{1,64}$/.test(site) && isObject(v)).map(([site, v]) => [site, keep(v, SETTINGS_SEEN)])) : undefined;
       const sites = Array.isArray(host.sites) ? host.sites.flatMap((x) => (isObject(x) && typeof x.name === "string" ? [x.name] : [])) : [];
+      const rows = sitesFilled(name, host, Array.isArray(got.sites) ? got.sites : undefined, links);
       const app: Record<string, unknown> = {
         name,
         ...(typeof host.botId === "string" && botsSeen.has(host.botId) ? { botId: host.botId } : {}),
@@ -429,7 +500,7 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
         ...(githubOf(host.github) ? { github: githubOf(host.github) } : {}),
         ...(sites.length ? { siteNames: sites } : {}),
         ...(got.head === null ? { head: null } : isObject(got.head) ? { head: keep(got.head, { id: true, message: true, at: true }) } : {}),
-        ...(Array.isArray(got.sites) ? { sites: write ? withCloudPasswords(name, keep(got.sites, [SITE_SEEN_WRITE]), passwords) : keep(got.sites, [SITE_SEEN]) } : {}),
+        ...(rows ? { sites: write ? withCloudPasswords(name, keep(rows, [SITE_SEEN_WRITE]), passwords) : keep(rows, [SITE_SEEN]) } : {}),
         ...(Array.isArray(got.commits) ? { commits: keep(got.commits, [COMMIT_SEEN]) } : {}),
         ...(Array.isArray(got.deploys) ? { deploys: keep(got.deploys, [DEPLOY_SEEN]) } : {}),
         ...(Array.isArray(got.acts) ? { acts: keep(got.acts, [ACT_SEEN]) } : {}),
