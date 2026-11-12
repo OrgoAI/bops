@@ -298,8 +298,13 @@ async function claimAndAnswer(ev: RunnerTurnEvent) {
     async () => {
       // The skills the owner or an Admin published in Orgo, read first (runner-skills.ts, a few seconds at most): the bot
       // follows them with the owner's Mac off.
-      const b = getState().bots.find((x) => x.id === t.botId);
-      if (b) await import("./runner-skills").then((m) => m.refreshRunnerSkills(workspaceOf(b)), () => {});
+      // Never in the way: a read that fails leaves the turn as it would have been.
+      try {
+        const b = (getState().bots ?? []).find((x) => x.id === t.botId);
+        if (b) await (await import("./runner-skills")).refreshRunnerSkills(workspaceOf(b));
+      } catch (e) {
+        console.warn(`[runner-chat] ${t.id}: skills from Orgo: ${(e as Error).message}`);
+      }
       return answer(t.chatId, t.messageId, saidBy(t.member));
     },
     { messageId: t.messageId },

@@ -200,9 +200,12 @@ export function refsOf(wsId: string, kind?: SkillKind): SkillRef[] {
 
 /** A published skill Orgo lists, as a ref here: published at its version, for its bots or by its label. */
 const runnerRef = (x: RunnerSkill, r?: SkillRef): SkillRef => {
-  const { label: _label, risk: _risk, ...rest } = r ?? ({} as Partial<SkillRef>);
+  // The state's own fields (its uses, the id it had as a procedure), never its label or risk: Orgo's say those.
+  const rest: Partial<SkillRef> = { ...r };
+  delete rest.label;
+  delete rest.risk;
   return {
-    ...(rest as Partial<SkillRef>),
+    ...rest,
     slug: x.slug,
     kind: x.kind,
     name: x.name,
