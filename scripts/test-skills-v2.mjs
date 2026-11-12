@@ -18,6 +18,7 @@
 // in a throwaway folder: nothing reaches a real service. The keys in it are made up.
 // Usage: node --conditions=react-server scripts/test-skills-v2.mjs
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
@@ -104,6 +105,22 @@ async function fakeOrgo(req, url) {
     if (req.method === "GET") return json({ kinds: [], ...fields });
     orgo.maps.push({ pid: map[1], body });
     return json({ ok: true, kinds: [], ...fields });
+  }
+  // A computer's runner reading its workspace's published skills (runner-skills.ts): `runnerRead` by project, as
+  // orgo-web answers a computer's own key (published ones only, each at its version; approvals with the role); `down`
+  // (no answer) and `refuse` (an orgo-web from before: 403 computer_key).
+  const rr = url.pathname.match(/^\/api\/projects\/([^/]+)\/skills(?:\/([^/]+))?(?:\/(export))?$/);
+  if (rr && orgo.runnerRead?.[rr[1]]) {
+    const o = orgo.runnerRead[rr[1]];
+    if (o.down) throw new TypeError("fetch failed");
+    if (o.refuse) return json({ error: "A computer’s own key can’t list a workspace’s skills.", code: "computer_key" }, 403);
+    const [, , sid, sub] = rr;
+    const sha = (t) => createHash("sha256").update(t).digest("hex");
+    if (!sid) return json({ skills: o.skills.map((x) => ({ id: x.id, slug: x.slug, name: x.name, description: x.description, type: "skill", status: x.status ?? "published", bot_ids: x.bot_ids, updated_at: x.updated_at ?? "2026-11-12T09:00:00.000Z", current_version: { version: x.version } })), deleted: [], full: true });
+    if (sid === "approvals") return json({ approvals: o.approvals });
+    const x = o.skills.find((y) => y.id === sid);
+    if (sub === "export" && x) return json({ slug: x.slug, name: x.name, version: x.version, files: { "SKILL.md": { content: x.md }, ...Object.fromEntries(Object.entries(x.files ?? {}).map(([p, c]) => [p, { content: c, sha256: sha(c), executable: p.startsWith("scripts/") }])) } });
+    return json({ error: "Skill not found.", code: "not_found" }, 404);
   }
   const labels = url.pathname.match(/^\/api\/projects\/([^/]+)\/skill-labels$/);
   if (labels) {
@@ -751,6 +768,122 @@ await check("Update from folder: the folder is the skill's next version (its lab
   const other = await route({ action: "import", ws: "ws_main", slug: "morning-sweep", path: folder("evening-sweep", "---\nname: evening-sweep\ndescription: x\n---\n# Evening\n") });
   assert.equal(other.status, 400);
   assert.equal((await route({ action: "import", ws: "ws_main", slug: "nope", path: f })).status, 404);
+});
+
+/* ---------------- A computer's runner, with the owner's Mac off ---------------- */
+
+/** On a runner, the computer's own key (made up) as its sign in holds it (orgo-auth.ts runnerKey), never the VMM's look; and a runner that would stop, kept. */
+const A = await import(`${root}/lib/server/orgo-auth.ts`);
+A.orgoAuthForTests.leave((why) => logged.push(`left: ${why}`));
+const asRunner = () => {
+  process.env.BOPS_RUNNER = "1";
+  globalThis.bopsRunnerAuth = { ...(globalThis.bopsRunnerAuth ?? {}), picking: Promise.resolve(ORGO_KEY) };
+};
+const asMac = () => {
+  delete process.env.BOPS_RUNNER;
+  if (globalThis.bopsRunnerAuth) delete globalThis.bopsRunnerAuth.picking;
+};
+
+await check("On a computer's runner with the owner's Mac off: Orgo's published skills, read with the computer's key, are its bots' by Bops' own rule; read_skill reads them; a copy carries them, runnable only on the owner's or an Admin's approval", async () => {
+  const R = await import(`${root}/lib/server/runner-skills.ts`);
+  const md = (slug, label, text) => `---\nname: ${slug}\ndescription: d\nmetadata:\n  label: ${label}\n  version: "1.0.0"\n---\n${text}`;
+  const CLOSE = "#!/bin/sh\necho closing\n";
+  const OTHER = "#!/bin/sh\necho other\n";
+  const sha = (t) => createHash("sha256").update(t).digest("hex");
+  orgo.runnerRead = {
+    p_lab: {
+      skills: [
+        // An Admin published it in Orgo: by its label, Finance (no bots named).
+        { id: "a0000000-0000-4000-8000-0000000000c1", slug: "close-the-books", name: "Close the books", description: "Closes the month.", version: "1.0.0", bot_ids: [], md: md("close-the-books", "Finance", "# Close the books\n\n1. Run the close.\n"), files: { "scripts/close.sh": CLOSE, "scripts/other.sh": OTHER } },
+        // Named for Ana alone.
+        { id: "a0000000-0000-4000-8000-0000000000c2", slug: "ana-only", name: "Ana only", description: "Ana's own.", version: "0.2.0", bot_ids: ["ana"], md: md("ana-only", "Email", "# Ana only\n"), files: {} },
+      ],
+      approvals: [
+        { sha256: sha(CLOSE), approved_at: "2026-11-12T09:00:00.000Z", approved_by_role: "admin" },
+        // A Member's approval: never runs a script.
+        { sha256: sha(OTHER), approved_at: "2026-11-12T09:00:00.000Z", approved_by_role: "member" },
+      ],
+    },
+  };
+  setLabels("ben", ["Finance"]);
+  setLabels("ana", ["Email"]);
+  asRunner();
+  try {
+    R.runnerSkillsForTests();
+    orgo.calls = [];
+    await R.refreshRunnerSkills("ws_lab");
+    assert.deepEqual(orgo.calls.map((c) => `${c.method} ${c.path}`), [
+      "GET /api/projects/p_lab/skills",
+      "GET /api/projects/p_lab/skills/a0000000-0000-4000-8000-0000000000c1/export",
+      "GET /api/projects/p_lab/skills/a0000000-0000-4000-8000-0000000000c2/export",
+      "GET /api/projects/p_lab/skills/approvals",
+    ]);
+    assert.deepEqual(W.skillsFor("ben").map((r) => [r.slug, r.version, r.label]), [["close-the-books", "1.0.0", "Finance"]], "Ben: the Finance one, by his label");
+    assert.deepEqual(W.skillsFor("ana").map((r) => r.slug), ["ana-only"], "Ana: hers by name; not Finance");
+    assert.match(W.skillsNote("ben"), /Close the books/);
+    const read = hear(W.readSkill("ben", "Close the books"));
+    assert.match(read, /^Skill: Close the books \(version 1\.0\.0\)\n\n# Close the books\n\n1\. Run the close\./);
+    assert.match(read, /- scripts\/close\.sh \(script, approved\)/, "an Admin's approval runs it");
+    assert.match(read, /- scripts\/other\.sh \(script, not approved yet/, "a Member's doesn't");
+    assert.match(W.readSkill("ben", "Close the books", "scripts/close.sh"), /echo closing/);
+    assert.match(W.readSkill("ben", "Close the books", "scripts/other.sh"), /a script not approved yet/);
+    // Read once a minute: a second look at once asks nothing.
+    orgo.calls = [];
+    await R.refreshRunnerSkills("ws_lab");
+    assert.deepEqual(orgo.calls, []);
+    // Copied to Ben's computer: the skill, its approved script runnable, the other one waiting (never its content).
+    const sent = [];
+    const n = await W.copySkillsToComputer("ben", "c_ben", async (_id, command) => (sent.push(command), { output: "", exit_code: 0 }));
+    assert.equal(n, 1);
+    const all = sent.join("\n");
+    assert.match(all, /capabilities\/skills\/close-the-books\/SKILL\.md/);
+    const closeAt = all.indexOf(Buffer.from(CLOSE).toString("base64"));
+    assert.ok(closeAt >= 0, "the approved script's content goes");
+    assert.ok(all.indexOf("chmod 755 '/workspace/capabilities/skills/close-the-books/scripts/close.sh'", closeAt) > closeAt, "and is made runnable after it is written");
+    assert.ok(!all.includes(Buffer.from(OTHER).toString("base64")), "an unapproved script's content never goes");
+    assert.doesNotMatch(all, /chmod 755 '[^']*other\.sh'/);
+    assert.doesNotMatch(all, /ana-only/, "Ana's isn't Ben's");
+    // Nothing of it in the state: a computer may not write a workspace's skills.
+    assert.ok(!(S.getState().workspaces.find((w) => w.id === "ws_lab").skills ?? []).some((r) => r.slug === "close-the-books"));
+  } finally {
+    asMac();
+  }
+  // On the Mac: none of it (the Mac's own folders and Orgo sync, as before).
+  assert.ok(!W.skillsFor("ben").some((r) => r.slug === "close-the-books"));
+});
+
+await check("On a runner: Orgo away keeps the copy read before (after a restart too); taken back to a draft there, it's off the bots and the computer; an older orgo-web (403) or none read, everything as before", async () => {
+  const R = await import(`${root}/lib/server/runner-skills.ts`);
+  asRunner();
+  try {
+    // A restart: memory gone, the disk's copy read; Orgo away: it still serves.
+    R.runnerSkillsForTests();
+    orgo.runnerRead.p_lab.down = true;
+    await R.refreshRunnerSkills("ws_lab");
+    assert.deepEqual(W.skillsFor("ben").map((r) => r.slug), ["close-the-books"], "the copy kept on disk");
+    assert.match(W.readSkill("ben", "Close the books"), /Run the close/);
+    // Back, with Close the books taken back to a draft: off Ben, and its folder off this computer.
+    orgo.runnerRead.p_lab.down = false;
+    orgo.runnerRead.p_lab.skills[0].status = "draft";
+    R.runnerSkillsForTests();
+    await R.refreshRunnerSkills("ws_lab");
+    assert.deepEqual(W.skillsFor("ben"), []);
+    assert.ok(!existsSync(join(S.userDir(), "runner-skills", "p_lab", "skills", "close-the-books")));
+    // An orgo-web from before (403 computer_key), and nothing read before: the state's list, as before.
+    S.update((s) => s.workspaces.find((w) => w.id === "ws_sync").skills = [...(s.workspaces.find((w) => w.id === "ws_sync").skills ?? []), { slug: "from-the-mac", kind: "skill", name: "From the Mac", description: "Published on the Mac.", status: "published", version: "0.1.0", versions: [{ version: "0.1.0", at: 1, sha256: "0".repeat(64) }], botIds: [], source: "bops", createdAt: 1, updatedAt: 1 }]);
+    orgo.runnerRead.p_sync = { refuse: true, skills: [], approvals: [] };
+    await R.refreshRunnerSkills("ws_sync");
+    assert.deepEqual(W.skillsFor("syd").map((r) => r.slug).filter((x) => x === "from-the-mac"), ["from-the-mac"], "the state's, as before");
+    assert.equal(hear(W.readSkill("syd", "From the Mac")), "\"From the Mac\" isn't on this computer right now.");
+    const sent = [];
+    assert.equal(await W.copySkillsToComputer("syd", "c_syd", async (_id, c) => (sent.push(c), { output: "", exit_code: 0 })), 0, "the Mac's last copy left as it is");
+    assert.deepEqual(sent, []);
+  } finally {
+    asMac();
+    S.update((s) => (s.workspaces.find((w) => w.id === "ws_sync").skills = (s.workspaces.find((w) => w.id === "ws_sync").skills ?? []).filter((r) => r.slug !== "from-the-mac")));
+    setLabels("ben", undefined);
+    setLabels("ana", undefined);
+  }
 });
 
 /* ---------------- Plain words ---------------- */

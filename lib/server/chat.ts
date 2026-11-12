@@ -21,7 +21,7 @@ import { contactLine, createBot, namesTheUser } from "./bots";
 import { creditsOut, noteOutOfCredit, outOfCreditWords } from "./cloud";
 import { noOwnComputer } from "./plan";
 import { agentLabel, agentName, agentNamed, aiOf, modelShort, paysLabel, readyAgents } from "@/lib/agents";
-import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, personaOf, routineSent, settingsOf, TAPBACK_EMOJI, TAPBACKS, saidOf, workBot, workspaceOf, type AppApproval, type Bot, type ChannelKind, type Delivery, type MemberTurn, type Message, type ReplyDraft, type Routine, type RoutineRun, type Schedule, type Session, type SkillProposal, type Tapback } from "@/lib/types";
+import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, personaOf, routineSent, settingsOf, TAPBACK_EMOJI, TAPBACKS, saidOf, workBot, workspaceOf, type AppApproval, type Bot, type ChannelKind, type Delivery, type MemberTurn, type Message, type ReplyDraft, type Routine, type RoutineRun, type Schedule, type Session, type SkillDraftNote, type SkillProposal, type Tapback } from "@/lib/types";
 import { computerBriefing, teamBriefing } from "./briefing";
 import { belowOf, directOf, entryOf, inLine, mayAskIn, ownMemory, reachOf, readsTeam, worksForNow } from "@/lib/chain";
 import { asksNow, chartedFor, handOffRefused, namesList, teamNow } from "./chart";
@@ -1240,6 +1240,8 @@ type ChatPause = Omit<TurnOptions, "group" | "background" | "resume"> & {
   drafts?: ReplyDraft[];
   /** The changes to skills it proposed so far (propose_skill_change), and whose words it read from outside Bops. */
   proposals?: SkillProposal[];
+  /** The skills it saved as drafts so far (create_skill): a card under its answer opens each in Skills. */
+  skillDrafts?: SkillDraftNote[];
   readFrom?: string[];
 };
 
@@ -1978,7 +1980,7 @@ export async function resumeChat(a: AppApproval): Promise<void> {
 }
 
 /** What a turn came to: its words, why it failed, the thread it started, or that it paused for the user's OK (resumeChat goes on from there). */
-export type TurnOut = { text: string | null; error?: string; sessionId?: string; paused?: boolean; drafts?: ReplyDraft[]; skillProposals?: SkillProposal[] };
+export type TurnOut = { text: string | null; error?: string; sessionId?: string; paused?: boolean; drafts?: ReplyDraft[]; skillProposals?: SkillProposal[]; skillDrafts?: SkillDraftNote[] };
 
 async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Promise<TurnOut> {
   const b = bot(botId);
@@ -2242,7 +2244,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
               fn(
                 tool,
                 tool === "create_skill"
-                  ? `Write down how you do one kind of job as a new skill of your workspace, so it's done the same way next time. Only when ${owner} asks you to remember how to do something, or says yes to saving one. Put it under one of your labels when one fits, else a new short one. It's saved as a draft: ${owner} publishes it in Skills, in Knowledge, and then you use it.`
+                  ? `Write down how you do one kind of job as a new skill of your workspace, so it's done the same way next time. Only when ${owner} asks you to remember how to do something, or says yes to saving one. Put it under one of your labels when one fits, else a new short one. It's saved as a draft: ${owner} or an Admin reads it and publishes it in Skills, in Knowledge (a card under your answer opens it there), and then you use it.`
                   : `Change one of your skills (by its name), when ${owner} asks you to, or says yes to it. The change is a draft of its next version until ${owner} publishes it in Skills, in Knowledge.`,
                 {
                   name: { type: "string", description: tool === "create_skill" ? "A short name for the kind of job, e.g. \"Weekly invoice summary\"." : "The skill's name, as listed." },
@@ -2566,6 +2568,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const drafts: ReplyDraft[] = [...(kept?.drafts ?? [])];
     // The changes to skills it proposed (skill-proposals.ts), and whose words from outside Bops it read: each proposal's card says so.
     const proposals: SkillProposal[] = [...(kept?.proposals ?? [])];
+    // The skills it saved as drafts (create_skill): a card under the answer opens each in Skills, to read and publish.
+    const skillDrafts: SkillDraftNote[] = [...(kept?.skillDrafts ?? [])];
     for (const x of kept?.readFrom ?? []) readFrom.add(x);
     if (opts.outside) readFrom.add(`This turn came from ${outsideFrom}`);
     /** Whose words this turn read so far: its own list, and each app account it read with the senders and recipients it saw there. */
@@ -2724,7 +2728,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           const saved = await saveSkillFromComputer(workspaceOf(b), { name: title, description: undash(String(p.description ?? "")), body, label, botId });
           if (!saved.ok) return `Not saved: ${saved.why}. Nothing was saved. ${offer}`;
           notes.push(`Saved the skill "${saved.name}" as a draft`);
-          return `Saved "${saved.name}" as a draft in your workspace's skills. ${owner} can publish it in Skills, in Knowledge; then you'll use it.`;
+          if (saved.slug) skillDrafts.push({ kind: "skill", slug: saved.slug, name: saved.name });
+          return `Saved "${saved.name}" as a draft in your workspace's skills. ${owner} or an Admin can read it and publish it in Skills, in Knowledge (the card under your answer opens it there); then you'll use it.`;
         }
         try {
           const ws = workspaceOf(b);
@@ -2732,7 +2737,10 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             ? updateSkill(ws, had.kind, had.slug, { name: title, description: undash(String(p.description ?? had.description)), body, label }, { draft: true })
             : createSkill(ws, { name: title, description: undash(String(p.description ?? "")), body, label, botIds: [botId], source: "bops", from: { chatId } }).ref;
           notes.push(`${had ? "Updated" : "Saved"} the skill "${r.name}" as a draft`);
-          return `${had ? "Updated" : "Saved"} "${r.name}" as a draft. ${owner} can publish it in Skills, in Knowledge; then you'll use it.`;
+          // A change to one is the owner's to publish (its folder is on their Mac); a new one Orgo keeps too, for an Admin.
+          if (had) return `Updated "${r.name}" as a draft. ${owner} can publish it in Skills, in Knowledge; then you'll use it.`;
+          skillDrafts.push({ kind: r.kind, slug: r.slug, name: r.name });
+          return `Saved "${r.name}" as a draft. ${owner} or an Admin can read it and publish it in Skills, in Knowledge (the card under your answer opens it there); then you'll use it.`;
         } catch (e) {
           if (e instanceof SkillError) return `Not saved: ${e.message}${e.problems?.length ? ` (${e.problems.map((x) => `${x.path}${x.line ? ` line ${x.line}` : ""}: ${x.reason}`).join("; ")})` : ""}`;
           throw e;
@@ -2939,6 +2947,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           read: read.keep(),
           drafts,
           proposals,
+          skillDrafts,
           readFrom: [...readFrom],
         };
         askFor(
@@ -3237,6 +3246,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         called: called.length ? called : undefined,
         drafts: drafts.length ? drafts : undefined,
         skillProposals: skillProposals.length ? skillProposals : undefined,
+        skillDrafts: skillDrafts.length ? skillDrafts : undefined,
       });
     // Not the reply to something the user wants kept from someone: it would carry the secret into the shared memory.
     if (reply && !isSecret(opts.answering)) saveToMemory(scopeOf(botId), "chat", chatId, [{ who: botId, text: reply }], { chat: chatName(chatId) });

@@ -264,6 +264,24 @@ export function sharedKeysOpen(): {
 }
 
 /**
+ * The shared workspace open now, for its skills (lib/server/shared-skills.ts): its Orgo project (never an id from a
+ * request), the user's role and what they may change there (SharedWsSlice.can), and its bots. Null when none is open for
+ * the signed-in user.
+ */
+export function sharedSkillsOpen(): { projectId: string; name: string; role: "admin" | "member"; can: string[]; botIds: string[] } | null {
+  const open = openNow();
+  if (!open || (open.at.role !== "admin" && open.at.role !== "member")) return null;
+  const s = open.data?.state;
+  return {
+    projectId: open.at.projectId,
+    name: open.at.name,
+    role: open.at.role,
+    can: Array.isArray(s?.can) ? s.can.filter((x): x is string => typeof x === "string") : [],
+    botIds: (Array.isArray(s?.bots) ? s.bots : []).flatMap((b) => (typeof b?.id === "string" ? [b.id] : [])),
+  };
+}
+
+/**
  * The shared workspace open now, for a change made there from this window (change-relay.ts): the id the window has for it,
  * its bots, what the user may change there (SharedWsSlice.can) and whether the owner's Bops takes it (SharedWsSlice.changes). Null
  * when none is open for the signed-in user.

@@ -157,6 +157,7 @@ const server = createServer(async (req, res) => {
   }
   if (!sid && req.method === "POST") {
     const s = { id: `sk_${++remote.seq}`, pid, slug: body.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), name: body.name, description: body.description, type: body.type, status: body.status, bot_ids: body.bot_ids, source: body.source, version: body.version ?? "0.1.0", body: body.body, files: body.files, updated_at: now() };
+    s.versions = [s.version];
     remote.skills.push(s);
     return send(res, 201, { skill: view(s), version: { version: s.version }, warnings: [] });
   }
@@ -169,8 +170,14 @@ const server = createServer(async (req, res) => {
     return [f.path, { ...where, sha256: f.badSha ?? sha(bytes), executable: !!f.executable }];
   };
   if (sub === "export") return send(res, 200, { slug: s.slug, name: s.name, description: s.description, type: s.type, version: s.version, files: { "SKILL.md": { content: s.body }, ...Object.fromEntries((s.files ?? []).map(exported)) } });
+  // Its versions (GET …/skills/{id}): every number it ever had.
+  const numbers = () => (s.versions ??= [s.version].filter(Boolean));
+  if (!sub && req.method === "GET") return send(res, 200, { skill: view(s), version: { version: s.version, body: s.body }, versions: numbers() });
   if (sub === "versions" && req.method === "POST") {
-    Object.assign(s, { body: body.body ?? s.body, files: body.files ?? s.files, version: body.version, updated_at: now() });
+    // A number it has already, as orgo-web: versions never change.
+    if (body.version && numbers().includes(body.version)) return send(res, 409, { error: `Version ${body.version} already exists. Versions never change; pick a new number.`, code: "version_exists" });
+    numbers().push(body.version);
+    Object.assign(s, { body: body.body ?? s.body, files: body.files ?? s.files, version: body.version, status: "published", updated_at: now() });
     return send(res, 201, { skill: view(s), version: { version: s.version } });
   }
   if (req.method === "PATCH") {
@@ -207,6 +214,8 @@ const hear = (...xs) => (said.push(...xs.map((x) => (typeof x === "string" ? x :
 const S = await import(`${root}/lib/server/store.ts`);
 const W = await import(`${root}/lib/server/workspace-skills.ts`);
 const B = await import(`${root}/lib/server/skill-bundle.ts`);
+// How many of Bops' own skills are under its apps label (lib/builtin-skills.ts): what a prompt counts there.
+const OWN_APPS = (await import(`${root}/lib/builtin-skills.ts`)).builtinSkills(true).filter((x) => x.label === "Apps and source control").length;
 const Route = await import(`${root}/app/api/skills/route.ts`);
 const route = async (body, method = "POST") => {
   const res = await Route[method](new Request(`http://localhost:3210/api/skills${method === "GET" ? body ?? "" : ""}`, { method, headers: { "content-type": "application/json", "x-bops-window": UI }, ...(method === "GET" ? {} : { body: JSON.stringify(body) }) }));
@@ -281,7 +290,7 @@ await check("A new skill is a folder and a draft: its bots don't see it until it
   assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), '---\nname: weekly-report\ndescription: "Sums up the week when asked for \\"the weekly report\\""\n---\n\n# Weekly report\n\n1. Read the chat.\n');
   assert.notEqual(statSync(join(dir, "scripts", "sum.sh")).mode & 0o111, 0, "its script executable in its folder");
   assert.deepEqual(W.skillsFor("boppy"), [], "a draft isn't any bot's yet");
-  assert.equal(W.readSkill("boppy", "Weekly report"), 'No skill called "Weekly report". Your labels: Apps and source control (5). Open one with read_skill and label to see its skills.', "Bops' own only");
+  assert.equal(W.readSkill("boppy", "Weekly report"), `No skill called "Weekly report". Your labels: Apps and source control (${OWN_APPS}). Open one with read_skill and label to see its skills.`, "Bops' own only");
   // The same name again: its own slug.
   const twin = W.createSkill("ws_main", { name: "Weekly report", description: "Another", body: "# Two\n" }).ref;
   assert.equal(twin.slug, "weekly-report-2");
@@ -471,10 +480,10 @@ await check("Versions are version shaped (never a path); a key in a description 
 await check("The prompts list skills and apps under their labels: up to 15 of its own by name and description, more as one line per label", async () => {
   W.publishSkill("ws_main", "app", "orgo-doctor");
   const note = hear(W.skillsNote("max"));
-  assert.match(note, /^Your skills: [^\n]+\nApps and source control \(5\): [^\n]+\nWriting \(1\):\n- Weekly report: [^\n]+\nUnsorted \(1\):\n- Orgo doctor \(app\): Finds what's wrong with a computer and says the fix\.$/);
+  assert.match(note, new RegExp(`^Your skills: [^\\n]+\\nApps and source control \\(${OWN_APPS}\\): [^\\n]+\\nWriting \\(1\\):\\n- Weekly report: [^\\n]+\\nUnsorted \\(1\\):\\n- Orgo doctor \\(app\\): Finds what's wrong with a computer and says the fix\\.$`));
   for (let i = 0; i < 20; i++) W.createSkill("ws_main", { name: `Many ${i}`, description: `Number ${i}`, body: `# ${i}\n`, status: "published" });
   const many = W.skillsNote("max");
-  assert.deepEqual(many.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(0, l.indexOf(":"))), ["- Apps and source control (5)", "- Writing (1)", "- Unsorted (21)"]);
+  assert.deepEqual(many.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(0, l.indexOf(":"))), [`- Apps and source control (${OWN_APPS})`, "- Writing (1)", "- Unsorted (21)"]);
   assert.match(many, /\n- Unsorted \(21\): Orgo doctor \(app\), Many 0, Many 1, /);
   assert.doesNotMatch(many, /Number \d/, "past 15 of its own, no descriptions: read_skill with the label lists them");
   for (let i = 0; i < 20; i++) await W.deleteSkill("ws_main", "skill", `many-${i}`);
@@ -784,6 +793,93 @@ await check("Several Macs agree: a sync reads only what changed since the last (
   clearTimers();
 });
 
+await check("An Admin's publish in Orgo while the owner's Mac was off comes in without wiping the owner's unpublished folder; a version number both took goes as the next free one, nothing kept here lost", async () => {
+  const clearTimers = () => {
+    for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+    globalThis.bopsSkillsSync?.clear();
+  };
+  const ref = (slug) => W.findRef("ws_two", "skill", slug);
+  const remoteOf = (slug) => remote.skills.find((x) => x.id === ref(slug).remoteId);
+  const later = (ms) => new Date(Date.now() + ms).toISOString();
+  const md = (slug, text, version) => `---\nname: ${slug}\ndescription: Hands a ticket over.\nmetadata:\n  version: "${version}"\n---\n${text}`;
+  // Published here and in step with Orgo.
+  const a = W.createSkill("ws_two", { name: "Handoff", description: "Hands a ticket over.", body: "# Handoff\n\n1. Read it.\n", status: "published" }).ref;
+  const b = W.createSkill("ws_two", { name: "Escalate", description: "Hands a ticket over.", body: "# Escalate\n\n1. Page someone.\n", status: "published" }).ref;
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(remoteOf(a.slug).version, "0.1.0");
+
+  // Handoff: the owner works on its folder (not published); an Admin publishes 0.1.1 in Orgo, later.
+  W.updateSkill("ws_two", "skill", a.slug, { body: "# Handoff\n\n1. Read it.\n2. The owner's step, not published.\n" });
+  Object.assign(remoteOf(a.slug), { body: md(a.slug, "# Handoff\n\n1. Read it.\n2. The Admin's step.\n", "0.1.1"), version: "0.1.1", updated_at: later(5_000) });
+  remoteOf(a.slug).versions.push("0.1.1");
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(ref(a.slug).version, "0.1.1", "Orgo's version is the one in use");
+  assert.match(W.readSkill("tess", a.slug), /The Admin's step/, "its bots read the Admin's");
+  const d = W.skillDetail("ws_two", "skill", a.slug);
+  assert.match(d.body, /The owner's step, not published/, "the owner's folder kept");
+  assert.equal(d.changed, true, "and said to differ from the version in use");
+  assert.ok(existsSync(join(dataDir(), "p_two", ".versions", "skills", a.slug, "0.1.1", "SKILL.md")));
+
+  // Escalate: an Admin publishes 0.1.1 in Orgo; then, before this Mac read it, the owner publishes their own 0.1.1 here, later.
+  Object.assign(remoteOf(b.slug), { body: md(b.slug, "# Escalate\n\n1. The Admin's way.\n", "0.1.1"), version: "0.1.1", updated_at: later(-30_000) });
+  remoteOf(b.slug).versions.push("0.1.1");
+  W.updateSkill("ws_two", "skill", b.slug, { body: "# Escalate\n\n1. The owner's way.\n" });
+  assert.equal(W.publishSkill("ws_two", "skill", b.slug).version, "0.1.1");
+  clearTimers();
+  remote.calls = [];
+  const r = await W.syncSkills("ws_two");
+  const posts = remote.calls.filter((c) => c.method === "POST" && c.path.endsWith("/versions")).map((c) => c.body.version);
+  assert.deepEqual(posts, ["0.1.1", "0.1.2"], "refused as Orgo's number, then sent as the next free one");
+  assert.equal(r.failed, 0, JSON.stringify(r));
+  assert.deepEqual([remoteOf(b.slug).version, ref(b.slug).version], ["0.1.2", "0.1.2"]);
+  assert.match(remoteOf(b.slug).body, /The owner's way/);
+  // Said in the log, once.
+  const said = logged.findIndex((l) => l === `[skills] ${b.slug}: Orgo has 0.1.1 already, so this Mac's goes as 0.1.2`);
+  assert.ok(said >= 0);
+  logged.splice(said, 1);
+  assert.ok(existsSync(join(dataDir(), "p_two", ".versions", "skills", b.slug, "0.1.2", "SKILL.md")));
+  assert.match(readFileSync(join(dataDir(), "p_two", ".versions", "skills", b.slug, "0.1.2", "SKILL.md"), "utf8"), /version: "0\.1\.2"/, "its SKILL.md here says the new number");
+  assert.deepEqual(ref(b.slug).versions.map((v) => v.version), ["0.1.0", "0.1.1", "0.1.2"], "every version kept here stays");
+  assert.match(W.readSkill("tess", b.slug), /^Skill: Escalate \(version 0\.1\.2\)[\s\S]*The owner's way/);
+  // The next sync agrees: nothing more sent.
+  clearTimers();
+  remote.calls = [];
+  await W.syncSkills("ws_two");
+  assert.equal(remote.calls.filter((c) => c.path.endsWith("/versions")).length, 0);
+  for (const x of [a, b]) await W.deleteSkill("ws_two", "skill", x.slug);
+  clearTimers();
+});
+
+await check("The owner's Mac looks at Orgo every couple of minutes: a workspace with people every time, one alone every fifth, none with a sync already going, never on a runner", async () => {
+  const due = (n) => W.skillsPollDue(n);
+  // (One started by a start's binding, earlier in this file: stopped, so this one's is the test's.)
+  W.stopSkillsPoll();
+  S.update((s) => {
+    s.workspaces.find((w) => w.id === "ws_two").memberAccess = { "admin@example.com": { others: "write", at: 1 } };
+  });
+  assert.deepEqual(due(1), ["ws_two"], "with people: every poll");
+  S.update((s) => void delete s.workspaces.find((w) => w.id === "ws_two").memberAccess);
+  assert.deepEqual(due(1), [], "alone: not every poll");
+  assert.deepEqual(due(5), ["ws_two"], "alone: every fifth");
+  W.queueSync("ws_two");
+  assert.deepEqual(due(5), [], "a sync queued already");
+  for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+  globalThis.bopsSkillsSync?.clear();
+  process.env.BOPS_RUNNER = "1";
+  try {
+    assert.deepEqual(due(5), [], "never on a computer's runner");
+    W.startSkillsPoll();
+    assert.equal(globalThis.bopsSkillsPoll, undefined, "no poll there either");
+  } finally {
+    delete process.env.BOPS_RUNNER;
+  }
+  W.startSkillsPoll();
+  assert.ok(globalThis.bopsSkillsPoll, "on the Mac");
+  W.stopSkillsPoll();
+});
+
 await check("Script approvals reach Orgo with the Bops sign-in key: approved and revoked through an outbox kept on disk, one whose skill isn't on Orgo yet sent after its sync, orgo.ai's taken here, its revokes too", async () => {
   const O = await import(`${root}/lib/server/sync-outbox.ts`);
   const clearTimers = () => {
@@ -863,6 +959,30 @@ await check("Script approvals reach Orgo with the Bops sign-in key: approved and
   clearTimers();
   await W.syncSkills("ws_two");
   assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, false, "taken before from another member's: gone");
+  // Orgo says whose role it is now: an Admin's approval runs it here (an Admin can do everything but delete the workspace
+  // or pay); a Member's never; an Admin made a Member again, or gone from the workspace, no longer.
+  const ws2 = () => S.getState().workspaces.find((w) => w.id === "ws_two");
+  remote.approvals.set(`p_two:${shaGo}`, { ...editors(), approved_by_role: "admin" });
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, true, "an Admin's approval runs it here");
+  assert.equal(ws2().approvals.find((a) => a.sha256 === shaGo).by, "admin");
+  for (const role of ["member", null]) {
+    remote.approvals.set(`p_two:${shaGo}`, { ...editors(), approved_by_role: role });
+    clearTimers();
+    await W.syncSkills("ws_two");
+    assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, false, `approved_by_role ${role}: not here`);
+  }
+  // The owner's, by role, even made on another account's Bops signed in as the owner elsewhere: runs.
+  remote.approvals.set(`p_two:${shaGo}`, { ...editors(), approved_by: "u_owner_elsewhere", approved_by_role: "owner" });
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(ws2().approvals.find((a) => a.sha256 === shaGo)?.by, "owner");
+  // As it was: another member's, from an orgo-web that doesn't say roles.
+  remote.approvals.set(`p_two:${shaGo}`, editors());
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, false);
   // Approved in this window: it runs, though Orgo's record stays the other member's.
   W.approveScript("ws_two", shaGo);
   await wait(() => S.getState().workspaces.find((w) => w.id === "ws_two").approvals.find((a) => a.sha256 === shaGo)?.synced);

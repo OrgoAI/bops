@@ -43,6 +43,7 @@ import {
   type Problem,
 } from "./skill-bundle";
 import { onRunner } from "./persist";
+import { exportedFile, refreshRunnerSkills, runnerBundle, runnerOverlay, type ExportFile, type RunnerSkill } from "./runner-skills";
 import { botIdsOn } from "@/cloud/computer-scope";
 import { bot, getState, ownerName, update, userDir } from "./store";
 import { outbox } from "./sync-outbox";
@@ -129,6 +130,7 @@ const g = globalThis as unknown as {
   bopsSkillLabelsRoute?: Map<string, boolean>;
   bopsSkillLabelRename?: Map<string, boolean>;
   bopsLabelSuggest?: Map<string, { keys: Set<string>; timer: ReturnType<typeof setTimeout> }>;
+  bopsSkillsPoll?: { timer: ReturnType<typeof setInterval>; ticks: number };
 };
 
 export class SkillError extends Error {
@@ -180,13 +182,60 @@ const versionDir = (wsId: string, kind: SkillKind, slug: string, version: string
 
 /* ---------------- What's in the state ---------------- */
 
-/** A workspace's skills and apps (both, or one kind), oldest first. */
+/**
+ * A workspace's skills and apps (both, or one kind), oldest first. On a computer's runner, Orgo's published ones as it
+ * last read them (runner-skills.ts) laid over the state's: Orgo's name, description, version, bots and label for one it
+ * lists, one only Orgo has added, and one Orgo had (remoteId) but no longer lists as published shown as a draft, so
+ * with the owner's Mac off its bots use what the owner or an Admin published. Without a read: the state's, as before.
+ */
 export function refsOf(wsId: string, kind?: SkillKind): SkillRef[] {
   adoptProcedures();
   labelRefs(wsId);
   const w = workspaceById(wsId);
   if (!w) return [];
-  return kind ? [...(w[listKey(kind)] ?? [])] : [...(w.skills ?? []), ...(w.apps ?? [])];
+  const own = kind ? [...(w[listKey(kind)] ?? [])] : [...(w.skills ?? []), ...(w.apps ?? [])];
+  const over = onRunner() && w.orgoProjectId ? runnerOverlay(w.orgoProjectId) : null;
+  return over ? overlaid(own, over.skills, kind) : own;
+}
+
+/** A published skill Orgo lists, as a ref here: published at its version, for its bots or by its label. */
+const runnerRef = (x: RunnerSkill, r?: SkillRef): SkillRef => {
+  // The state's own fields (its uses, the id it had as a procedure), never its label or risk: Orgo's say those.
+  const rest: Partial<SkillRef> = { ...r };
+  delete rest.label;
+  delete rest.risk;
+  return {
+    ...rest,
+    slug: x.slug,
+    kind: x.kind,
+    name: x.name,
+    description: x.description,
+    ...(x.label ? { label: x.label } : {}),
+    labelBy: "skill",
+    status: "published",
+    version: x.version,
+    ...(x.risk && (RISKS as readonly string[]).includes(x.risk) ? { risk: x.risk as SkillRisk } : {}),
+    botIds: x.botIds,
+    source: r?.source ?? "orgo",
+    createdAt: r?.createdAt ?? 0,
+    updatedAt: Date.parse(x.updatedAt) || r?.updatedAt || 0,
+    remoteId: x.id,
+  };
+};
+
+function overlaid(own: SkillRef[], theirs: RunnerSkill[], kind?: SkillKind): SkillRef[] {
+  const used = new Set<RunnerSkill>();
+  const out = own.map((r) => {
+    const x = theirs.find((t) => t.kind === r.kind && !used.has(t) && (r.remoteId ? t.id === r.remoteId : t.slug === r.slug)) ?? theirs.find((t) => t.kind === r.kind && !used.has(t) && t.slug === r.slug);
+    if (x) {
+      used.add(x);
+      return runnerRef(x, r);
+    }
+    // Orgo had it and doesn't list it as published now (taken back to a draft, or deleted there): not its bots' here.
+    return r.status === "published" && r.remoteId ? { ...r, status: "draft" as const } : r;
+  });
+  for (const x of theirs) if (!used.has(x) && (!kind || x.kind === kind)) out.push(runnerRef(x));
+  return out;
 }
 
 export const findRef = (wsId: string, kind: SkillKind, slug: string) => refsOf(wsId, kind).find((r) => r.slug === slug);
@@ -717,6 +766,10 @@ function readBundle(dir: string | null): Bundle | null {
  * is written again here from the procedure kept in the state.
  */
 function publishedBundle(wsId: string, r: SkillRef): Bundle | null {
+  // On a computer's runner: the version Orgo serves, as it last read it (runner-skills.ts).
+  const pid = onRunner() && r.version ? workspaceById(wsId)?.orgoProjectId : undefined;
+  const fromOrgo = pid ? runnerBundle(pid, r.kind, r.slug, r.version!) : null;
+  if (fromOrgo) return fromOrgo;
   if (r.version) {
     const v = readBundle(versionDir(wsId, r.kind, r.slug, r.version));
     if (v) return v;
@@ -956,7 +1009,7 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
  * rest. Nothing is kept on the computer or in its state: a computer may not write a workspace's skills
  * (cloud/computer-scope.ts), and the owner's Bops keeps their folders. Answers its name, or why it wasn't saved.
  */
-export async function saveSkillFromComputer(wsId: string, input: { name: string; description: string; body: string; label: string | null; botId: string }): Promise<{ ok: true; name: string } | { ok: false; why: string }> {
+export async function saveSkillFromComputer(wsId: string, input: { name: string; description: string; body: string; label: string | null; botId: string }): Promise<{ ok: true; name: string; slug?: string } | { ok: false; why: string }> {
   const pid = workspaceById(wsId)?.orgoProjectId;
   if (!pid) return { ok: false, why: "this workspace isn't on Orgo yet, so a skill can be saved only where its folders are kept" };
   const who = bot(input.botId);
@@ -982,12 +1035,13 @@ export async function saveSkillFromComputer(wsId: string, input: { name: string;
   const { apiKey, callOrgo } = await import("./orgo");
   const key = await apiKey().catch(() => "");
   if (!key) return { ok: false, why: "this computer isn't signed in to Orgo right now" };
-  const r = await callOrgo<{ skill?: { name?: string }; error?: string; code?: string }>(key, `/api/projects/${encodeURIComponent(pid)}/skills`, {
+  const r = await callOrgo<{ skill?: { name?: string; slug?: string }; error?: string; code?: string }>(key, `/api/projects/${encodeURIComponent(pid)}/skills`, {
     method: "POST",
     body: { name, description, type: "skill", body: md, files: [], bot_ids: [input.botId], status: "draft" },
     timeoutMs: 20_000,
   });
-  if (r?.status === 201) return { ok: true, name: r.json.skill?.name ?? name };
+  // (Its slug, Orgo's, so the card under the answer opens it in Skills.)
+  if (r?.status === 201) return { ok: true, name: r.json.skill?.name ?? name, ...(typeof r.json.skill?.slug === "string" && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(r.json.skill.slug) ? { slug: r.json.skill.slug } : {}) };
   if (!r) return { ok: false, why: "Orgo didn't answer" };
   const plain = r.status === 403 && typeof r.json.code === "string" ? skillRefusedWords(r.json.code, who.name) : undefined;
   if (plain) return { ok: false, why: plain };
@@ -1218,7 +1272,11 @@ export function dropBotFromSkills(botId: string, wsId: string) {
 
 export type SkillFileInfo = { path: string; size: number; sha256: string; executable: boolean; script: boolean; approved: boolean; binary: boolean };
 
-const approvedIn = (wsId: string) => new Set((workspaceById(wsId)?.approvals ?? []).map((a) => a.sha256));
+/** The contents approved to run in a workspace: the state's, and on a computer's runner, the owner's and Admins' Orgo has (runner-skills.ts). */
+const approvedIn = (wsId: string) => {
+  const pid = onRunner() ? workspaceById(wsId)?.orgoProjectId : undefined;
+  return new Set([...(workspaceById(wsId)?.approvals ?? []).map((a) => a.sha256), ...(pid ? (runnerOverlay(pid)?.approvals ?? []) : [])]);
+};
 
 /** A skill as the window shows it: its SKILL.md (a version, else what's being worked on), its files, and where its folder is. */
 export function skillDetail(wsId: string, kind: SkillKind, slug: string, version?: string) {
@@ -1336,7 +1394,7 @@ export function readSkill(botId: string, nameOrSlug: string, file?: string | nul
   }
   const wsId = workspaceOf(b);
   const bundle = publishedBundle(wsId, r);
-  if (!bundle) return `"${r.name}" isn't on this Mac right now.`;
+  if (!bundle) return `"${r.name}" isn't on this ${onRunner() ? "computer" : "Mac"} right now.`;
   if (file?.trim()) {
     const n = normalizePath(file.trim());
     const f = "reason" in n ? undefined : bundle.files.find((x) => x.path === n.path);
@@ -1558,6 +1616,32 @@ export function updateFromFolder(wsId: string, folder: string, kind: SkillKind, 
   return { ref: findRef(wsId, kind, slug)!, skipped: checked.skipped, warnings: checked.warnings, drafted: checked.drafted, published };
 }
 
+/** A bundle's files as orgo-web takes them: text as content, a binary file (a program) as content_base64. */
+export const orgoFiles = (files: BundleFile[]) =>
+  files.map((f) => (f.content !== null ? { path: f.path, content: f.content, executable: f.executable } : { path: f.path, content_base64: f.data!.toString("base64"), executable: f.executable }));
+
+/**
+ * A folder on this Mac, for a workspace whose skills are kept in Orgo alone here (a shared workspace's Skills:
+ * shared-skills.ts), read and checked as importFolder checks a new one, or with `slug` as updateFromFolder checks an
+ * existing skill's next version (its SKILL.md name, when it says one, that skill's), then strictly as a save is (no
+ * secret, the caps): its name, description, SKILL.md text and files as orgo-web takes them. Nothing is kept here.
+ */
+export function folderPayload(folder: string, slug?: string) {
+  const checked = readFolder(folder);
+  const said = checked.frontmatter.name;
+  if (slug && said !== undefined && said !== slug) throw new SkillError(`That folder is another skill: its SKILL.md says ${JSON.stringify(said)}, and this one is ${JSON.stringify(slug)}.`, 400, [{ path: "SKILL.md", reason: `frontmatter name: must be ${JSON.stringify(slug)}` }]);
+  const name = cut(oneLine(checked.name), 120);
+  const description = oneLine(checked.description);
+  if (!/[\p{L}\p{N}]/u.test(name)) throw new SkillError("A skill needs a name.");
+  if (!description) throw new SkillError("Say what it does and when to use it.");
+  const fm = frontmatterOf(slug ?? checked.slugBase, description, { ...checked.frontmatter, name: slug ?? checked.slugBase });
+  noSecretsIn(name, description, fm);
+  const problems = validateFrontmatter(fm);
+  if (problems.length) throw new SkillError("The frontmatter has a problem.", 400, problems);
+  const { files } = checkFiles(checked.body, checked.files.map((f) => ({ path: f.path, content: f.content, data: f.data, executable: f.executable })));
+  return { name, description, skillMd: renderSkillMd(fm, checked.body), files: orgoFiles(files), skipped: checked.skipped, warnings: checked.warnings, drafted: checked.drafted };
+}
+
 /* ---------------- Procedures from before ---------------- */
 
 /** A procedure as SKILL.md text: when to use it, its steps, its pitfalls. */
@@ -1737,6 +1821,8 @@ const PIECE = 96 * 1024;
  * copied it rather than clear it.
  */
 export async function copySkillsToComputer(botId: string, computerId: string, bash: (computerId: string, command: string, timeout?: number) => Promise<{ output: string; exit_code: number }>) {
+  // On a computer's runner: what Orgo publishes now, read first (runner-skills.ts), so the copy is whole.
+  if (onRunner() && bot(botId)) await refreshRunnerSkills(workspaceOf(bot(botId)!));
   const team = sharers(botId);
   if (onRunner() && team.some((id) => skillsFor(id).some((r) => !publishedBundle(workspaceOf(bot(id)!), r)))) return 0;
   const bundles = bundlesFor(team, { builtins: true });
@@ -1824,9 +1910,9 @@ type RemoteSkill = { id: string; slug: string; name: string; description: string
 /** One of Orgo's record of deletions (GET …/skills?since=): a skill deleted after `since`, never one live now. */
 type RemoteDeletion = { id: string; slug: string; type: string; deleted_at: string };
 
-const remoteType = (kind: SkillKind) => (kind === "app" ? "app" : "skill");
+export const remoteType = (kind: SkillKind) => (kind === "app" ? "app" : "skill");
 // "software" is what an older orgo-web called an app.
-const localKind = (type: string): SkillKind => (type === "software" || type === "app" ? "app" : "skill");
+export const localKind = (type: string): SkillKind => (type === "software" || type === "app" ? "app" : "skill");
 
 /** One call to orgo-web's skills routes for a workspace, with the signed-in key. Null when Orgo didn't answer. */
 async function skillsCall<T>(projectId: string, path: string, init: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown } = {}) {
@@ -2092,8 +2178,24 @@ function renamesLater() {
 type ApprovalChange = { pid: string; sha256: string; on: boolean; path?: string };
 /** Approvals and revokes Orgo hasn't taken yet, kept on disk until it does. */
 const approvalsOut = outbox<ApprovalChange>("skill-approvals", 2000);
-/** `approved_by`: the Orgo user who approved it. */
-type RemoteApproval = { sha256: string; path_hint?: string | null; approved_by?: string | null; approved_at?: string };
+/**
+ * `approved_by`: the Orgo user who approved it. `approved_by_role`: their role in the workspace now, as orgo-web reads it
+ * with the list (owner, admin, member; null once they left it); an older orgo-web doesn't say it.
+ */
+type RemoteApproval = { sha256: string; path_hint?: string | null; approved_by?: string | null; approved_at?: string; approved_by_role?: string | null };
+
+/**
+ * Whose approval of orgo-web's runs a script here: with its role said, the owner's or an Admin's now (an Admin can do
+ * everything in a workspace but delete it or pay; one made a Member again, or gone, no longer counts); without it (an
+ * orgo-web from before the role), only the person signed in here, as before. `owner`: that person's Orgo user id.
+ * A Member's never, whatever switch they have: theirs would run nothing on this Mac (phase 2 counts one only on the bots'
+ * computers, never here).
+ */
+export function approvalCounts(a: RemoteApproval | undefined, owner: string | undefined): "owner" | "admin" | null {
+  if (!a) return null;
+  if (a.approved_by_role !== undefined) return a.approved_by_role === "owner" ? "owner" : a.approved_by_role === "admin" ? "admin" : null;
+  return !!owner && a.approved_by === owner ? "owner" : null;
+}
 const g2 = globalThis as unknown as { bopsApprovalsTimer?: ReturnType<typeof setTimeout>; bopsApprovalsTries?: number; bopsApprovalsSaid?: boolean; bopsApprovalsParked?: Set<string> };
 /** Outbox entries Orgo couldn't place (unknown_sha), by id: sent again only after a sync sent a file with that content (or once a run of Bops). */
 const parked = (g2.bopsApprovalsParked ??= new Set<string>());
@@ -2196,18 +2298,18 @@ function markApproval(wsId: string, sha256: string, on: boolean) {
 }
 
 /**
- * Orgo's approvals here (GET …/skills/approvals): one the person signed in here made (on orgo.ai, or in
- * Bops on another Mac: approved_by) is taken, another member's never (it doesn't run a script on this
- * Mac); one Orgo had and no longer lists was revoked there and goes here too; one made here that Orgo
- * never had is sent, while its script is in one of the workspace's skills. What waits to be sent from here
- * stands.
+ * Orgo's approvals here (GET …/skills/approvals): the owner's and an Admin's (approvalCounts: orgo-web says the
+ * approver's role now; an older one, only the person signed in here) are taken, a Member's never (it doesn't run a
+ * script on this Mac), and one taken before from someone who is no longer an Admin goes; one Orgo had and no longer
+ * lists was revoked there and goes here too; one made here that Orgo never had is sent, while its script is in one of
+ * the workspace's skills. What waits to be sent from here stands. Each taken says whose it was (ScriptApproval.by).
  */
 async function pullApprovals(wsId: string, pid: string) {
   const got = await skillsCall<{ approvals?: RemoteApproval[] }>(pid, "/approvals");
   if (!got || got.status !== 200 || !Array.isArray(got.json.approvals)) return;
   const owner = getState().account?.user.id;
   const there = new Map(got.json.approvals.filter((a) => typeof a?.sha256 === "string").map((a) => [a.sha256, a]));
-  const byOwner = (a: RemoteApproval | undefined) => !!owner && !!a && a.approved_by === owner;
+  const byOwner = (a: RemoteApproval | undefined) => approvalCounts(a, owner) !== null;
   const waiting = new Set(approvalsOut.waiting(wsId).map((e) => e.item.sha256));
   const mine = workspaceById(wsId)?.approvals ?? [];
   const send: ScriptApproval[] = [];
@@ -2217,7 +2319,10 @@ async function pullApprovals(wsId: string, pid: string) {
     if (waiting.has(a.sha256)) kept.push(a);
     else if (there.has(a.sha256)) {
       // Made here, or taken from Orgo while Orgo says this person made it (one taken before from another member's goes).
-      if (a.inBops || byOwner(there.get(a.sha256)) || !owner) kept.push(a.synced ? a : { ...a, synced: true });
+      if (a.inBops || byOwner(there.get(a.sha256)) || !owner) {
+        const by = a.inBops ? a.by : (approvalCounts(there.get(a.sha256), owner) ?? undefined);
+        kept.push(a.synced && a.by === by ? a : { ...a, synced: true, ...(by ? { by } : {}) });
+      }
     }
     // Orgo had it and doesn't now: revoked there. Never had it: sent, while its script is in a skill here.
     else if (!a.synced) {
@@ -2226,7 +2331,7 @@ async function pullApprovals(wsId: string, pid: string) {
     }
   }
   for (const [sha, a] of there)
-    if (byOwner(a) && !waiting.has(sha) && !kept.some((x) => x.sha256 === sha)) kept.push({ sha256: sha, path: (a.path_hint ?? "").slice(0, 512), at: Date.parse(a.approved_at ?? "") || Date.now(), synced: true });
+    if (byOwner(a) && !waiting.has(sha) && !kept.some((x) => x.sha256 === sha)) kept.push({ sha256: sha, path: (a.path_hint ?? "").slice(0, 512), at: Date.parse(a.approved_at ?? "") || Date.now(), synced: true, by: approvalCounts(a, owner)! });
   if (kept.length !== mine.length || kept.some((x, i) => x !== mine[i]))
     update((s) => {
       const ws = s.workspaces?.find((w) => w.id === wsId);
@@ -2284,8 +2389,51 @@ function payloadOf(wsId: string, r: SkillRef) {
   return {
     shas: b.files.map((f) => f.sha256),
     body: renderSkillMd(withLabel(frontmatterOf(r.slug, r.description, b.frontmatter), sentLabelOf(r)), b.body),
-    files: b.files.map((f) => (f.content !== null ? { path: f.path, content: f.content, executable: f.executable } : { path: f.path, content_base64: f.data!.toString("base64"), executable: f.executable })),
+    files: orgoFiles(b.files),
   };
+}
+
+/**
+ * Whether Orgo's version of a skill under the number this Mac uses (its export) has the same text and files as this
+ * Mac's (the frontmatter aside, which each side writes in its own words); null when it couldn't be read.
+ */
+async function sameAsOrgo(wsId: string, pid: string, remoteId: string, r: SkillRef): Promise<boolean | null> {
+  const mine = r.version ? readBundle(versionDir(wsId, r.kind, r.slug, r.version)) : null;
+  if (!mine || !r.version) return null;
+  const ex = await skillsCall<{ files?: Record<string, ExportFile> }>(pid, `/${encodeURIComponent(remoteId)}/export?version=${encodeURIComponent(r.version)}`);
+  if (!ex || ex.status !== 200 || !ex.json.files) return null;
+  const parsed = parseSkillMd(ex.json.files["SKILL.md"]?.content ?? "");
+  if (!parsed.ok) return null;
+  const theirs = Object.entries(ex.json.files).filter(([p]) => p !== "SKILL.md").map(([p, f]) => `${p}:${f.sha256 ?? ""}`).sort().join();
+  return parsed.body.replace(/^\n+/, "") === mine.body.replace(/^\n+/, "") && theirs === mine.files.map((f) => `${f.path}:${f.sha256}`).sort().join();
+}
+
+/**
+ * The version a skill here is at, under a number Orgo has already (an Admin published that number there while this Mac
+ * was off, or this Mac rolled back to a number Orgo moved past): its bots' version here becomes a new one, the next
+ * number free both here and in Orgo (its versions, GET …/skills/{id}), with the same text and files (its SKILL.md's
+ * metadata.version the new number), and the ref points at it. Every version kept here stays. Answers the new number, or
+ * null when Orgo's versions couldn't be read or the version's folder isn't here.
+ */
+async function freeVersion(wsId: string, pid: string, remoteId: string, r: SkillRef): Promise<string | null> {
+  const from = r.version;
+  if (!from) return null;
+  const got = await skillsCall<{ versions?: unknown }>(pid, `/${encodeURIComponent(remoteId)}`);
+  if (got?.status !== 200 || !Array.isArray(got.json.versions)) return null;
+  const theirs = got.json.versions.filter((x): x is string => typeof x === "string");
+  const to = nextVersion([...theirs, ...(r.versions ?? []).map((x) => x.version)]);
+  const was = readBundle(versionDir(wsId, r.kind, r.slug, from));
+  const dir = versionDir(wsId, r.kind, r.slug, to);
+  if (!was || !dir) return null;
+  const md = renderSkillMd(withVersion(was.frontmatter, to), was.body);
+  writeTree(dir, md, was.files);
+  const sha = bundleSha(md, was.files);
+  patchRef(wsId, r.kind, r.slug, (x) => {
+    x.versions = [...(x.versions ?? []), { version: to, at: Date.now(), sha256: sha }];
+    x.version = to;
+  });
+  console.warn(`[skills] ${r.slug}: Orgo has ${from} already, so this Mac's goes as ${to}`);
+  return to;
 }
 
 /** `removed`: deleted on Orgo, so deleted here. `retry`: Orgo didn't take all of it for now (tried again after a backoff). */
@@ -2454,7 +2602,11 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
         // Its label too, where Orgo keeps it in a column (labelColumn): a move goes at once, without a version.
         const withLabelColumn = labelColumn.get(pid) === true;
         let p = await skillsCall<{ skill?: RemoteSkill }>(pid, `/${encodeURIComponent(there.id)}`, { method: "PATCH", body: { name: r.name, description: r.description, bot_ids: r.botIds, status: r.status, ...(withLabelColumn ? { label: columnLabel(r) } : {}) } });
-        const v = r.version && there.current_version?.version !== r.version ? payloadOf(wsId, r) : null;
+        // Both moved to the same number since they last agreed (an Admin published it in Orgo, the owner here): the same
+        // number with other content is a clash, sent as the next free number below (freeVersion).
+        const theirsNow = there.current_version?.version ?? "";
+        const clash = !!r.version && theirsNow === r.version && r.remoteVersion !== undefined && r.remoteVersion !== theirsNow && (await sameAsOrgo(wsId, pid, there.id, r)) === false;
+        const v = r.version && (theirsNow !== r.version || clash) ? payloadOf(wsId, r) : null;
         // The label Orgo's SKILL.md has from now on: the one a version sent carries.
         let sentLabel: string | undefined = withLabelColumn && p?.status === 200 ? sentLabelOf(r) : undefined;
         if (!withLabelColumn && p?.status === 200 && hasColumn(p.json.skill)) {
@@ -2474,10 +2626,23 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
           }
         }
         if (v) {
-          const sentV = await skillsCall(pid, `/${encodeURIComponent(there.id)}/versions`, { method: "POST", body: { body: v.body, files: v.files, version: r.version } });
+          const versionsOf = `/${encodeURIComponent(there.id)}/versions`;
+          let sentV = await skillsCall<{ code?: string }>(pid, versionsOf, { method: "POST", body: { body: v.body, files: v.files, version: r.version } });
+          // That number is Orgo's already (an Admin published one there while this Mac was off, or a roll back here to a
+          // number Orgo moved past): this Mac's version goes as the next number free on both sides, here too.
+          if (sentV?.status === 409 && sentV.json.code === "version_exists") {
+            const next = await freeVersion(wsId, pid, there.id, findRef(wsId, r.kind, r.slug) ?? r);
+            const now = next ? findRef(wsId, r.kind, r.slug) : undefined;
+            const again = now ? payloadOf(wsId, now) : null;
+            if (next && now && again) sentV = await skillsCall<{ code?: string }>(pid, versionsOf, { method: "POST", body: { body: again.body, files: again.files, version: next } });
+          }
           if (sentV && sentV.status < 300) {
             for (const sha of v.shas) pushed.add(sha);
             sentLabel = sentLabelOf(r);
+          } else if (sentV?.status === 409 && sentV.json.code !== "unchanged") {
+            // Not taken (still a number Orgo has): not marked as agreed, so it goes again.
+            res.failed++;
+            continue;
           }
         }
         if (p?.status === 200) {
@@ -2587,27 +2752,28 @@ async function syncLabelInfo(wsId: string, pid: string): Promise<boolean> {
   return true;
 }
 
-type ExportFile = { content?: string; url?: string; sha256?: string; executable?: boolean };
+/** Two bundles' text and files the same (the blank line after the frontmatter aside): what skillDetail calls unchanged. */
+const sameWork = (a: Bundle, b: Bundle) => a.body.replace(/^\n+/, "") === b.body.replace(/^\n+/, "") && a.files.map((f) => `${f.path}:${f.sha256}`).join() === b.files.map((f) => `${f.path}:${f.sha256}`).join();
 
 /**
- * A file of Orgo's export as it was stored: its text inline, or its bytes from `url` (a short presigned GET,
- * no key sent: orgo-web gives one for every binary file and for large text). Checked against its sha256;
- * null when it can't be fetched or doesn't match, so nothing half there is ever written.
+ * Whether a skill's working folder here holds work not published yet, which a pull must keep: its text or files
+ * differ from the version its bots read (skillDetail's "changed"), or, a draft with no version here, it changed here
+ * since this Mac and Orgo last agreed. Orgo's version then goes beside it (its .versions folder, the ref's pointer), so
+ * an Admin's publish never wipes the owner's next version in the making.
  */
-async function exportedFile(path: string, f: ExportFile): Promise<{ path: string; content: string | null; data?: Buffer; executable: boolean } | null> {
-  let bytes: Buffer;
-  if (typeof f.content === "string") bytes = Buffer.from(f.content, "utf8");
-  else if (typeof f.url === "string" && /^https?:\/\//.test(f.url)) {
-    const res = await fetch(f.url, { signal: AbortSignal.timeout(120_000) }).catch(() => null);
-    if (!res?.ok) return null;
-    bytes = Buffer.from(await res.arrayBuffer());
-  } else return null;
-  if (f.sha256 && sha256Hex(bytes) !== f.sha256) return null;
-  const text = typeof f.content === "string" ? f.content : textOf(path, bytes);
-  return text !== null ? { path, content: text, executable: !!f.executable } : { path, content: null, data: bytes, executable: !!f.executable };
+function workInFolder(wsId: string, r: SkillRef): boolean {
+  const here = readBundle(skillDir(wsId, r.kind, r.slug));
+  if (!here) return false;
+  const used = r.version ? readBundle(versionDir(wsId, r.kind, r.slug, r.version)) : null;
+  if (used) return !sameWork(here, used);
+  return r.status === "draft" && !!r.syncedAt && r.updatedAt > r.syncedAt;
 }
 
-/** Orgo's copy of a skill (its export: SKILL.md and every file) written here, as `into` or as a new one. */
+/**
+ * Orgo's copy of a skill (its export: SKILL.md and every file) written here, as `into` or as a new one. Into one whose
+ * folder holds work not published yet (workInFolder), only Orgo's version is written (its .versions folder, and the
+ * ref's pointer to it): the folder stays as it is.
+ */
 async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef): Promise<boolean> {
   const ex = await skillsCall<{ files?: Record<string, ExportFile>; version?: string }>(pid, `/${encodeURIComponent(x.id)}/export`);
   if (!ex || ex.status !== 200 || !ex.json.files) return false;
@@ -2641,7 +2807,9 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
       const unmoved = into.remoteLabel !== undefined && sameLabel(pulledAs, into.remoteLabel);
       const mine = suggested(into) ? undefined : into.label;
       const keep = unmoved && !!mine && !sameLabel(pulledAs, mine) ? mine : column && !sameLabel(pulledAs, labelOf(parsed.frontmatter) ?? UNSORTED) ? pulledAs : undefined;
-      writeTree(skillDir(wsId, kind, into.slug)!, keep ? renderSkillMd(withLabel(parsed.frontmatter ?? {}, keep), parsed.body) : md, files);
+      // Work not published yet in its folder: kept, and Orgo's version goes beside it (with a version to go to).
+      const keepFolder = !!version && workInFolder(wsId, into);
+      if (!keepFolder) writeTree(skillDir(wsId, kind, into.slug)!, keep ? renderSkillMd(withLabel(parsed.frontmatter ?? {}, keep), parsed.body) : md, files);
       if (version) writeTree(versionDir(wsId, kind, into.slug, version)!, md, files);
       // Moved on Orgo (another Mac, orgo.ai): that label, the skill's own from now on (Unsorted: none).
       const label = (column || pulledLabel) && !unmoved ? knownLabel(wsId, pulledAs) : undefined;
@@ -2724,6 +2892,49 @@ export function queueSync(wsId: string, tries = 0) {
 
 /** Whether Orgo has the skills routes for this project, as last seen (undefined: not asked yet). */
 export const skillsRoutesSeen = (projectId: string) => routes.get(projectId);
+
+/** How often the owner's Mac looks at Orgo for changes made there (an Admin's publish, roll back, delete or approval). */
+const POLL_MS = 2 * 60_000;
+/** A workspace no one else is in is looked at every this many polls (10 minutes): an Admin with no access entry yet still lands. */
+const POLL_ALONE_EVERY = 5;
+
+/**
+ * The workspaces one poll syncs (the `ticks`th): each with an Orgo project whose skills routes Orgo has (or that wasn't
+ * asked yet), on the owner's Mac. A workspace with people in it (Workspace.memberAccess: someone the owner added)
+ * every poll; any other every POLL_ALONE_EVERY polls. One with a sync queued, backing off or under way is left to it.
+ */
+export function skillsPollDue(ticks: number): string[] {
+  if (onRunner() || userDir() === null) return [];
+  const timers = g.bopsSkillsSync;
+  const going = g.bopsSkillsInFlight;
+  return (getState().workspaces ?? [])
+    .filter((w) => !!w.orgoProjectId && routes.get(w.orgoProjectId) !== false)
+    .filter((w) => Object.keys(w.memberAccess ?? {}).length > 0 || ticks % POLL_ALONE_EVERY === 0)
+    .filter((w) => !timers?.has(w.id) && !going?.has(w.id))
+    .map((w) => w.id);
+}
+
+/**
+ * On the owner's Mac, while Bops runs (workspaces.ts startProjectBinding, once a start): every two minutes, what changed
+ * in Orgo comes here (syncSkills reads only what changed since the last: ?since=), so an Admin's publish, roll back,
+ * delete or approval made with this Mac off lands here soon after it's on, and bots on this Mac use it. Never on a
+ * computer's runner, which reads Orgo itself (runner-skills.ts).
+ */
+export function startSkillsPoll() {
+  if (onRunner() || g.bopsSkillsPoll) return;
+  const poll = { ticks: 0, timer: setInterval(() => {
+    poll.ticks++;
+    for (const wsId of skillsPollDue(poll.ticks)) queueSync(wsId);
+  }, POLL_MS) };
+  poll.timer.unref?.();
+  g.bopsSkillsPoll = poll;
+}
+
+/** Tests: stop the poll. */
+export function stopSkillsPoll() {
+  if (g.bopsSkillsPoll) clearInterval(g.bopsSkillsPoll.timer);
+  g.bopsSkillsPoll = undefined;
+}
 
 /**
  * A deleted workspace's skills and apps go from this Mac (remove.ts deleteWorkspace, while it's still

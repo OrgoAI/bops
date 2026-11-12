@@ -12,7 +12,7 @@ import { changeRouteOf } from "@/cloud/change-routes";
  * or switches the workspace, signing in and out, notices, usage events, what's on screen and what's the
  * user's own (their vault, account and name) go through. Nor do the reads the server answers from the
  * user's own bots or workspaces by id (a shared bot's id is often one of theirs, "boppy"): their memory,
- * Knowledge's issues, skills, files, screens. The buttons that would change something are hidden or say so too; this is what
+ * Knowledge's issues, files, screens. The buttons that would change something are hidden or say so too; this is what
  * holds whatever's missed. A screen's stream and its pictures (an EventSource, an image) never pass through fetch: what
  * opens them asks readAllowed first.
  */
@@ -43,13 +43,16 @@ const ALLOWED = [
   // on the owner's computer Bops Cloud names for that bot (lib/server/shared.ts sharedFileTarget), for an Admin, with the
   // user's own Orgo key; never on the user's own bot of that id. (attachments.tsx sendFile asks sendRefused: XMLHttpRequest.)
   /^\/api\/bots\/files(\?|$)/,
+  // Skills (skills.tsx, in Knowledge): while a shared workspace is open, every skills route acts on that workspace's skills
+  // alone, in orgo-web with the user's own Orgo key, for an Admin there (lib/server/shared-skills.ts, which refuses anyone
+  // else before Orgo is asked); never this Mac's folders or the user's own workspace of that id.
+  /^\/api\/skills(\/|\?|$)/,
 ];
 
 /** The reads that don't go while it's open: answered from the user's own bot or workspace of that id, never the shared one's. */
 const OWN_READS = [
   /^\/api\/memory(\/|\?|$)/,
   /^\/api\/orbit(\/|\?|$)/,
-  /^\/api\/skills(\/|\?|$)/,
   /^\/api\/routines\/suggestions(\/|\?|$)/,
   // A routine's runs, by id: the user's own routine of that id, never the owner's (its reports read the shared copy only).
   /^\/api\/routines\/[^/]+\/runs(\/|\?|$)/,

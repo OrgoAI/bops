@@ -494,9 +494,11 @@ export type ScriptApproval = {
   synced?: boolean;
   /**
    * Made in a Bops window by the person signed in (approveScript), not taken from Orgo. One taken from
-   * Orgo counts only while Orgo says that person made it: another member's approval never runs a script here.
+   * Orgo counts only while Orgo says the owner or an Admin made it: a Member's approval never runs a script here.
    */
   inBops?: boolean;
+  /** Whose it was, as Orgo said when it was taken from there: the owner's or an Admin's (lib/server/workspace-skills.ts approvalCounts). */
+  by?: "owner" | "admin";
 };
 
 export type WorkspaceLine = {
@@ -968,7 +970,16 @@ export type Message = {
    * Nothing changes until the owner presses Accept in the window (lib/server/skill-proposals.ts).
    */
   skillProposals?: SkillProposal[];
+  /**
+   * Set on a bot's message: skills it saved as drafts this turn (chat.ts create_skill), each a card under the message
+   * that opens it in Skills, in Knowledge, to read and publish (components/app/skill-drafts.tsx). Publishing is a
+   * person's, there, with their own sign in: the owner, or an Admin of a shared workspace.
+   */
+  skillDrafts?: SkillDraftNote[];
 };
+
+/** A skill a bot saved as a draft (Message.skillDrafts): which one, to open in Skills. */
+export type SkillDraftNote = { kind: SkillKind; slug: string; name: string };
 
 /**
  * A reply a bot wrote for the user, to an email, a Slack message or a Discord message it read with the user's

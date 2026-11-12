@@ -190,6 +190,13 @@ export const powerWho = (state: Viewing): PowerWho => ({
   ...(state.shared?.changes ? { can: Object.fromEntries((state.shared.can ?? []).map((p) => [p, true])) as Partial<Record<Power, true>> } : {}),
 });
 
+/**
+ * Whether the viewer works on a shared workspace's skills in Knowledge, Skills (lib/server/shared-skills.ts: orgo-web with
+ * their own Orgo key, which checks again): an Admin, everything but labels. The one rule the window and the server both
+ * read. A Member with Memory and skills (Power "memory") comes next, once orgo-web lets them write and says so: here.
+ */
+export const sharedSkillsWho = (s: { role?: SharedRole; can?: readonly string[] } | null | undefined): boolean => s?.role === "admin";
+
 export const mayChange = (state: Viewing, power: Power, { soon = false } = {}) =>
   !state.shared || (!!state.shared.can?.includes(power) && (soon || state.shared.changes === true));
 
