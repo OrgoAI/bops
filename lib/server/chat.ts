@@ -29,7 +29,7 @@ import { aboutBops, ASKING, tidyAnswer, WRITING } from "./style";
 import { howIWork, plainLinks } from "@/cloud/style";
 import { whenText } from "@/cloud/schedule";
 import { buildApp, madeApp } from "./made-apps";
-import { appWork, askDeploy, botSite, deployForBot, hostedAppsLine, localForBot, readReposAhead } from "./hosted-apps";
+import { appWork, askDeploy, botSite, deployForBot, hostedAppsLine, localForBot, publishWent, readReposAhead } from "./hosted-apps";
 import { savePage } from "./pages";
 import { onRunner } from "./persist";
 import { currentTurn, noteActing, stillTurn } from "./turn-context";
@@ -2723,7 +2723,13 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         const note = (a as { where?: unknown }).where === "prod" && !prod ? ` (It went to its preview: only ${owner}'s or an Admin's own words publish it. Ask them, or they press Publish in Your Apps.)` : "";
         const app = String((a as { app?: unknown }).app ?? "") || botSite(botId)?.app || "";
         return deployForBot(botId, app, typeof at === "string" && at.trim() ? at.trim().toLowerCase() : null, undefined, prod ? "prod" : "preview")
-          .then((said) => said + note)
+          .then((said) => {
+            // A publish that went: said in the chat as Bops, the way a Preview deploy is (hosted-apps.ts deployAfterTask), so
+            // the person sees it went and the bot's later turns ("is it live?") have it; a refusal is the model's to put in words.
+            // An app note: never texted or posted to a channel (phone.ts, channels.ts), where the bot's answer says it.
+            if (prod && publishWent(said)) addMessage({ chatId, role: "bot", botId, text: said, appNote: true, bops: true });
+            return said + note;
+          })
           .catch(failed);
       }
       if (name === "local_app") {

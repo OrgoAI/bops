@@ -5218,6 +5218,13 @@ async function markIfGood(wsId: string, name: string, site: string, port: number
 /** What a bot says when an environment of an app didn't change (deploy_app, a task's deploy after): which one, why, and that nothing went live. */
 const unchanged = (env: "Preview" | "Published", name: string, why: string) => `${env} of ${name} not changed: ${why.trim().replace(/[.\s]+$/, "")}. Nothing went live.`;
 
+/**
+ * Whether deployForBot's words for a Publish say it went: "Published: publishing ..." (on Orgo) or "Published (on GitHub): ..."
+ * (the mirror pushed). Every refusal ("Published not changed: ...", unchanged's "Published of <app> not changed: ...", a
+ * partial failure's own message) is false. The chat says a publish that went as Bops (chat.ts deploy_app).
+ */
+export const publishWent = (said: string) => /^Published(?: \(on GitHub\))?: /.test(said);
+
 /** How many pages of an app's log (200 each) a short id is looked for in. */
 const LOOK_PAGES = 10;
 
