@@ -1,11 +1,11 @@
 import "server-only";
 import { mkdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnMember } from "@/cloud/protocol";
+import { RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnJob, type TurnMember } from "@/cloud/protocol";
 import type { AppApproval, MemberTurn } from "@/lib/types";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
-import { getState, pullState, stateReady } from "./store";
+import { addMessage, getState, pullState, stateReady } from "./store";
 import { runInTurn, type TurnContext } from "./turn-context";
 
 /**
@@ -30,6 +30,10 @@ import { runInTurn, type TurnContext } from "./turn-context";
  * "turn-cancel" (its member removed or their access changed, its lease lost) stops a turn where it is. "state" reads
  * the state now (an OK answered, a change of who may). A turn whose message it can't read fails with a note. The Mac
  * never runs this.
+ *
+ * A turn that's an app's GitHub job (TurnMember.job: Link, or Bring in GitHub's changes, asked from a shared workspace's
+ * Your Apps and checked by Bops Cloud: cloud/turns.ts takeAppJob) isn't words to answer: it's done here (runJob, through
+ * hosted-apps.ts githubJob), said in the bot's chat as Bops' own, and its result told with its end. No model sees it.
  */
 
 const RECONNECT_MIN_MS = 2_000;
@@ -58,11 +62,14 @@ type Box = {
   marks?: Map<string, number>;
   /** Tests: how often a resume looks again at an upgrade's hold. */
   holdPollMs?: number;
+  /** Tests: what does an app's GitHub job (hosted-apps.ts githubJob). */
+  job?: (botId: string, job: TurnJob, by: string) => Promise<{ ok: boolean; said: string }>;
 };
 const g = globalThis as unknown as { __bopsRunnerChat?: Box };
 const box: Box = (g.__bopsRunnerChat ??= { running: new Map() });
 
 const answerOf = async () => box.answer ?? (await import("./chat")).answerMessage;
+const jobOf = async () => box.job ?? (await import("./hosted-apps")).githubJob;
 const identityOf = async () => box.identity ?? (await import("./runner")).checkIdentity;
 
 /** A call to Bops Cloud as this computer: the answer's status and body (status 0 when it didn't answer). */
@@ -218,8 +225,8 @@ async function whileMarked<T>(id: string, run: () => Promise<T>, held?: () => T)
 }
 const holding = () => stat(holdOf()).then((h) => Date.now() - h.mtimeMs < HOLD_STALE_MS, () => false);
 
-/** The turn's beats while `run` runs, then its end: done (with its tapback), paused for an OK, or nothing (taken back). */
-async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }) {
+/** The turn's beats while `run` runs, then its end: done (with its tapback, or `result`: a job's), paused for an OK, or nothing (taken back). */
+async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }, result?: () => { ok: boolean; said: string }) {
   box.running.set(ctx.id, ctx);
   // The beats on the way: the end waits for them, so one that lands after it can't say the turn runs still.
   const beats = new Set<Promise<void>>();
@@ -258,7 +265,7 @@ async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } 
     }
   }
   const react = after ? getState().messages.find((m) => m.id === after.messageId)?.reactions?.find((r) => r.by === ctx.botId)?.type : undefined;
-  await postSure(path, { state: "done", ...(react ? { react } : {}) });
+  await postSure(path, { state: "done", ...(react ? { react } : {}), ...(result ? { job: result() } : {}) });
 }
 
 /** The OK request a chat turn just paused for: the one asked on this turn (AskResume.cloudTurn), unanswered, the newest. */
@@ -284,6 +291,8 @@ async function claimAndAnswer(ev: RunnerTurnEvent) {
   if (r.status !== 200 || !r.body?.turn) return;
   const t = r.body.turn;
   const offsetMs = r.body.now - Date.now();
+  // An app's GitHub job: done here, never answered (its message is Bops' note of who asked, which it needs none of).
+  if (t.member?.job) return runJob({ id: t.id, chatId: t.chatId, botId: t.botId, offsetMs, humanAt: t.humanAt, acting: false, cancelled: false }, t.member.job, t.member.name);
   for (let i = 0; i < READS_FOR_MESSAGE && !getState().messages.some((m) => m.id === t.messageId); i++) await pullState().catch(() => {});
   const path = `/v1/runner/turns/${encodeURIComponent(t.id)}/done`;
   if (!getState().messages.some((m) => m.id === t.messageId)) {
@@ -293,6 +302,34 @@ async function claimAndAnswer(ev: RunnerTurnEvent) {
   const ctx: TurnContext = { id: t.id, chatId: t.chatId, botId: t.botId, offsetMs, humanAt: t.humanAt, acting: false, cancelled: false };
   const answer = await answerOf();
   await asTurn(ctx, () => answer(t.chatId, t.messageId, saidBy(t.member)), { messageId: t.messageId });
+}
+
+/** How a job's result reads in the bot's chat (Bops' own words, as the bot). */
+export const jobLine = (job: TurnJob, r: { ok: boolean; said: string }) =>
+  r.ok ? r.said : `${job.act === "githubLink" ? `Couldn't link ${job.app} to GitHub` : `Couldn't bring in GitHub's changes to ${job.app}`}: ${r.said}`;
+
+/**
+ * An app's GitHub job (TurnMember.job) as this turn: said at once to be doing what can't be done twice (it writes to
+ * Ingot), so a runner gone quiet after never has it done again; then done by hosted-apps.ts githubJob in `by`'s name,
+ * its words in the chat as the bot's, marked Bops' own and about an app (Message.appNote, bops), and its result told
+ * with the turn's end, which Bops Cloud keeps on the app for Your Apps. Taken back first (409): nothing is done.
+ */
+async function runJob(ctx: TurnContext, job: TurnJob, by: string) {
+  ctx.acting = true;
+  const first = await post(`/v1/runner/turns/${encodeURIComponent(ctx.id)}/beat`, { phase: "tools" });
+  if (first.status === 409) return;
+  const doJob = await jobOf();
+  let result: { ok: boolean; said: string } = { ok: false, said: "That didn't go. Try again." };
+  await asTurn(
+    ctx,
+    async () => {
+      result = await doJob(ctx.botId, job, by);
+      if (!ctx.cancelled) addMessage({ chatId: ctx.chatId, role: "bot", botId: ctx.botId, text: jobLine(job, result), appNote: true, bops: true });
+      return null;
+    },
+    undefined,
+    () => result,
+  );
 }
 
 /**
@@ -321,8 +358,9 @@ async function resumeMarked<T extends { paused?: boolean }>(a: AppApproval, id: 
 }
 
 /** For tests: how the turn is run and how this runner makes sure it's on its own computer (unset: the real ones), and the beat. */
-export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[]; turnsDir?: string; holdPollMs?: number }) {
+export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[]; turnsDir?: string; holdPollMs?: number; job?: typeof box.job }) {
   box.answer = opts.answer;
+  box.job = opts.job;
   box.identity = opts.identity;
   box.beatMs = opts.beatMs;
   box.turnsDir = opts.turnsDir;

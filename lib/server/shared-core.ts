@@ -716,6 +716,8 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...(s.adminActs ? { adminActs: true as const } : {}),
       ...(s.ownerOld && open.role === "admin" ? { ownerOld: true as const } : {}),
       ...(s.adminPublish && open.role === "admin" ? { adminPublish: true as const } : {}),
+      // Its apps' GitHub production, at Your Apps Write, for whoever has the power of Publish (cloud/ws-slice.ts sharedSlice).
+      ...(s.appGithub && s.apps?.level === "write" ? { appGithub: true as const } : {}),
       // Keys (cloud/ws-slice.ts keysOf): whether they manage this workspace's keys, whether the owner's Bops takes their
       // bots' key switches, and the switches on their way or not gone (keys.tsx).
       ...(s.keys ? { keys: true as const, ...(s.keyActs ? { keyActs: true as const } : {}) } : {}),

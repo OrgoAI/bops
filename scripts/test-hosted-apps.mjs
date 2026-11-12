@@ -680,6 +680,8 @@ const projectView = (p) => ({
   // (Said once it was changed: before, the fake is an orgo-web that doesn't say it, as Bops' first one didn't.)
   ...(p.health_path !== undefined ? { health_path: p.health_path } : {}),
   env_keys: [...(web.envs?.get(p.id)?.keys() ?? [])],
+  // What it gets from Keys, from an orgo-web that says it (a test sets it).
+  ...(web.keyed?.has(p.id) ? { env_from_keys: web.keyed.get(p.id) } : {}),
   current: newestFirst(p).find((d) => d.state === "succeeded") ?? null,
   deployments: newestFirst(p).map(({ log, ...d }) => (void log, d)),
 });
@@ -1143,6 +1145,16 @@ function vaultAndBroker(req, url, body) {
     return json({ secrets: web.secrets.map((s) => ({ name: s.name, workspace_id: s.workspace_id ?? null, created_at: "2026-10-20T00:00:00Z", updated_at: "2026-10-21T00:00:00Z" })) });
   if (url.pathname === "/api/secrets/reveal") return json({ error: "No reveal in these tests." }, 403);
   if (url.pathname !== "/api/secrets/call" || req.method !== "POST") return null;
+  // GitHub behind the broker, when a check sets it up (web.github): one repo whose branch has no app/ folder yet.
+  if (body?.name === "GITHUB_TOKEN" && web.github) {
+    const g = web.github;
+    g.calls.push(`${body.method} ${body.path}`);
+    const answer = (status, b) => json({ status, contentType: "application/json", body: b, truncated: false, headers: {} });
+    if (body.method === "GET" && body.path === `/repos/${g.repo}/git/ref/heads/main`) return answer(200, { object: { sha: g.head } });
+    if (body.method === "GET" && body.path === `/repos/${g.repo}/git/commits/${g.head}`) return answer(200, { sha: g.head, tree: { sha: g.tree } });
+    if (body.method === "GET" && body.path === `/repos/${g.repo}/git/trees/${g.tree}`) return answer(200, { sha: g.tree, tree: [{ path: "README.md", type: "blob", sha: "3".repeat(40), mode: "100644", size: 2 }], truncated: false });
+    return answer(404, { message: "Not Found" });
+  }
   // orgo-web's broker (app/api/secrets/call): a name with no provider, a workspace the user isn't in, a name not set.
   if (body?.name !== "CLOUDFLARE_API_TOKEN" || !web.cfBroker) return json({ error: `${body?.name} has no provider Orgo can call. GET /api/secrets/providers lists them.` }, 400);
   const ws = body.workspace_id ?? null;
@@ -2142,6 +2154,78 @@ await check("On a bot's computer: Orgo's refusals of its computer's own sign in 
   }
   assert.equal(hear(out), "Published of recipe-box not changed: Boppy has no GitHub key for this app, so it can't publish it to GitHub from here. Give it the GitHub key in Keys, then say publish again. Nothing went live.");
   assert.equal(web.calls.length, n, "nothing asked of Orgo");
+});
+
+await check("Link and Bring in asked from a shared workspace (githubJob): on a bot's computer only for an app at home there with a bot there given the GitHub key, said in words before anything is read; on this Mac a Link to a folder GitHub doesn't have yet keeps only the point, one the app's computer may keep too; the owner's own route says to use the shared Your Apps while one is open", async () => {
+  const { hostingChangeAllowed, hostingScope } = await import(`${root}/cloud/computer-scope.ts`);
+  const was = structuredClone(hostedApps()["recipe-box"]);
+  const cfg = { repo: "acme/site", branch: "main", path: "app" };
+  const boppyBot = () => S.getState().bots.find((b) => b.id === "boppy");
+  const keysWere = structuredClone(boppyBot().keys);
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].github = { ...cfg }));
+  const env = { runner: process.env.BOPS_RUNNER, computer: process.env.BOPS_RUNNER_COMPUTER, tokens: process.env.BOPS_INGOT_TOKENS };
+  const n = web.calls.length;
+  const job = (act = "githubLink") => H.githubJob("boppy", { act, app: "recipe-box" }, "Ada");
+  try {
+    process.env.BOPS_RUNNER = "1";
+    // Another computer's app: nothing of it is touched.
+    process.env.BOPS_RUNNER_COMPUTER = "c_elsewhere";
+    assert.deepEqual(await job(), { ok: false, said: "recipe-box lives on another computer, not this one, so nothing of it was changed here." });
+    // Its own computer, with no bot there given the GitHub key: said before anything is read (Orgo's broker would refuse it).
+    process.env.BOPS_RUNNER_COMPUTER = was.computerId;
+    S.update((s) => (s.bots.find((b) => b.id === "boppy").keys = []));
+    assert.deepEqual(hear(await job("githubPull")), { ok: false, said: "Boppy has no GitHub key on this computer, so nothing was read from GitHub. Give it the GitHub key in Keys, then try again." });
+    // Given it: Ingot is this computer's own sign in (none here yet), said as Ingot says it, never thrown.
+    S.update((s) => (s.bots.find((b) => b.id === "boppy").keys = ["GITHUB_TOKEN"]));
+    process.env.BOPS_INGOT_TOKENS = join(scratch, "no-ingot-tokens-here");
+    const r = await job();
+    assert.equal(r.ok, false);
+    assert.ok(r.said.startsWith("This computer has no Ingot sign in for this workspace yet"), r.said);
+    assert.equal(web.calls.length, n, "nothing asked of Orgo");
+  } finally {
+    for (const [k, v] of [["BOPS_RUNNER", env.runner], ["BOPS_RUNNER_COMPUTER", env.computer], ["BOPS_INGOT_TOKENS", env.tokens]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    S.update((s) => (s.bots.find((b) => b.id === "boppy").keys = keysWere));
+  }
+  // On this Mac (the owner's Mac doing it for someone, with the owner's own key): a folder GitHub doesn't have yet links to an empty one.
+  web.github = { repo: "acme/site", head: "1".repeat(40), tree: "2".repeat(40), calls: [] };
+  try {
+    const before = structuredClone(hostedApps()["recipe-box"]);
+    // Bring in before it's linked: said, nothing read.
+    assert.deepEqual(await job("githubPull"), { ok: false, said: "recipe-box isn't linked to GitHub yet. Link it first, in the menu beside Publish." });
+    assert.deepEqual(web.github.calls, []);
+    const linked = hear(await job());
+    assert.deepEqual(linked, { ok: true, said: "Linked recipe-box to GitHub acme/site main, folder app at 1111111. GitHub has no app/ folder yet, so the next Publish puts all of it there." });
+    assert.ok(web.github.calls.every((c) => c.startsWith("GET ")), "a Link writes nothing to GitHub");
+    const after = hostedApps()["recipe-box"];
+    const last = after.github.last;
+    assert.deepEqual([last.sha, /^[0-9a-f]{64}$/.test(last.ingot), last.keep], ["1".repeat(40), true, []]);
+    assert.deepEqual({ ...after, github: { ...after.github, last: undefined } }, { ...before, github: { ...cfg, last: undefined } }, "only its point changed");
+    // That change is one the app's own computer may keep (cloud/computer-scope.ts), so a runner's Link is kept too.
+    const sc = hostingScope(S.getState(), was.computerId);
+    assert.equal(hostingChangeAllowed(WS, before, after, sc, "recipe-box"), true);
+    assert.equal(hostingChangeAllowed(WS, before, { ...after, github: { ...after.github, repo: "acme/other" } }, sc, "recipe-box"), false, "never where it publishes");
+    // (Bring in itself, GitHub's version winning, is test-github-mirror.mjs's: this fake Ingot has no file trees.)
+  } finally {
+    web.github = undefined;
+  }
+  // No setting: said, nothing read.
+  S.update((s) => void delete s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].github);
+  assert.deepEqual(await job(), { ok: false, said: "Set where it lives on GitHub first." });
+  // The owner's own route, while a workspace someone shared is open: those are done in that workspace's Your Apps.
+  const { orgoKey } = await import(`${root}/lib/server/orgo-auth.ts`);
+  globalThis.bopsShared = { user: S.stateUser(), key: orgoKey(), copy: { openNow: () => ({ id: "shared_p" }), data: () => ({}), close() {} }, subscriber: { stop() {} } };
+  try {
+    for (const action of ["github", "githubLink", "githubPull"]) {
+      const r = await post("recipe-box", { ws: WS, action, github: cfg });
+      assert.deepEqual([r.status, r.body.error], [403, "Change it in this workspace's Your Apps."], action);
+    }
+  } finally {
+    globalThis.bopsShared = null;
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"] = was));
+  }
 });
 
 await check("deploy_app with the short id Ingot prints: the whole one looked up on main in Ingot and deployed, the computer asleep or not; the start of two, an unknown one, and one while Ingot is down are refused in words", async () => {
@@ -3226,6 +3310,28 @@ await check("Its variables: set and removed on its deploy project, the values go
   walk(scratch);
   assert.ok(files.some((f) => f.endsWith(".json")), "the state's files are among them");
   for (const f of files) assert.ok(!readFileSync(f).includes(SECRET), `not on disk: ${f}`);
+});
+
+await check("What it gets from Keys: orgo-web's env_from_keys, by name and where each comes from, into keyed; nothing else orgo-web sent; none from an orgo-web that doesn't say", async () => {
+  const p = recipeProject();
+  assert.equal((await H.appSettings(WS, "recipe-box")).keyed, undefined, "an older orgo-web: not said");
+  web.keyed = new Map([[p.id, [
+    { name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY", from: "workspace" },
+    { name: "AI_KEY", key: "OPENAI_API_KEY", from: "app", missing: true, value: "sk-made-up-never-shown" },
+    { name: "bad name", key: "X", from: "app" },
+    { name: "OTHER", key: "Y", from: "elsewhere" },
+  ]]]);
+  try {
+    const got = await H.appSettings(WS, "recipe-box");
+    assert.deepEqual(got.keyed, [
+      { name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY", from: "workspace" },
+      { name: "AI_KEY", key: "OPENAI_API_KEY", from: "app", missing: true },
+    ]);
+    assert.ok(!JSON.stringify(got).includes("sk-made-up-never-shown"), "never a value");
+    assert.deepEqual(got.env, (await H.appSettings(WS, "recipe-box")).env, "its own variables as before");
+  } finally {
+    web.keyed = undefined;
+  }
 });
 
 await check("Roll back: an earlier deploy of its own that went live and is still on the computer put back without a build, the app answered with it queued; the live one, a failed one, one that isn't its, or a made-up id refused before Orgo is asked; Orgo's refusals in words", async () => {

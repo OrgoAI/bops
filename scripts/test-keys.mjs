@@ -99,6 +99,9 @@ const orgoCalls = [];
 /** A shared workspace's own keys as orgo-web's bops-keys routes keep them, and what they answer next instead ("page": a route it doesn't have). */
 const projectVault = new Map([["LINEAR_API_KEY", "lin_api_fake_shared"]]);
 const projectSays = [];
+/** The links of keys to apps orgo-web keeps (bops-keys/apps), and what it answers next instead ("old": no such route yet). */
+const projectLinks = [];
+const linksSay = [];
 /** Orgo's reveal answers 429 while this is set: its rate limit. */
 let revealLimited = false;
 /** What the broker answers next for a path, else a small JSON answer. */
@@ -145,6 +148,22 @@ const server = createServer(async (req, res) => {
     if (!vault.has(body.name)) return send(404, { error: "Secret not set", code: "not_set" });
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     return res.end(JSON.stringify({ name: body.name, value: vault.get(body.name) }));
+  }
+  // Which apps use which of a workspace's keys (orgo-web's bops-keys/apps), names only. "old": an orgo-web from before it,
+  // where the path falls into bops-keys/{name} (DELETE only) and answers 405.
+  const pl = url.pathname.match(/^\/api\/projects\/([^/]+)\/bops-keys\/apps$/);
+  if (pl) {
+    const say = linksSay.shift();
+    if (say === "old") return res.writeHead(405), res.end();
+    if (say) return send(say.status, say.body);
+    const shown = (app) => projectLinks.filter((l) => !app || l.app === app || l.app === "*");
+    if (req.method === "GET") return send(200, { links: shown(url.searchParams.get("app")) });
+    if (req.method === "PUT") {
+      const at = projectLinks.findIndex((l) => l.app === body.app && l.name === body.var);
+      if (at >= 0) projectLinks.splice(at, 1);
+      if (body.key !== null) projectLinks.push({ app: body.app, name: body.var, key: body.key, ...(body.key === "NOTION_API_KEY" ? { missing: true } : {}) });
+      return send(200, { links: shown(body.app) });
+    }
   }
   // A shared workspace's own keys (orgo-web's bops-keys routes), as its Keys holder reaches them with their own key.
   const pk = url.pathname.match(/^\/api\/projects\/([^/]+)\/bops-keys(?:\/(reveal|[A-Z0-9_]+))?$/);
@@ -918,6 +937,7 @@ const openShared = (o = {}) => {
     view: () => ({
       projectId: SHARED_PROJECT,
       keys: o.keys ?? true,
+      appsWrite: o.appsWrite ?? false,
       keyActs: o.keyActs ?? true,
       keyNames: o.keyNames ?? [{ name: "GITHUB_TOKEN", scope: "all" }, { name: "LINEAR_API_KEY", scope: "workspace" }, { name: "PLAIN_API_KEY", scope: "workspace", from: true }],
       bots: [{ id: "max", keys: ["GITHUB_TOKEN", "LINEAR_API_KEY"] }, { id: "ivy", keys: [] }],
@@ -1248,6 +1268,114 @@ await check("in a shared workspace a Member without Keys can't save from the car
   } finally {
     closeShared();
   }
+});
+
+/* ---------------- Apps that use a key from Keys (lib/server/app-keys.ts) ---------------- */
+
+const AppKeysRoute = await import(`${root}/app/api/keys/apps/route.ts`);
+const linkCalls = (project) => orgoCalls.filter((c) => c.path === `/api/projects/${project}/bops-keys/apps`);
+const LINK_VALUE = "sk-ant-made-up-never-sent-0001";
+const answered = async (res) => [res.status, await res.json()];
+
+await check("apps that use a key, in the user's own workspace: the workspace's Orgo project, with their own key, names only; every app's or one app's; only from the window, only where apps are open", async () => {
+  const PROJ = "4b4b4b4b-1111-4222-8333-944455556666";
+  const had = { workspaces: S.getState().workspaces, workspace: S.getState().workspace, account: S.getState().account };
+  S.update((st) => {
+    st.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, orgoProjectId: PROJ }];
+    st.workspace = "ws_main";
+    st.account = { user: { id: "u_alex", email: "alex@orgo.ai", name: "Alex" }, signedInAt: 1 };
+  });
+  projectLinks.length = 0;
+  try {
+    let n = linkCalls(PROJ).length;
+    let [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "*", key: "anthropic-api-key", value: LINK_VALUE, projectId: SHARED_PROJECT })));
+    assert.equal(status, 200, JSON.stringify(got));
+    assert.deepEqual(got, { links: [{ app: "*", name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY" }], can: { every: true, app: true } });
+    let calls = linkCalls(PROJ).slice(n);
+    assert.deepEqual(calls.map((c) => [c.method, c.auth, c.body]), [["PUT", `Bearer ${ORGO_KEY}`, { app: "*", var: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY" }]], "the open workspace's project, never one from the request; no value");
+    [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "notes", name: "AI_KEY", key: "NOTION_API_KEY" })));
+    assert.equal(status, 200);
+    assert.deepEqual(got.links, [{ app: "*", name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY" }, { app: "notes", name: "AI_KEY", key: "NOTION_API_KEY", missing: true }]);
+    [status, got] = await answered(await AppKeysRoute.GET(req("GET", "/api/keys/apps?app=notes")));
+    assert.equal(status, 200);
+    assert.equal(linkCalls(PROJ).at(-1).search, "?app=notes");
+    assert.equal(got.links.length, 2);
+    [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "*", name: "ANTHROPIC_API_KEY", key: null })));
+    assert.deepEqual([status, got.links], [200, []]);
+    assert.deepEqual(linkCalls(PROJ).at(-1).body, { app: "*", var: "ANTHROPIC_API_KEY", key: null });
+    // Refused here, Orgo not asked.
+    n = linkCalls(PROJ).length;
+    for (const [body, want] of [
+      [{ app: "*", name: "CLAUDE_KEY", key: "ANTHROPIC_API_KEY" }, "A key for every app keeps its own name."],
+      [{ app: "notes", name: "PORT", key: "ANTHROPIC_API_KEY" }, "PORT is set by Orgo. Pick another name."],
+      [{ app: "notes", name: "ai-key", key: "ANTHROPIC_API_KEY" }, "Use capital letters, digits and underscores for its name."],
+      [{ app: "Not An App", key: "ANTHROPIC_API_KEY" }, "Pick an app."],
+      [{ app: "notes", key: "" }, "Pick a key from Keys."],
+    ]) {
+      [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", body)));
+      assert.deepEqual([status, got.error], [400, want], JSON.stringify(body));
+      noDashes(got.error, "a refusal");
+    }
+    assert.equal((await AppKeysRoute.GET(req("GET", "/api/keys/apps", undefined, false))).status, 403, "only from the Bops window");
+    assert.equal((await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "*", key: "ANTHROPIC_API_KEY" }, false))).status, 403);
+    S.update((st) => void (st.account = { user: { id: "u_x", email: "someone@example.com", name: "Someone" }, signedInAt: 1 }));
+    assert.equal((await AppKeysRoute.GET(req("GET", "/api/keys/apps"))).status, 404, "where apps aren't open");
+    assert.equal(linkCalls(PROJ).length, n);
+  } finally {
+    S.update((st) => Object.assign(st, had));
+  }
+});
+
+await check("apps that use a key, in a shared workspace: the copy's Orgo project with the user's own key; every app's with Keys, one app's only with Your Apps at Write too; without Keys refused before Orgo is asked", async () => {
+  projectLinks.length = 0;
+  openShared();
+  try {
+    let n = linkCalls(SHARED_PROJECT).length;
+    let [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "*", key: "LINEAR_API_KEY" })));
+    assert.equal(status, 200, JSON.stringify(got));
+    assert.deepEqual(got.can, { every: true, app: false });
+    assert.equal(linkCalls(SHARED_PROJECT).length, n + 1);
+    [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "notes", key: "LINEAR_API_KEY" })));
+    assert.deepEqual([status, got.error], [403, "You can link a key to an app once you have Write on Your Apps."]);
+    assert.equal(linkCalls(SHARED_PROJECT).length, n + 1, "not asked");
+    openShared({ appsWrite: true });
+    [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "notes", name: "TRACKER_KEY", key: "LINEAR_API_KEY" })));
+    assert.equal(status, 200);
+    assert.deepEqual(linkCalls(SHARED_PROJECT).at(-1).body, { app: "notes", var: "TRACKER_KEY", key: "LINEAR_API_KEY" });
+    openShared({ keys: false, appsWrite: true });
+    n = linkCalls(SHARED_PROJECT).length;
+    for (const res of [await AppKeysRoute.GET(req("GET", "/api/keys/apps")), await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "*", key: "LINEAR_API_KEY" }))]) {
+      assert.deepEqual(await answered(res), [403, { error: "The owner or an Admin can give you Keys." }]);
+    }
+    assert.equal(linkCalls(SHARED_PROJECT).length, n);
+    // What orgo-web refuses, in its words: Keys taken away meanwhile.
+    openShared({ appsWrite: true });
+    linksSay.push({ status: 403, body: { error: "x", code: "KEYS_NOT_ALLOWED" } });
+    assert.deepEqual(await answered(await AppKeysRoute.GET(req("GET", "/api/keys/apps"))), [403, { error: "The owner or an Admin can give you Keys." }]);
+  } finally {
+    closeShared();
+  }
+});
+
+await check("apps that use a key, with an orgo-web from before links: the list says so and offers nothing, a link is refused in plain words; anything but names orgo-web sends is dropped", async () => {
+  openShared({ appsWrite: true });
+  try {
+    // A 405 (the path falls into bops-keys/{name}), its database without the table (503), or a 404 that isn't orgo-web's own.
+    for (const say of ["old", { status: 503, body: { error: "x", code: "APP_KEYS_UNAVAILABLE" } }, { status: 404, body: null }]) {
+      linksSay.push(say);
+      const [status, got] = await answered(await AppKeysRoute.GET(req("GET", "/api/keys/apps?app=notes")));
+      assert.deepEqual([status, got], [200, { links: [], can: { every: false, app: false }, old: true, said: "Orgo can't link keys to apps yet." }], JSON.stringify(say));
+    }
+    linksSay.push("old");
+    assert.deepEqual(await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "*", key: "LINEAR_API_KEY" }))), [503, { error: "Orgo can't link keys to apps yet." }]);
+    linksSay.push({ status: 200, body: { links: [{ app: "*", name: "LINEAR_API_KEY", key: "LINEAR_API_KEY", value: LINK_VALUE }, { app: "../x", name: "A", key: "B" }, { app: "notes", name: "lower", key: "B" }] } });
+    const [, got] = await answered(await AppKeysRoute.GET(req("GET", "/api/keys/apps")));
+    assert.deepEqual(got.links, [{ app: "*", name: "LINEAR_API_KEY", key: "LINEAR_API_KEY" }]);
+    assert.ok(!JSON.stringify(got).includes(LINK_VALUE));
+  } finally {
+    closeShared();
+  }
+  assert.ok(!orgoCalls.some((c) => JSON.stringify(c.body ?? "").includes(LINK_VALUE)), "no value ever went to Orgo");
 });
 
 await check("no dashes in anything Bops said or told the model", () => {

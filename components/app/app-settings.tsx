@@ -37,6 +37,7 @@ import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
 import { act, AppEnvCtx, AppSite, CopyLink, envQuery, isSending, PILL, QUIET, removeApp, short, siteQuery, STATES, UrlLink, useSending } from "./hosted-apps";
 import { InlineConfirm, undash } from "./side-group";
 import { ago, post } from "./ui";
+import { KeyVariables } from "./app-key-links";
 
 /*
  * An app on the web's own page, beyond what hosted-apps.tsx shows of it (lib/hosted-apps.ts): Add app on the
@@ -1400,6 +1401,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
         </div>
       </form>
       <Variables ws={ws} name={name} names={answer.env} onSaved={(names) => onSaved({ ...answer, env: names })} first={first} lacks={answer.prodEnv?.filter((x) => !answer.env.includes(x))} />
+      <KeyVariables app={name} />
     </div>
   );
 }

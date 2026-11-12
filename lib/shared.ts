@@ -57,6 +57,11 @@ export type SharedOpen = SharedWorkspace & {
   ownerOld?: true;
   /** For an Admin: the owner's Bops publishes for them (SharedWsSlice.adminPublish), so Your Apps shows Publish. */
   adminPublish?: true;
+  /**
+   * For an Admin, or a Member with App secrets, at Your Apps Write: where an app publishes on GitHub, its Link and Bring in
+   * GitHub's changes, which the app's own computer does (SharedWsSlice.appGithub: the owner's Bops takes them).
+   */
+  appGithub?: true;
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
   /** The same for a bot's How I work (bot-panel.tsx HowIWork). */

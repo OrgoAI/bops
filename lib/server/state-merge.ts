@@ -230,8 +230,24 @@ function mergeEither(key: string, b: unknown, m: unknown, t: unknown, top: boole
   // A workspace's team chart (Workspace.chain) is one field, like its favorites: changed on both, the copy of the
   // Bops saving now goes whole (an older Bops's: theirs), never a mix of two charts.
   if (!top && key === "chain") return me?.older ? t : m;
+  // An app's GitHub setting (AppHosting.github) is one value too: its point (`last`) is of its own repo, branch and folder.
+  if (!top && key === "github" && (isObject(m) || isObject(t))) return githubWhole(b, m, t, me);
   if (isObject(m) && isObject(t)) return mergeObject(isObject(b) ? b : {}, m, t, false, me);
   return me?.older ? t : m;
+}
+
+/**
+ * An app's GitHub setting changed on both sides (lib/hosted-apps.ts AppHosting.github), never mixed: a point (`last`) is
+ * only ever of the repo, branch and folder it was made for. The side that changed where it publishes (Bops Cloud keeping an
+ * Admin's setting while this Mac published or linked: cloud/members.ts githubHere) goes whole over one that only moved its
+ * point, as a new setting needs a new Link anyway; both moved it, or neither: this Mac's (an older Bops's: theirs).
+ */
+function githubWhole(base: unknown, mine: unknown, theirs: unknown, me?: Me): unknown {
+  const where = (x: unknown) => (isObject(x) ? canonical({ ...x, last: undefined }) : "");
+  const moved = (x: unknown) => where(x) !== where(base);
+  if (moved(theirs) && !moved(mine)) return theirs;
+  if (moved(mine) && !moved(theirs)) return mine;
+  return me?.older ? theirs : mine;
 }
 
 /** A bot's "How I work" and who wrote it (Bot.persona, Bot.personaBy): one field, as one Save or an Admin's change writes both. */

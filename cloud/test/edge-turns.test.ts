@@ -7,9 +7,9 @@ import { closeDb, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import type { MemberActPayload } from "../protocol.ts";
+import { GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState } from "../protocol.ts";
 import { howIWork } from "../style.ts";
-import { closeRunners, resetTurns, sweepTurns, turnById, turnTiming } from "../turns.ts";
+import { closeRunners, JOB_OLD_RUNNER, resetTurns, sweepTurns, turnById, turnTiming } from "../turns.ts";
 import { connectMac, dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
@@ -34,6 +34,8 @@ const orgoSays = (member: string, project: string, more: Record<string, unknown>
 /** What the fake orgo-web answers a wake with, by desktop (default: running), and each wake it was asked for. */
 const wakeAnswers = new Map<string, (n: number) => Promise<Record<string, unknown>> | Record<string, unknown>>();
 const wakes: { userId: string; desktopId: string; allowHourly: boolean; signed: boolean }[] = [];
+/** Each project's own keys as orgo-web's bops-keys lists them (names), or the status it answers; none: 404. */
+const liveKeys: Record<string, string[] | number> = {};
 /** A bops-role answer held until the test lets it go, by "<user> <project>": what orgo-web said before a notice, back after it. */
 const held = new Map<string, { until: Promise<void>; reached: boolean }>();
 
@@ -57,6 +59,11 @@ async function fakeOrgo(): Promise<Listening> {
         wakes.push({ ...b, signed });
         const n = wakes.filter((w) => w.desktopId === b.desktopId).length;
         return json(res, 200, { desktopId: b.desktopId, ...(await (wakeAnswers.get(b.desktopId) ?? (() => ({ state: "running" })))(n)) });
+      }
+      const keysOf = /^\/api\/projects\/([^/]+)\/bops-keys$/.exec(req.url ?? "")?.[1];
+      if (keysOf) {
+        const k = liveKeys[keysOf];
+        return k === undefined || typeof k === "number" ? json(res, typeof k === "number" ? k : 404, {}) : json(res, 200, { keys: k.map((name) => ({ name, updated_at: null })) });
       }
       const project = /^\/api\/projects\/([^/]+)\/bops-role$/.exec(req.url ?? "")?.[1];
       let m: RegExpExecArray | null;
@@ -788,4 +795,223 @@ test("without Use its computer, a member can't tell work on the bot's computer m
   }
   assert.equal((await act(s.noUse, s.project, "key-nc-stop001", { act: "stop", sessionIds: ["t1"] })).status, 202);
   assert.equal((await act(s.writer, s.project, "key-nc-reply02", { act: "reply", sessionId: "t1", text: "do more" })).status, 202, "with it, as before");
+});
+
+/* ---------------- An app's GitHub production, from a shared workspace's Your Apps ---------------- */
+
+const SHA = "a".repeat(40);
+const INGOT = "b".repeat(64);
+/** The owner's state as their Mac reads it from Bops Cloud, whole (ownersState, with apps). */
+type Full = { version: number; state: { workspaces: { id: string; hostedApps?: Record<string, Record<string, unknown>>; appsForMembers?: { apps: Record<string, { acts?: Record<string, unknown>[] }> } }[] } };
+const fullState = async (owner: string) => (await (await fetch(`${cloud.url}/v1/state`, { headers: own(owner, "mac-o", GITHUB_ACTS_MIN_VERSION) })).json()) as Full;
+const acme = (f: Full) => f.state.workspaces.find((w) => w.id === "ws_acme")!;
+const actsOn = async (owner: string, app = "site") => acme(await fullState(owner)).appsForMembers?.apps[app]?.acts ?? [];
+/** What a member reads of the workspace, as a Bops that says its version (the GitHub acts are shown only to one at GITHUB_ACTS_MIN_VERSION). */
+const readAs = async (who: string, project: string, version = GITHUB_ACTS_MIN_VERSION) =>
+  (await (await fetch(`${cloud.url}/v1/ws/${project}/state`, { headers: { Authorization: `Bearer ${keyOf(who)}`, "x-bops-version": version } })).json()) as SharedWsState;
+
+/**
+ * A workspace of Orgo's team (its owner's email, as orgo-web says it, opens Your Apps) whose app "site" publishes to GitHub
+ * (linked), at home on Max's computer, with a runner there the owner's Mac saw running (`runner`: its version; null: none),
+ * Max given the GitHub key (`keyed`), and the owner's last Mac at `mac`. An Admin; Sam, a Member with Your Apps at Write and
+ * App secrets; Ivy, at Write without the switch. The owner's Mac is shut (no tunnel).
+ */
+async function setupGithub(o: { runner?: string | null; keyed?: boolean; mac?: string } = {}) {
+  const owner = user("owner");
+  const admin = user("admin");
+  const sam = user("secrets");
+  const ivy = user("noswitch");
+  const project = randomUUID();
+  const desktop = randomUUID();
+  const said = { ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme", ownerEmail: "owner@orgo.ai" };
+  roles[`${owner} ${project}`] = { role: "owner", ...said };
+  roles[`${admin} ${project}`] = { role: "admin", ...said };
+  for (const m of [sam, ivy]) roles[`${m} ${project}`] = { role: "member", ...said };
+  const DESKTOP = desktop.toUpperCase();
+  const state = {
+    owner: { name: "Tara" },
+    workspaces: [
+      { id: "ws_main", name: "Main" },
+      {
+        id: "ws_acme",
+        name: "Acme",
+        memberAccess: {
+          [`${sam}@example.com`]: { others: "none", bots: { max: "read" }, apps: "write", can: { appSecrets: true } },
+          [`${ivy}@example.com`]: { others: "none", bots: { max: "read" }, apps: "write" },
+        },
+        hostedApps: {
+          site: {
+            botId: "max",
+            computerId: DESKTOP,
+            projectId: "proj-1",
+            url: "https://site.orgo.dev",
+            github: { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts"], last: { sha: SHA, ingot: INGOT, keep: ["proxy.ts"], when: 7 } },
+          },
+        },
+        appsForMembers: { at: 10, apps: { site: { head: null, sites: [], commits: [], deploys: [] } } },
+      },
+    ],
+    bots: [{ id: "max", name: "Max", isMain: true, workspaceId: "ws_acme", computerId: DESKTOP, ...(o.keyed === false ? {} : { keys: ["GITHUB_TOKEN"] }) }],
+    chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_acme" }],
+    ...(o.runner === null ? {} : { runners: { [DESKTOP]: { status: "running", version: o.runner ?? GITHUB_ACTS_MIN_VERSION, buildId: "b1", by: "mac-o", at: 1 } } }),
+  };
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: own(owner, "mac-o", GITHUB_ACTS_MIN_VERSION), body: JSON.stringify({ base: 0, state }) })).status, 200);
+  await macSaid(owner, o.mac ?? GITHUB_ACTS_MIN_VERSION);
+  return { owner, admin, sam, ivy, project, desktop, device: deviceIdOf(owner, desktop) };
+}
+const pendingFor = async (owner: string) => (await query<{ payload: MemberActPayload }>("SELECT payload FROM bops.cloud_pending WHERE user_id = $1 AND kind = 'member'", [owner])).rows.map((r) => r.payload);
+
+test("an Admin's Bring in with the owner's Mac shut: owed to the app's own computer as a job (nothing waits for the Mac), Your Apps shows it going, the runner claims it with the job and its result is kept on the app", async (t) => {
+  const s = await setupGithub();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  t.after(() => box.close());
+  const r = await act(s.admin, s.project, "key-ghpull-01", { act: "githubPull", app: "site" });
+  assert.equal(r.status, 202, await r.clone().text());
+  const a = (await r.json()) as { turn: string };
+  assert.deepEqual(a, { ok: true, macOn: true, stored: true, computer: true, turn: `turn_msg_job_${s.admin}_key-ghpull-01` });
+  assert.deepEqual(await pendingFor(s.owner), [], "nothing waits for the owner's Mac");
+  // Said in the app's bot's chat, as Bops' own; the turn carries the job and who asked, with the role.
+  assert.equal(await noteOf(s.owner, `msg_job_${s.admin}_key-ghpull-01`), `${s.admin} asked Max's computer to bring in GitHub's changes to site.`);
+  const row = (await query<{ member: { job?: unknown; role?: string; ref: string }; desktop_id: string }>("SELECT member, desktop_id FROM bops.chat_turns WHERE user_id = $1 AND id = $2", [s.owner, a.turn])).rows[0];
+  assert.deepEqual([row.member.job, row.member.role, row.member.ref, row.desktop_id], [{ act: "githubPull", app: "site" }, "admin", "key-ghpull-01", s.desktop]);
+  // Your Apps: going, named as theirs; and the GitHub part is theirs to use.
+  const seen = await readAs(s.admin, s.project);
+  assert.equal(seen.state.appGithub, true);
+  const site = seen.state.apps!.list.find((x) => x.name === "site")!;
+  assert.deepEqual(site.github?.linked, { sha: SHA, ingot: INGOT, when: 7 });
+  assert.deepEqual(site.acts?.map((x) => [x.key, x.act, x.going, x.name]), [["key-ghpull-01", "githubPull", true, s.admin]]);
+  // A Bops from before the GitHub acts is shown none of it.
+  const old = await readAs(s.admin, s.project, "0.0.51");
+  assert.deepEqual([old.state.apps!.list[0].acts, old.state.appGithub], [[], true], "(the owner's Mac takes them: the flag stays; the old window never reads it)");
+  // The runner hears it and claims it, with the job; its row in the chat (Bops' own, about an app) is the turn's.
+  await until(() => box.of("turn").some((e) => e.data.id === a.turn), "the job's turn event");
+  const c = await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/claim`, {});
+  assert.equal(c.status, 200, await c.clone().text());
+  const claim = (await c.json()) as { turn: { member: { job: unknown; name: string } } };
+  assert.deepEqual(claim.turn.member.job, { act: "githubPull", app: "site" });
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/beat`, { phase: "tools" })).status, 200);
+  const w = await writeAs(s.owner, s.desktop, [{ id: "job-row-1", chatId: "bot:max", role: "bot", botId: "max", text: "Brought 2 changes from GitHub into Ingot.", at: Date.now(), turn: a.turn, appNote: true, bops: true }]);
+  assert.equal(w.status, 200, await w.text());
+  // Its own state write moves only the point (computer-scope.ts hostingChangeAllowed): never where it publishes.
+  const mine = (await (await runner(s.owner, s.desktop, "/v1/state")).json()) as Full;
+  const moved = JSON.parse(JSON.stringify(mine)) as Full;
+  acme(moved).hostedApps!.site.github = { ...(acme(moved).hostedApps!.site.github as Record<string, unknown>), last: { sha: "c".repeat(40), ingot: "d".repeat(64), keep: ["proxy.ts"], when: 9 } };
+  const putAs = (body: Full) => fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: { Authorization: `Bearer ${vm(s.owner, s.desktop)}`, "x-bops-user": s.owner, "x-bops-protocol": "2", "content-type": "application/json" }, body: JSON.stringify({ base: body.version, state: body.state }) });
+  const elsewhere = JSON.parse(JSON.stringify(mine)) as Full;
+  acme(elsewhere).hostedApps!.site.github = { ...(acme(elsewhere).hostedApps!.site.github as Record<string, unknown>), repo: "example-org/other" };
+  assert.equal((await putAs(elsewhere)).status, 403, "a runner never points it elsewhere");
+  assert.equal((await putAs(moved)).status, 200, "its point, it may");
+  // Its end, with how it went: kept on the app in place of going.
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/done`, { state: "done", job: { ok: true, said: "Brought 2 changes from GitHub into Ingot." } })).status, 200);
+  assert.equal((await turnById(s.owner, a.turn))?.state, "done");
+  const kept = (await actsOn(s.owner))[0];
+  assert.deepEqual([kept.key, kept.act, kept.ok, kept.going, kept.said, kept.name], ["key-ghpull-01", "githubPull", true, undefined, "Brought 2 changes from GitHub into Ingot.", s.admin]);
+  assert.equal((acme(await fullState(s.owner)).hostedApps!.site.github as { last: { sha: string } }).last.sha, "c".repeat(40));
+  // The same key again: the same turn, nothing new.
+  const again = (await (await act(s.admin, s.project, "key-ghpull-01", { act: "githubPull", app: "site" })).json()) as { turn: string };
+  assert.equal(again.turn, a.turn);
+  assert.equal((await turnsOf(s.owner)).length, 1);
+});
+
+test("Save and link from a Member with App secrets: a new destination needs a GitHub key of the workspace's own; with it Bops Cloud keeps the setting (its point dropped, as Link must run again), says so, and owes the Link to the computer", async () => {
+  const s = await setupGithub();
+  const elsewhere = { repo: "example-org/other", branch: "main", path: "clients/acme" };
+  // The workspace sees GitHub only through the owner's own key: refused, nothing written.
+  liveKeys[s.project] = ["STRIPE_SECRET_KEY"];
+  const before = (await fullState(s.owner)).version;
+  const no = await act(s.sam, s.project, "key-ghset-001", { act: "github", app: "site", github: elsewhere, link: true });
+  assert.deepEqual([no.status, ((await no.json()) as { code: string; error: string }).error], [403, GITHUB_KEY_LINE]);
+  assert.equal((await fullState(s.owner)).version, before);
+  // A key of its own (This workspace, in Keys): kept now, by Bops Cloud, the owner's Mac shut.
+  liveKeys[s.project] = ["GITHUB_TOKEN"];
+  const r = await act(s.sam, s.project, "key-ghset-002", { act: "github", app: "site", github: elsewhere, link: true });
+  assert.equal(r.status, 202, await r.clone().text());
+  assert.equal(((await r.json()) as { computer?: boolean }).computer, true, "its Link owed to the computer");
+  const now = acme(await fullState(s.owner)).hostedApps!.site.github;
+  assert.deepEqual(now, { ...elsewhere }, "the new destination, its point gone (a new folder needs a new Link)");
+  assert.equal((await query<{ writer: string }>("SELECT writer FROM bops.app_state WHERE user_id = $1", [s.owner])).rows[0].writer, "cloud");
+  assert.equal(await noteOf(s.owner, `msg_github_${s.sam}_key-ghset-002`), `${s.sam} set site to publish to GitHub example-org/other, main, folder clients/acme.`);
+  assert.equal(await noteOf(s.owner, `msg_job_${s.sam}_key-ghset-002`), `${s.sam} asked Max's computer to link site to GitHub.`);
+  assert.deepEqual((await actsOn(s.owner)).map((x) => [x.key, x.act, x.going]), [["key-ghset-002", "githubLink", true]], "one row for the act, going");
+  delete liveKeys[s.project];
+});
+
+test("an Admin's setting with the same folder keeps its point, more left alone is fine without a key of the workspace's own, and null puts it back on Orgo", async () => {
+  const s = await setupGithub();
+  const same = { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts", "clients/acme/"] };
+  const r = await act(s.admin, s.project, "key-ghkeep-01", { act: "github", app: "site", github: same });
+  assert.equal(r.status, 202, await r.clone().text());
+  assert.deepEqual(await r.json(), { ok: true, macOn: true, stored: true });
+  assert.deepEqual(acme(await fullState(s.owner)).hostedApps!.site.github, { ...same, last: { sha: SHA, ingot: INGOT, keep: ["proxy.ts"], when: 7 } }, "the point holds");
+  assert.deepEqual((await actsOn(s.owner)).map((x) => [x.act, x.ok, x.going]), [["github", true, undefined]]);
+  // Sent again (a lost answer): nothing changes.
+  const v = (await fullState(s.owner)).version;
+  assert.equal((await act(s.admin, s.project, "key-ghkeep-01", { act: "github", app: "site", github: same })).status, 202);
+  assert.equal((await fullState(s.owner)).version, v);
+  // A path left alone taken off the list: its point goes (its Link was made with it left alone).
+  assert.equal((await act(s.admin, s.project, "key-ghkeep-02", { act: "github", app: "site", github: { ...same, keep: ["clients/acme/"] } })).status, 202);
+  assert.equal((acme(await fullState(s.owner)).hostedApps!.site.github as { last?: unknown }).last, undefined);
+  // Back to Publish on Orgo.
+  assert.equal((await act(s.admin, s.project, "key-ghkeep-03", { act: "github", app: "site", github: null })).status, 202);
+  assert.equal(acme(await fullState(s.owner)).hostedApps!.site.github, undefined);
+  assert.equal(await noteOf(s.owner, `msg_github_${s.admin}_key-ghkeep-03`), `${s.admin} set site to publish on Orgo again.`);
+  // Bring in with nothing linked now: refused, as their window says it.
+  const pull = await act(s.admin, s.project, "key-ghkeep-04", { act: "githubPull", app: "site" });
+  assert.deepEqual([pull.status, ((await pull.json()) as { code: string }).code], [409, "not_linked"]);
+});
+
+test("who may: a Member without App secrets or the owner's last Mac older is refused; a runner older than the gate, or none, leaves it to the owner's Mac; only the key missing with that Mac off is said at once", async () => {
+  const s = await setupGithub();
+  const r1 = await act(s.ivy, s.project, "key-ghwho-001", { act: "githubPull", app: "site" });
+  assert.deepEqual([r1.status, ((await r1.json()) as { code: string }).code], [403, "admin_only"]);
+  assert.equal((await readAs(s.ivy, s.project)).state.appGithub, undefined, "no GitHub part for her");
+  assert.equal((await readAs(s.sam, s.project)).state.appGithub, true);
+  // The owner's last Mac older than the GitHub acts.
+  const o = await setupGithub({ mac: "0.0.51" });
+  const r2 = await act(o.admin, o.project, "key-ghwho-002", { act: "githubLink", app: "site" });
+  assert.deepEqual([r2.status, ((await r2.json()) as { code: string }).code], [409, "owner_bops_old"]);
+  assert.equal((await readAs(o.admin, o.project)).state.appGithub, undefined);
+  // The app's computer's runner older than the gate: the owner's Mac does it when it opens (MEMBER_ACT_MS), as theirs.
+  const old = await setupGithub({ runner: "0.0.51" });
+  const r3 = await act(old.sam, old.project, "key-ghwho-003", { act: "githubPull", app: "site" });
+  assert.equal(r3.status, 202);
+  assert.deepEqual(await r3.json(), { ok: true, macOn: false });
+  assert.deepEqual((await pendingFor(old.owner)).map((p) => [p.act, p.key, p.member.userId]), [[{ act: "githubPull", app: "site" }, "key-ghwho-003", old.sam]]);
+  assert.equal((await turnsOf(old.owner)).length, 0, "no job for a runner from before");
+  // No runner there at all: the same.
+  const none = await setupGithub({ runner: null });
+  assert.equal((await act(none.admin, none.project, "key-ghwho-004", { act: "githubLink", app: "site" })).status, 202);
+  assert.equal((await pendingFor(none.owner)).length, 1);
+  // A runner at the gate, but no bot on its computer was given the GitHub key, and the owner's Mac shut: said now.
+  const nokey = await setupGithub({ keyed: false });
+  const r5 = await act(nokey.admin, nokey.project, "key-ghwho-005", { act: "githubPull", app: "site" });
+  const b5 = (await r5.json()) as { code: string; error: string };
+  assert.deepEqual([r5.status, b5.code], [409, "github_no_key"]);
+  assert.match(b5.error, /^Max's computer has no GitHub key, so it can't do this while the owner's Mac is off\. Give Max the GitHub key in Keys, then try again\.$/);
+  assert.equal((await pendingFor(nokey.owner)).length, 0);
+});
+
+test("a job's end its computer never says is kept on the app too: a runner from before (done, no result), a computer that can't wake, and App secrets taken away meanwhile", async () => {
+  // A runner that says it's at the gate but answers like one from before: done with no result is never a success.
+  const s = await setupGithub();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  const a = (await (await act(s.sam, s.project, "key-ghend-001", { act: "githubLink", app: "site" })).json()) as { turn: string };
+  await until(() => box.of("turn").some((e) => e.data.id === a.turn), "the job's turn event");
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/claim`, {})).status, 200);
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/done`, { state: "done" })).status, 200);
+  assert.deepEqual((await actsOn(s.owner)).map((x) => [x.ok, x.said, x.going]), [[false, JOB_OLD_RUNNER, undefined]]);
+  // App secrets turned off for Sam in Team before the computer took it: the job ends, and Your Apps says why.
+  const b = (await (await act(s.sam, s.project, "key-ghend-002", { act: "githubPull", app: "site" })).json()) as { turn: string };
+  await ownerChanges(s.owner, (st) => void (st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess![`${s.sam}@example.com`].can = {}), own(s.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+  await until(async () => (await turnById(s.owner, b.turn))?.state === "failed", "ended as they may no longer");
+  await until(async () => (await actsOn(s.owner))[0]?.going === undefined, "kept on the app");
+  assert.deepEqual((await actsOn(s.owner)).slice(0, 1).map((x) => [x.key, x.ok, x.said]), [["key-ghend-002", false, "Who can do this changed, so it didn't go."]]);
+  box.close();
+  // A computer that can't wake (stopped): the chat's note, and the act says why.
+  const w = await setupGithub();
+  wakeAnswers.set(w.desktop, () => ({ state: "stopped" }));
+  const c = (await (await act(w.admin, w.project, "key-ghend-003", { act: "githubPull", app: "site" })).json()) as { turn: string };
+  await until(async () => (await turnById(w.owner, c.turn))?.state === "failed", "ended: it can't wake", 15_000);
+  await until(async () => (await actsOn(w.owner))[0]?.going === undefined, "kept on the app");
+  assert.deepEqual((await actsOn(w.owner)).map((x) => [x.ok, x.said]), [[false, "Max's computer is stopped. Tara can start it again."]]);
 });
