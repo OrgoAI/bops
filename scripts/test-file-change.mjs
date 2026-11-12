@@ -17,7 +17,7 @@
 // Usage: node --conditions=react-server scripts/test-file-change.mjs
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
@@ -82,7 +82,8 @@ let gh;
 function freshRepo() {
   const blobs = new Map();
   const blob = (bytes) => {
-    const sha = sha1(Buffer.concat([Buffer.from("blob"), bytes]));
+    // Git's own id for a file's bytes, as GitHub's trees list it.
+    const sha = sha1(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes]));
     blobs.set(sha, bytes);
     return sha;
   };
@@ -189,12 +190,16 @@ const writes = () => gh.calls.filter((c) => c.method !== "GET");
 const entryOf = (ref, p) => gh.trees.get(gh.commits.get(gh.refs.get(ref))?.tree)?.[p];
 const fileAt = (ref, p) => gh.blobs.get(entryOf(ref, p)?.sha)?.toString();
 
+/** What Orgo's broker takes (app/api/secrets/call: a request's body, 1 MB) and answers whole (512 KB; past it, cut, as text). */
+const broker = { maxRequest: 1024 * 1024, maxAnswer: 512 * 1024, refused: 0 };
 const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const c of req) chunks.push(c);
-  const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
-  const url = new URL(req.url, "http://fake");
+  const raw = Buffer.concat(chunks).toString();
   const send = (status, obj) => (res.writeHead(status, { "content-type": "application/json" }), res.end(JSON.stringify(obj)));
+  if (req.url === "/api/secrets/call" && raw.length > broker.maxRequest) return (broker.refused++, send(400, { error: "Request body is too large." }));
+  const body = chunks.length ? JSON.parse(raw) : undefined;
+  const url = new URL(req.url, "http://fake");
   if (req.headers.authorization !== `Bearer ${ORGO_KEY}`) return send(401, { error: "Not authenticated" });
   if (url.pathname === "/api/secrets" && req.method === "GET") return send(200, { secrets: [{ name: "GITHUB_TOKEN", workspace_id: null, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" }] });
   if (url.pathname === "/api/secrets/call" && req.method === "POST") {
@@ -202,6 +207,8 @@ const server = createServer(async (req, res) => {
     // Orgo's broker refuses a path with ".." (as the real one does), whatever the service.
     if (body.path.includes("..")) return send(400, { error: "path must not contain '..'" });
     const r = github(body.method, body.path, body.query, body.body);
+    const text = JSON.stringify(r.body);
+    if (text.length > broker.maxAnswer) return send(200, { status: r.status, contentType: "application/json", body: text.slice(0, broker.maxAnswer), truncated: true, headers: {} });
     return send(200, { status: r.status, contentType: "application/json", body: r.body, truncated: false, headers: {} });
   }
   send(404, { error: "no such route" });
@@ -344,6 +351,8 @@ await check("a bot with the GitHub key has change_files in the chat, saying to u
   assert.deepEqual(tool.parameters.required, Object.keys(tool.parameters.properties), "strict: every field required");
   assert.deepEqual(tool.parameters.properties.files.items.required, Object.keys(tool.parameters.properties.files.items.properties));
   assert.deepEqual(tool.parameters.properties.key.enum, ["GITHUB_TOKEN"]);
+  assert.deepEqual(Object.keys(tool.parameters.properties.files.items.properties), ["path", "text", "delete", "image", "imageUrl"], "a chat turn on the Mac can put in a picture from the chat");
+  assert.match(tool.description, /goes in byte for byte, up to 700 KB each/);
   assert.match(tool.description, /any change to files, never call_api's contents or git calls/);
   assert.match(tool.description, /not a diff, not base64/);
   assert.match(body.tools.find((t) => t.name === "call_api").description, /To change files in a GitHub repository \(an edit, a new file, a delete\), use change_files, never these calls/);
@@ -373,6 +382,15 @@ await check("a task has change_files too, and each change it makes is one card s
   const r = await changeFiles("boppy", change(), { sessionId: "ses_x" });
   assert.equal(r.text, "Only in the chat or a task: nothing else changes files.");
   assert.equal(gh.calls.length, n, "nothing sent");
+  // A task has no chat of its own, so it's offered no pictures (none it could find), and one it sends is refused plainly.
+  const { changeFilesTool } = await import(`${root}/lib/server/repo-change.ts`);
+  const tool = changeFilesTool([Keys.keyProvider("GITHUB_TOKEN")]);
+  assert.deepEqual(Object.keys(tool.parameters.properties.files.items.properties), ["path", "text", "delete"], "the task's tool, as computer-task.ts makes it");
+  assert.deepEqual(tool.parameters.properties.files.items.required, ["path", "text", "delete"]);
+  assert.doesNotMatch(tool.description, /picture/i);
+  const pic = await changeFiles("boppy", change({ files: [{ path: "public/logo.png", text: null, delete: null, image: 1, imageUrl: null }] }), { sessionId: "ses_x" }, { task: true });
+  assert.equal(pic.text, "A picture can't go into a change from here yet. Only text files can.");
+  assert.equal(gh.calls.length, n, "nothing sent for it");
 });
 
 await check("a task pauses at its change on one card; Allow once resumes it and saves exactly that change; Stop first and nothing is written", async () => {
@@ -848,17 +866,93 @@ await check("a picture far bigger than the card's words goes on it as one line, 
   S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
 });
 
-await check("a change with a picture is 12 MB at most in all, its text counted too: a picture just under it with some text is refused before anything is read", async () => {
+await check("a picture is 700 KB at most, as its blob goes through Orgo's broker (1 MB a request): a bigger one is refused before anything is read, never after the yes", async () => {
   freshRepo();
   const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
-  const big = PNG_OF(64, 64, 12 * 1024 * 1024 - 64);
+  const big = PNG_OF(64, 64, 800 * 1024 - 33);
   const up = Up.saveUpload(`data:image/png;base64,${big.toString("base64")}`);
   const said = S.addMessage({ chatId, role: "user", text: "The big one", images: [{ id: up.id, type: up.type }], at: Date.now() });
   try {
     const n = (await import(`${root}/lib/server/chat-pictures.ts`)).chatPictures(chatId).length;
-    const r = await changeFiles("boppy", change({ files: [picture("public/big.png", { image: n }), { path: "notes.txt", text: "x".repeat(200) }] }), { chatId }, { chat: true });
+    const r = await changeFiles("boppy", change({ files: [picture("public/big.png", { image: n })] }), { chatId }, { chat: true });
+    assert.equal(r.text, "public/big.png: this picture is 800.0 KB, and Bops can put in pictures up to 700 KB for now. A smaller copy of it would go.");
+    assert.deepEqual(gh.calls, [], "not even a read");
+  } finally {
+    S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
+  }
+});
+
+await check("one at 700 KB goes in on the yes, its request under the broker's 1 MB; a request the broker refuses says why in one sentence, writing nothing", async () => {
+  freshRepo();
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const most = PNG_OF(640, 480, 700 * 1024 - 33);
+  const up = Up.saveUpload(`data:image/png;base64,${most.toString("base64")}`);
+  const said = S.addMessage({ chatId, role: "user", text: "The hero", images: [{ id: up.id, type: up.type }], at: Date.now() });
+  try {
+    const n = (await import(`${root}/lib/server/chat-pictures.ts`)).chatPictures(chatId).length;
+    const args = change({ branch: "site/hero", files: [picture("public/hero.png", { image: n })] });
+    const e = await changeFiles("boppy", args, { chatId }, { chat: true }).then((r) => r, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, e?.text);
+    const refused = broker.refused;
+    const done = await changeFiles("boppy", args, { chatId }, { chat: true, approved: true, asked: e.ask.api.change });
+    assert.equal(done.failed, undefined, done.text);
+    assert.equal(broker.refused, refused, "the broker took every request");
+    assert.equal(sha256(blobAt("site/hero", "public/hero.png")), sha256(most));
+    // A broker that takes less (its words end in a full stop): one sentence, never "..".
+    freshRepo();
+    const e2 = await changeFiles("boppy", args, { chatId }, { chat: true }).then((r) => r, (x) => x);
+    broker.maxRequest = 100 * 1024;
+    const no = await changeFiles("boppy", args, { chatId }, { chat: true, approved: true, asked: e2.ask.api.change });
+    assert.equal(no.text, "Not saved: Orgo didn't send it: Request body is too large. Nothing changed on site/hero.");
+    assert.equal(no.failed?.why, "Orgo didn't send it: Request body is too large");
+    assert.equal(gh.refs.has("site/hero"), false, "nothing written");
+  } finally {
+    broker.maxRequest = 1024 * 1024;
+    S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
+  }
+});
+
+await check("a change with pictures is 12 MB at most in all, its text counted too: refused before anything is read", async () => {
+  freshRepo();
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const most = PNG_OF(64, 64, 700 * 1024 - 33);
+  const up = Up.saveUpload(`data:image/png;base64,${most.toString("base64")}`);
+  const said = S.addMessage({ chatId, role: "user", text: "The tiles", images: [{ id: up.id, type: up.type }], at: Date.now() });
+  try {
+    const n = (await import(`${root}/lib/server/chat-pictures.ts`)).chatPictures(chatId).length;
+    // 17 at 700 KB is 11.6 MB: with 400 KB of text it's past 12 MB.
+    const tiles = Array.from({ length: 17 }, (_, i) => picture(`public/tile-${i}.png`, { image: n }));
+    const r = await changeFiles("boppy", change({ files: [...tiles, { path: "notes.txt", text: "x".repeat(400 * 1024), delete: null }] }), { chatId }, { chat: true });
     assert.equal(r.text, "The change is too big with its pictures (12 MB at most in all).");
     assert.deepEqual(gh.calls, [], "not even a read");
+    const without = await changeFiles("boppy", change({ files: tiles }), { chatId }, { chat: true }).then((x) => x, (x) => x);
+    assert.ok(without instanceof P.NeedsOk, "under it without the text");
+  } finally {
+    S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
+  }
+});
+
+await check("a picture there now past what the broker answers whole (450 KB) is replaced without reading it back: the card says changed; the same picture asks nothing", async () => {
+  freshRepo();
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const old = PNG(450 * 1024);
+  theirCommit("main", "public/hero.jpg", old);
+  const next = PNG_OF(1200, 600, 300 * 1024);
+  const a = Up.saveUpload(`data:image/png;base64,${next.toString("base64")}`);
+  const b = Up.saveUpload(`data:image/png;base64,${old.toString("base64")}`);
+  const said = S.addMessage({ chatId, role: "user", text: "New hero, and the old one", images: [{ id: a.id, type: a.type }, { id: b.id, type: b.type }], at: Date.now() });
+  try {
+    const all = (await import(`${root}/lib/server/chat-pictures.ts`)).chatPictures(chatId).length;
+    const e = await changeFiles("boppy", change({ branch: "site/hero", files: [picture("public/hero.jpg", { image: all - 1 })] }), { chatId }, { chat: true }).then((r) => r, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, e?.text);
+    assert.deepEqual(e.ask.api.change.files.map((f) => [f.path, f.op, f.bytes]), [["public/hero.jpg", "change", next.length]]);
+    assert.match(e.ask.preview, /public\/hero\.jpg: changed, 300\.0 KB, 1200 × 600/);
+    assert.ok(!gh.calls.some((c) => c.path.includes("/contents/public/hero.jpg")), "never read back");
+    const done = await changeFiles("boppy", change({ branch: "site/hero", files: [picture("public/hero.jpg", { image: all - 1 })] }), { chatId }, { chat: true, approved: true, asked: e.ask.api.change });
+    assert.equal(done.failed, undefined, done.text);
+    assert.equal(sha256(blobAt("site/hero", "public/hero.jpg")), sha256(next));
+    const same = await changeFiles("boppy", change({ files: [picture("public/hero.jpg", { image: all })] }), { chatId }, { chat: true });
+    assert.equal(same.text, "Nothing to change: the file already says that on main.");
   } finally {
     S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
   }
@@ -918,16 +1012,95 @@ await check("the yes commits only the card's copy: one gone by then stops the ch
   assert.deepEqual(writes(), [], "nothing written");
   assert.equal(siteHits.length, hits, "the link never fetched again");
   assert.equal(outputOf(asked[a0]), "Not saved: the picture the card showed for public/logo.png isn't here any more. Ask again. Nothing changed on site/gone.");
-  // A chat answered from the bot's computer: its pictures and the card's copies are on the Mac.
+  // A chat answered from the bot's computer: it keeps neither the chat's pictures nor the card's copies.
   const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
   process.env.BOPS_RUNNER = "1";
   try {
     const r = await changeFiles("boppy", change({ files: [picture("public/logo.png", { imageUrl: url })] }), { chatId }, { chat: true });
-    assert.equal(r.text, "A picture goes into a change only from Bops on Alex's Mac, which keeps the pictures, and this chat is answered from the bot's computer now. Ask again once the Mac is on.");
+    assert.equal(r.text, "A picture can't go into a change from here yet. Only text files can.");
   } finally {
     delete process.env.BOPS_RUNNER;
   }
   assert.equal(siteHits.length, hits, "nor fetched there");
+});
+
+await check("on the bot's computer the chat's change_files says nothing of pictures, and the chat doesn't number them: never a word of the Mac", async () => {
+  const { changeFilesTool } = await import(`${root}/lib/server/repo-change.ts`);
+  const logo = PNG(300);
+  const up = Up.saveUpload(`data:image/png;base64,${logo.toString("base64")}`);
+  const said = S.addMessage({ chatId, role: "user", text: "Our logo for the runner", images: [{ id: up.id, type: up.type }], at: Date.now() });
+  process.env.BOPS_RUNNER = "1";
+  try {
+    const tool = changeFilesTool([Keys.keyProvider("GITHUB_TOKEN")], { pictures: true });
+    assert.deepEqual(Object.keys(tool.parameters.properties.files.items.properties), ["path", "text", "delete"]);
+    assert.deepEqual(tool.parameters.properties.files.items.required, ["path", "text", "delete"]);
+    assert.doesNotMatch(JSON.stringify(tool), /picture|image|\bMac\b/i);
+  } finally {
+    delete process.env.BOPS_RUNNER;
+  }
+  // The turn (a runner's can't run here: it signs in with its computer's own key) offers pictures and numbers them only off a runner.
+  const src = readFileSync(`${root}/lib/server/chat.ts`, "utf8");
+  assert.match(src, /const changePictures = !onRunner\(\);\s+const changeTool = changeFilesTool\(keyed, \{ pictures: changePictures \}\);/);
+  assert.match(src, /history\(chatId, botId, \{[^}]*pictures: !!changeTool && changePictures/);
+  // On the Mac the same chat numbers it.
+  answers.push(reply("Got it."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, "thanks");
+  assert.match(JSON.stringify(asked[n].input), /Our logo for the runner \[Bops: picture \d+\]/);
+  S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== said.id)));
+});
+
+/** The card copies of linked pictures kept on this Mac (uploads.ts keepCopy): their ids. */
+const copies = () => readdirSync(Up.uploadsDir()).filter((f) => /^img_c[0-9a-f]{32}\./.test(f)).map((f) => f.replace(/\.[a-z]+$/, ""));
+
+await check("a linked picture's copy is made only when a card shows, one per picture: none for a draft, the same one asked again, gone on a no and once the yes is done; one no card names goes after an hour", async () => {
+  const { changeFiles } = await import(`${root}/lib/server/repo-change.ts`);
+  const url = `${SITE}/mark.png`;
+  const mark = PNG(2000);
+  site.set("/mark.png", { type: "image/png", bytes: mark });
+  globalThis.bopsLinkedPictures.clear();
+  S.addMessage({ chatId, role: "user", text: `Our mark: ${url}`, at: Date.now() });
+  for (const id of copies()) rmSync(Up.uploadPath(id).path);
+  // A draft goes at once: no card, no copy.
+  freshRepo();
+  listDrafts();
+  const draft = await changeFiles("boppy", change({ branch: "site/mark", files: [picture("public/mark.png", { imageUrl: url })] }), { chatId }, { chat: true });
+  assert.equal(draft.failed, undefined, draft.text);
+  assert.equal(sha256(blobAt("site/mark", "public/mark.png")), sha256(mark));
+  assert.deepEqual(copies(), [], "no copy for a draft");
+  // Asked twice for the same picture: one copy.
+  freshRepo();
+  const once = await changeFiles("boppy", change({ files: [picture("public/mark.png", { imageUrl: url })] }), { chatId }, { chat: true }).then((r) => r, (x) => x);
+  const twice = await changeFiles("boppy", change({ files: [picture("public/mark.png", { imageUrl: url })] }), { chatId }, { chat: true }).then((r) => r, (x) => x);
+  assert.ok(once instanceof P.NeedsOk && twice instanceof P.NeedsOk);
+  const id = once.ask.api.change.files[0].image.id;
+  assert.equal(twice.ask.api.change.files[0].image.id, id, "the same copy");
+  assert.deepEqual(copies(), [id]);
+  assert.equal(sha256(readFileSync(Up.uploadPath(id).path)), sha256(mark));
+  // A no: the copy goes.
+  const { apr } = await asking(change({ files: [picture("public/mark.png", { imageUrl: url })] }));
+  assert.equal(apr.api.change.files[0].image.id, id);
+  let k = asked.length;
+  P.replyToAsk(apr.id, "reject");
+  await until(() => asked.length === k + 1, "the turn to go on from the no");
+  assert.deepEqual(copies(), [], "gone with the no");
+  // A yes: the copy goes once it's done.
+  const yes = await asking(change({ branch: "site/mark-live", files: [picture("public/mark.png", { imageUrl: url })] }));
+  assert.deepEqual(copies(), [id]);
+  k = asked.length;
+  P.replyToAsk(yes.apr.id, "once");
+  await until(() => asked.length === k + 1 && gh.refs.has("site/mark-live"), "the change to go in");
+  assert.equal(sha256(blobAt("site/mark-live", "public/mark.png")), sha256(mark));
+  assert.deepEqual(copies(), [], "gone once the yes is done");
+  // A copy no waiting card names (its card cleared without an answer) goes after an hour, with the next card's; a newer one stays.
+  const stale = `img_c${"a".repeat(32)}`;
+  const fresh = `img_c${"b".repeat(32)}`;
+  for (const x of [stale, fresh]) writeFileSync(join(Up.uploadsDir(), `${x}.png`), PNG(10));
+  const hourAgo = new Date(Date.now() - 61 * 60_000);
+  utimesSync(join(Up.uploadsDir(), `${stale}.png`), hourAgo, hourAgo);
+  await changeFiles("boppy", change({ files: [picture("public/mark.png", { imageUrl: url })] }), { chatId }, { chat: true }).catch(() => {});
+  assert.deepEqual(copies().sort(), [fresh, id].sort(), "the old one gone, the new one and this card's kept");
+  for (const x of copies()) rmSync(Up.uploadPath(x).path);
 });
 
 await check("a link the bot found (on a page, in its own words) is refused in plain words, and never fetched; a link that isn't a picture says so", async () => {

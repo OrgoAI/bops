@@ -104,11 +104,17 @@ const namesPicture = (url: string) => {
 const LOOKED_AT = 3;
 const LINKS_EACH = 3;
 const LOOK_MS = 10_000;
+/**
+ * The most of the linked pictures a turn shows the model, together (their bytes; as data URLs, 4/3 of it): the newest
+ * links first, one past it left out. A turn's request goes through Bops Cloud's proxy, 25 MB at most (cloud/proxy.ts),
+ * beside the pictures people attached; a picture is still the bot's to put in a change (change_files' imageUrl).
+ */
+const LOOK_BYTES = 6 * 1024 * 1024;
 
 /**
  * The pictures behind the picture links (namesPicture) in a person's newest messages in chat `chatId`, by link, as data
- * URLs the model can look at: the newest message's fetched now (LOOK_MS at most), the ones before only as already had.
- * A link that isn't a picture, or can't be had, is left out. Any other link is the bot's to read (web_fetch) or to put in
+ * URLs the model can look at: the newest message's fetched now (LOOK_MS at most), the ones before only as already had,
+ * LOOK_BYTES at most in all. A link that isn't a picture, or can't be had, is left out. Any other link is the bot's to read (web_fetch) or to put in
  * a change (change_files' imageUrl), never fetched on every turn.
  */
 export async function linkedPictures(chatId: string): Promise<Map<string, string>> {
@@ -118,14 +124,22 @@ export async function linkedPictures(chatId: string): Promise<Map<string, string
   const links = (m: { text: string } | undefined) => (m ? linksIn(m.text).filter(namesPicture).slice(0, LINKS_EACH) : []);
   const now = new Set(links(said.at(-1)));
   const all = [...new Set(said.flatMap(links))].filter((u) => now.has(u) || cache.has(u));
-  const out = new Map<string, string>();
+  const got = new Map<string, Picture>();
   await Promise.all(
     all.map((url) =>
       linkedPicture(url, LOOK_MS).then(
-        (p) => void out.set(url, `data:${p.type};base64,${p.bytes.toString("base64")}`),
+        (p) => void got.set(url, p),
         () => {},
       ),
     ),
   );
+  const out = new Map<string, string>();
+  let bytes = 0;
+  for (const url of [...all].reverse()) {
+    const p = got.get(url);
+    if (!p || bytes + p.bytes.length > LOOK_BYTES) continue;
+    bytes += p.bytes.length;
+    out.set(url, `data:${p.type};base64,${p.bytes.toString("base64")}`);
+  }
   return out;
 }
