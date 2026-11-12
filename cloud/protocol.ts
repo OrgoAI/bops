@@ -878,6 +878,8 @@ export type SharedApp = {
   /**
    * `url`: Published's address (none: no domain yet). Its Preview, where members deploy, from an owner's Bops that sends
    * it: its link, newest deploy and what it serves, whether its link asks for a password, and the password at Write only.
+   * A Preview the owner's Mac hasn't read yet has its link and password from Bops Cloud alone (ws-slice.ts sitesFilled):
+   * no deploy or what it serves (`serving` null, no `live`).
    */
   sites?: {
     name: string;

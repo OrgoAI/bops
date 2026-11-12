@@ -17,7 +17,9 @@ import { announce, checkUser, lockedState, lockUser, toJson } from "./state.ts";
  * this is how what a runner set reaches anyone: nothing waits on the owner's Mac being on. Bops Cloud keeps the newest
  * on the owner's state, by "<app>/<site>", with the link it's for and when it took it, by its own clock: posts land in
  * the order they reach the owner's row lock, never by a sender's clock. ws-slice.ts appsFor shows it beside that link,
- * only to viewers at Write (an Admin always), and only while the link is the one the owner's Mac read for members.
+ * only to viewers at Write (an Admin always), and only while the link is the one the owner's Mac read for members, or,
+ * where the owner's Mac read none (a new app a bot made on its computer while the Mac was off), the one the app's record
+ * names by its label copy (ws-slice.ts sitesFilled): that link, and that it asks for a password, at Read too.
  * A share can miss (Bops Cloud away for longer than its sender keeps trying, an older Bops that never shares): the
  * owner's Mac, as it reads Orgo for members, tells it what Orgo has (lib/server/apps-for-members.ts), with the entry it
  * saw (`seen`), so that never lands over a share that came after it looked.
