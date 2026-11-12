@@ -2053,6 +2053,180 @@ test("Your Apps is in the member's fingerprint: what the owner's Mac reads again
   assert.notEqual(sharedHash(sharedSlice(later, "ws_apps", TOM_VIEW)), a);
 });
 
+/* A new app a bot made on its computer while the owner's Mac was off: its record, and the password its computer shared for its Preview's link. */
+const NEW_LABEL = "q4m8x2kz7wpt";
+const NEW_LINK = `https://${NEW_LABEL}.orgo.dev`;
+const NEW_PASS = "Tz6kW3p";
+const SITE_LABEL = "r5n9y3va8xqu";
+const SITE_LINK = `https://${SITE_LABEL}.web.orgo.dev`;
+const SITE_PASS = "Hb4nQ7s";
+const ADA_VIEW: SliceViewer = { role: "admin", email: "ada@example.com", id: "u-ada", ownerEmail: STAFF_OWNER };
+const SAM_WRITE: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam", ownerEmail: STAFF_OWNER };
+type NewApp = { host?: Record<string, unknown>; entries?: Record<string, unknown>; mac?: Record<string, unknown> };
+/**
+ * appsBlob with "client-x" in it as the runner keeps it (its bot and computer, its label copy, when its password was set:
+ * computer-scope.ts HOSTING_NEW) and its password as the runner shared it (Workspace.previewPasswords); nothing of it the
+ * owner's Mac read (`mac`: what it did).
+ */
+function newAppBlob(apps: Record<string, unknown> | undefined, o: NewApp = {}): Record<string, unknown> {
+  const blob = appsBlob(apps);
+  const ws = (blob.workspaces as Record<string, Record<string, unknown>>[])[0];
+  (ws.hostedApps as Record<string, unknown>)["client-x"] = { botId: "max", computerId: "comp-3", preview: NEW_LABEL, passwordSet: { at: 20, live: null }, ...o.host };
+  ws.previewPasswords = o.entries ?? { "client-x/client-x": { url: NEW_LINK, password: NEW_PASS, at: 21 } };
+  if (o.mac) ((ws.appsForMembers as Record<string, unknown>).apps as Record<string, unknown>)["client-x"] = o.mac;
+  return blob;
+}
+const newApp = (blob: Record<string, unknown>, viewer: SliceViewer) => sharedSlice(blob, "ws_apps", viewer).apps?.list.find((a) => a.name === "client-x");
+
+test("Your Apps with the owner's Mac off: a new app's Preview link and password from its computer's share, at Write (an Admin always); at Read its link and that it asks for one, never the password; nothing for None", () => {
+  for (const viewer of [ADA_VIEW, SAM_WRITE, TOM_VIEW]) {
+    const write = viewer !== TOM_VIEW;
+    const s = sharedSlice(newAppBlob({ apps: write ? "write" : "read" }), "ws_apps", viewer);
+    const app = s.apps!.list.find((a) => a.name === "client-x")!;
+    assert.deepEqual(Object.keys(app).sort(), ["botId", "name", "sites"], viewer.email);
+    assert.deepEqual(
+      app.sites,
+      [{ name: "client-x", url: null, preview: NEW_LINK, previewProtected: true, ...(write ? { previewPassword: NEW_PASS, previewPasswordAt: 21 } : {}), serving: null }],
+      viewer.email,
+    );
+    assert.equal(s.apps!.at, 10, "as of the owner's Mac's last read, as before");
+    assert.equal(JSON.stringify(s).includes(NEW_PASS), write, `${viewer.email}: the password at Write only`);
+    for (const hidden of ["comp-", "proj-", "passwordSet", "previewPasswords", NEW_LABEL + '"']) assert.ok(!JSON.stringify(s).includes(hidden), `${viewer.email}: "${hidden}" isn't shown`);
+    // The apps the owner's Mac read are as they were.
+    assert.deepEqual(s.apps!.list.find((a) => a.name === "shop"), sharedSlice(appsBlob({ apps: write ? "write" : "read" }), "ws_apps", viewer).apps!.list.find((a) => a.name === "shop"));
+  }
+  // Orgo's team in a workspace whose owner isn't: read only, so the link without the password.
+  const capped = newApp(newAppBlob({ apps: "write" }), { ...TOM_VIEW, ownerEmail: "owner@example.com" });
+  assert.equal(capped?.sites?.[0].preview, NEW_LINK);
+  assert.equal(capped?.sites?.[0].previewPassword, undefined);
+  for (const [why, blob, viewer] of [
+    ["None", newAppBlob({ apps: "none" }), TOM_VIEW],
+    ["someone the owner gave nothing", newAppBlob({ apps: "write" }), { role: "member", email: "kim@example.com", id: "u-kim", ownerEmail: STAFF_OWNER }],
+    ["a workspace whose owner isn't Orgo's team", newAppBlob({ apps: "write" }), { ...SAM_WRITE, ownerEmail: "owner@example.com" }],
+    ["the owner (their own page reads Orgo)", newAppBlob({ apps: "write" }), OWNER_VIEW],
+  ] as const) {
+    const text = JSON.stringify(sharedSlice(blob, "ws_apps", viewer as SliceViewer));
+    assert.ok(!text.includes(NEW_PASS) && !text.includes(NEW_LINK), why);
+  }
+});
+
+test("Your Apps with the owner's Mac off: no link but the one the app's record names, under orgo.dev and nothing else; none for an app that lost its computer or a Preview whose password the owner turned off", () => {
+  const entry = (url: unknown) => ({ "client-x/client-x": { url, password: NEW_PASS, at: 21 } });
+  for (const [why, o] of [
+    ["an app that lost its computer", { host: { lost: 30 } }],
+    ["a record with no label copy", { host: { preview: undefined } }],
+    ["a label that isn't a Preview's", { host: { preview: "short" }, entries: entry("https://short.orgo.dev") }],
+    ["its password turned off by the owner", { host: { passwordOff: true } }],
+    ["a link for another label", { entries: entry("https://z9y8x7w6v5u4.orgo.dev") }],
+    ["another app's entry", { entries: { "shop/shop": { url: NEW_LINK, password: NEW_PASS, at: 21 } } }],
+    ["a site the record hasn't", { entries: { "client-x/admin": { url: NEW_LINK, password: NEW_PASS, at: 21 } } }],
+    ["a host outside orgo.dev", { entries: entry(`https://${NEW_LABEL}.orgo.dev.example.com`) }],
+    ["a name that only ends like it", { entries: entry(`https://${NEW_LABEL}.notorgo.dev`) }],
+    ["another domain", { entries: entry(`https://${NEW_LABEL}.example.com`) }],
+    ["http", { entries: entry(`http://${NEW_LABEL}.orgo.dev`) }],
+    ["a port", { entries: entry(`${NEW_LINK}:8443`) }],
+    ["https's own port written out", { entries: entry(`${NEW_LINK}:443`) }],
+    ["a path", { entries: entry(`${NEW_LINK}/admin`) }],
+    ["a query", { entries: entry(`${NEW_LINK}/?next=1`) }],
+    ["a hash", { entries: entry(`${NEW_LINK}/#x`) }],
+    ["a sign in", { entries: entry(`https://u:p@${NEW_LABEL}.orgo.dev`) }],
+    ["capitals", { entries: entry(`https://${NEW_LABEL.toUpperCase()}.orgo.dev`) }],
+    ["a trailing dot", { entries: entry(`${NEW_LINK}.`) }],
+    ["the label further down", { entries: entry(`https://x.${NEW_LABEL}.orgo.dev`) }],
+    ["a url that isn't text", { entries: entry(7) }],
+    ["an entry that isn't one", { entries: { "client-x/client-x": "x" } }],
+    ["no entry", { entries: {} }],
+  ] as const) {
+    for (const viewer of [ADA_VIEW, TOM_VIEW]) {
+      const blob = newAppBlob({ apps: viewer === TOM_VIEW ? "read" : "write" }, o as NewApp);
+      const app = newApp(blob, viewer);
+      assert.ok(app, `${why}: still shown by name`);
+      assert.equal(app.sites, undefined, `${why}: ${viewer.email}`);
+      assert.ok(!JSON.stringify(sharedSlice(blob, "ws_apps", viewer)).includes(NEW_PASS), `${why}: ${viewer.email}`);
+    }
+  }
+  // Shown: a slash at its end, and another of Orgo's names in orgo.dev (orgo-web makes some under web.orgo.dev).
+  for (const url of [`${NEW_LINK}/`, `https://${NEW_LABEL}.web.orgo.dev`, `https://${NEW_LABEL}.staging.orgo.dev`])
+    assert.equal(newApp(newAppBlob({ apps: "write" }, { entries: entry(url) }), ADA_VIEW)?.sites?.[0].previewPassword, NEW_PASS, url);
+  // The owner's Mac's state can say lost in other ways too: never filled.
+  assert.equal(newApp(newAppBlob({ apps: "write" }, { host: { lost: null } }), ADA_VIEW)?.sites, undefined);
+});
+
+test("Your Apps with the owner's Mac off: a site the Mac read before its Preview was made gets the link; one it read with a link keeps it; a site it never read comes after, the app's own first", () => {
+  const macSite = (name: string, more: Record<string, unknown> = {}) => ({ name, url: null, preview: null, serving: null, live: null, ...more });
+  const mac = (sites: unknown[]) => ({ head: { id: "cs-9", message: "First", at: 19 }, sites, commits: [], deploys: [] });
+  // Read with no Preview yet: filled, the rest of the row as the Mac read it.
+  const early = newApp(newAppBlob({ apps: "write" }, { mac: mac([macSite("client-x", { serving: "cs-9" })]) }), ADA_VIEW)!;
+  assert.deepEqual(early.sites, [{ name: "client-x", url: null, preview: NEW_LINK, previewProtected: true, previewPassword: NEW_PASS, previewPasswordAt: 21, serving: "cs-9" }]);
+  assert.deepEqual(early.head, { id: "cs-9", message: "First", at: 19 });
+  // A Mac of v0.0.34 (no preview field at all): filled too.
+  const noField: Record<string, unknown> = macSite("client-x");
+  delete noField.preview;
+  assert.equal(newApp(newAppBlob({ apps: "write" }, { mac: mac([noField]) }), ADA_VIEW)!.sites![0].preview, NEW_LINK);
+  // Read with a link: that one stands, with the Mac's password (Bops Cloud's is for another link); Read never sees either.
+  const OLD_LINK = "https://k7p2qxm4wr3d.orgo.dev";
+  const read = mac([macSite("client-x", { preview: OLD_LINK, previewProtected: true, previewPassword: "Mac4pas" })]);
+  assert.deepEqual(newApp(newAppBlob({ apps: "write" }, { mac: read }), ADA_VIEW)!.sites![0], { name: "client-x", url: null, preview: OLD_LINK, previewProtected: true, previewPassword: "Mac4pas", serving: null });
+  assert.equal(newApp(newAppBlob({ apps: "read" }, { mac: read }), TOM_VIEW)!.sites![0].preview, OLD_LINK);
+  // Its other sites (AppHosting.sites): each with its own label copy and share.
+  const two: NewApp = {
+    host: { sites: [{ name: "client-x-admin", preview: SITE_LABEL }] },
+    entries: { "client-x/client-x": { url: NEW_LINK, password: NEW_PASS, at: 21 }, "client-x/client-x-admin": { url: SITE_LINK, password: SITE_PASS, at: 22 } },
+  };
+  const both = newApp(newAppBlob({ apps: "write" }, two), ADA_VIEW)!;
+  assert.deepEqual(both.siteNames, ["client-x-admin"]);
+  assert.deepEqual(both.sites!.map((s) => [s.name, s.preview, s.previewPassword]), [["client-x", NEW_LINK, NEW_PASS], ["client-x-admin", SITE_LINK, SITE_PASS]]);
+  // The Mac read the app's own site only: the other comes after it.
+  const later = newApp(newAppBlob({ apps: "write" }, { ...two, mac: mac([macSite("client-x", { preview: NEW_LINK, previewProtected: true })]) }), ADA_VIEW)!;
+  assert.deepEqual(later.sites!.map((s) => [s.name, s.preview, s.previewPassword]), [["client-x", NEW_LINK, NEW_PASS], ["client-x-admin", SITE_LINK, SITE_PASS]]);
+  // Only the other site shared yet, nothing read: the app's own still first (what Your Apps shows up top), with no link.
+  const second = newApp(newAppBlob({ apps: "write" }, { ...two, entries: { "client-x/client-x-admin": { url: SITE_LINK, password: SITE_PASS, at: 22 } } }), ADA_VIEW)!;
+  assert.deepEqual(second.sites, [
+    { name: "client-x", url: null, preview: null, serving: null },
+    { name: "client-x-admin", url: null, preview: SITE_LINK, previewProtected: true, previewPassword: SITE_PASS, previewPasswordAt: 22, serving: null },
+  ]);
+  // Only a member's act kept on it (no sites read): every site of the record, its acts as they were.
+  const acted = newApp(newAppBlob({ apps: "write" }, { mac: { head: null, sites: [], commits: [], deploys: [], acts: [{ key: "k9", userId: "u-sam", name: "Sam", act: "deploy", ok: false, at: 23 }] } }), ADA_VIEW)!;
+  assert.deepEqual(acted.sites!.map((s) => s.preview), [NEW_LINK]);
+  assert.equal(acted.acts?.length, 1);
+  // Never more than an app's sites (lib/hosted-apps.ts MAX_SITES): the record's first five.
+  const many = Array.from({ length: 7 }, (_, i) => ({ name: `part-${i}`, preview: `${"p".repeat(11)}${i}` }));
+  const manyEntries = Object.fromEntries([["client-x/client-x", { url: NEW_LINK, password: NEW_PASS, at: 21 }], ...many.map((s) => [`client-x/${s.name}`, { url: `https://${s.preview}.orgo.dev`, password: NEW_PASS, at: 21 }])]);
+  assert.deepEqual(newApp(newAppBlob({ apps: "write" }, { host: { sites: many }, entries: manyEntries }), ADA_VIEW)!.sites!.map((s) => s.name), ["client-x", "part-0", "part-1", "part-2", "part-3"]);
+});
+
+test("Your Apps with the owner's Mac off is in the fingerprint: a link shared gives everyone shown it a new one; a new password, a Write viewer only (by its time, never the password)", () => {
+  const hash = (blob: Record<string, unknown>, viewer: SliceViewer) => sharedHash(sharedSlice(blob, "ws_apps", viewer));
+  const entryOf = (blob: Record<string, unknown>) => ((blob.workspaces as Record<string, Record<string, unknown>>[])[0].previewPasswords as Record<string, Record<string, unknown>>)["client-x/client-x"];
+  const none = newAppBlob({ apps: "read" }, { entries: {} });
+  const shared = newAppBlob({ apps: "read" });
+  assert.notEqual(hash(shared, TOM_VIEW), hash(none, TOM_VIEW), "Read: the link came");
+  assert.notEqual(hash(shared, ADA_VIEW), hash(none, ADA_VIEW), "Write: the link and password came");
+  // A new password for the same link (its deploy went live): Read's view is the same; Write's changes by its time alone.
+  const rotated = newAppBlob({ apps: "read" });
+  Object.assign(entryOf(rotated), { password: "Wd5mK8r" });
+  assert.equal(hash(rotated, TOM_VIEW), hash(shared, TOM_VIEW));
+  assert.equal(hash(rotated, ADA_VIEW), hash(shared, ADA_VIEW), "no fingerprint is worked out from a password");
+  entryOf(rotated).at = 25;
+  assert.equal(hash(rotated, TOM_VIEW), hash(shared, TOM_VIEW), "Read: nothing it's shown changed");
+  assert.notEqual(hash(rotated, ADA_VIEW), hash(shared, ADA_VIEW), "Write: its time is in it");
+});
+
+test("Your Apps shows up to 100 apps, the newest last: one a bot made past the owner's Mac's 30 still has its link", () => {
+  const blob = newAppBlob({ apps: "write" });
+  const ws = (blob.workspaces as Record<string, Record<string, unknown>>[])[0];
+  const apps = ws.hostedApps as Record<string, unknown>;
+  const all = { ...apps };
+  for (const k of Object.keys(apps)) delete apps[k];
+  for (let i = 0; i < 40; i++) apps[`client-${i}`] = { botId: "max", computerId: "comp-3" };
+  Object.assign(apps, all);
+  const list = sharedSlice(blob, "ws_apps", ADA_VIEW).apps!.list;
+  assert.equal(list.length, 43);
+  assert.deepEqual(list.at(-1)?.sites?.[0].previewPassword, NEW_PASS, "the newest, 43rd");
+  for (let i = 40; i < 120; i++) apps[`client-${i}`] = { botId: "max", computerId: "comp-3" };
+  assert.equal(sharedSlice(blob, "ws_apps", ADA_VIEW).apps!.list.length, 100);
+});
+
 test("over HTTP: in a workspace of Orgo's team, Your Apps at Write deploys, goes back, changes settings and uses a domain, whatever the member's email; Read, a missing app, a domain it doesn't own, a deploy that can't go back or a workspace whose owner isn't Orgo's team are refused", async () => {
   const blob = appsBlob({ apps: "write" });
   queued.length = 0;
