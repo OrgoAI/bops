@@ -472,6 +472,14 @@ export type AppDnsInput = { type: string; name: string; value: string; priority?
 export type AppDnsZone = { id: string; domain: string; serving: boolean; ttl: number | null; records: AppDnsRecord[]; error?: string; renewal?: AppRenewal };
 
 export type AppDomainStatus = "pending" | "verifying" | "active" | "failed" | "disabled";
+/** A domain's state in a word: the owner's Your Apps (components/app/hosted-apps.tsx DOMAIN_STATES) and a member's (shared-apps.tsx) alike. */
+export const DOMAIN_WORDS: Record<AppDomainStatus, string> = {
+  pending: "Waiting for its DNS",
+  verifying: "Checking its DNS",
+  active: "Live",
+  failed: "Couldn't be verified",
+  disabled: "Turned off by Orgo",
+};
 
 /** One of the app's domains: one its computer serves on the app's port (orgo-web custom_domains.target_port). */
 export type AppDomain = {

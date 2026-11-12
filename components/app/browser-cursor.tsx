@@ -13,23 +13,33 @@ import { Mascot } from "./mascot";
  * with its face and name, a person's with their initials and first name. It travels like a hand (lib/cursor-path.ts),
  * arrives before it presses (a press that comes first hurries the rest of the way), dips and rings once where it
  * pressed, and fades after resting a while. The viewer's own pointer is never drawn twice: their own events don't come
- * here (`you`).
+ * here (`you`). Their own press on the page rings at once where they pressed (CursorFeed.ring, from bot-browser.tsx),
+ * rather than once the page's answer comes back; nothing of it reaches the page.
  *
  * Reduced motion: the cursor is simply there, with no arc and no dip; the ring where it pressed still shows (it's what
  * happened, not decoration), held still.
  */
 
 type PointerEvent = Extract<BrowserEvent, { t: "pointer" }>;
-/** The stream's pointer events, handed on as they come (bot-browser.tsx): a cursor moves at each without a render. */
-export type CursorFeed = { on: (fn: (e: PointerEvent) => void) => () => void; emit: (e: PointerEvent) => void };
+/**
+ * The stream's pointer events, handed on as they come (bot-browser.tsx): a cursor moves at each without a render. `ring`:
+ * the viewer's own press on the page, at its CSS pixels, shown at once.
+ */
+export type CursorFeed = { on: (fn: (e: PointerEvent) => void) => () => void; emit: (e: PointerEvent) => void; onRing: (fn: (p: Point) => void) => () => void; ring: (p: Point) => void };
 export function cursorFeed(): CursorFeed {
   const fns = new Set<(e: PointerEvent) => void>();
+  const rings = new Set<(p: Point) => void>();
   return {
     on: (fn) => {
       fns.add(fn);
       return () => void fns.delete(fn);
     },
     emit: (e) => fns.forEach((f) => f(e)),
+    onRing: (fn) => {
+      rings.add(fn);
+      return () => void rings.delete(fn);
+    },
+    ring: (p) => rings.forEach((f) => f(p)),
   };
 }
 
@@ -70,15 +80,19 @@ export function BrowserCursors({ bot, feed, page, driver, idle = false }: { bot:
       if (now) fade();
       else c.rest = setTimeout(fade, REST_MS);
     };
+    /** A ring where something pressed, for RING_MS. */
+    const ringAt = (p: Point) => {
+      const id = performance.now() + Math.random();
+      setRings((r) => [...r, { id, x: p.x, y: p.y }]);
+      setTimeout(() => setRings((r) => r.filter((x) => x.id !== id)), RING_MS);
+    };
     const press = (key: string, p: Point) => {
       const el = els.current.get(key);
       if (el && !reducedMotion()) {
         el.setAttribute("data-pressed", "");
         setTimeout(() => el.removeAttribute("data-pressed"), DIP_MS);
       }
-      const id = performance.now() + Math.random();
-      setRings((r) => [...r, { id, ...p }]);
-      setTimeout(() => setRings((r) => r.filter((x) => x.id !== id)), RING_MS);
+      ringAt(p);
     };
     /** Each cursor where its travel has it now; a press that was waiting for it, once it's there. Again next frame while any moves. */
     const place = () => {
@@ -124,12 +138,15 @@ export function BrowserCursors({ bot, feed, page, driver, idle = false }: { bot:
       rest(key);
       if (!frame.current) frame.current = requestAnimationFrame(place);
     });
+    // The viewer's own press: its ring at once, where they pressed (no cursor of theirs: their own pointer is there).
+    const offRing = feed.onRing(ringAt);
     // The frame shown at another size: each cursor stays over the same point of the page.
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(() => !frame.current && (frame.current = requestAnimationFrame(place))) : null;
     if (layer.current) ro?.observe(layer.current);
     const all = cursors.current;
     return () => {
       off();
+      offRing();
       ro?.disconnect();
       cancelAnimationFrame(frame.current);
       frame.current = 0;

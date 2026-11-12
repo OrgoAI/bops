@@ -5,7 +5,7 @@ import { flushSync } from "react-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Globe, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { AppDisclosure, appAttention, appGhost, appIcon, appList, appOutline, appRow, segmented, segment } from "./app-controls";
 import { hasUnpublishedPreview, reviewLabel, statusForApp } from "@/lib/app-review";
-import { DNS_TYPES, dnsNeeds } from "@/lib/hosted-apps";
+import { DNS_TYPES, DOMAIN_WORDS, dnsNeeds } from "@/lib/hosted-apps";
 import type {
   AddAppAnswer,
   AppCommitsAnswer,
@@ -1248,11 +1248,11 @@ function DeployLog({ ws, name, live }: { ws: string; name: string; live: NonNull
 /* ---------------- Its domains and their DNS ---------------- */
 
 export const DOMAIN_STATES: Record<AppDomainStatus, { word: string; dot: string }> = {
-  pending: { word: "Waiting for its DNS", dot: PULSE },
-  verifying: { word: "Checking its DNS", dot: PULSE },
-  active: { word: "Live", dot: "bg-[#2BB673]" },
-  failed: { word: "Couldn't be verified", dot: "bg-[#B42318]" },
-  disabled: { word: "Turned off by Orgo", dot: "bg-[#9A9A98]" },
+  pending: { word: DOMAIN_WORDS.pending, dot: PULSE },
+  verifying: { word: DOMAIN_WORDS.verifying, dot: PULSE },
+  active: { word: DOMAIN_WORDS.active, dot: "bg-[#2BB673]" },
+  failed: { word: DOMAIN_WORDS.failed, dot: "bg-[#B42318]" },
+  disabled: { word: DOMAIN_WORDS.disabled, dot: "bg-[#9A9A98]" },
 };
 
 /** A domain's state in a word, and in full for its dot's tooltip (its HTTPS certificate, once it's live). */

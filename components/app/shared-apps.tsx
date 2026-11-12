@@ -8,6 +8,7 @@ import { AppPassword, AppReview, AppVersions } from "./app-review";
 import { Fold } from "./fold";
 import { useState } from "react";
 import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
+import { DOMAIN_WORDS } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
 import { PasswordShown } from "./preview-password";
@@ -56,6 +57,14 @@ export const SHARED_APPS_WORDS = {
   live: "Live",
   notOnWeb: "Not on the web yet",
   subdomain: "Subdomain",
+  /** Where an Admin's Publish goes, said as they confirm it: the owner's Bops publishes it. */
+  publishLine: "Sends this reviewed preview to the owner's Bops for publishing.",
+  /** Where it goes, when there's no domain or repo to name. */
+  destination: "Publishing destination configured by the owner",
+  /** As an Admin confirms Publish: where it goes when its production is on GitHub. */
+  publishGithub: (g: { repo: string; branch: string }) => `Publish sends it to GitHub (${g.repo}, ${g.branch}), where its own deploy puts it live.`,
+  /** As an Admin confirms Publish: its domains aren't pointed at Orgo yet, so a published change isn't what their visitors see. */
+  publishWaiting: (domains: string, many = false) => `Visitors to ${domains} won't see a publish until ${many ? "their" : "its"} DNS points at Orgo.`,
   acted: (who: string, a: Pick<MemberAppAct, "act" | "site"> & { domain?: string; env?: "prod" }) =>
     a.act === "deploy" ? (a.env === "prod" ? `${who} published it` : `${who} deployed it`) : a.act === "rollback" ? `${who} went back to an earlier deploy` : a.act === "settings" ? `${who} changed ${a.site ? `${a.site}'s` : "its"} settings` : `${who} pointed ${a.domain ?? "a domain"} at it`,
   tried: (who: string, act: MemberAppAct["act"] | "publish", said: string) =>
@@ -126,7 +135,27 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
   };
   const newest = a.acts?.[0];
   const deployState = (s: string | null | undefined): DeployState | null => s === "queued" || s === "running" || s === "succeeded" || s === "failed" || s === "cancelled" || s === "superseded" ? s : null;
-  const status = appStatus({ head: a.head?.id ?? null, preview: pv ? { serving: serving ?? null, state: deployState(live?.state) } : null, live: { serving: site?.serving ?? null, state: deployState(site?.live?.state) }, domain: !!site?.domains?.some(d => d.status !== "failed" && d.status !== "disabled"), wasLive: !!site?.serving, lost: a.lost, changes: changesBetween(a.commits ?? [], site?.serving ?? null, serving ?? null) });
+  // Production on GitHub: Live is the changeset last sent there (Bops Cloud's github.at; null: not linked yet), as the
+  // owner's own Your Apps reads it (lib/app-review.ts statusForApp), never Orgo's Published, which a push doesn't move.
+  // From a Bops Cloud that doesn't say (no `at`): Published's, and linked as far as this page knows (the owner's Bops
+  // says so if it isn't, and Publish stays pressable as before).
+  const gh = a.github;
+  const liveAt = gh && gh.at !== undefined ? gh.at : site?.serving ?? null;
+  const status = appStatus({
+    head: a.head?.id ?? null,
+    preview: pv ? { serving: serving ?? null, state: deployState(live?.state) } : null,
+    live: { serving: liveAt, state: deployState(site?.live?.state) },
+    domain: !!site?.domains?.some(d => d.status !== "failed" && d.status !== "disabled"),
+    wasLive: !!site?.serving,
+    lost: a.lost,
+    ...(gh ? { github: { linked: gh.at !== null } } : {}),
+    changes: changesBetween(a.commits ?? [], liveAt, serving ?? null),
+  });
+  // Where an Admin's Publish goes, said where they confirm it: GitHub, or Published on domains that don't point at Orgo
+  // yet (its visitors don't see a publish until they do), else its domain.
+  const waitingOn = site?.domains?.length && site.domains.every((d) => d.status !== "active") && !site.url ? site.domains.map((d) => d.domain) : [];
+  const where = gh ? W.publishGithub(gh) : waitingOn.length ? W.publishWaiting(waitingOn.join(" and "), waitingOn.length > 1) : null;
+  const destination = gh ? `${gh.repo} · ${gh.branch}` : (site?.url ?? a.url)?.replace(/^https?:\/\//, "") ?? (waitingOn.length ? waitingOn.join(" and ") : W.destination);
   return (
     <div data-shared-app={a.name} className="flex min-w-0 flex-col">
       <div className={appRow}>
@@ -157,11 +186,11 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
       )}
       <Fold lazy open={open}><div className="flex min-w-0 flex-col gap-5 border-b border-rule px-4 py-4">
         {!write && <span className="text-[13px] text-pencil">{W.readOnly}</span>}
-        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={site?.serving ?? null} versions={a.commits} env={env} onEnv={setEnv} destination="Publishing destination configured by the owner" publishLine="Sends this reviewed preview to the owner's Bops for publishing." busy={!!going}
+        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? W.publishLine} busy={!!going}
           password={site?.previewProtected ? <AppPassword password={write ? site.previewPassword ?? null : null}/> : undefined}
           onUpdate={write ? () => void send({ act: "deploy", app: a.name }) : undefined}
           onPublish={publish ? at => send({ act: "deploy", app: a.name, env: "prod", ...(pv && !a.siteNames?.length ? { at } : {}) }) : undefined}
-          history={a.commits?.length ? <AppVersions versions={a.commits} preview={serving ?? null} published={site?.serving ?? null} busy={!!going} onRestore={write ? id => void send({ act: "deploy", app: a.name, at: id }) : undefined}/> : undefined}
+          history={a.commits?.length ? <AppVersions versions={a.commits} preview={serving ?? null} published={liveAt} busy={!!going} onRestore={write ? id => void send({ act: "deploy", app: a.name, at: id }) : undefined}/> : undefined}
           technical={<div data-technical-details className="flex flex-col gap-4 rounded-xl bg-desk p-4">
           <Part title={W.sites}>
             {(a.sites ?? []).map((s) => (
@@ -172,8 +201,9 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
                   <span className="text-[#6B6B6B]">{stateWord(s.live?.state)}</span>
                   {s.url && <span className="text-[#3A3A38]">{s.url}</span>}
                   {(s.domains ?? []).map((d) => (
-                    <span key={d.domain} className="rounded-full bg-[#F6F6F4] px-2 py-0.5 text-[11.5px] text-[#3A3A38]">
-                      {d.domain}
+                    // Its state beside it until it's live (a state this build doesn't know reads as waiting), as the owner's Your Apps says it.
+                    <span key={d.domain} data-domain-state={d.status} className="rounded-full bg-[#F6F6F4] px-2 py-0.5 text-[11.5px] text-[#3A3A38]">
+                      {d.status === "active" ? d.domain : `${d.domain} · ${DOMAIN_WORDS[d.status as keyof typeof DOMAIN_WORDS] ?? DOMAIN_WORDS.pending}`}
                     </span>
                   ))}
                 </span>

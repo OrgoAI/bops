@@ -1038,12 +1038,15 @@ await check("Bops' own lines in the owner's voice read as the owner's in a share
     { id: "t4", chatId: "bot:boppy", role: "system", text: "Running “Pay invoice” in the cloud (you texted it) · say “run it on my Mac” to change that", at: 7, sessionIds: ["noted", "stopped"] },
     { id: "t5", chatId: "bot:boppy", role: "system", text: "Linked your phone +1 (415) 555-0100 to Dana's Boppy's number +1 (628) 555-0199: it texted first, so calls and texts from it count as you now.", at: 8 },
     { id: "t6", chatId: "bot:boppy", role: "bot", botId: "boppy", text: "Sent you the list", at: 9 },
+    // Your Apps is the page's name for everyone (lib/apps-access.ts APPS_NAME), not the owner's "your": it stays as named.
+    { id: "t7", chatId: "bot:boppy", role: "bot", botId: "boppy", bops: true, appNote: true, text: "Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.", at: 10 },
   ];
   // The viewer's own credit is out: their bots, not the owner's.
   const state = viewState({ ...own(), credits: { out: true, at: 1 } }, { ...listed, role: "member", wsId: WS }, c, {});
   const chat = renderToStaticMarkup(h(ChatView, chatProps(state, "bot:boppy")));
-  assert.deepEqual(yous(chat, "Sent you the list"), []);
+  assert.deepEqual(yous(chat, "Sent you the list", "press Publish in Your Apps"), []);
   const ct = text(chat);
+  assert.ok(ct.includes("press Publish in Your Apps, to put what Preview serves") && !ct.includes("owner's Apps"), ct);
   for (const said of ["The owner took over from Dana's Boppy · paused Buy tickets", "Texted the owner: the invoice is paid", "Dana's Boppy didn't send it: the owner said no", "Running “Pay invoice” in the cloud (the owner texted it)", "Linked the owner's phone to Dana's Boppy's number"]) assert.ok(ct.includes(said), `${said} | ${ct}`);
   assert.ok(!/run it on my Mac|555-0100|Out of AI credit/.test(ct), ct);
   const sheetOf = (id) => renderToStaticMarkup(h(ThreadSheet, { state, session: state.sessions.find((x) => x.id === id), onClose: noop, onShowComputer: noop }));

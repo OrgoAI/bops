@@ -373,6 +373,8 @@ async function sam(browser,width) {
     check(`Admin restore keeps its request ${width}`,same(model.acts.at(-1),{act:'deploy',app:'fourcorners',at:F.id('c3')}));
     const n=model.acts.length; await click(fc,'Publish changes');
     check(`Admin publishing asks before sending ${width}`,model.acts.length===n && await fc.locator('[data-publish-confirmation]').count()===1);
+    const said=await fc.locator('[data-publish-confirmation]').innerText();
+    check(`Admin confirmation says where Publish goes ${width}`,said.includes('Publish sends it to GitHub (OrgoAI/orgo-brandlord, main), where its own deploy puts it live.') && said.includes('OrgoAI/orgo-brandlord · main'));
     check(`Admin confirmation quiets review ${width}`,!await attention(fc.getByRole('link',{name:'Review preview',exact:true})));
     await click(fc.locator('[data-publish-confirmation]'),'Publish changes');
     check(`Admin Publish keeps its original pinned request ${width}`,same(model.acts.at(-1),{act:'deploy',app:'fourcorners',env:'prod',at:F.FC.head}));

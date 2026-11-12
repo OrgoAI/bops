@@ -872,6 +872,12 @@ export type SharedApp = {
   url?: string;
   /** Its computer went: it needs a new home (a deploy gives it one). */
   lost?: true;
+  /**
+   * Its production is on GitHub (lib/hosted-apps.ts AppHosting.github): Publish sends what its Preview serves to this repo
+   * and branch, whose own deploy puts it live. `at`: the changeset last sent there (its Live; null: not linked yet), from
+   * a Bops Cloud that says it (none from one before: Live is then read from Published, as before).
+   */
+  github?: { repo: string; branch: string; at?: string | null };
   head?: { id: string; message: string; at: number } | null;
   /**
    * `url`: Published's address (none: no domain yet). Its Preview, where members deploy, from an owner's Bops that sends
@@ -1277,11 +1283,13 @@ export type BrowserActivity = { step: "browsing" | "idle"; waiting: boolean; sig
 
 /**
  * What Bops Cloud tells a runner on its socket (WS /v1/browser/runner): who watches each of its bots' browsers now
- * ("watch", the whole list each time; empty: nobody), and what a viewer asked ("take", "release", "input"). A take
+ * ("watch", the whole list each time; empty: nobody; `joined`: a stream just opened, maybe for someone already watching
+ * on another Mac or window, who sees the page at once as someone new does), and what a viewer asked ("take", "release",
+ * "input"). A take
  * by the owner (`over`) takes control from a member who has it; a member's never takes it from anyone.
  */
 export type BrowserToRunner =
-  | { t: "watch"; bot: string; viewers: BrowserPerson[] }
+  | { t: "watch"; bot: string; viewers: BrowserPerson[]; joined?: true }
   | { t: "take"; bot: string; who: BrowserPerson; over?: true }
   | { t: "release"; bot: string; who: BrowserPerson }
   | { t: "input"; bot: string; who: BrowserPerson; method: string; params: unknown };
@@ -1316,6 +1324,20 @@ export type BrowserEvent =
 
 /** POST /v1/browser/act: take control, hand it back, or (in control) one CDP input. `project`: a shared workspace's Orgo id; none for the caller's own bots. */
 export type BrowserAct = { bot: string; project?: string; act: "take" | "release" | "input"; method?: string; params?: unknown };
+
+/**
+ * WS /v1/browser/input?bot=<id>[&project=<Orgo workspace>]: the acts of one viewer's Bops for one bot, in order, on one
+ * socket (lib/server/browser-view.ts), each message a BrowserAct without `bot` and `project` (the address says them), at
+ * most 64 KiB. Checked as the watch stream is: at the upgrade (refused with mayUseBrowser's status), every ROLE_MS while
+ * open and at each write of the owner's state, and ended by orgo-web's notice; each act checked as POST /v1/browser/act
+ * checks it, then sent to the runner of that computer at that moment. Bops Cloud answers only what didn't go
+ * (BrowserInputReply), and pings it; each end pings the other, and one that doesn't answer by the next ping is taken for
+ * gone. Its refusals of the upgrade carry BROWSER_INPUT_HEADER, so a 404 without it is a Bops Cloud from before this socket.
+ */
+export const BROWSER_INPUT_PATH = "/v1/browser/input";
+export const BROWSER_INPUT_HEADER = "x-bops-browser-input";
+export type BrowserInputAct = Omit<BrowserAct, "bot" | "project">;
+export type BrowserInputReply = { t: "error"; code: string; why: string };
 
 /** Why Bops Cloud won't let someone watch a bot's browser (403, with the words to show them). */
 export const BROWSER_NEEDS_WRITE = "browser_needs_write";

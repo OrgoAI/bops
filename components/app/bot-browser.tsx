@@ -72,8 +72,28 @@ const mods = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey
 /** Keys that aren't text, as Chrome's key codes. Enter carries its "\r" so a form submits. */
 const KEY_CODES: Record<string, number> = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34 };
 const BUTTON = ["left", "middle", "right"] as const;
-/** Moves and scrolls go at most this often: the last move always (where the pointer stopped), scrolls added up. */
-const MOVE_MS = 50;
+/**
+ * Moves and scrolls go at most this often (about 60 a second): the last move always (where the pointer stopped), scrolls
+ * added up. Inputs reach Bops Cloud on one socket now (lib/server/browser-view.ts), and a move still waiting is replaced
+ * by the next (act), so this many never queue up, even by POST to a Bops Cloud from before the socket.
+ */
+const MOVE_MS = 16;
+
+type ActBody = { act: "take" | "release" | "input"; method?: BrowserMethod; params?: unknown };
+/** An act waiting to be sent, for the bot and workspace it was made in; `sent` settles once Bops answered it. */
+type Queued = { body: ActBody; bot: string; project: string; sent: Promise<void>; done: () => void };
+type Wheel = { x: number; y: number; deltaX: number; deltaY: number };
+/** A move or a scroll: one still waiting is replaced by a later one of its kind. Anything else is never replaced. */
+const laterWins = (b: ActBody): "move" | "wheel" | null => {
+  const type = b.act === "input" && b.method === "Input.dispatchMouseEvent" ? (b.params as { type?: string } | undefined)?.type : null;
+  return type === "mouseMoved" ? "move" : type === "mouseWheel" ? "wheel" : null;
+};
+/** Two scrolls as one: where the later one is, by both their distances. */
+const addWheel = (was: unknown, next: unknown) => {
+  const a = was as Wheel;
+  const b = next as Wheel;
+  return { ...b, deltaX: a.deltaX + b.deltaX, deltaY: a.deltaY + b.deltaY };
+};
 
 /**
  * `project`: the shared workspace the window shows (its Orgo id; none: the user's own), sent with the stream and every
@@ -128,7 +148,10 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     [],
   );
   const surface = useRef<HTMLDivElement>(null);
-  const sending = useRef(Promise.resolve());
+  // Acts not sent yet, oldest first, and whether one is on its way (they go one at a time, in order).
+  const queue = useRef<Queued[]>([]);
+  const sending = useRef(false);
+  const probePending = useRef(0);
   const lastMove = useRef(0);
   const held = useRef<{ move?: Record<string, unknown>; wheel?: { x: number; y: number; deltaX: number; deltaY: number }; timer?: ReturnType<typeof setTimeout> }>({});
   const meta = useRef<BrowserFrameMeta | null>(null);
@@ -222,15 +245,58 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     return () => clearTimeout(t);
   }, [note]);
 
-  /** One act, after the ones before it (typing stays in order). */
-  const act = (body: { act: "take" | "release" | "input"; method?: BrowserMethod; params?: unknown }) => {
-    const run = sending.current.then(async () => {
-      const res = await fetch("/api/browser", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bot: bot.id, ...(project ? { project } : {}), ...body }) }).catch(() => null);
-      if (!res) return setNote("Couldn't reach Bops. Try again.");
-      if (!res.ok) setNote(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "That didn't go through.");
-    });
-    sending.current = run.catch(() => {});
-    return run;
+  /** Opt-in latency probe (docs/BROWSER-SPEED.md): a mouse act's queued, sent and settled times. Silent otherwise. */
+  const timing = (q: Queued, phase: "queued" | "sent" | "settled") => {
+    if (process.env.BOPS_BROWSER_PROBE !== "1" || q.body.method !== "Input.dispatchMouseEvent") return;
+    if (phase === "queued") probePending.current++;
+    const p = q.body.params as { type?: string; x?: number; y?: number } | undefined;
+    window.dispatchEvent(new CustomEvent("bops-browser-probe", { detail: { phase, at: performance.timeOrigin + performance.now(), depth: probePending.current - 1, type: p?.type, x: p?.x, y: p?.y } }));
+    if (phase === "settled") probePending.current--;
+  };
+  /** The acts waiting, sent one at a time in order, each when the one before it is answered. */
+  const pump = async () => {
+    if (sending.current) return;
+    sending.current = true;
+    try {
+      for (let q; (q = queue.current.shift()); ) {
+        timing(q, "sent");
+        try {
+          const res = await fetch("/api/browser", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bot: q.bot, ...(q.project ? { project: q.project } : {}), ...q.body }) }).catch(() => null);
+          if (!res) setNote("Couldn't reach Bops. Try again.");
+          else if (!res.ok) setNote(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "That didn't go through.");
+        } finally {
+          timing(q, "settled");
+          q.done();
+        }
+      }
+    } finally {
+      sending.current = false;
+    }
+  };
+  /**
+   * One act, after the ones before it: presses, releases, keys and pages in order, never dropped. A move or a scroll still
+   * waiting, with only moves and scrolls after it, is replaced by the newer one of its kind (latest wins; scrolls added
+   * up), so at most one of each waits there and moving never queues up ahead of a press.
+   */
+  const act = (body: ActBody): Promise<void> => {
+    const kind = laterWins(body);
+    let i = queue.current.length - 1;
+    if (kind) while (i >= 0 && laterWins(queue.current[i].body) && laterWins(queue.current[i].body) !== kind) i--;
+    const was = i >= 0 ? queue.current[i] : null;
+    const same = kind && was && laterWins(was.body) === kind && was.bot === bot.id && was.project === project ? was : null;
+    if (same) {
+      timing(same, "settled");
+      same.body = kind === "wheel" ? { ...body, params: addWheel(same.body.params, body.params) } : body;
+      timing(same, "queued");
+      return same.sent;
+    }
+    let done = () => {};
+    const sent = new Promise<void>((r) => (done = r));
+    const q: Queued = { body, bot: bot.id, project, sent, done };
+    timing(q, "queued");
+    queue.current.push(q);
+    void pump();
+    return sent;
   };
   const input = (method: BrowserMethod, params: unknown) => (control.you ? void act({ act: "input", method, params }) : undefined);
 
@@ -250,6 +316,8 @@ export function BotBrowser({ bot, project = "", hidden = false, inset = false }:
     if (!p) return;
     const params = { type, ...p, button: type === "mouseMoved" ? (e.buttons & 1 ? "left" : "none") : (BUTTON[e.button] ?? "left"), clickCount: type === "mouseMoved" ? 0 : Math.min(3, e.detail || 1), modifiers: mods(e) };
     if (type === "mouseMoved") return often({ move: params });
+    // Their own press rings at once where they pressed, rather than once the page's answer comes back.
+    if (type === "mousePressed") feed.ring(p);
     // A press or release lands after the move held back for it, where the pointer is.
     flushHeld();
     input("Input.dispatchMouseEvent", params);

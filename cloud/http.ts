@@ -71,8 +71,9 @@ export class HttpError extends Error {
   }
 }
 
-/** Refuse a WebSocket upgrade with an HTTP status. */
-export function refuseUpgrade(socket: Duplex, status: number, message: string) {
-  socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+/** Refuse a WebSocket upgrade with an HTTP status (and `headers`: names and values of letters, digits and dashes). */
+export function refuseUpgrade(socket: Duplex, status: number, message: string, headers: Record<string, string> = {}) {
+  const extra = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join("");
+  socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n${extra}Content-Length: 0\r\n\r\n`);
   socket.destroy();
 }

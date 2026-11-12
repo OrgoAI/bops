@@ -233,6 +233,8 @@ export function sharedApps() {
       name: a.name,
       botId: BOT.id,
       head: { id: a.head, message: COMMITS[a.name][0].message, at: COMMITS[a.name][0].at },
+      // Its production on GitHub, as Bops Cloud says it (cloud/ws-slice.ts githubOf): repo, branch and the changeset last sent there.
+      ...(a.hosting?.github ? { github: { repo: a.hosting.github.repo, branch: a.hosting.github.branch, at: a.hosting.github.last?.ingot ?? null } } : {}),
       sites: [site(a)],
       commits: COMMITS[a.name],
       deploys: deploysOf(a),

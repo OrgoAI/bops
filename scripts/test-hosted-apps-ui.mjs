@@ -2618,6 +2618,97 @@ await test("only an authorized Admin can confirm publication or roll back the pu
     } finally { await m.done(); }
   }
   assert.match(actLine({key:"k",userId:"u",name:"Ada",act:"deploy",env:"prod",ok:true,at:1}),/^Ada published it/);
+  assert.match(actLine({key:"k",userId:"u",name:"Ada",act:"deploy",env:"prod",ok:false,said:"No.",at:1}),/^Ada tried to publish it: No\. · /);
+});
+
+// An Admin's review, opened, with its Publish confirmation (what it says, where it goes) when there's one to open.
+const sharedAdmin = async (app, fn, role = "admin") => {
+  const {SharedAppsPage}=await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  const m=await mount(h(SharedAppsPage,{state:sharedReviewState("write",role,role==="admin",app)}));
+  try {
+    const row=m.box.querySelector('[data-shared-app="shop"]');
+    const shut={label:row.querySelector('span.hidden')?.textContent,action:[...row.querySelectorAll("button")].map(b=>b.textContent).find(t=>t==="Review changes"||t==="Open app")};
+    await click(button(m.box,"Open shop"));
+    const confirmOf=async()=>{ const p=button(m.box,"Publish changes"); if(!p||p.disabled) return null; await click(p); return m.box.querySelector('[data-publish-confirmation]'); };
+    await fn({m,box:m.box,shut,confirmOf,state:m.box.querySelector('[data-review-state]')?.textContent});
+  } finally { await m.done(); }
+};
+
+await test("where an Admin's Publish goes is said as they confirm it: GitHub, a domain not pointed at Orgo yet, or its domain; never a stray line, nor for a Member", async () => {
+  routes={"/api/workspaces/shared":{body:{ok:true}}};
+  // A domain not pointed at Orgo yet: its visitors don't see a published change until it is (a pending domain still
+  // pointing at the client's own server), and the domain says it isn't live in Technical details.
+  const waiting={...sharedReviewApp,url:undefined,sites:[{...sharedReviewApp.sites[0],url:null,domains:[{domain:"shop.acme.example",status:"pending"}]}]};
+  await sharedAdmin(waiting,async({box,confirmOf})=>{
+    assert.equal(box.querySelector("[data-publish-where]"),null,"no stray line under the row");
+    const c=await confirmOf();
+    assert.ok(c.textContent.includes("Visitors to shop.acme.example won't see a publish until its DNS points at Orgo."),c.textContent);
+    assert.ok(c.textContent.includes("shop.acme.example"),"the domain it goes to");
+    await click(button(box,"Keep reviewing"));
+    await click(button(box,"Technical details"));
+    assert.equal(box.querySelector('[data-domain-state="pending"]')?.textContent,"shop.acme.example · Waiting for its DNS","the domain says it isn't live");
+  });
+  const two={...waiting,sites:[{...waiting.sites[0],domains:[{domain:"shop.acme.example",status:"pending"},{domain:"www.acme.example",status:"verifying"}]}]};
+  await sharedAdmin(two,async({confirmOf})=>assert.ok((await confirmOf()).textContent.includes("Visitors to shop.acme.example and www.acme.example won't see a publish until their DNS points at Orgo.")));
+  // Production on GitHub: its repo and branch, where its own deploy puts it live.
+  await sharedAdmin({...waiting,github:{repo:"acme/shop-site",branch:"main",at:"cs1"}},async({confirmOf})=>{
+    const c=await confirmOf();
+    assert.ok(c.textContent.includes("Publish sends it to GitHub (acme/shop-site, main), where its own deploy puts it live."),c.textContent);
+    assert.ok(c.textContent.includes("acme/shop-site · main"),"the repo and branch it goes to");
+  });
+  // Live on its domain: the owner's Bops publishes it there; the domain is just its name.
+  await sharedAdmin(sharedReviewApp,async({box,confirmOf})=>{
+    const c=await confirmOf();
+    assert.ok(c.textContent.includes("Sends this reviewed preview to the owner's Bops for publishing.")&&c.textContent.includes("shop.example"),c.textContent);
+    assert.ok(!/Visitors to|GitHub/.test(c.textContent));
+    await click(button(box,"Keep reviewing"));
+    await click(button(box,"Technical details"));
+    assert.equal(box.querySelector('[data-domain-state="active"]')?.textContent,"shop.example");
+  });
+  // A Member has no Publish, so nothing says where it goes.
+  await sharedAdmin(waiting,async({box})=>{
+    assert.equal(button(box,"Publish changes"),undefined);
+    assert.ok(!box.textContent.includes("Visitors to"),"no line for a Member");
+  },"member");
+  // Nothing on its Preview yet: nothing to publish (Update preview first).
+  await sharedAdmin({...sharedReviewApp,sites:[{...sharedReviewApp.sites[0],previewServing:null,previewLive:null}]},async({box})=>{
+    assert.equal(button(box,"Publish changes"),undefined);
+    assert.equal(button(box,"Update preview").disabled,false);
+  });
+});
+
+await test("an Admin's review of an app whose production is on GitHub reads Live from the last push, as the owner's does, not from Orgo's Published", async () => {
+  routes={"/api/workspaces/shared":{body:{ok:true}}};
+  const gh=(at,site={})=>({...sharedReviewApp,github:{repo:"acme/shop-site",branch:"main",...(at===undefined?{}:{at})},sites:[{...sharedReviewApp.sites[0],...site}]});
+  // Published on Orgo still serves an old version (cs1); GitHub got the Preview's (cs2): up to date, nothing to review.
+  await sharedAdmin(gh("cs2"),async({box,shut,state})=>{
+    assert.deepEqual(shut,{label:"Up to date",action:"Open app"});
+    assert.equal(state,"Up to date");
+    assert.equal(button(box,"Publish changes").disabled,true,"nothing new to publish");
+    await click(button(box,"Live"));
+    assert.ok(box.textContent.includes("Sent to GitHub"),"Live is what GitHub has");
+  });
+  // No Orgo production and no domain (it moved computers, say), GitHub one change behind: Publish, never a dead Add a domain.
+  await sharedAdmin(gh("cs1",{url:null,serving:null,live:null,domains:[]}),async({box,shut,confirmOf})=>{
+    assert.deepEqual(shut,{label:"1 unpublished change",action:"Review changes"});
+    assert.equal(button(box,"Add a domain"),undefined);
+    const n=calls.length;
+    const c=await confirmOf();
+    assert.ok(c.textContent.includes("acme/shop-site · main"));
+    await click(button(c,"Publish changes"));
+    assert.deepEqual(posts(n,"/api/workspaces/shared").map(x=>x.body.act),[{act:"deploy",app:"shop",env:"prod",at:"cs2"}]);
+  });
+  // Not linked to GitHub yet: said, and nothing to publish until the owner links it.
+  await sharedAdmin(gh(null),async({box,shut})=>{
+    assert.deepEqual(shut,{label:"Connect GitHub",action:"Open app"});
+    assert.equal(button(box,"Publish changes").disabled,true);
+  });
+  // From a Bops Cloud that doesn't say where GitHub is (no `at`): Published's as before, and Publish stays pressable.
+  await sharedAdmin(gh(undefined,{url:null,serving:null,live:null,domains:[]}),async({box,shut})=>{
+    assert.equal(shut.action,"Review changes");
+    assert.equal(button(box,"Publish changes").disabled,false);
+    assert.equal(button(box,"Add a domain"),undefined);
+  });
 });
 
 /* ---------------- Local, Staging and Prod, all on the app's computer ---------------- */
