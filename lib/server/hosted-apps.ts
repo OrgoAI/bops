@@ -5018,6 +5018,46 @@ export function askDeploy(sessionId: string, app: { wsId: string; name: string }
   });
 }
 
+/** Where words name its Preview or a deploy (deploy it, redeploying, the Preview). */
+const NAMES_PREVIEW = /\b(?:re-?)?deploy\w*|\bpreviews?\b/gi;
+/**
+ * Said not to, in the same clause just before (don't put it on the Preview, never deploy, hold off on deploying, wait
+ * to deploy, but not on the Preview, keep it off the Preview, no deploy); "I don't see it on the Preview" isn't...
+ */
+const HOLD_BEFORE =
+  /(?:\b(?:(?:don['’]?t|do not|dont)(?!\s+(?:forget|see|think|know)\b)|never|without|hold off(?: on)?|wait (?:to|before|until)|no need to|(?:but|and) not)\s+(?:[\w'’-]+\s+){0,4}|\boff\s+(?:of\s+)?(?:the|its|our|my)\s+|\bno\s+)$/i;
+/** ...or just after (deploy it later). */
+const HOLD_AFTER = /^\s+(?:(?:it|this|that|them)\s+)?later\b/i;
+
+/**
+ * Whether the speaker's words, sent straight to a task on an app, say not to put its change on its Preview (askDeployAgain):
+ * no model reads them on the way (a reply to one of its messages, its reply box), so these words are what tell_task's
+ * deploy false is to the bot. "It's not on the Preview yet" or "the Preview still shows the old title" asks for it.
+ */
+export function keepsOffPreview(words: string): boolean {
+  for (const m of words.matchAll(NAMES_PREVIEW)) {
+    const at = m.index ?? 0;
+    const clause = words.slice(0, at).split(/[.?!;:\n]/).pop() ?? "";
+    if (HOLD_BEFORE.test(clause) || HOLD_AFTER.test(words.slice(at + m[0].length))) return true;
+  }
+  return false;
+}
+
+/**
+ * More asked of a task on an app that already put a change on its Preview (`from`: keepHeads and deployAfterTask set it
+ * only on a task asked to deploy, and deployAfterTask took that ask off once it deployed): its next commit goes there
+ * too (askDeploy), asked before the run is queued, so it ends with the deploy. A task started with deploy false (no
+ * `from`) stays as it is. For the speaker's own words sent to it: chat.ts tell_task (its deploy, on work_on_app's rule),
+ * and, with `words` (none said not to: keepsOffPreview), a reply to one of its messages (chat.ts continueThread), its
+ * reply box (app/api/sessions/[sessionId]/reply) and a member's reply there (member-acts.ts). Never for a note Bops
+ * sends it (signed in, its terminal closed, a takeover) or someone else's words.
+ */
+export function askDeployAgain(sessionId: string, words?: string) {
+  const x = session(sessionId)?.app;
+  if (!x || x.from === undefined || x.deployAfter || (words !== undefined && keepsOffPreview(words))) return;
+  askDeploy(sessionId, x);
+}
+
 /**
  * POST /api/hosted-apps (the Apps page's Add app): a new app, built by the workspace's main bot on its
  * computer, as work_on_app starts one (appWork, then a task through the normal task path), and put live once
