@@ -226,6 +226,22 @@ await test("an older Bops's words: its lines as they came, the size in files alo
   assert.equal(K.changeSize({ ...change, files: [...change.files, { path: "b", op: "delete" }] }, K.changeOf(change, "acme/site, branch main\n\nsrc/a.txt: changed, 90 B\n- x\n+ y")), "2 files · 2 lines changed");
 });
 
+await test("a picture from the chat in a change: the thumbnail of the copy that goes in, its name, size and pixel size, and no lines; none in a shared workspace's window, which can't open the owner's pictures yet", () => {
+  const change = { repo: "acme/site", branch: "site/favicon", base: "main", files: [{ path: "public/favicon.png", op: "add", bytes: 908, image: { id: "img_logo1", w: 512, h: 384 } }, { path: "README.md", op: "change", bytes: 20 }] };
+  const a = ask({ reason: "Use our logo as the site's tab icon", api: { key: "GITHUB_TOKEN", label: "GitHub", method: "POST", path: "/repos/acme/site/git/commits", change }, preview: "public/favicon.png: added, 908 B, 512 × 384, picture 1 from the chat\n\nREADME.md: changed, 20 B\n+ Logo: the new one." });
+  const rows = [...chat([a]).matchAll(/<div[^>]*data-change-file[^>]*>([\s\S]*?)<\/div><\/div>/g)].map((m) => m[1]);
+  assert.match(rows[0], /<img data-change-image="true" src="\/api\/uploads\/img_logo1" alt="public\/favicon\.png, as it goes in"[^>]*\/><span[^>]*>public\/favicon\.png<\/span>/, "the thumbnail, then its path");
+  assert.match(text(rows[0]), /added · 908 B · 512 × 384$/, "its size and pixel size");
+  assert.doesNotMatch(rows[0], /<pre/, "no lines for a picture");
+  assert.doesNotMatch(rows[1], /<img/, "a text file has none");
+  globalThis.bopsViewOnly = { line: "You can watch this bot." };
+  try {
+    assert.doesNotMatch(chat([a]), /data-change-image/);
+  } finally {
+    globalThis.bopsViewOnly = undefined;
+  }
+});
+
 /* ---------------- Opened ---------------- */
 
 const { parseHTML } = await import("linkedom");
