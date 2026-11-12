@@ -5,9 +5,9 @@
 // 1. The owner opens the bot's browser from a new tab; the bot goes to a page with a fresh word; within 2 s the owner's
 //    tab shows its address, and its frame matches a direct CDP screenshot of the bot's page (and not the page before).
 // 2. Sam sees the same in place of the owner's computer.
-// 4. Sam takes over (the owner sees "Sam has control"), clicks the page's button and types in its field, and the page
-//    reacts; a bot step on that screen waits meanwhile and runs once sam hands back. A CDP method outside the allowlist
-//    is refused.
+// 4. Sam takes over (the owner sees "Sam has control"), clicks the page's button (sam's own press rings at once where
+//    sam pressed, within 400 ms) and types in its field, and the page reacts; a bot step on that screen waits
+//    meanwhile and runs once sam hands back. A CDP method outside the allowlist is refused.
 // 7. Without control the address bar is read-only; in control, sam types an address and the page goes there.
 // 5. Sam signs in to the test site's sign-in page with the fixture's made-up account, hands back, and a bot step reads
 //    the signed-in page: it prints the name it read.
@@ -921,7 +921,23 @@ try {
     await sleep(1500);
     assert.equal(stepDone, null, "the bot's step waits while sam has control");
     await beat(1000);
-    await clickOnFrame(sam.page, "#press");
+    // Sam's own press rings at once where sam pressed, on sam's frame, without waiting for the page's answer (the
+    // page's own pointer event for it is sam's, so it never draws one).
+    const pressAt = await onFrame(sam.page, ...(await centre("#press")));
+    await sam.page.mouse.move(pressAt.x, pressAt.y);
+    const pressed = Date.now();
+    await sam.page.mouse.down();
+    const ring = await until(
+      () => sam.page.evaluate(() => {
+        const r = document.querySelector("[data-bot-browser] [data-browser-cursors] [data-cursor-ring]")?.getBoundingClientRect();
+        return r && { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      }),
+      "sam's own press to ring",
+      400,
+    );
+    console.log(`  sam's own press rang ${Date.now() - pressed} ms after it, ${Math.hypot(ring.x - pressAt.x, ring.y - pressAt.y).toFixed(1)} px from it`);
+    await sam.page.mouse.up();
+    assert.ok(Math.hypot(ring.x - pressAt.x, ring.y - pressAt.y) < 3, "the ring is where sam pressed");
     await until(async () => (await onPage("document.getElementById('press').textContent")) === "Pressed by a person", "the page's button to react");
     await beat(1000);
     await clickOnFrame(sam.page, "#note");

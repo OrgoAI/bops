@@ -290,5 +290,10 @@ export function noteMemberAct(wsId: string, app: string, act: MemberAppAct) {
   });
 }
 
-/** Whether a member's act with this key is kept already (done or refused): the same act again is done once. */
-export const actKept = (wsId: string, app: string, key: string) => !!getState().workspaces?.find((w) => w.id === wsId)?.appsForMembers?.apps[app]?.acts?.some((x) => x.key === key);
+/**
+ * Whether a member's act with this key is kept already (done or refused): the same act again is done once. With `act`, only
+ * that act's, done or refused: a GitHub setting Bops Cloud kept under the key of a "Save and link" leaves its Link to do,
+ * and so does one it marked going on a computer that couldn't take it.
+ */
+export const actKept = (wsId: string, app: string, key: string, act?: MemberAppAct["act"]) =>
+  !!getState().workspaces?.find((w) => w.id === wsId)?.appsForMembers?.apps[app]?.acts?.some((x) => x.key === key && (!act || (x.act === act && !x.going)));

@@ -9,6 +9,9 @@ import { MAIN_WORKSPACE } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+/** What this route says to a GitHub change while a workspace someone shared is open: it's done in that workspace's Your Apps. */
+const SHARED_GITHUB = "Change it in this workspace's Your Apps.";
+
 /**
  * Put an app on the web (HostedAppAction in lib/hosted-apps.ts): "deploy" changeset `at` (the newest on main
  * by default) on its Preview, on the computer it's worked on (or on `botId`'s the first time), every site of it
@@ -82,10 +85,13 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
     if (b.action === "addSite") return Response.json(await addSite(wsId, name, b.site));
     if (b.action === "removeSite") return Response.json(await removeSite(wsId, name, b.site));
     if (b.action === "restore") return notOwner() ?? Response.json(await restoreApp(wsId, name, b.to));
-    // Where its production is on GitHub (null: Publish on Orgo again), and linking it there: the owner's alone.
-    if (b.action === "github") return (sharedOpen() ? Response.json({ error: "Only the owner can change where an app is published." }, { status: 403 }) : null) ?? Response.json(await setGithubMirror(wsId, name, b.github ?? null));
-    if (b.action === "githubLink") return (sharedOpen() ? Response.json({ error: "Only the owner can change where an app is published." }, { status: 403 }) : null) ?? Response.json(await linkGithubMirror(wsId, name));
-    if (b.action === "githubPull") return (sharedOpen() ? Response.json({ error: "Only the owner can bring GitHub's changes in." }, { status: 403 }) : null) ?? Response.json(await pullGithubMirror(wsId, name));
+    // Where its production is on GitHub (null: Publish on Orgo again), linking it and bringing GitHub's changes in: this
+    // Bops' own apps. In a workspace someone shared with the user, the shared Your Apps does it there (Bops Cloud checks
+    // who may: cloud/members.ts githubAct), never this Bops on an app of its own by that name.
+    const inShared = () => (sharedOpen() ? Response.json({ error: SHARED_GITHUB }, { status: 403 }) : null);
+    if (b.action === "github") return inShared() ?? Response.json(await setGithubMirror(wsId, name, b.github ?? null));
+    if (b.action === "githubLink") return inShared() ?? Response.json(await linkGithubMirror(wsId, name));
+    if (b.action === "githubPull") return inShared() ?? Response.json(await pullGithubMirror(wsId, name));
     return Response.json({ error: "What should happen to it?" }, { status: 400 });
   } catch (e) {
     return answer(e);

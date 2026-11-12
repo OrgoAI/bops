@@ -1,6 +1,6 @@
 import "server-only";
 import { cleanChange } from "@/cloud/change-routes";
-import { cleanMemberFiles, isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
+import { cleanMemberFiles, isAppAct, isGithubAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
@@ -11,6 +11,7 @@ import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
 import { compactThread, dismissWaiting, replyToSession, setWhere, stopSession } from "./sessions";
+import { askDeployAgain } from "./hosted-apps";
 import { compactChat } from "./chat-summary";
 import { changeRefused, doChange, refuseChange } from "./change-acts";
 import { addMessage, bot, chat, getState, ownerName, pullState, session, update } from "./store";
@@ -71,7 +72,7 @@ function actOf(a: unknown): MemberAct | null {
   if (x.act === "persona")
     return short(x.botId, 120) && [x.text, x.was].every((v) => typeof v === "string" && v.length <= MEMBER_MAX_TEXT) ? { act: "persona", botId: x.botId as string, text: x.text as string, was: x.was as string } : null;
   if (x.act === "key") return short(x.botId, 120) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" ? { act: "key", botId: x.botId as string, name: x.name, on: x.on } : null;
-  if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
+  if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain" || x.act === "githubLink" || x.act === "githubPull") return appActOf(x);
   if (x.act === "change") {
     const call = cleanChange(x);
     return call ? { act: "change", ...call } : null;
@@ -83,6 +84,9 @@ const OPAQUE = /^[A-Za-z0-9_-]{1,80}$/;
 /** An act on an app (Your Apps at Write), as cloud/members.ts cleanAct checks it: only its own fields. */
 function appActOf(x: Record<string, unknown>): MemberAct | null {
   if (!isAppName(x.app) || (x.site !== undefined && !isSiteName(x.site))) return null;
+  // Link, or Bring in GitHub's changes: when the app's own computer couldn't (cloud/turns.ts takeAppJob). Never where it
+  // publishes ("github"): Bops Cloud writes that itself (cloud/members.ts githubHere), and this Mac's merge keeps it.
+  if (x.act === "githubLink" || x.act === "githubPull") return x.site === undefined ? { act: x.act, app: x.app } : null;
   const site = typeof x.site === "string" ? { site: x.site } : {};
   // Published ("prod"): an Admin's alone (refused); none is the Preview's.
   if ((x.act === "deploy" || x.act === "rollback") && x.env !== undefined && x.env !== "prod") return null;
@@ -217,6 +221,9 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     if (!h || !sitesOfHosting(h, act.app).includes(act.site ?? act.app)) return "no such app";
     // Publish, or going back on Published: the owner's and an Admin's (member-access.ts ADMIN_POWERS).
     if (isPublish(act) && !adminMay("publish", me)) return "not an Admin";
+    // Its GitHub production: the same power (an Admin, or a Member with App secrets), for an app of one folder.
+    if (isGithubAct(act) && !adminMay("publish", me)) return "no App secrets";
+    if (isGithubAct(act) && h.sites?.length) return "more than one site";
     return null;
   }
   // A change as the owner's window makes it (change-acts.ts): the power it needs, this workspace's bots and apps alone.
@@ -291,7 +298,7 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
   if (!act || !who || typeof p.wsId !== "string" || typeof p.key !== "string") return void console.warn(`[members] event ${eventId}: not a member's act`);
   // The same act on an app again (an ack that was lost): done, or refused, once; or still being done.
   const doing = isAppAct(act) ? `${p.wsId}\n${act.app}\n${p.key}` : "";
-  if (isAppAct(act) && (going.has(doing) || actKept(p.wsId, act.app, p.key))) return;
+  if (isAppAct(act) && (going.has(doing) || actKept(p.wsId, act.app, p.key, act.act))) return;
   const admin = await adminOf(p, who);
   const why = refused(p, act, who, admin);
   if (why && isAppAct(act) && why !== "too late" && why !== "no such workspace" && why !== "no such app") {
@@ -344,7 +351,9 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
     }
     case "reply": {
       if (session(act.sessionId)?.replies.some((r) => r.member?.ref === p.key)) return;
-      // Never made into a watch (the owner's reply route may): a member's words go to the thread as they are.
+      // Never made into a watch (the owner's reply route may): a member's words go to the thread as they are. One on an
+      // app (theirs at Write: refused) that put a change on its Preview puts this one there too, unless they say not to.
+      askDeployAgain(act.sessionId, act.text);
       replyToSession(act.sessionId, act.text, undefined, undefined, said);
       return;
     }
@@ -502,6 +511,8 @@ const REFUSED: Record<string, string> = {
   "access from before they joined": "The owner took away Write on Your Apps.",
   "apps aren't open": "The owner took away Write on Your Apps.",
   "not an Admin": "Only the owner or an Admin can publish.",
+  "no App secrets": "Only the owner, an Admin, or someone with App secrets can do this.",
+  "more than one site": "It runs more than one site, and one GitHub folder is one app.",
 };
 
 /** Whether an act on an app is Published's: Publish (a deploy) or going back there (a rollback), an Admin's alone. */
@@ -513,7 +524,7 @@ const keptAct = (p: MemberActPayload, act: MemberAppAct, who: MemberWho, ok: boo
   name: who.name,
   act: act.act,
   ...(act.site ? { site: act.site } : {}),
-  ...(act.act === "domain" ? { domain: act.subdomain ? `${act.subdomain}.${act.zone}` : act.zone } : {}),
+  ...(act.act === "domain" && "zone" in act ? { domain: act.subdomain ? `${act.subdomain}.${act.zone}` : act.zone } : {}),
   ...(isPublish(act) ? { env: "prod" as const } : {}),
   ok,
   ...(said ? { said } : {}),
@@ -534,6 +545,7 @@ async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, 
   const h = await import("./hosted-apps");
   let said: string | undefined;
   let domain: string | undefined;
+  let ok = false;
   try {
     // (A Member's deploy, rollback and settings are the Preview's. An Admin's Publish, refused for anyone else, is the owner's
     // Publish button's (promoteApp: what the Preview serves, `at` the changeset they saw there); going back on Published, its Roll back's.)
@@ -546,16 +558,22 @@ async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, 
         Promise.reject((e as { status?: unknown })?.status === 404 && /recent deploys/.test((e as Error)?.message ?? "") ? new Error(`Members roll back its preview only. Ask ${ownerName()} to roll back what's published.`) : e),
       );
     else if (act.act === "settings") await h.changeSettings(p.wsId, act.app, { port: act.port, install: act.install, build: act.build, start: act.start, health: act.health }, act.site, "preview");
+    // Link, or Bring in GitHub's changes, with the owner's own key here, Ingot's commit in their name (hosted-apps.ts githubNow).
+    else if (act.act === "githubLink") ({ said } = await h.linkGithubMirror(p.wsId, act.app));
+    else if (act.act === "githubPull") ({ said } = await h.pullGithubMirror(p.wsId, act.app, h.personAuthor(who.name)));
+    else if (act.act === "github") throw new Error("Bops Cloud sets where it publishes.");
     else {
       const got = await h.connectDomain(p.wsId, act.app, { zone: act.zone, ...(act.subdomain ? { subdomain: act.subdomain } : {}) }, act.site);
       domain = got.domain?.domain;
       if (got.error) said = got.error;
     }
+    ok = true;
   } catch (e) {
     said = plain(e);
     console.warn(`[members] event ${eventId}: ${said}`);
   }
-  const kept = keptAct(p, act, who, !said, said);
+  // (A GitHub act says how it went either way; the rest say only why not.)
+  const kept = keptAct(p, act, who, ok && (isGithubAct(act) || !said), said);
   noteMemberAct(p.wsId, act.app, domain ? { ...kept, domain } : kept);
   void seeApps(p.wsId).catch(() => {});
 }

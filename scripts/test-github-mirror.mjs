@@ -259,7 +259,7 @@ const reset = (ghFiles, igFiles) => {
   globalThis.__fake = { ingot: ig.api, callKey: (c) => gh.call(c), userDir: home };
 };
 reset({ a: "1" }, { a: "1" });
-const { mirrorPublish, mirrorPull, linkMirror, keptPath, gitSha: ourGitSha, MirrorError, BLOB_MAX } = await import(`${root}/lib/server/github-mirror.ts`);
+const { mirrorPublish, mirrorPull, linkMirror, linkAndSay, keptPath, gitSha: ourGitSha, MirrorError, BLOB_MAX } = await import(`${root}/lib/server/github-mirror.ts`);
 const { cleanGithubMirror } = await import(`${root}/lib/hosted-apps.ts`);
 
 // The BrandLord shape: the app is the formula/ folder; the rest of the repo is the server's and its secrets'.
@@ -296,13 +296,17 @@ await check("not linked yet: nothing happens, and it says to link it", async () 
   assert.deepEqual(gh.calls, []);
 });
 
-await check("Link: only two sides with the same files (but kept paths, GitHub's links, .ingotignore), at both newest", async () => {
+await check("Link: GitHub has nothing Ingot lacks or has otherwise (but kept paths, GitHub's links, .ingotignore), at both newest", async () => {
   reset(GH0, IG0);
   const last = await link();
   assert.deepEqual({ ...last, when: 0 }, { sha: gh.head, ingot: ig.head, keep: KEEP, when: 0 });
   assert.deepEqual(writes(), []);
+  // A file both have, otherwise: it stops, naming only that one (Ingot's own extra.ts is fine).
   reset(GH0, { ...IG0, "lib/look.ts": "teal", "extra.ts": "x" });
-  await assert.rejects(link(), (e) => code("LINK_DIFFERS")(e) && e.extra.paths.join() === "extra.ts,lib/look.ts" && /Ingot and GitHub differ in extra\.ts, lib\/look\.ts/.test(e.message));
+  await assert.rejects(link(), (e) => code("LINK_DIFFERS")(e) && e.extra.paths.join() === "lib/look.ts" && /Ingot and GitHub differ in lib\/look\.ts\./.test(e.message));
+  // A file only GitHub has: it stops too.
+  reset({ ...GH0, "formula/theirs.ts": "only on GitHub" }, IG0);
+  await assert.rejects(link(), (e) => code("LINK_DIFFERS")(e) && e.extra.paths.join() === "theirs.ts");
   // Not on GitHub yet: an empty folder, so the first Publish puts it all there.
   reset({ "README.md": "x" }, IG0);
   const l2 = await link();
@@ -310,6 +314,37 @@ await check("Link: only two sides with the same files (but kept paths, GitHub's 
   assert.equal(gh.files().get("formula/lib/look.ts"), "orange");
   assert.ok(!gh.files().has("formula/proxy.ts"));
   assert.equal(gh.files().get("README.md"), "x");
+});
+
+await check("Link takes files only Ingot has (a new client's own folder): they're Ingot's changes, and the first Publish puts them there", async () => {
+  // A new client of a shared formula/: its own clients/acme/ folder isn't on GitHub yet.
+  reset(GH0, { ...IG0, "clients/acme/client.json": '{"autoDeploy":false}', "clients/acme/deck.ts": "acme deck" });
+  const linked = await linkAndSay("ws_1", "fourcorners", CFG());
+  assert.deepEqual(linked.ingotOnly, ["clients/acme/client.json", "clients/acme/deck.ts"]);
+  assert.match(linked.said, /^Linked fourcorners to GitHub OrgoAI\/orgo-brandlord main, folder formula at [0-9a-f]{7}\. 2 files only Ingot has \(clients\/acme\/client\.json, clients\/acme\/deck\.ts\) go to GitHub with the next Publish\.$/);
+  assert.ok(!/[\u2013\u2014]| - /.test(linked.said), "no dashes in what it says");
+  assert.deepEqual(writes(), [], "Link writes nothing to GitHub");
+  const done = await publish(ig.head, linked.last);
+  assert.equal(gh.files().get("formula/clients/acme/deck.ts"), "acme deck", "the first Publish puts them there");
+  assert.equal(gh.files().get("formula/clients/acme/client.json"), '{"autoDeploy":false}');
+  assert.equal(gh.files().get("formula/clients/cclc/deck.ts"), "cclc deck", "another client's kept folder stays");
+  assert.match(done.said, /Pushed 2 files/);
+  // Kept paths are still left out of the comparison: an Ingot-only kept file is neither a difference nor pushed.
+  reset(GH0, { ...IG0, "clients/cclc/mine.ts": "kept here" });
+  const kept = await linkAndSay("ws_1", "fourcorners", CFG());
+  assert.deepEqual(kept.ingotOnly, []);
+  assert.equal(kept.said.includes("only Ingot has"), false);
+});
+
+await check("Bring in after a Link with files only Ingot has: they stay Ingot's, GitHub's changes come in", async () => {
+  reset(GH0, { ...IG0, "clients/acme/deck.ts": "acme deck" });
+  const linked = await linkAndSay("ws_1", "fourcorners", CFG());
+  gh.push({ "formula/lib/look.ts": "teal on GitHub" });
+  const done = await mirrorPull("ws_1", "fourcorners", CFG(linked.last), "bops; Ada");
+  assert.equal(done.brought, 1);
+  assert.equal(ig.files().get("lib/look.ts"), "teal on GitHub");
+  assert.equal(ig.files().get("clients/acme/deck.ts"), "acme deck", "Ingot's own file stays");
+  assert.equal(ig.commits.at(-1).author, "bops; Ada", "Ingot's commit is in the person's name");
 });
 
 await check("Ingot's changes go to GitHub: one commit on top of the branch, its folder only; kept paths, links and the rest stay", async () => {

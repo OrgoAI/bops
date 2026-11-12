@@ -371,6 +371,16 @@ try {
     say({ t: "watch", bot: "boppy", viewers: [sam, tess] });
   });
 
+  await test("a stream that just opened for someone already watching (another Mac or window) sees the page at once too", async () => {
+    await sleep(300);
+    got.length = 0;
+    say({ t: "watch", bot: "boppy", viewers: [sam, tess] });
+    await sleep(500);
+    assert.equal(got.filter((g) => g.m.t === "control").length, 0, "the same people and no stream new: nothing to catch up");
+    say({ t: "watch", bot: "boppy", viewers: [sam, tess], joined: true });
+    await until(() => got.some((g) => g.m.t === "page") && got.some((g) => g.m.t === "control"), "the page and who has control, for the new stream", 3000);
+  });
+
   await test("a bot step waits while someone has control, and goes on when they hand it back", async () => {
     let ran = false;
     const step = relay.whenFree(100).then(() => (ran = true));

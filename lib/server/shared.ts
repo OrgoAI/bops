@@ -241,6 +241,8 @@ export async function sharedFileTarget(botId: string, { screen = false } = {}): 
 export function sharedKeysOpen(): {
   projectId: string;
   keys: boolean;
+  /** Your Apps at Write: who may link a key to one app (lib/server/app-keys.ts). */
+  appsWrite: boolean;
   keyActs: boolean;
   keyNames: SharedKey[];
   bots: { id: string; keys: string[] }[];
@@ -253,6 +255,7 @@ export function sharedKeysOpen(): {
   return {
     projectId: open.at.projectId,
     keys: s.keys === true,
+    appsWrite: s.apps?.level === "write",
     keyActs: s.keyActs === true,
     keyNames: s.keys && Array.isArray(s.keyNames) ? s.keyNames : [],
     bots: s.bots.flatMap((b) => (typeof b.id === "string" ? [{ id: b.id, keys: s.keys ? switchedKeys(b, acts) : [] }] : [])),

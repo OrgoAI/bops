@@ -12,6 +12,7 @@
  * Imported by the window and the Mac server.
  */
 
+import type { GithubMirror } from "@/cloud/github-config";
 import { siteOf, workBot, workspaceOf, type Bot, type BotSite } from "./types";
 
 export type DeployState = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "superseded";
@@ -86,49 +87,11 @@ export type AppHosting = {
 };
 
 /**
- * Where an app's production lives on GitHub (AppHosting.github). `path`: the folder of the repo the app's files are
- * ("" the whole repo). `keep`: paths left alone either way (a path, or a folder ending in /): never sent to GitHub,
- * never taken from it (a preview's own password file; another app's client in a shared folder). `dispatch`: a workflow
- * to run after a push, for one that doesn't start on a push. `last`: where the two were last the same (Link, Publish,
- * or Bring in): `sha`, the GitHub commit; `ingot`, the Ingot changeset that matches it, which a preview must be at
- * or after to publish (lib/server/github-mirror.ts).
+ * Where an app's production lives on GitHub (AppHosting.github), and the one check of what the window sends for it: in
+ * cloud/github-config.ts, which Bops Cloud checks an Admin's setting with too (cloud/members.ts githubHere).
  */
-export type GithubMirror = {
-  repo: string;
-  branch: string;
-  path: string;
-  keep?: string[];
-  dispatch?: { workflow: string; inputs?: Record<string, string> };
-  /** (`keep`: the paths left alone when it was made: one taken off the list since needs a new Link.) */
-  last?: { sha: string; ingot: string; keep?: string[]; when: number };
-};
-
-const GH_REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
-const GH_BRANCH = /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._/-]{1,200}$/;
-const GH_PATH = /^(?!.*\.\.)(?!\/)[A-Za-z0-9._/@ -]{0,300}$/;
-
-/** A GitHub mirror as the window sends it, cleaned, or why it won't do. `last` is the server's own (never taken from here). */
-export function cleanGithubMirror(v: unknown): { ok: Omit<GithubMirror, "last"> } | { why: string } {
-  const m = v as Partial<GithubMirror> | null;
-  const repo = typeof m?.repo === "string" ? m.repo.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "") : "";
-  if (!GH_REPO.test(repo)) return { why: "Which GitHub repo? Like OrgoAI/orgo-brandlord." };
-  const branch = typeof m?.branch === "string" && m.branch.trim() ? m.branch.trim() : "main";
-  if (!GH_BRANCH.test(branch)) return { why: "That isn't a branch name." };
-  const path = (typeof m?.path === "string" ? m.path.trim() : "").replace(/^\/+|\/+$/g, "");
-  if (!GH_PATH.test(path)) return { why: "That isn't a folder in the repo." };
-  const typed = Array.isArray(m?.keep) ? m.keep.filter((k): k is string => typeof k === "string").map((k) => k.trim().replace(/^\/+/, "")).filter(Boolean) : [];
-  const bad = typed.find((k) => !GH_PATH.test(k));
-  if (bad) return { why: `"${bad.slice(0, 80)}" can't be a path left alone (letters, digits, . _ - @ / and spaces; a folder ends in /).` };
-  const keep = [...new Set(typed)].slice(0, 50);
-  const w = m?.dispatch;
-  const workflow = typeof w?.workflow === "string" ? w.workflow.trim() : "";
-  if (workflow && !/^[A-Za-z0-9_.-]{1,100}\.ya?ml$/.test(workflow)) return { why: "That isn't a workflow file, like deploy.yml." };
-  const inputs =
-    w?.inputs && typeof w.inputs === "object"
-      ? Object.fromEntries(Object.entries(w.inputs).filter(([k, x]) => /^[A-Za-z0-9_-]{1,50}$/.test(k) && typeof x === "string" && x.length <= 200).slice(0, 10) as [string, string][])
-      : undefined;
-  return { ok: { repo, branch, path, ...(keep.length ? { keep } : {}), ...(workflow ? { dispatch: { workflow, ...(inputs && Object.keys(inputs).length ? { inputs } : {}) } } : {}) } };
-}
+export type { GithubMirror } from "@/cloud/github-config";
+export { cleanGithubMirror, keepsPoint } from "@/cloud/github-config";
 
 /** A site's deploy project left on a computer the app moved off (AppHosting.behind). */
 export type AppProjectBehind = { site: string; computerId: string; projectId: string };
@@ -472,6 +435,14 @@ export type AppDnsInput = { type: string; name: string; value: string; priority?
 export type AppDnsZone = { id: string; domain: string; serving: boolean; ttl: number | null; records: AppDnsRecord[]; error?: string; renewal?: AppRenewal };
 
 export type AppDomainStatus = "pending" | "verifying" | "active" | "failed" | "disabled";
+/** A domain's state in a word: the owner's Your Apps (components/app/hosted-apps.tsx DOMAIN_STATES) and a member's (shared-apps.tsx) alike. */
+export const DOMAIN_WORDS: Record<AppDomainStatus, string> = {
+  pending: "Waiting for its DNS",
+  verifying: "Checking its DNS",
+  active: "Live",
+  failed: "Couldn't be verified",
+  disabled: "Turned off by Orgo",
+};
 
 /** One of the app's domains: one its computer serves on the app's port (orgo-web custom_domains.target_port). */
 export type AppDomain = {
@@ -587,7 +558,11 @@ export type AppSettingsAnswer = {
   said?: string;
   /** Of the Preview's (env=preview): Published's variables' names, so the window says which the Preview doesn't have. */
   prodEnv?: string[];
+  /** The variables it gets from Keys at each build (lib/server/app-keys.ts), names only; `missing`: Keys has none now. */
+  keyed?: AppKeyed[];
 };
+/** A variable an app gets from Keys: its name, the key's, and whether the link is the app's own or every app's. */
+export type AppKeyed = { name: string; key: string; from: "app" | "workspace"; missing?: true };
 export type AppSettingsChange = { ws: string; site?: string; env?: "preview" | "prod"; port?: number | string; install?: string; build?: string; start?: string; health?: string };
 export type AppEnvChange = { ws: string; site?: string; where?: AppEnv; env: Record<string, string | null> };
 
@@ -821,8 +796,13 @@ export type AppForMembers = {
   acts?: MemberAppAct[];
 };
 
-/** A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). `env` "prod": an Admin's Publish or Roll back on Published. */
-export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; env?: "prod"; ok: boolean; said?: string; at: number };
+/**
+ * A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). `env` "prod": an Admin's
+ * Publish or Roll back on Published. The GitHub ones (cloud/protocol.ts MemberGithubAct) are kept by Bops Cloud too: where
+ * it publishes ("github"), and a Link or Bring in while the app's computer does it (`going`), then how it went
+ * (cloud/turns.ts takeAppJob, finish).
+ */
+export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain" | "github" | "githubLink" | "githubPull"; site?: string; domain?: string; env?: "prod"; ok: boolean; going?: true; said?: string; at: number };
 
 /** How much members are shown: apps, sites of each, changesets, deploys a site, and acts kept. */
 export const MEMBER_APPS = 30;

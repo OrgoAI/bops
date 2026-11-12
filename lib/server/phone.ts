@@ -749,8 +749,9 @@ async function textIn(b: Bot, line: Line, e: ApEvent, deliveryId: string, verdic
   const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && (!x.routineId || askedFor(x.id)));
   for (const t of started.filter((x) => !x.textBack)) patchSession(t.id, { textBack: { botId: b.id, to: from } });
   // The bot's answer, as it gave it in Bops: each message its own bubble, threaded where it was an
-  // inline reply, and a tapback as a tapback (never a filler text in its place).
-  const replies = getState().messages.filter((m) => m.chatId === chatId && m.role === "bot" && m.botId === b.id && m.at >= mine.at && turnsOwn(m, started));
+  // inline reply, and a tapback as a tapback (never a filler text in its place). Bops' own words about an
+  // app said in the chat meanwhile (Message.appNote: a publish that went, chat.ts deploy_app) stay in Bops.
+  const replies = getState().messages.filter((m) => m.chatId === chatId && m.role === "bot" && m.botId === b.id && m.at >= mine.at && !m.appNote && turnsOwn(m, started));
   const failed = (err: Error) =>
     addMessage({ chatId, role: "system", text: `Couldn't text this back to you: ${/regist/i.test(err.message) ? "texting from this number waits on carrier approval" : err.message}` });
   for (const r of replies) {

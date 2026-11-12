@@ -5,9 +5,9 @@ import { WebSocket } from "ws";
 import { clearAuthCache } from "../auth.ts";
 import { resetBrowser, runnerConnected, viewersOf } from "../browser.ts";
 import { closeDb } from "../db.ts";
-import { resetMembers } from "../members.ts";
+import { membersChanged, resetMembers } from "../members.ts";
 import { BROWSER_NEEDS_COMPUTER, BROWSER_NEEDS_WRITE, BROWSER_SHARED_COMPUTER, type BrowserToRunner, type RunnerToBrowser } from "../protocol.ts";
-import { listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
+import { dropUsers, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
  * The bot's browser in Bops Cloud (browser.ts): who may watch a bot's browser and take control of it. The owner, and a
@@ -32,6 +32,8 @@ const PROJECT = "22222222-3333-4444-5555-666666666666";
 const DESKTOP = "0f0e0d0c-0b0a-4908-8706-050403020100";
 const keyOf = (id: string) => `key-${id}`;
 const COMPUTER_KEY = `computer-${owner}`;
+/** Keys orgo-web turns down now (revoked after they signed in). */
+const revoked = new Set<string>();
 
 before(async () => {
   await prepareDb();
@@ -51,6 +53,7 @@ before(async () => {
       const json = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
       const key = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
       if (req.url === "/api/user/profile") {
+        if (revoked.has(key)) return json(401, { error: "This key was revoked" });
         if (key === COMPUTER_KEY) return json(200, { id: owner, api_key: { scope: "computer", computer_id: DESKTOP } });
         const id = /^key-(.+)$/.exec(key)?.[1];
         return id ? json(200, { id, email: `${id}@example.com`, full_name: id.split("-")[1] }) : json(401, { error: "no" });
@@ -96,6 +99,7 @@ after(async () => {
   resetBrowser();
   await cloud.close();
   await orgo.close();
+  await dropUsers([owner]);
   await closeDb();
 });
 
@@ -177,6 +181,28 @@ test("the owner and a member with Write and Use its computer watch the bot's bro
   const left = await until(() => r.got.findLast((m) => m.t === "watch"), "the runner to hear they left");
   assert.deepEqual(left.t === "watch" && left.viewers, [], "nobody watches: the runner stops capturing");
   r.close();
+});
+
+test("a second stream of someone already watching (another Mac or window) tells the runner one joined, so it catches them up", async () => {
+  const r = await runner();
+  const first = await watch(owner, null);
+  const second = { close: () => {} };
+  try {
+    await until(() => r.got.some((m) => m.t === "watch" && m.viewers.length === 1), "the runner to hear the owner");
+    r.got.length = 0;
+    Object.assign(second, await watch(owner, null));
+    const w = await until(() => r.got.findLast((m) => m.t === "watch"), "the runner to hear of the second stream");
+    assert.ok(w.t === "watch" && w.joined === true && w.viewers.length === 1, JSON.stringify(w));
+    first.close();
+    const left = await until(() => r.got.findLast((m) => m.t === "watch" && m !== w), "the runner to hear one left");
+    assert.ok(left.t === "watch" && !left.joined && left.viewers.length === 1, "one leaving: no one joined, the owner still watches");
+  } finally {
+    first.close();
+    second.close();
+    await until(() => viewersOf(owner, "max") === 0, "both streams to end");
+    r.close();
+    await until(() => !runnerConnected(owner, DESKTOP), "the runner to go");
+  }
 });
 
 test("a member without Use its computer, a member at Read, one who doesn't see the bot and an outsider are refused, saying why", async () => {
@@ -324,4 +350,218 @@ test("only a computer opens the runner's socket", async () => {
     ws.on("open", () => ok(101));
   });
   assert.equal(status, 403, "the owner's own key isn't a computer");
+});
+
+/**
+ * A viewer's input socket (WS /v1/browser/input): the upgrade's status and whether Bops Cloud marked a refusal as this
+ * route's (a plain 404 is a Bops Cloud from before it); open, what Bops Cloud says on it and how it closed. The address
+ * and the mark are the wire's, spelled out here.
+ */
+async function inputSocket(key: string, query = `bot=max&project=${PROJECT}`, opts: { autoPong?: boolean } = {}) {
+  const ws = new WebSocket(`${cloud.url.replace("http", "ws")}/v1/browser/input?${query}`, { headers: { Authorization: `Bearer ${key}` }, ...opts });
+  const said: { t: string; code?: string; why?: string }[] = [];
+  let closed: number | null = null;
+  ws.on("message", (d) => said.push(JSON.parse(String(d))));
+  ws.on("close", (code) => (closed = code));
+  ws.on("error", () => {});
+  const upgrade = await new Promise<{ status: number; marked: boolean }>((ok) => {
+    ws.on("unexpected-response", (req, res) => {
+      ok({ status: res.statusCode ?? 0, marked: res.headers["x-bops-browser-input"] === "1" });
+      req.destroy();
+    });
+    ws.on("open", () => ok({ status: 101, marked: false }));
+  });
+  return { ...upgrade, said, closed: () => closed, send: (m: unknown) => ws.send(typeof m === "string" ? m : JSON.stringify(m)), close: () => ws.close() };
+}
+
+test("one input socket: each act reaches the runner in order as who sent it; what a POST would refuse is refused on it, in words", async () => {
+  const r = await runner();
+  const s = await inputSocket(keyOf(writer));
+  assert.equal(s.status, 101, "a member with Write and Use its computer opens it");
+  const who = { id: writer, name: "writer" };
+  const moves = Array.from({ length: 20 }, (_, x) => ({ type: "mouseMoved", x, y: 5, button: "none", clickCount: 0, modifiers: 0 }));
+  s.send({ act: "take" });
+  for (const params of moves) s.send({ act: "input", method: "Input.dispatchMouseEvent", params });
+  s.send({ act: "input", method: "Runtime.evaluate", params: { expression: "document.cookie" } });
+  s.send({ act: "input", method: "Input.insertText", params: { text: "hi" } });
+  s.send({ act: "steal" });
+  s.send("not json");
+  s.send({ act: "release" });
+  const acts = await until(() => {
+    const a = r.got.filter((m) => m.t !== "watch");
+    return a.length >= 23 && a;
+  }, "the acts");
+  assert.deepEqual(acts, [
+    { t: "take", bot: "max", who },
+    ...moves.map((params) => ({ t: "input", bot: "max", who, method: "Input.dispatchMouseEvent", params })),
+    { t: "input", bot: "max", who, method: "Input.insertText", params: { text: "hi" } },
+    { t: "release", bot: "max", who },
+  ], "in the order sent; a method outside BROWSER_METHODS never reaches the runner");
+  await until(() => s.said.length === 3, "the refusals");
+  assert.deepEqual(s.said, [
+    { t: "error", code: "http_400", why: "The browser tab can't do that." },
+    { t: "error", code: "http_400", why: "act must be take, release or input" },
+    { t: "error", code: "http_400", why: "act must be take, release or input" },
+  ]);
+  // No runner now: said on the socket in Bops Cloud's words, and nothing sent.
+  r.close();
+  await until(() => !runnerConnected(owner, DESKTOP), "the runner to go");
+  s.send({ act: "input", method: "Input.insertText", params: { text: "x" } });
+  assert.deepEqual(await until(() => s.said[3], "the offline answer"), { t: "error", code: "browser_offline", why: "Max's computer isn't connected right now." });
+  // More than 64 KiB in one act: the socket ends, as a POST that big is refused.
+  s.send({ act: "input", method: "Input.insertText", params: { text: "x".repeat(70 * 1024) } });
+  assert.equal(await until(() => s.closed(), "the socket to end"), 1009);
+});
+
+test("only someone who may use the bot's browser opens its input socket: refused at the upgrade with the watch stream's status, marked as this route's", async () => {
+  for (const [who, status] of [[noComputer, 403], [reader, 403], [hidden, 404], [outsider, 404]] as const) {
+    const s = await inputSocket(keyOf(who));
+    assert.deepEqual({ status: s.status, marked: s.marked }, { status, marked: true }, `${who}`);
+  }
+  const shared = await inputSocket(keyOf(hidden), `bot=dana&project=${PROJECT}`);
+  assert.deepEqual({ status: shared.status, marked: shared.marked }, { status: 403, marked: true }, "nor through a bot that shares its computer");
+  const own = await inputSocket(keyOf(outsider), "bot=max");
+  assert.deepEqual({ status: own.status, marked: own.marked }, { status: 404, marked: true }, "nor their own account's bot of that id");
+  assert.equal((await inputSocket(COMPUTER_KEY)).status, 403, "a computer's key isn't a person");
+  const before = await new Promise<{ status: number; marked: boolean }>((ok) => {
+    const ws = new WebSocket(`${cloud.url.replace("http", "ws")}/v1/browser/elsewhere?bot=max`, { headers: { Authorization: `Bearer ${keyOf(owner)}` } });
+    ws.on("error", () => {});
+    ws.on("unexpected-response", (req, res) => (ok({ status: res.statusCode ?? 0, marked: !!res.headers["x-bops-browser-input"] }), req.destroy()));
+  });
+  assert.deepEqual(before, { status: 404, marked: false }, "a path Bops Cloud doesn't have: a plain 404, as one from before the socket says");
+});
+
+test("an open input socket ends at once on orgo-web's notice, and when the owner takes away Write (asked again every ROLE_MS)", async () => {
+  let now: typeof state = state;
+  resetBrowser({ state: async (account) => (account === owner ? now : {}), every: 50 });
+  const s = await inputSocket(keyOf(writer));
+  assert.equal(s.status, 101);
+  membersChanged(PROJECT, writer);
+  assert.equal(await until(() => s.closed(), "the notice to end it", 1000), 4403);
+  const t = await inputSocket(keyOf(writer));
+  assert.equal(t.status, 101, "asked afresh, they still may");
+  const ws = state.workspaces[0];
+  now = { ...state, workspaces: [{ ...ws, memberAccess: { ...ws.memberAccess, [`${writer}@example.com`]: { others: "none", bots: { max: "read", dana: "write" }, computer: "use", at } } }] };
+  assert.equal(await until(() => t.closed(), "the next look to end it", 2000), 4403);
+});
+
+test("an open input socket ends once orgo-web turns its key down, at the next look, though no notice comes for an owner's own bot", async () => {
+  resetBrowser({ state: async (account) => (account === owner ? state : {}), every: 50 });
+  const r = await runner();
+  const s = await inputSocket(keyOf(owner), "bot=max");
+  try {
+    assert.equal(s.status, 101);
+    s.send({ act: "input", method: "Input.insertText", params: { text: "a" } });
+    await until(() => r.got.some((m) => m.t === "input"), "the act before");
+    // Revoked: orgo-web turns the key down, and what was kept of its sign-in has run out (as HIT_MS passing).
+    revoked.add(keyOf(owner));
+    clearAuthCache();
+    assert.equal(await until(() => s.closed(), "the next look to end it", 2000), 4403);
+    s.send({ act: "input", method: "Input.insertText", params: { text: "b" } });
+    await new Promise((ok) => setTimeout(ok, 150));
+    assert.equal(r.got.filter((m) => m.t === "input").length, 1, "nothing after it reaches the runner");
+    assert.equal((await inputSocket(keyOf(owner), "bot=max")).status, 401, "nor does a new socket on that key");
+  } finally {
+    revoked.delete(keyOf(owner));
+    clearAuthCache();
+    r.close();
+    await until(() => !runnerConnected(owner, DESKTOP), "the runner to go");
+  }
+});
+
+test("an open watch stream ends once orgo-web turns its key down, at the next look, though no notice comes for an owner's own bot", async () => {
+  resetBrowser({ state: async (account) => (account === owner ? state : {}), every: 50 });
+  const v = await watch(owner, null);
+  try {
+    assert.equal(v.status, 200);
+    await until(() => viewersOf(owner, "max") === 1, "watching");
+    // Revoked: orgo-web turns the key down, and what was kept of its sign-in has run out (as HIT_MS passing).
+    revoked.add(keyOf(owner));
+    clearAuthCache();
+    await until(() => viewersOf(owner, "max") === 0, "the next look to end it", 2000);
+    // It says why, in place of the page (read as it comes: the stream can end here before its last event is read).
+    await until(() => v.events.some((e) => e.t === "refused" && e.code === "signed_out"), "the stream to say why", 1000);
+    assert.equal((await watch(owner, null)).status, 401, "nor does a new stream on that key");
+  } finally {
+    revoked.delete(keyOf(owner));
+    clearAuthCache();
+    v.close();
+  }
+});
+
+/** The owner's Mac writes their state through PUT /v1/state, over what it read last (`base`); gives back the version. */
+async function ownerWrites(base: number, blob: Record<string, unknown>): Promise<number> {
+  const headers = { Authorization: `Bearer ${keyOf(owner)}`, "x-bops-user": owner, "x-bops-protocol": "2", "x-bops-device": "mac-o", "content-type": "application/json" };
+  const res = await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers, body: JSON.stringify({ base, state: blob }) });
+  assert.equal(res.status, 200, await res.clone().text());
+  return ((await res.json()) as { version: number }).version;
+}
+const head = async () => ((await (await fetch(`${cloud.url}/v1/state/head`, { headers: { Authorization: `Bearer ${keyOf(owner)}`, "x-bops-user": owner, "x-bops-protocol": "2" } })).json()) as { version: number }).version;
+/** The owner's state with the member's levels on its bots as given (and Use its computer, as before). */
+const writerGets = (bots: Record<string, string>) => {
+  const ws = state.workspaces[0];
+  return { ...state, workspaces: [{ ...ws, memberAccess: { ...ws.memberAccess, [`${writer}@example.com`]: { others: "none", bots, computer: "use", at } } }] };
+};
+
+test("the owner setting a member to Read on the bot, written through the state route, ends their input socket and watch stream at once, not at the next look", async () => {
+  // Looked at again only every ROLE_MS (a minute): what ends them here is the write itself.
+  const version = await ownerWrites(await head(), state);
+  const s = await inputSocket(keyOf(writer));
+  const v = await watch(writer);
+  try {
+    assert.equal(s.status, 101);
+    assert.equal(v.status, 200);
+    await until(() => viewersOf(owner, "max") === 1, "watching");
+    // A write that changes nothing of theirs leaves them be.
+    await ownerWrites(version, { ...state, owner: { name: "Olive" } });
+    await new Promise((ok) => setTimeout(ok, 150));
+    assert.equal(s.closed(), null, "nothing of theirs changed: still open");
+    assert.equal(viewersOf(owner, "max"), 1);
+    await ownerWrites(version + 1, writerGets({ max: "read", dana: "write" }));
+    assert.equal(await until(() => s.closed(), "the write to end the socket", 1000), 4403);
+    await until(() => viewersOf(owner, "max") === 0, "the write to end the stream", 1000);
+    const why = await until(() => v.events.find((e) => e.t === "refused"), "the stream to say why", 1000);
+    assert.equal(why.code, BROWSER_NEEDS_WRITE, "the stream says why, in place of the page");
+  } finally {
+    s.close();
+    v.close();
+  }
+});
+
+test("a bot moved to another computer ends the owner's input socket at once; a bot they don't have moved onto its computer ends a member's", async () => {
+  const OTHER = "0a0b0c0d-0e0f-4011-8213-141516171819";
+  let version = await ownerWrites(await head(), state);
+  const mine = await inputSocket(keyOf(owner), "bot=max");
+  const theirs = await inputSocket(keyOf(writer));
+  try {
+    assert.equal(mine.status, 101);
+    assert.equal(theirs.status, 101);
+    // Zed, a bot the member doesn't have, now works on Max's computer: its screens are Zed's too.
+    const zed = { id: "zed", name: "Zed", workspaceId: "ws_acme", computerId: DESKTOP, computerStatus: "ready" };
+    version = await ownerWrites(version, { ...state, bots: [...state.bots, zed] });
+    assert.equal(await until(() => theirs.closed(), "the write to end the member's socket", 1000), 4403);
+    assert.equal(mine.closed(), null, "the owner has every bot: still open");
+    // Max moved to another computer: acts would reach the old one's runner, whose screens another bot may hold now.
+    await ownerWrites(version, { ...state, bots: state.bots.map((b) => (b.id === "max" ? { ...b, computerId: OTHER } : b)) });
+    assert.equal(await until(() => mine.closed(), "the write to end the owner's socket", 1000), 4409);
+  } finally {
+    mine.close();
+    theirs.close();
+  }
+});
+
+test("an input socket that stops answering pings ends (a Mac gone without a close); one that answers stays", async () => {
+  resetBrowser({ state: async (account) => (account === owner ? state : {}), ping: 40 });
+  const gone = await inputSocket(keyOf(owner), "bot=max", { autoPong: false });
+  const here = await inputSocket(keyOf(owner), "bot=max");
+  try {
+    assert.equal(gone.status, 101);
+    assert.equal(here.status, 101);
+    assert.equal(await until(() => gone.closed(), "the silent one to end", 1000), 1006, "ended without a close to wait for");
+    await new Promise((ok) => setTimeout(ok, 200));
+    assert.equal(here.closed(), null, "five pings answered: still open");
+  } finally {
+    gone.close();
+    here.close();
+  }
 });

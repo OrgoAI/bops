@@ -6,7 +6,8 @@
 // schedule tool as a lookup (every with hours, a time that passed today moved to tomorrow, refusals in
 // plain words, where results go: text, a channel, by default back where the user asked), manage_routine
 // (run now, pause; Run now asked in Slack bringing a task's result back there, never one from the app
-// or another message), skills (the list in the instructions, read_skill, create_skill only on the user's
+// or another message; a publish asked in Slack answered there once, its Published line kept in Bops),
+// skills (the list in the instructions, read_skill, create_skill only on the user's
 // own say, start_task following one), the watch tool's web pages, what a turn someone else started can't do
 // (no routines, watches, skills or bots; no address in a task they didn't write), markdown links made
 // plain for texts and channels, the instructions (the new rules in, the old contradictions out, How I work,
@@ -104,10 +105,11 @@ const MAIL_AT = "2026-10-13T12:00:00.000Z";
 const email = (id, o) => ({ inbox_id: "in_1", thread_id: o.thread ?? `th_${id}`, message_id: id, labels: o.labels ?? ["received"], timestamp: MAIL_AT, from: o.from ?? "Jordan <jordan@acme.example>", to: o.to ?? ["boppy@bops.bot"], subject: o.subject ?? "Links", preview: o.preview ?? (o.text ?? "").slice(0, 200), text: o.text ?? o.preview ?? "", size: 100, updated_at: MAIL_AT, created_at: MAIL_AT });
 /**
  * Composio (composio.ts), only for the actions a test puts in `cx.tools`: each one's app, tags and answer (a function of
- * its inputs: { data } or { error }). `cx.ran` is every action that ran, with its account and inputs. Anything else is
- * offline, as before.
+ * its inputs: { data } or { error }). `cx.ran` is every action that ran, with its account and inputs. While a test sets
+ * `cx.posts` to a list, a bot's Slack post (channels.ts slackPost, through Composio's proxy) lands there and goes. Anything
+ * else is offline, as before.
  */
-const cx = { tools: {}, ran: [] };
+const cx = { tools: {}, ran: [], posts: null };
 const cxTool = (slug, t) => ({ slug, name: slug, description: slug, tags: t.tags ?? [], toolkit: { slug: t.app, name: t.app, logo: "" }, input_parameters: { type: "object", properties: {} }, output_parameters: {}, version: "1", available_versions: ["1"], no_auth: false, scopes: [], is_deprecated: false, deprecated: { displayName: slug, version: "1", available_versions: ["1"], toolkit: { logo: "" }, is_deprecated: false } });
 globalThis.fetch = async (input, init) => {
   const req = new Request(input, init);
@@ -122,6 +124,11 @@ globalThis.fetch = async (input, init) => {
       cx.ran.push({ slug: execute, account: body.connected_account_id, args: body.arguments });
       const out = (await t.answer?.(body.arguments)) ?? { data: {} };
       return json({ data: out.data ?? {}, error: out.error ?? null, successful: !out.error, log_id: "log_1" });
+    }
+    if (cx.posts && /^\/api\/v3(?:\.1)?\/tools\/execute\/proxy$/.test(url.pathname)) {
+      const body = JSON.parse(await req.text());
+      cx.posts.push({ endpoint: body.endpoint, ...body.body });
+      return json({ status: 200, data: { ok: true }, headers: {} });
     }
   }
   if (url.origin === "https://api.agentmail.to") {
@@ -1610,6 +1617,34 @@ await check("a turn by text or in a channel sends back only its own: not a routi
   assert.equal(turnsOwn({ role: "bot", text: "The digest", routine: { id: "r1", manual: true } }, []), true, "one this turn ran now");
   assert.equal(turnsOwn({ role: "bot", text: "Done", resultOf: "s1" }, [{ id: "s1" }]), true, "a thread it started");
   assert.equal(turnsOwn({ role: "bot", text: "An older job's result", resultOf: "s0" }, [{ id: "s1" }]), false);
+});
+
+await check("a publish asked in Slack: only the bot's answer goes back there; the Published line Bops said in the chat stays in Bops", async () => {
+  const Channels = await import(`${root}/lib/server/channels.ts`);
+  S.update((st) => {
+    st.channels = [{ id: "ch_pub", kind: "slack", botId: "boppy", handle: "Acme", owner: "U1", ownerName: "Alex", pairCode: "1", status: "live", at: 0, slack: { accountId: "ac_1", teamId: "T1", channels: [], dm: "D1" } }];
+  });
+  const published = "Published (on GitHub): recipe-box at abc1234, what its Preview serves, to GitHub acme/recipe-box main: pushed.";
+  cx.posts = [];
+  const m0 = messages().length;
+  try {
+    answers.push(() => {
+      // A publish that went, as chat.ts deploy_app says it in the chat during the turn: as Bops, an app note.
+      S.addMessage({ chatId, role: "bot", botId: "boppy", text: published, appNote: true, bops: true });
+      return response(`resp_${asked.length}`, [said("It's published on GitHub.")]);
+    });
+    await Channels.slackEventIn(["T1"], { type: "message", channel: "D1", channel_type: "im", ts: "1700000000.0002", user: "U1", text: "publish the recipe app" });
+    assert.deepEqual(
+      cx.posts.map((p) => [p.endpoint, p.channel, p.markdown_text]),
+      [["/chat.postMessage", "D1", "It's published on GitHub."]],
+      "one message back to Slack: the bot's answer, not the app note",
+    );
+    assert.equal(messages().filter((m) => m.appNote && m.bops && m.text === published).length, 1, "the Published line stays in the chat");
+    assert.ok(!messages().slice(m0).some((m) => /^Couldn't send this back/.test(m.text)), "it went");
+  } finally {
+    cx.posts = null;
+    S.update((st) => (st.channels = []));
+  }
 });
 
 /* ---------------- Replies to send (draft_reply: lib/server/reply-drafts.ts) ---------------- */

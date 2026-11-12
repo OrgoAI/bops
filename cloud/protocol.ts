@@ -816,6 +816,13 @@ export type SharedWsSlice = {
   /** With `can`: the owner's Bops takes the "change" act (CHANGES_MIN_VERSION). Part of the fingerprint. */
   changes?: true;
   /**
+   * With `apps` at Write, for an Admin or a Member with App secrets (cloud/member-access.ts POWER_OF.publish), once the
+   * owner's last Mac is at GITHUB_ACTS_MIN_VERSION: Your Apps sets where an app publishes on GitHub, links it, and brings
+   * GitHub's changes in (MemberAppAct "github", "githubLink", "githubPull"), which the app's own computer does with the
+   * owner's Mac off. Part of the fingerprint.
+   */
+  appGithub?: true;
+  /**
    * With `can`: what the owner's Mac did with their last changes (Workspace.changesDone): each by their key, done or why
    * not, so their window says one that didn't go. Only their own.
    */
@@ -872,10 +879,19 @@ export type SharedApp = {
   url?: string;
   /** Its computer went: it needs a new home (a deploy gives it one). */
   lost?: true;
+  /**
+   * Its production is on GitHub (lib/hosted-apps.ts AppHosting.github): Publish sends what its Preview serves to this repo
+   * and branch, whose own deploy puts it live. At Write also its folder, the paths left alone, the workflow it runs, and
+   * where it was last the same as GitHub (`linked`: Link, Publish or Bring in; none: it isn't linked yet), so an Admin, or
+   * a Member with App secrets, links it and brings GitHub's changes in (SharedWsSlice.appGithub).
+   */
+  github?: { repo: string; branch: string; path?: string; keep?: string[]; dispatch?: { workflow: string; inputs?: Record<string, string> }; linked?: { sha: string; ingot: string; when: number } };
   head?: { id: string; message: string; at: number } | null;
   /**
    * `url`: Published's address (none: no domain yet). Its Preview, where members deploy, from an owner's Bops that sends
    * it: its link, newest deploy and what it serves, whether its link asks for a password, and the password at Write only.
+   * A Preview the owner's Mac hasn't read yet has its link and password from Bops Cloud alone (ws-slice.ts sitesFilled):
+   * no deploy or what it serves (`serving` null, no `live`).
    */
   sites?: {
     name: string;
@@ -896,8 +912,12 @@ export type SharedApp = {
   deploys?: { id: string; state: string; at: string | null; rollback: boolean; when: number | null; live: boolean; canRollback: boolean; site: string; env?: "preview" | "prod" }[];
   /** Each site's settings: Write only. */
   settings?: Record<string, { port: number | null; install: string | null; build: string | null; start: string | null; health?: string }>;
-  /** `env` "prod": an Admin's Publish (a deploy) or Roll back on Published. */
-  acts?: { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; env?: "prod"; ok: boolean; said?: string; at: number }[];
+  /**
+   * `env` "prod": an Admin's Publish (a deploy) or Roll back on Published. The GitHub ones (MemberAppAct "github",
+   * "githubLink", "githubPull") only to a viewer whose Bops is at GITHUB_ACTS_MIN_VERSION: `going` while the app's
+   * computer works on it (Bops Cloud keeps how it went in its place: cloud/turns.ts finish).
+   */
+  acts?: { key: string; userId: string; name: string; act: MemberAppAct["act"]; site?: string; domain?: string; env?: "prod"; ok: boolean; going?: true; said?: string; at: number }[];
 };
 export type SharedWsState = {
   projectId: string;
@@ -971,8 +991,46 @@ export type MemberAppAct =
   | { act: "deploy"; app: string; site?: string; at?: string; env?: "prod" }
   | { act: "rollback"; app: string; deployment: string; site?: string; env?: "prod" }
   | { act: "settings"; app: string; site?: string; port?: number; install?: string; build?: string; start?: string; health?: string }
-  | { act: "domain"; app: string; site?: string; zone: string; subdomain?: string };
-export const isAppAct = (a: { act: string }): a is MemberAppAct => a.act === "deploy" || a.act === "rollback" || a.act === "settings" || a.act === "domain";
+  | { act: "domain"; app: string; site?: string; zone: string; subdomain?: string }
+  | MemberGithubAct;
+/**
+ * An app's production on GitHub, from a shared workspace's Your Apps (SharedWsSlice.appGithub): the owner's power of
+ * Publish (cloud/member-access.ts POWER_OF.publish), so an Admin always and a Member with App secrets, with the owner's
+ * last Mac at GITHUB_ACTS_MIN_VERSION (OWNER_BOPS_OLD), for an app with one site. Never `site`: one folder is one app.
+ * - "github": where it publishes (GithubSetting, cleaned as lib/hosted-apps.ts cleanGithubMirror cleans the owner's), or
+ *   null for Publish on Orgo again. Bops Cloud writes it on the owner's state itself, Mac on or off (cloud/members.ts
+ *   githubHere), keeping its point only when cloud/github-config.ts keepsPoint says. A repo, branch, folder or workflow
+ *   other than it had is set only while the workspace has a GitHub key of its own (This workspace, in Keys): the owner's
+ *   key for all their workspaces stays the owner's to point (MEMBER_OWNER_ONLY, GITHUB_KEY_LINE). `link`: then link it.
+ * - "githubLink": link it as both sides are now (lib/server/github-mirror.ts linkMirror). "githubPull": bring GitHub's
+ *   changes into Ingot, GitHub's version winning where both changed a file (mirrorPull); it needs a link (NOT_LINKED).
+ *   Both are done by the app's own computer (a turn owed to its runner: cloud/turns.ts takeAppJob, TurnMember.job), with
+ *   the owner's Mac on or off; when no runner there can (none at GITHUB_ACTS_MIN_VERSION, or no bot on it given the
+ *   GitHub key), by the owner's Mac as a member's other app acts are (lib/server/member-acts.ts).
+ */
+export type MemberGithubAct =
+  | { act: "github"; app: string; github: GithubSetting | null; link?: true; site?: undefined }
+  | { act: "githubLink"; app: string; site?: undefined }
+  | { act: "githubPull"; app: string; site?: undefined };
+/** Where an app publishes on GitHub (lib/hosted-apps.ts GithubMirror without its point, spelled out: this file imports nothing). */
+export type GithubSetting = { repo: string; branch: string; path: string; keep?: string[]; dispatch?: { workflow: string; inputs?: Record<string, string> } };
+export const isAppAct = (a: { act: string }): a is MemberAppAct => a.act === "deploy" || a.act === "rollback" || a.act === "settings" || a.act === "domain" || isGithubAct(a);
+export const isGithubAct = (a: { act: string }): a is MemberGithubAct => a.act === "github" || a.act === "githubLink" || a.act === "githubPull";
+/**
+ * The first Bops that takes the GitHub acts (MemberGithubAct): an owner's Mac whose merge keeps an app's GitHub setting Bops
+ * Cloud wrote (lib/server/state-merge.ts) and that links or brings GitHub's changes in for someone else (lib/server/
+ * member-acts.ts); a runner that does it as a turn (lib/server/runner-chat.ts); a viewer's window that shows them. Bops
+ * Cloud refuses them (OWNER_BOPS_OLD) and shows no SharedWsSlice.appGithub while the owner's last Mac is older, owes a
+ * job only to a runner at it (else the owner's Mac does it), and shows the acts only to a viewer at it. Set to the release
+ * that carries it.
+ */
+export const GITHUB_ACTS_MIN_VERSION = "0.0.52";
+/** 403 MEMBER_OWNER_ONLY for a "github" act that points the GitHub key somewhere new without a key of the workspace's own. */
+export const GITHUB_KEY_LINE = "Only the owner can point the owner's own GitHub key somewhere new. Add a GitHub key for this workspace in Keys, then try again.";
+/** 409: a "githubPull" of an app that isn't linked to GitHub yet. */
+export const NOT_LINKED = "not_linked";
+/** 409: no bot on the app's computer was given the GitHub key, and the owner's Mac (which has it) isn't on to do it instead. */
+export const GITHUB_NO_KEY = "github_no_key";
 /** 403: the apps are shown to the caller at Read (Your Apps), not Write. */
 export const MEMBER_APPS_READ_ONLY = "member_apps_read_only";
 /** `key`: the member's own id for this act (8 to 64 of A-Z a-z 0-9 _ -): sent again on a retry, it's never done twice. */
@@ -1013,8 +1071,10 @@ export type MemberActPayload = {
  * and its turn's (`turn`, none when no answer is owed: the owner hasn't let them use the bot's computer), and `macOn`
  * true, so an app from before says "Sending…" until it lands (as it does at once). So is an Admin's "persona" act there
  * while the owner's Mac is away (cloud/members.ts personaHere): `stored`, and `macOn` true, so their window says Saved.
+ * A GitHub act (MemberGithubAct) Bops Cloud kept itself is `stored` too; `computer` when the app's own computer does the
+ * rest (`turn`, its job's), the owner's Mac on or off.
  */
-export type MemberActAnswer = { ok: true; macOn: boolean; stored?: true; messageId?: string; turn?: string };
+export type MemberActAnswer = { ok: true; macOn: boolean; stored?: true; messageId?: string; turn?: string; computer?: true };
 /** 403: a bot the act touches is at Read for the caller (or a group has one that is). */
 export const MEMBER_READ_ONLY = "member_read_only";
 /**
@@ -1199,7 +1259,14 @@ export type RunnerCancelEvent = { id: string };
 /** Who said the message a turn answers, when a member did (Bops Cloud vouched): what the bot is told, and checked again as it claims. */
 /** `computerUse`: what orgo-web said of their Use its computer when the message was taken (WsAccess.computerUse), which the turn goes by after. */
 /** `role`: "admin" when orgo-web said so as the message was taken (an Admin's turn needs no entry: cloud/turns.ts memberStill). None: a member. */
-export type TurnMember = { userId: string; email?: string; name: string; ref: string; joinedAt?: number; projectId?: string; computerUse?: boolean; role?: "admin" };
+/**
+ * `job`: a turn that's an app's GitHub act (MemberGithubAct "githubLink" or "githubPull", cloud/turns.ts takeAppJob), not
+ * words to answer: its runner does it (lib/server/runner-chat.ts) and no model ever sees it. Checked by Your Apps at Write
+ * and the power of Publish, never by the bot's level or Use its computer (memberStill). A runner from before reads its
+ * message, a note of Bops', and answers nothing.
+ */
+export type TurnMember = { userId: string; email?: string; name: string; ref: string; joinedAt?: number; projectId?: string; computerUse?: boolean; role?: "admin"; job?: TurnJob };
+export type TurnJob = { act: "githubLink" | "githubPull"; app: string };
 /**
  * POST /v1/runner/turns/<id>/claim, answered 200: the turn is this runner's until it stops beating. `now`: Bops Cloud's
  * clock, which the answer's times are taken from (a computer's own can lag after it wakes); `humanAt` the message's
@@ -1208,8 +1275,12 @@ export type TurnMember = { userId: string; email?: string; name: string; ref: st
 export type RunnerClaim = { ok: true; now: number; turn: { id: string; messageId: string; chatId: string; botId: string; humanAt: number; seq: number; member?: TurnMember } };
 /** POST /v1/runner/turns/<id>/beat: still running, every 30 seconds; `tools` once it did something that can't be done twice. 409: it isn't this runner's any more (stop). */
 export type RunnerBeat = { phase: "model" | "tools" };
-/** POST /v1/runner/turns/<id>/done: how it ended. paused: waiting for an OK (`approvalId`); `react`: its tapback on the message (only Bops Cloud writes on a person's row). */
-export type RunnerDone = { state: "done" | "paused" | "failed"; approvalId?: string; note?: string; react?: string };
+/**
+ * POST /v1/runner/turns/<id>/done: how it ended. paused: waiting for an OK (`approvalId`); `react`: its tapback on the
+ * message (only Bops Cloud writes on a person's row). `job`: a job turn's (TurnMember.job) result, done or why not, in
+ * words, which Bops Cloud keeps on the app (SharedApp.acts); a job turn done without it went to a runner from before.
+ */
+export type RunnerDone = { state: "done" | "paused" | "failed"; approvalId?: string; note?: string; react?: string; job?: { ok: boolean; said: string } };
 /**
  * POST /v1/runner/turns/<id>/resume {approvalId}: a turn paused for an OK goes on once the OK is answered, only for that
  * request (the one its pause named), only on the runner that paused it, and only while whoever said the message still
@@ -1277,11 +1348,13 @@ export type BrowserActivity = { step: "browsing" | "idle"; waiting: boolean; sig
 
 /**
  * What Bops Cloud tells a runner on its socket (WS /v1/browser/runner): who watches each of its bots' browsers now
- * ("watch", the whole list each time; empty: nobody), and what a viewer asked ("take", "release", "input"). A take
+ * ("watch", the whole list each time; empty: nobody; `joined`: a stream just opened, maybe for someone already watching
+ * on another Mac or window, who sees the page at once as someone new does), and what a viewer asked ("take", "release",
+ * "input"). A take
  * by the owner (`over`) takes control from a member who has it; a member's never takes it from anyone.
  */
 export type BrowserToRunner =
-  | { t: "watch"; bot: string; viewers: BrowserPerson[] }
+  | { t: "watch"; bot: string; viewers: BrowserPerson[]; joined?: true }
   | { t: "take"; bot: string; who: BrowserPerson; over?: true }
   | { t: "release"; bot: string; who: BrowserPerson }
   | { t: "input"; bot: string; who: BrowserPerson; method: string; params: unknown };
@@ -1316,6 +1389,20 @@ export type BrowserEvent =
 
 /** POST /v1/browser/act: take control, hand it back, or (in control) one CDP input. `project`: a shared workspace's Orgo id; none for the caller's own bots. */
 export type BrowserAct = { bot: string; project?: string; act: "take" | "release" | "input"; method?: string; params?: unknown };
+
+/**
+ * WS /v1/browser/input?bot=<id>[&project=<Orgo workspace>]: the acts of one viewer's Bops for one bot, in order, on one
+ * socket (lib/server/browser-view.ts), each message a BrowserAct without `bot` and `project` (the address says them), at
+ * most 64 KiB. Checked as the watch stream is: at the upgrade (refused with mayUseBrowser's status), every ROLE_MS while
+ * open and at each write of the owner's state, and ended by orgo-web's notice; each act checked as POST /v1/browser/act
+ * checks it, then sent to the runner of that computer at that moment. Bops Cloud answers only what didn't go
+ * (BrowserInputReply), and pings it; each end pings the other, and one that doesn't answer by the next ping is taken for
+ * gone. Its refusals of the upgrade carry BROWSER_INPUT_HEADER, so a 404 without it is a Bops Cloud from before this socket.
+ */
+export const BROWSER_INPUT_PATH = "/v1/browser/input";
+export const BROWSER_INPUT_HEADER = "x-bops-browser-input";
+export type BrowserInputAct = Omit<BrowserAct, "bot" | "project">;
+export type BrowserInputReply = { t: "error"; code: string; why: string };
 
 /** Why Bops Cloud won't let someone watch a bot's browser (403, with the words to show them). */
 export const BROWSER_NEEDS_WRITE = "browser_needs_write";

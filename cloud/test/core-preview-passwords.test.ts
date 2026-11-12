@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { after, before, test } from "node:test";
 import WebSocket from "ws";
@@ -108,11 +109,13 @@ function stateOf() {
   };
 }
 
-/** A user whose Mac wrote their state (version 1). */
-async function seeded(what: string) {
+/** A user whose Mac wrote their state (version 1), with `edit` made to it first. */
+async function seeded(what: string, edit?: (s: ReturnType<typeof stateOf>) => void) {
   const u = newUserId(what);
   users.push(u);
-  const r = await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: 0, state: stateOf() } });
+  const state = stateOf();
+  edit?.(state);
+  const r = await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: 0, state } });
   assert.equal(r.status, 200, r.text);
   return u;
 }
@@ -323,6 +326,55 @@ test("who is shown it: a Write member and an Admin see the new one beside its li
   assert.equal(shown((await row(u)).state, SAM)?.previewPassword, MAC_PASS);
   // The owner's own view never carries apps (their page reads Orgo itself); a slice never names previewPasswords.
   for (const v of [SAM, ADA, RAE]) assert.ok(!JSON.stringify(sharedSlice((await row(u)).state as unknown as Record<string, unknown>, "ws_main", v)).includes("previewPasswords"));
+});
+
+/** A Preview label sealed for an app's site, as lib/server/app-labels.ts newLabel makes one from `head` (8 letters and digits): what computer-scope.ts sealedFor lets a computer keep. */
+function sealedLabel(repo: string, site: string, head: string): string {
+  const h = createHash("sha256").update(`bops:preview:${repo.toLowerCase()}:${site}:${head}`).digest();
+  return head + Array.from({ length: 4 }, (_, i) => "abcdefghijklmnopqrstuvwxyz0123456789"[h[i] % 36]).join("");
+}
+
+test("with the owner's Mac off, a new app a bot made on its computer shows its Preview's link to everyone with Your Apps and its password at Write, from the runner's own writes alone; another computer's share never does", T, async () => {
+  clearAuthCache();
+  const u = await seeded("new-app", (s) => void (s.workspaces[0].orgoProjectId = "proj-acme"));
+  const label = sealedLabel("proj-acme/client-x", "client-x", "q4m8x2kz");
+  const link = `https://${label}.orgo.dev`;
+  const app = (blob: unknown, v: SliceViewer) => sharedSlice(blob as Record<string, unknown>, "ws_main", v).apps?.list.find((a) => a.name === "client-x");
+  // The runner on D1 gives it its first home there and keeps its label copy (lib/server/hosted-apps.ts appWork, ensurePreview).
+  const read = (await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) })).json;
+  const next = structuredClone(read.state) as ReturnType<typeof stateOf>;
+  (next.workspaces[0].hostedApps as Record<string, unknown>)["client-x"] = { botId: "main", computerId: D1, preview: label, passwordSet: { at: 5, live: null } };
+  const put = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read.version, state: next } });
+  assert.equal(put.status, 200, put.text);
+  const before = (await row(u)).state;
+  assert.equal(app(before, ADA)?.sites, undefined, "by name only, before its password is shared");
+  const hashes = (blob: unknown) => [SAM, ADA, RAE].map((v) => sharedHash(sharedSlice(blob as Record<string, unknown>, "ws_main", v)));
+  const was = hashes(before);
+  // Another computer (D2, Iris's) telling a password for it: refused, nothing kept.
+  assert.equal((await post(vm(u, D2), body({ app: "client-x", site: "client-x", url: link, password: "Pt5hR3c" }))).status, 403);
+  assert.equal(app((await row(u)).state, ADA)?.sites, undefined);
+  // Its own computer sets its password on Orgo and shares it, with its link.
+  assert.equal((await post(vm(u), body({ app: "client-x", site: "client-x", url: link, password: "Nw5pR8t" }))).status, 204);
+  const now = (await row(u)).state;
+  for (const v of [SAM, ADA]) {
+    const site = app(now, v)?.sites?.[0];
+    assert.deepEqual({ ...site, previewPasswordAt: 0 }, { name: "client-x", url: null, preview: link, previewProtected: true, previewPassword: "Nw5pR8t", previewPasswordAt: 0, serving: null }, v.email);
+  }
+  assert.deepEqual(app(now, RAE)?.sites, [{ name: "client-x", url: null, preview: link, previewProtected: true, serving: null }], "Read: its link, and that it asks for a password");
+  assert.ok(!JSON.stringify(sharedSlice(now as unknown as Record<string, unknown>, "ws_main", RAE)).includes("Nw5pR8t"), "Read never sees it");
+  // Everyone shown it is told: each one's fingerprint is another.
+  hashes(now).forEach((h, i) => assert.notEqual(h, was[i], [SAM, ADA, RAE][i].email));
+  // The runner's own read never has it.
+  const again = await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) });
+  answers.push(again.text);
+  assert.ok(!again.text.includes("Nw5pR8t"));
+  // The owner's Mac back on reads it from Orgo: its row stands, the newest password beside it.
+  const mac = structuredClone(now);
+  ((mac.workspaces[0].appsForMembers as { apps: Record<string, unknown> }).apps)["client-x"] = { head: { id: "cs-1", message: "First", at: 6 }, sites: [{ name: "client-x", url: null, preview: link, previewLive: { id: "dep-1", state: "succeeded", when: 6 }, previewServing: "cs-1", previewProtected: true, serving: null, live: null }], commits: [], deploys: [] };
+  const back = await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: (await row(u)).version, state: mac } });
+  assert.equal(back.status, 200, back.text);
+  const read2 = app((await row(u)).state, ADA)!;
+  assert.deepEqual(read2.sites?.map((s) => [s.preview, s.previewLive?.state, s.previewPassword]), [[link, "succeeded", "Nw5pR8t"]]);
 });
 
 test("a computer never reads it, can't write one (even the right one), and keeps it when it writes back what it read", T, async () => {

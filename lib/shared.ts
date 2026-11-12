@@ -9,6 +9,7 @@ import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
  * the server's memory alone (never in the user's state, never synced, never on disk), and it's shown in
  * place of the user's own workspace while it's open.
  */
+import { APPS_NAME } from "@/lib/apps-access";
 import { askOwnersOnly, threadOwnersOnly, type Power, type PowerWho } from "@/lib/member-access";
 
 /** The roles in a workspace: the owner everything; an Admin every bot, its computer and its apps, all but deleting it; a Member what the owner picks. */
@@ -56,6 +57,11 @@ export type SharedOpen = SharedWorkspace & {
   ownerOld?: true;
   /** For an Admin: the owner's Bops publishes for them (SharedWsSlice.adminPublish), so Your Apps shows Publish. */
   adminPublish?: true;
+  /**
+   * For an Admin, or a Member with App secrets, at Your Apps Write: where an app publishes on GitHub, its Link and Bring in
+   * GitHub's changes, which the app's own computer does (SharedWsSlice.appGithub: the owner's Bops takes them).
+   */
+  appGithub?: true;
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
   /** The same for a bot's How I work (bot-panel.tsx HowIWork). */
@@ -378,7 +384,8 @@ export const SHARED_SCREEN_WORDS = {
  */
 export function ownerVoice(text: string, keep: readonly string[] = []): string {
   // Quoted spans at odd places, as said, and what `keep` names (a thread's title), as written: only what's around them is Bops' line.
-  const kept = keep.filter((k) => k.trim()).map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // Your Apps too: it's the page's name for everyone (lib/apps-access.ts APPS_NAME), never the owner's "your".
+  const kept = [...keep, APPS_NAME].filter((k) => k.trim()).map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   // (What `keep` names first: one that starts with a quote of its own is kept whole, not cut at its first inner quote.)
   // A web address is never Bops' words either ("Read https://example.com/what-you-need-to-know", "Stopped watching your-bank.com").
   const spans = new RegExp(`(${kept.length ? `${kept.join("|")}|` : ""}“[^”]*”|"[^"\n]*"|https?:\\/\\/[^\\s"“”]+|\\b[\\w-]+(?:\\.[\\w-]+)*\\.[A-Za-z]{2,}\\b(?:\\/[^\\s"“”]*)?)`);

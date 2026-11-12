@@ -25,6 +25,8 @@ export const KEYS_UNAVAILABLE = "KEYS_UNAVAILABLE";
 
 /** What the Keys page says when orgo-web has no bops-keys routes yet (an older orgo-web). */
 export const KEYS_NOT_ON_ORGO = "Orgo can't keep this workspace's keys yet.";
+/** What the window says when orgo-web can't link keys to apps yet (no bops-keys/apps route, or no table for it: lib/server/app-keys.ts). */
+export const APP_KEYS_NOT_ON_ORGO = "Orgo can't link keys to apps yet.";
 const NOT_SIGNED_IN = "Sign in to Orgo to use Keys: they're kept in your Orgo vault.";
 /** The owner's keys for all their workspaces, as the window's rows say whose they are. */
 export const OWNERS_KEY = "That's the owner's key. Only they can see, replace or remove it.";
@@ -41,10 +43,17 @@ const SAID: Record<string, { status: number; words: string }> = {
   value_too_long: { status: 400, words: "That key is too long." },
   app_key_required: { status: 403, words: "Orgo shows a key only to a Bops signed in with Orgo. Sign out, then sign in again." },
   audit_unavailable: { status: 503, words: "Orgo couldn't note who looked just now, so it didn't send the key. Try again in a minute." },
+  // The links of keys to apps (bops-keys/apps, lib/server/app-keys.ts).
+  APP_KEYS_UNAVAILABLE: { status: 503, words: APP_KEYS_NOT_ON_ORGO },
+  every_app_name: { status: 400, words: "A key for every app keeps its own name." },
+  too_many: { status: 400, words: "An app can use at most 64 keys from Keys." },
 };
 
-/** One call to the shared workspace's bops-keys routes on orgo-web, with the user's own Orgo key. Never logs what it sent or got. */
-async function projectKeys<T>(projectId: string, method: "GET" | "POST" | "DELETE", path = "", body?: unknown): Promise<T> {
+/**
+ * One call to a workspace's bops-keys routes on orgo-web, with the user's own Orgo key (a Keys holder's in a shared
+ * workspace; the owner's own for app links, lib/server/app-keys.ts). Never logs what it sent or got.
+ */
+export async function projectKeys<T>(projectId: string, method: "GET" | "POST" | "PUT" | "DELETE", path = "", body?: unknown): Promise<T> {
   let key: string;
   try {
     key = await apiKey();
@@ -73,6 +82,8 @@ async function projectKeys<T>(projectId: string, method: "GET" | "POST" | "DELET
     void sharedKeysOpen()?.refresh().catch(() => {});
     throw new KeysError(KEYS_GIVEN_LINE, 403);
   }
+  // A method the route doesn't have: an orgo-web from before it (bops-keys/apps falls into bops-keys/{name}, DELETE only).
+  if (res.status === 405) throw new KeysError(KEYS_NOT_ON_ORGO, 503);
   // No such route (an orgo-web before it answers a page, not JSON), or not a member of it any more.
   if (res.status === 404) throw json && typeof json.error === "string" ? new KeysError("This workspace isn't shared with you anymore.", 404) : new KeysError(KEYS_NOT_ON_ORGO, 503);
   if (res.status === 429) throw new KeysError("You've looked at a lot of keys this hour. Try again later.", 429);
