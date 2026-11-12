@@ -49,14 +49,16 @@ export const appsOwnShown = (state: Pick<AppState, "account" | "shared"> | null 
 /**
  * The state as the window gets it (app/api/state): where it doesn't show apps (appsShown), nothing of them,
  * even what an account kept from before: no apps the bots made or their lines in a chat (Message.madeApp,
- * Message.appNote), no apps on the web or Ingot tokens on a workspace, no app a thread works on.
+ * Message.appNote), no apps on the web, Ingot tokens or Preview passwords on a workspace, no app a thread works on.
  */
 export function appsForWindow(state: AppState): AppState {
   if (appsOwnShown(state)) return state;
   return {
     ...state,
     madeApps: undefined,
-    workspaces: state.workspaces?.map((w) => (w.hostedApps || w.ingotTokens || w.appsForMembers ? { ...w, hostedApps: undefined, ingotTokens: undefined, appsForMembers: undefined } : w)),
+    workspaces: state.workspaces?.map((w) =>
+      w.hostedApps || w.ingotTokens || w.appsForMembers || w.previewPasswords ? { ...w, hostedApps: undefined, ingotTokens: undefined, appsForMembers: undefined, previewPasswords: undefined } : w,
+    ),
     sessions: state.sessions.map((s) => (s.app ? { ...s, app: undefined } : s)),
     messages: state.messages.filter((m) => !m.madeApp && !m.appNote),
   };
