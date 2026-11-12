@@ -7,6 +7,7 @@ import { act, deploying, isSending, OpenHostedApp, PROBLEM, PULSE, short, UrlLin
 import { useDismiss } from "./new-thread";
 import { OpenPreview } from "./panel-tabs";
 import { PasswordBeside } from "./preview-password";
+import { GithubForm, ghFormOf, ghMirrorOf, NO_GH_FORM, type GhForm } from "./github-form";
 import { InlineConfirm, undash } from "./side-group";
 import { post } from "./ui";
 
@@ -171,72 +172,8 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
   return undefined;
 }
 
-/** The GitHub production form as typed: its lists as one line each ("a, b", "client=cclc"). */
-type GhForm = { repo: string; branch: string; path: string; keep: string; workflow: string; inputs: string };
-
-/** The form as the route takes it (lib/hosted-apps.ts cleanGithubMirror checks it again). */
-export function ghMirrorOf(f: GhForm) {
-  const keep = f.keep.split(",").map((x) => x.trim()).filter(Boolean);
-  const inputs = Object.fromEntries(
-    f.inputs
-      .split(",")
-      .map((x) => x.split("=").map((y) => y.trim()))
-      .filter((kv) => kv.length === 2 && kv[0])
-      .map((kv) => [kv[0], kv[1]] as const),
-  );
-  return {
-    repo: f.repo.trim(),
-    branch: f.branch.trim() || "main",
-    path: f.path.trim(),
-    ...(keep.length ? { keep } : {}),
-    ...(f.workflow.trim() ? { dispatch: { workflow: f.workflow.trim(), ...(Object.keys(inputs).length ? { inputs } : {}) } } : {}),
-  };
-}
-
-/**
- * Where an app's production is on GitHub: the repo, its branch and the app's folder in it, the files that stay in
- * Ingot alone, and a workflow to run after a push (for one that doesn't start on a push).
- */
-function GithubForm({ form, onChange, busy, onSave, onCancel, compact }: { form: GhForm; onChange: (f: GhForm) => void; busy: boolean; onSave: () => void; onCancel: () => void; compact?: boolean }) {
-  const field = (key: keyof GhForm, label: string, placeholder: string) => (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">{label}</span>
-      <input
-        data-gh-field={key}
-        value={form[key]}
-        placeholder={placeholder}
-        onChange={(e) => onChange({ ...form, [key]: e.target.value })}
-        className="h-8 rounded-[8px] bg-white px-2.5 text-[12.5px] leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] outline-none placeholder:text-[#B0B0AE] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
-      />
-    </label>
-  );
-  return (
-    <div data-gh-form className={`${compact ? "pl-[26px] pr-2" : ""} pt-2`} onClick={(e) => e.stopPropagation()}>
-      <div className="flex flex-col gap-2.5 rounded-[12px] bg-[#F7F7F6] p-3">
-        <span className="text-[12.5px] font-semibold leading-4 text-ink">Publish to GitHub</span>
-        <span className="text-[12px] leading-[17px] text-[#6B6B6B]">
-          Ingot stays where it&apos;s worked on and previewed. Publish pushes what the Preview serves into this folder, with your GitHub key in Keys, and that repo&apos;s own workflow deploys it.
-        </span>
-        <div className="grid grid-cols-1 gap-2 @[420px]:grid-cols-3">
-          {field("repo", "Repo", "OrgoAI/orgo-brandlord")}
-          {field("branch", "Branch", "main")}
-          {field("path", "Folder in it", "formula (empty: the whole repo)")}
-        </div>
-        {field("keep", "Left alone both ways (files, or folders ending in /)", "proxy.ts, clients/other/")}
-        <div className="grid grid-cols-1 gap-2 @[420px]:grid-cols-2">
-          {field("workflow", "Workflow to run after a push (optional)", "deploy.yml")}
-          {field("inputs", "Its inputs", "client=cclc")}
-        </div>
-        <div className="flex items-center gap-2">
-          <Btn tag="gh-save" dark label="Save" doing="Saving…" busy={busy} why={form.repo.trim() ? undefined : "Which repo?"} onClick={onSave} />
-          <button onClick={onCancel} className="text-[12.5px] leading-4 text-[#6B6B6B] hover:text-ink">
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+/* Where its production is on GitHub, as a form: components/app/github-form.tsx (a shared workspace's Your Apps has it too). */
+export { ghMirrorOf } from "./github-form";
 
 /** One line: its environment, state, where it is and what it serves; a Local's of a bot's copy (`bot`), with whose it is (`who`). */
 type Line = { env: AppEnv; state: EnvState; where: ReactNode; at: string | null; bot?: string; who?: string };
@@ -508,7 +445,7 @@ export function AppEnvs({
                   Bring in GitHub&apos;s changes
                 </button>
               )}
-              <button data-gh-edit role="menuitem" onClick={() => (setMenu(false), setGhForm({ repo: gh.repo, branch: gh.branch, path: gh.path, keep: (gh.keep ?? []).join(", "), workflow: gh.dispatch?.workflow ?? "", inputs: Object.entries(gh.dispatch?.inputs ?? {}).map(([k, v]) => `${k}=${v}`).join(", ") }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+              <button data-gh-edit role="menuitem" onClick={() => (setMenu(false), setGhForm(ghFormOf(gh)))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
                 GitHub settings
               </button>
               <button data-gh-off role="menuitem" onClick={() => void githubSet(null)} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
@@ -518,7 +455,7 @@ export function AppEnvs({
           )}
           {menu && !gh && (
             <div role="menu" aria-label="Published" className="absolute right-0 top-[calc(100%+4px)] z-20 flex min-w-[180px] flex-col rounded-[12px] bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_32px_-12px_#00000040]">
-              <button data-gh-start role="menuitem" onClick={() => (setMenu(false), setGhForm({ repo: "", branch: "main", path: "", keep: "", workflow: "", inputs: "" }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+              <button data-gh-start role="menuitem" onClick={() => (setMenu(false), setGhForm({ ...NO_GH_FORM }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
                 Publish to GitHub instead
               </button>
               <button data-rollback role="menuitem" disabled={!app.serving} onClick={() => void rollbackAsk()} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4] disabled:text-[#9A9A98]">
