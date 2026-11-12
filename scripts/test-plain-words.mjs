@@ -1,7 +1,7 @@
 // Tests for lib/plain-words.ts: what a bot's words and steps say to someone who isn't a developer.
 // Usage: node --experimental-strip-types scripts/test-plain-words.mjs
 import assert from "node:assert/strict";
-import { dropCitations, isLocalLink, isTableRow, isTableRule, localOnlyLine, plainStep, plainText, plainTitle, tableCells } from "../lib/plain-words.ts";
+import { dropCitations, isLocalLink, isTableRow, isTableRule, localOnlyLine, plainStep, plainText, plainTitle, shownAddress, tableCells } from "../lib/plain-words.ts";
 
 let passed = 0;
 const check = (name, fn) => {
@@ -10,6 +10,37 @@ const check = (name, fn) => {
   console.log(`ok - ${name}`);
 };
 const cite = (id) => `cite${id}`;
+
+check("an address said in a row hides what could let someone in: a user and password, and secret-looking values", () => {
+  // Made-up values only.
+  assert.equal(shownAddress("https://raw.example/o/r/main/a.md?token=MADEUPtoken0000000000000001"), "https://raw.example/o/r/main/a.md?token=•••");
+  assert.equal(shownAddress("https://me:not-a-real-pass@x.example/p"), "https://x.example/p", "no user or password");
+  assert.equal(
+    shownAddress("https://files.example/f.pdf?X-Amz-Credential=MADEUP%2F2026&X-Amz-Signature=ab12cd&response-content-type=application%2Fpdf"),
+    "https://files.example/f.pdf?X-Amz-Credential=•••&X-Amz-Signature=•••&response-content-type=application%2Fpdf",
+  );
+  assert.equal(shownAddress("https://x.example/cb?code=abc&state=xyz"), "https://x.example/cb?code=•••&state=xyz");
+  assert.equal(shownAddress("https://x.example/p?id=9f8e7d6c5b4a39281706a5b4c3d2e1f0"), "https://x.example/p?id=•••", "a long opaque value");
+  assert.equal(shownAddress("https://x.example/#access_token=madeup&type=bearer"), "https://x.example/#access_token=•••&type=bearer");
+  for (const plain of ["https://x.example/search?q=red+shoes&page=2#top", "https://x.example/docs/getting-started", "http://localhost:3000/?tab=preview"]) assert.equal(shownAddress(plain), plain, "plain ones stay as they are");
+  assert.equal(shownAddress("not quite an address ?token=madeup"), "not quite an address ?token=•••");
+  // A query after a route in the fragment, a second @ in the user part, and a hostile string of ? (no slow match).
+  assert.equal(shownAddress("https://x.example/app#/cb?code=abc&next=home"), "https://x.example/app#/cb?code=•••&next=home");
+  // A fragment of pairs with a ? in a value; a query inside a value.
+  assert.equal(shownAddress("https://x.example/#access_token=abc&next=/cb?tab=1"), "https://x.example/#access_token=•••&next=/cb?tab=1");
+  assert.equal(shownAddress("https://x.example/login?next=/cb?code=xyz&lang=en"), "https://x.example/login?next=/cb?code=•••&lang=en");
+  // Queries nested past reason (a page can pick its own address): never a crash, and what's past the limit is hidden.
+  const deep = shownAddress(`https://x.example/?${"a=?".repeat(5000)}code=1`);
+  assert.ok(deep.endsWith("•••") && !deep.includes("code=1"), "the rest hidden");
+  // Thousands of @ with a line break after a #: still quick (the fragment takes any character).
+  const t1 = Date.now();
+  shownAddress(`https://${"@".repeat(32_000)}x.example/#x\ny`);
+  assert.ok(Date.now() - t1 < 200, `quick (${Date.now() - t1} ms)`);
+  assert.equal(shownAddress("https://one@two:not-a-real-pass@x.example/p"), "https://x.example/p");
+  const t0 = Date.now();
+  shownAddress(`not an address ${"?".repeat(32_000)}`);
+  assert.ok(Date.now() - t0 < 100, `a long string of ? is quick (${Date.now() - t0} ms)`);
+});
 
 check("citation markers go, with the space before them, and nothing else changes", () => {
   assert.equal(dropCitations(`I found the logo files. ${cite("turn0search3")}`), "I found the logo files.");

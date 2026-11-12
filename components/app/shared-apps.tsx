@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
+import { DOMAIN_WORDS } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
 import { PasswordShown } from "./preview-password";
@@ -50,6 +51,10 @@ export const SHARED_APPS_WORDS = {
   live: "Live",
   notOnWeb: "Not on the web yet",
   subdomain: "Subdomain",
+  /** Under an Admin's Publish: where it goes when its production is on GitHub. */
+  publishGithub: (g: { repo: string; branch: string }) => `Publish sends it to GitHub (${g.repo}, ${g.branch}), where its own deploy puts it live.`,
+  /** Under an Admin's Publish: its domains aren't pointed at Orgo yet, so a published change isn't what their visitors see. */
+  publishWaiting: (domains: string, many = false) => `Visitors to ${domains} won't see a publish until ${many ? "their" : "its"} DNS points at Orgo.`,
   acted: (who: string, a: Pick<MemberAppAct, "act" | "site"> & { domain?: string; env?: "prod" }) =>
     a.act === "deploy" ? (a.env === "prod" ? `${who} published it` : `${who} deployed it`) : a.act === "rollback" ? `${who} went back to an earlier deploy` : a.act === "settings" ? `${who} changed ${a.site ? `${a.site}'s` : "its"} settings` : `${who} pointed ${a.domain ?? "a domain"} at it`,
   tried: (who: string, act: MemberAppAct["act"] | "publish", said: string) =>
@@ -123,6 +128,9 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
     if (!r.ok) setSaid(r.error ?? W.failed);
   };
   const newest = a.acts?.[0];
+  // Where an Admin's Publish goes, said under it: GitHub, or Published on domains that don't point at Orgo yet.
+  const waitingOn = site?.domains?.length && site.domains.every((d) => d.status !== "active") && !site.url ? site.domains.map((d) => d.domain) : [];
+  const where = !publish ? null : a.github ? W.publishGithub(a.github) : waitingOn.length ? W.publishWaiting(waitingOn.join(" and "), waitingOn.length > 1) : null;
   return (
     <div data-shared-app={a.name} className="flex flex-col rounded-[14px] bg-white shadow-[0_0_0_1px_#ECECEA]">
       <div className="flex items-center gap-3 px-4 py-3">
@@ -159,8 +167,13 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
           </span>
         )}
       </div>
-      {(going || acts.some((x) => x.state === "failed") || said || newest) && (
+      {(where || going || acts.some((x) => x.state === "failed") || said || newest) && (
         <div className="flex flex-col gap-0.5 px-4 pb-2.5 text-[12px] leading-4">
+          {where && (
+            <span data-publish-where className="text-[#6B6B6B]">
+              {where}
+            </span>
+          )}
           {going && <span className="text-[#6B6B6B]">{going.state === "waiting" ? W.waiting : W.sending}</span>}
           {acts
             .filter((x) => x.state === "failed")
@@ -189,8 +202,9 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
                   <span className="text-[#6B6B6B]">{stateWord(s.live?.state)}</span>
                   {s.url && <span className="text-[#3A3A38]">{s.url}</span>}
                   {(s.domains ?? []).map((d) => (
-                    <span key={d.domain} className="rounded-full bg-[#F6F6F4] px-2 py-0.5 text-[11.5px] text-[#3A3A38]">
-                      {d.domain}
+                    // Its state beside it until it's live (a state this build doesn't know reads as waiting), as the owner's Your Apps says it.
+                    <span key={d.domain} data-domain-state={d.status} className="rounded-full bg-[#F6F6F4] px-2 py-0.5 text-[11.5px] text-[#3A3A38]">
+                      {d.status === "active" ? d.domain : `${d.domain} · ${DOMAIN_WORDS[d.status as keyof typeof DOMAIN_WORDS] ?? DOMAIN_WORDS.pending}`}
                     </span>
                   ))}
                 </span>
@@ -260,7 +274,7 @@ function PreviewLine({ site: s, link, write }: { site: NonNullable<SharedApp["si
 function Part({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-[11px] font-semibold uppercase leading-4 tracking-[0.02em] text-[#9A9A97]">{title}</span>
+      <span className="text-[12px] font-semibold leading-4 text-[#9A9A97]">{title}</span>
       {children}
     </div>
   );

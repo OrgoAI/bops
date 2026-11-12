@@ -299,6 +299,11 @@ assert.match(ladder, /Your tools, quickest first\. For each step, use the quicke
 // The screen for what needs seeing, and after two scripts that missed; never "pixels last".
 assert.match(ladder, /Use the screen when you need to see: menus, pop-ups, account and channel switchers, .*When two page scripts haven't got a step done, do that step on the screen\./);
 assert.ok(!/not pixels|Go further down the list only/.test(ladder + asked[0].tools.find((t) => t.name === "page_script").description), "the screen isn't the last resort");
+// It says how to use tabs and files: list and switch tabs, close its own, downloads land in Downloads, a file goes into a page by path.
+const pageTool = asked[0].tools.find((t) => t.name === "page_script").description;
+assert.match(pageTool, /context\.pages\(\) lists the tabs.*bringToFront\(\).*Close tabs you opened/);
+assert.match(pageTool, /A file the page downloads is saved to ~\/Downloads.*waitForEvent\('download'\).*setInputFiles\(/);
+assert.match(pageTool, /await sideBySide\(a, b\): a in a window on the left half of the screen, b \(a page, or an address to open\) on the right half/);
 assert.match(ladder, /To look things up or read, don't use the screen: search, and read pages as text\./);
 assert.ok(!/in the open|the way a capable person/.test(ladder), "nothing tells it to do everything on the screen");
 assert.match(asked[0].tools.find((t) => t.name === "run_command").description, /and to fetch a page or an API \(curl\)\. Don't use it to sign in to or act on websites or apps/);
@@ -365,7 +370,11 @@ answers.push(
 const pageRuns = [];
 onPage = (c) => {
   pageRuns.push(c);
-  if (pageRuns.length === 1) return { output: 'npm noise\n@@bops-page@@{"ok":true,"value":"[\\n \\"Basic $8\\"\\n]","url":"https://example.com/pricing"}\n', exit_code: 0 };
+  if (pageRuns.length === 1)
+    return {
+      output: `npm noise\n@@bops-page@@${JSON.stringify({ ok: true, value: '[\n "Basic $8"\n]', url: "https://example.com/pricing", downloads: ["/root/Downloads/pricing.pdf"], unsaved: ["big.zip: Download failed"], tabs: [{ title: "Pricing", url: "https://example.com/pricing", front: true }, { title: "Canva", url: "https://www.canva.com/", front: false }] })}\n`,
+      exit_code: 0,
+    };
   if (pageRuns.length === 2) return { output: '@@bops-page@@{"ok":false,"error":"locator.click: Timeout 30000ms exceeded.","url":"https://example.com/pricing"}\n', exit_code: 0 };
   return { output: "node: not found", exit_code: 127 };
 };
@@ -380,7 +389,11 @@ assert.ok(pageRuns[0].includes(`/root/.bops/activity/${pageDisplay}`), "the scre
 assert.match(pageRuns[1], / 60 \/tmp\/bops-page-/, "60 seconds when it didn't say");
 // What came back: the value and the page it ended on; a failure as the runner said it; no marker, what the computer said.
 const pageOut = (call) => asked.find((b) => b.input?.some((i) => i.call_id === call)).input.find((i) => i.call_id === call).output;
-assert.equal(pageOut("call_p1"), '[\n "Basic $8"\n]\n\n(Now on https://example.com/pricing)');
+// With its receipt: where each download was saved (or why it wasn't), and the tabs once there are two or more.
+assert.equal(
+  pageOut("call_p1"),
+  '[\n "Basic $8"\n]\n\nSaved a download to /root/Downloads/pricing.pdf. A download wasn\'t saved (big.zip: Download failed). Tabs open: "Pricing" https://example.com/pricing (in front), "Canva" https://www.canva.com/.\n\n(Now on https://example.com/pricing)',
+);
 // A script that failed comes back with the screen, at full size, as OpenAI's code-execution harness sends it;
 // a second miss in a row says to do it on the screen.
 const SCREEN = { type: "input_image", image_url: `data:image/png;base64,${PNG.toString("base64")}`, detail: "original" };
@@ -653,7 +666,7 @@ assert.match(asked.at(-1).instructions, /Anything that sends, changes, deletes o
   const admin = await noteOf({ userId: "user_ivy", email: "ivy@example.com", name: "Ivy" }, "Admin task");
   assert.equal(
     admin,
-    "Ivy, an Admin of this workspace, asked for this task. Do it as you would for the user, with the apps, keys and logins you have for it: their yes is enough for anything the user could say yes to, so never wait for the user's yes or ask the user to approve what they asked. A saved site login signs in only when it's set to sign in by itself. Still the user's alone: paying, deleting or moving the workspace, the user's own Mac, settings and memory, and setting up or changing routines, reminders, watches, skills and new bots.",
+    "Ivy, an Admin of this workspace, asked for this task. Do it as you would for the user, with the apps, keys and logins you have for it: their yes is enough for anything the user could say yes to, so never wait for the user's yes or ask the user to approve what they asked. A saved site login signs in only when it's set to sign in by itself. Still the user's alone: paying, and deleting the workspace or handing it to someone else.",
   );
   assert.equal(await noteOf(DEE, "Member task"), MEMBER_NOTE, "a Member's note, word for word");
   // A Member who tells an Admin's task more keeps a Member's rule: while it runs, their reply says their writes wait for

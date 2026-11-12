@@ -77,7 +77,58 @@ export type AppHosting = {
    * it when the app passes to it). None while only its own bot works on it. They stay on the computer it leaves.
    */
   copies?: string[];
+  /**
+   * Its production is on GitHub (lib/server/github-mirror.ts): Ingot stays where it's worked on and previewed, and
+   * Publish puts what the Preview serves into `path` of `repo`'s `branch` with the owner's GITHUB_TOKEN, where that
+   * repo's own workflow deploys it. Unset, Publish deploys on Orgo as ever.
+   */
+  github?: GithubMirror;
 };
+
+/**
+ * Where an app's production lives on GitHub (AppHosting.github). `path`: the folder of the repo the app's files are
+ * ("" the whole repo). `keep`: paths left alone either way (a path, or a folder ending in /): never sent to GitHub,
+ * never taken from it (a preview's own password file; another app's client in a shared folder). `dispatch`: a workflow
+ * to run after a push, for one that doesn't start on a push. `last`: where the two were last the same (Link, Publish,
+ * or Bring in): `sha`, the GitHub commit; `ingot`, the Ingot changeset that matches it, which a preview must be at
+ * or after to publish (lib/server/github-mirror.ts).
+ */
+export type GithubMirror = {
+  repo: string;
+  branch: string;
+  path: string;
+  keep?: string[];
+  dispatch?: { workflow: string; inputs?: Record<string, string> };
+  /** (`keep`: the paths left alone when it was made: one taken off the list since needs a new Link.) */
+  last?: { sha: string; ingot: string; keep?: string[]; when: number };
+};
+
+const GH_REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const GH_BRANCH = /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._/-]{1,200}$/;
+const GH_PATH = /^(?!.*\.\.)(?!\/)[A-Za-z0-9._/@ -]{0,300}$/;
+
+/** A GitHub mirror as the window sends it, cleaned, or why it won't do. `last` is the server's own (never taken from here). */
+export function cleanGithubMirror(v: unknown): { ok: Omit<GithubMirror, "last"> } | { why: string } {
+  const m = v as Partial<GithubMirror> | null;
+  const repo = typeof m?.repo === "string" ? m.repo.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "") : "";
+  if (!GH_REPO.test(repo)) return { why: "Which GitHub repo? Like OrgoAI/orgo-brandlord." };
+  const branch = typeof m?.branch === "string" && m.branch.trim() ? m.branch.trim() : "main";
+  if (!GH_BRANCH.test(branch)) return { why: "That isn't a branch name." };
+  const path = (typeof m?.path === "string" ? m.path.trim() : "").replace(/^\/+|\/+$/g, "");
+  if (!GH_PATH.test(path)) return { why: "That isn't a folder in the repo." };
+  const typed = Array.isArray(m?.keep) ? m.keep.filter((k): k is string => typeof k === "string").map((k) => k.trim().replace(/^\/+/, "")).filter(Boolean) : [];
+  const bad = typed.find((k) => !GH_PATH.test(k));
+  if (bad) return { why: `"${bad.slice(0, 80)}" can't be a path left alone (letters, digits, . _ - @ / and spaces; a folder ends in /).` };
+  const keep = [...new Set(typed)].slice(0, 50);
+  const w = m?.dispatch;
+  const workflow = typeof w?.workflow === "string" ? w.workflow.trim() : "";
+  if (workflow && !/^[A-Za-z0-9_.-]{1,100}\.ya?ml$/.test(workflow)) return { why: "That isn't a workflow file, like deploy.yml." };
+  const inputs =
+    w?.inputs && typeof w.inputs === "object"
+      ? Object.fromEntries(Object.entries(w.inputs).filter(([k, x]) => /^[A-Za-z0-9_-]{1,50}$/.test(k) && typeof x === "string" && x.length <= 200).slice(0, 10) as [string, string][])
+      : undefined;
+  return { ok: { repo, branch, path, ...(keep.length ? { keep } : {}), ...(workflow ? { dispatch: { workflow, ...(inputs && Object.keys(inputs).length ? { inputs } : {}) } } : {}) } };
+}
 
 /** A site's deploy project left on a computer the app moved off (AppHosting.behind). */
 export type AppProjectBehind = { site: string; computerId: string; projectId: string };
@@ -368,7 +419,10 @@ export type HostedAppAction =
   | { ws: string; action: "addSite" | "removeSite"; site: string }
   | { ws: string; action: "removeLeftOver"; project: string }
   | { ws: string; action: "preview"; site?: string; label?: string }
-  | { ws: string; action: "restore"; to: string };
+  | { ws: string; action: "restore"; to: string }
+  | { ws: string; action: "github"; github: Omit<GithubMirror, "last"> | null }
+  | { ws: string; action: "githubLink" }
+  | { ws: string; action: "githubPull" };
 
 /**
  * GET /api/hosted-apps/[name]?ws=&restore=<to> (the owner's alone), for Restore's question before it's sent: every
@@ -418,6 +472,14 @@ export type AppDnsInput = { type: string; name: string; value: string; priority?
 export type AppDnsZone = { id: string; domain: string; serving: boolean; ttl: number | null; records: AppDnsRecord[]; error?: string; renewal?: AppRenewal };
 
 export type AppDomainStatus = "pending" | "verifying" | "active" | "failed" | "disabled";
+/** A domain's state in a word: the owner's Your Apps (components/app/hosted-apps.tsx DOMAIN_STATES) and a member's (shared-apps.tsx) alike. */
+export const DOMAIN_WORDS: Record<AppDomainStatus, string> = {
+  pending: "Waiting for its DNS",
+  verifying: "Checking its DNS",
+  active: "Live",
+  failed: "Couldn't be verified",
+  disabled: "Turned off by Orgo",
+};
 
 /** One of the app's domains: one its computer serves on the app's port (orgo-web custom_domains.target_port). */
 export type AppDomain = {

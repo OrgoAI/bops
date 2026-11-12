@@ -168,9 +168,9 @@ test("the route table: computers on the runner's routes only (the providers' rou
   const forComputers = routes()
     .filter((r) => r.computer)
     .map((r) => `${r.method} ${r.path}`);
-  for (const want of ["GET /v1/state", "PUT /v1/state", "GET /v1/state/head", "GET /v1/messages", "POST /v1/messages", "POST /v1/session", "GET /v1/runner/live", "POST /v1/runner/turns/*", "POST /proxy/openai/*", "GET /proxy/honcho/*", "POST /v3/*", "POST /proxy/composio/*", "POST /proxy/typesafe/*", "POST /proxy/treg/*", "POST /proxy/agentphone/*", "GET /proxy/agentmail/*"])
+  for (const want of ["GET /v1/state", "PUT /v1/state", "GET /v1/state/head", "GET /v1/messages", "POST /v1/messages", "POST /v1/session", "GET /v1/runner/live", "POST /v1/runner/turns/*", "POST /proxy/openai/*", "GET /proxy/honcho/*", "POST /v3/*", "POST /proxy/composio/*", "POST /proxy/typesafe/*", "POST /proxy/treg/*", "POST /proxy/agentphone/*", "GET /proxy/agentmail/*", "POST /v1/apps/preview-password"])
     assert.ok(forComputers.includes(want), want);
-  for (const p of forComputers) assert.ok(/^(GET|PUT|POST|PATCH|DELETE) (\/v1\/(state|state\/head|messages|session|runner\/live|runner\/turns\/\*)|\/proxy\/(openai|honcho|composio|typesafe|treg|agentphone|agentmail)\/\*|\/v3\/\*)$/.test(p), `only the runner's: ${p}`);
+  for (const p of forComputers) assert.ok(/^(GET|PUT|POST|PATCH|DELETE) (\/v1\/(state|state\/head|messages|session|runner\/live|runner\/turns\/\*|apps\/preview-password)|\/proxy\/(openai|honcho|composio|typesafe|treg|agentphone|agentmail)\/\*|\/v3\/\*)$/.test(p), `only the runner's: ${p}`);
   const ups = upgrades();
   assert.equal(ups.find((x) => x.path === "/proxy/openai/*")?.computer, true);
   assert.ok(!ups.find((x) => x.path === "/v1/connect")?.computer);

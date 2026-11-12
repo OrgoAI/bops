@@ -575,6 +575,8 @@ export type PhoneMessage = {
   via?: "text" | "email" | "slack" | "telegram" | "discord";
   options?: string[];
   photos?: number;
+  /** The names of files added with it, on a bot's computer's Desktop (not on the phone). A phone from before shows the text alone. */
+  files?: string[];
   taskId?: string;
   answers?: string;
 };
@@ -806,6 +808,23 @@ export type SharedWsSlice = {
   keyNames?: SharedKey[];
   /** With `keys`: the owner's Bops takes the "key" act (KEYS_MIN_VERSION), so bots' keys switch from here. Part of the fingerprint. */
   keyActs?: true;
+  /**
+   * What they may change (cloud/member-access.ts Power: an Admin every one, a Member the ones turned on for them in Team), for
+   * anyone but the owner, so their window opens what each lets them change. Part of the fingerprint. None: nothing.
+   */
+  can?: string[];
+  /** With `can`: the owner's Bops takes the "change" act (CHANGES_MIN_VERSION). Part of the fingerprint. */
+  changes?: true;
+  /**
+   * With `can`: what the owner's Mac did with their last changes (Workspace.changesDone): each by their key, done or why
+   * not, so their window says one that didn't go. Only their own.
+   */
+  changed?: { key: string; ok: boolean; error?: string }[];
+  /**
+   * With "chart" in `can`: the workspace's org chart (lib/chain.ts Chain, Workspace.chain) as the owner's state keeps it,
+   * its people's entries (by their access key) included, so the Org chart draws and changes it.
+   */
+  chain?: Record<string, unknown>;
 };
 /**
  * A key the workspace's bots see (SharedWsSlice.keyNames), by its vault name (STRIPE_SECRET_KEY): "workspace" its own
@@ -819,6 +838,28 @@ export const KEY_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 /** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
 export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
 
+/**
+ * A site's Preview password as Bops makes one (lib/server/hosted-apps.ts newPassword, which takes these two): its
+ * length in characters of this alphabet (letters and digits without the ones that look alike: 0, O, o, 1, l, I), case
+ * sensitive, with a letter and a digit in it. PREVIEW_PASSWORD is the same rule as a pattern, and Bops Cloud takes no
+ * other password (PREVIEW_PASSWORD_PATH).
+ */
+export const PREVIEW_PASSWORD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // gitleaks:allow (an alphabet, not a key)
+export const PREVIEW_PASSWORD_LENGTH = 7;
+export const PREVIEW_PASSWORD = /^(?=.*[A-Za-z])(?=.*[2-9])[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789]{7}$/;
+
+/**
+ * A site's Preview password as whoever just set it tells Bops Cloud (POST PREVIEW_PASSWORD_PATH, lib/server/preview-password-share.ts):
+ * the owner's Bops on their own key, or the app's own computer's runner on its identity. `site` is the app's own name
+ * for its own site. `password` null: it has none now (the owner turned it off). `seen`: only in place of the one Bops
+ * Cloud kept at that time (its `at`), else nothing changes: the owner's Mac telling it what it read from Orgo
+ * (lib/server/apps-for-members.ts), which never lands over a share that came after it looked. Bops Cloud keeps it on the
+ * workspace (Workspace.previewPasswords) and answers 204 with nothing in it: it never says a password back, nor whether
+ * one was the same or was kept.
+ */
+export const PREVIEW_PASSWORD_PATH = "/v1/apps/preview-password";
+export type PreviewPasswordPost = { ws: string; app: string; site: string; url: string; password: string | null; seen?: number };
+
 /** What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` when the owner's Mac last read them. */
 export type SharedApps = { level: "read" | "write"; at: number; list: SharedApp[]; /** The workspace's domains bought through Orgo: Write only. */ owned?: { id: string; domain: string }[] };
 /** One app as a member sees it (lib/hosted-apps.ts AppForMembers, spelled out: this file imports nothing). */
@@ -831,6 +872,8 @@ export type SharedApp = {
   url?: string;
   /** Its computer went: it needs a new home (a deploy gives it one). */
   lost?: true;
+  /** Its production is on GitHub (lib/hosted-apps.ts AppHosting.github): Publish sends what its Preview serves to this repo and branch, whose own deploy puts it live. */
+  github?: { repo: string; branch: string };
   head?: { id: string; message: string; at: number } | null;
   /**
    * `url`: Published's address (none: no domain yet). Its Preview, where members deploy, from an owner's Bops that sends
@@ -844,6 +887,8 @@ export type SharedApp = {
     previewServing?: string | null;
     previewProtected?: true;
     previewPassword?: string;
+    /** When Bops Cloud took that password (Workspace.previewPasswords' `at`): what a fingerprint goes by, never the password. */
+    previewPasswordAt?: number;
     serving: string | null;
     live: { id: string; state: string | null; when: number | null } | null;
     domains?: { domain: string; status: string }[];
@@ -888,7 +933,10 @@ export const MESSAGES_PER_CHAT = 200;
  * owner's, as the member's copy has them.
  */
 export type MemberAct =
-  | { act: "chat"; chatId: string; text: string; replyTo?: string }
+  // `files`: put on the Desktop of the computer a bot of the chat works on first (MemberFile), with the owner's Bops at
+  // MEMBER_FILES_MIN_VERSION (OWNER_BOPS_OLD), by an Admin (ADMIN_ONLY: orgo-web's uploads take no Member yet) with Use its
+  // computer (MEMBER_NO_COMPUTER). With files, `text` may be empty.
+  | { act: "chat"; chatId: string; text: string; replyTo?: string; files?: MemberFile[] }
   | { act: "reply"; sessionId: string; text: string }
   | { act: "compact"; chatId: string }
   | { act: "compact"; sessionId: string }
@@ -907,6 +955,12 @@ export type MemberAct =
   // On is for the workspace's own keys alone: one it sees only as the owner's (scope "all", or `from`) is refused
   // (MEMBER_OWNER_ONLY, OWNERS_KEY_LINE); off goes for any.
   | { act: "key"; botId: string; name: string; on: boolean }
+  // A change made as the owner's own window makes it (cloud/change-routes.ts CHANGE_ROUTES: which route, which power it
+  // needs), by someone with that power (cloud/member-access.ts Power: an Admin has every one, a Member the ones turned on for them in
+  // Team), with the owner's Bops at CHANGES_MIN_VERSION (OWNER_BOPS_OLD). The workspace's own id is "@ws" (THIS_WS) in it.
+  // Done by the owner's Mac through that route (lib/server/change-acts.ts); how it went comes back on the workspace
+  // (SharedWsSlice.changed).
+  | { act: "change"; method: "POST" | "PATCH" | "PUT" | "DELETE"; path: string; query?: Record<string, string>; body: Record<string, unknown> }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
 /**
@@ -1017,12 +1071,20 @@ export const CLOUD_PERSONA_MIN_VERSION = "0.0.42";
 export const OWNERS_KEY_LINE = "Only the owner can let bots use the owner's own keys.";
 /** 403: the act is a Keys holder's (SharedWsSlice.keys), and the caller hasn't been given Keys. */
 export const MEMBER_NO_KEYS = "member_no_keys";
+/** 403: a "change" act needs a power (cloud/member-access.ts Power) the caller hasn't been given in Team. */
+export const MEMBER_NO_POWER = "member_no_power";
 /** 409: the ask is answered, or the thread already ended (stop, dismiss). */
 export const NOT_WAITING = "not_waiting";
 /** 403: the caller is the workspace's owner, who acts in their own Bops. */
 export const OWN_WORKSPACE = "own_workspace";
 /** How many acts one member may send a minute, across every workspace shared with them. */
 export const MEMBER_ACTS_A_MINUTE = 30;
+/**
+ * How many files one member may add a minute (POST /v1/ws/<projectId>/files, one for each), across every workspace
+ * shared with them: counted apart from their acts, so the files of a message never use up the act that sends it. Four
+ * full message boxes (ATTACH_MAX each).
+ */
+export const MEMBER_FILES_A_MINUTE = 40;
 /** The most a member's message or reply may say, and a note with Deny. */
 export const MEMBER_MAX_TEXT = 8000;
 export const MEMBER_MAX_NOTE = 2000;
@@ -1032,6 +1094,61 @@ export const MEMBER_MAX_PERSONA = 1500;
 export const PERSONA_CHANGED = "Changed by someone else. Here's the latest.";
 /** The most threads one Stop may name ("Stop all"). */
 export const MEMBER_STOP_MAX = 20;
+
+/**
+ * A file a member added for a bot with their message (lib/added-files.ts AddedFile, the same fields): already on the
+ * Desktop of the computer that bot works on, put there by their own Bops with their own Orgo key, at the computer Bops
+ * Cloud named for it (POST /v1/ws/<projectId>/files: MemberFileTarget). The owner's Mac and the bot's computer tell the
+ * bot where it is (lib/added-files.ts filesNote), as for the owner's own.
+ */
+export type MemberFile = { id: string; name: string; size: number; path: string; botId: string; hostId: string; hostName: string };
+/** The most files one message may carry (lib/added-files.ts ATTACH_MAX). */
+export const MEMBER_FILES_MAX = 10;
+/** The biggest file Orgo's uploads take (lib/added-files.ts FILE_MAX). */
+const MEMBER_FILE_BYTES = 2 * 1024 ** 3;
+/** A short id of the owner's or Bops' (a file's, a bot's). */
+const fileId = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 120;
+/**
+ * Whether `name` is a plain file name on a Desktop, as lib/added-files.ts cleanFileName and the name claimed there
+ * leave one: no folder, no hidden file, no control character, no space at either end, at most 250 bytes ("report (2).pdf").
+ */
+const plainFileName = (name: string) =>
+  name.length > 0 && name.trim() === name && !name.startsWith(".") && !/[\\/\u0000-\u001f\u007f]/.test(name) && new TextEncoder().encode(name).length <= 250;
+/** A bot's name as a file's `hostName` carries it: one line, no control character, words at both ends. */
+const plainHostName = (v: unknown): v is string => fileId(v) && v.trim() === v && !/[\u0000-\u001f\u007f]/.test(v);
+/**
+ * A message's files as a member's Bops sent them (MemberAct chat `files`), each whole and checked: a plain name on the
+ * Desktop (`path` exactly ~/Desktop/<name>), a size Orgo takes, its ids, a bot's name on one line, every id once,
+ * MEMBER_FILES_MAX at most. None sent: []. Null when any isn't one. Which bots they're for is checked against the
+ * owner's state, which names the bot whose computer each is on (cloud/members.ts filesFit, lib/server/member-acts.ts).
+ */
+export function cleanMemberFiles(v: unknown): MemberFile[] | null {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v) || v.length > MEMBER_FILES_MAX) return null;
+  const out: MemberFile[] = [];
+  for (const f of v) {
+    if (!f || typeof f !== "object" || Array.isArray(f)) return null;
+    const x = f as Record<string, unknown>;
+    if (!fileId(x.id) || !fileId(x.botId) || !fileId(x.hostId) || !plainHostName(x.hostName)) return null;
+    if (typeof x.name !== "string" || !plainFileName(x.name) || x.path !== `~/Desktop/${x.name}`) return null;
+    if (typeof x.size !== "number" || !Number.isSafeInteger(x.size) || x.size < 1 || x.size > MEMBER_FILE_BYTES) return null;
+    out.push({ id: x.id, name: x.name, size: x.size, path: `~/Desktop/${x.name}`, botId: x.botId, hostId: x.hostId, hostName: x.hostName });
+  }
+  return new Set(out.map((f) => f.id)).size === out.length ? out : null;
+}
+/**
+ * 200 from POST /v1/ws/<projectId>/files {botId, screen?} (cloud/members.ts filesIn): the Orgo computer a file someone
+ * adds for that bot goes on (its own, or the main bot's it shares), woken as a message to the bot would wake it, and
+ * the bot whose computer that is. Their own Bops puts the file there with their own Orgo key (lib/server/bot-files.ts).
+ */
+export type MemberFileTarget = { computerId: string; botId: string; hostId: string; hostName: string };
+/**
+ * The first Bops whose Mac takes a member's message with files (lib/server/member-acts.ts: the bot told where they are,
+ * a message of files alone): an older one would drop the files, or the whole message when it has no words, so Bops Cloud
+ * refuses files (OWNER_BOPS_OLD, before any is put on the computer) for an owner whose last Mac is older. Set to the
+ * release that carries it.
+ */
+export const MEMBER_FILES_MIN_VERSION = "0.0.48";
 /** How long an act waits for the owner's Bops to open: an older one is dropped, never done late. */
 export const MEMBER_ACT_MS = 10 * 60_000;
 /** How long a message Bops Cloud wrote already, or an answer (MemberActPayload.stored), waits for the owner's Mac to take it. */
@@ -1106,6 +1223,19 @@ export type RunnerResume = { ok: true; now: number; humanAt: number };
 export const TURN_LEASE_MS = 90_000;
 /** How often a runner beats. */
 export const TURN_BEAT_MS = 30_000;
+/**
+ * Where a runner marks each reply it's answering: a file named for the turn, made before it's claimed (or resumed),
+ * touched at each beat and removed once its end is said to Bops Cloud (lib/server/runner-chat.ts). An upgrade of that
+ * runner (lib/server/runner-install.ts) waits while one was touched in the last 2 minutes: restarting it would cut the
+ * reply off ("stopped partway"). One a runner left behind when it died goes stale in 2 minutes.
+ */
+export const RUNNER_TURNS_DIR = "/var/run/bops/turns";
+/**
+ * Set by an upgrade (lib/server/runner-install.ts installScript) just before it looks at the marks a last time and
+ * swaps the runner's files: from then on the runner claims no new reply (Bops Cloud gives it again later). A reply marks
+ * itself before it looks here, so none starts unseen. One older than 5 minutes (an upgrade that died) is ignored.
+ */
+export const RUNNER_HOLD = "/var/run/bops/upgrading";
 
 /* ---------------- The bot's browser (cloud/browser.ts, lib/browser-relay.ts) ---------------- */
 
@@ -1115,11 +1245,16 @@ export const TURN_BEAT_MS = 30_000;
  * relays, never keeps. Bops Cloud lets watch, and take control, only the owner and a member with Write on that bot
  * and Use its computer (cloud/browser.ts mayUseBrowser, the check a member's computer chat turn goes by: turns.ts
  * memberStill). A person in control sends only these CDP methods, each with its parameters checked
- * (lib/browser-relay.ts cleanInput); anything else is refused, on the runner, whatever Bops Cloud let through.
+ * (lib/browser-relay.ts cleanInput); anything else is refused, on the runner, whatever Bops Cloud let through. The
+ * Target ones are the browser's tabs: a new tab at an http or https page, and a switch to or close of a tab the runner
+ * listed ("tabs"), done through Chrome's DevTools address on the computer, never a CDP session on the browser itself.
  */
-export const BROWSER_METHODS = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"] as const;
+export const BROWSER_METHODS = ["Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry", "Target.createTarget", "Target.activateTarget", "Target.closeTarget"] as const;
 export type BrowserMethod = (typeof BROWSER_METHODS)[number];
 export const isBrowserMethod = (v: unknown): v is BrowserMethod => typeof v === "string" && (BROWSER_METHODS as readonly string[]).includes(v);
+
+/** One of the browser's tabs, as the runner lists them (its DevTools target id, title and address), oldest first. */
+export type BrowserTab = { id: string; title: string; url: string };
 
 /** Someone watching or in control, as Bops Cloud vouches for them: their Orgo user id and the name others see. */
 export type BrowserPerson = { id: string; name: string };
@@ -1157,6 +1292,7 @@ export type BrowserToRunner =
 export type RunnerToBrowser =
   | { t: "frame"; bots: string[]; data: string; meta: BrowserFrameMeta }
   | { t: "page"; bots: string[]; url: string; title: string; back: number | null }
+  | { t: "tabs"; bots: string[]; tabs: BrowserTab[]; front: string | null }
   | { t: "control"; bots: string[]; by: BrowserPerson | null }
   | ({ t: "pointer"; bots: string[]; by: BrowserPerson | null } & BrowserPointer)
   | ({ t: "activity"; bots: string[] } & BrowserActivity)
@@ -1164,7 +1300,7 @@ export type RunnerToBrowser =
 
 /**
  * What a viewer's stream carries (GET /v1/browser/watch, server-sent events named for `t`): frames, the page's address and
- * title (`back`: the history entry Back goes to, null when there's none), who has control (`you`: the viewer does), a
+ * title (`back`: the history entry Back goes to, null when there's none), the browser's tabs and which is in front, who has control (`you`: the viewer does), a
  * pointer event on the page and who drove it (`you`: the viewer, whose own pointer is never drawn twice), what the bot
  * is doing with it ("activity"), an input of theirs refused and why (no `code`), or the stream itself, as they may no
  * longer watch (a `code`), and whether the bot's computer is connected at all ("computer"). `?only=activity`: a stream of
@@ -1173,6 +1309,7 @@ export type RunnerToBrowser =
 export type BrowserEvent =
   | { t: "frame"; data: string; meta: BrowserFrameMeta }
   | { t: "page"; url: string; title: string; back: number | null }
+  | { t: "tabs"; tabs: BrowserTab[]; front: string | null }
   | { t: "control"; by: BrowserPerson | null; you: boolean }
   | ({ t: "pointer"; by: BrowserPerson | null; you: boolean } & BrowserPointer)
   | ({ t: "activity" } & BrowserActivity)

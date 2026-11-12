@@ -6,10 +6,13 @@ import { openaiClient } from "./openai-client";
 import { sleptSince } from "./awake";
 import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
-import { askFor, declined, NeedsOk, Paused, type AskSpec } from "./permission";
+import { askFor, declined, declinedStep, NeedsOk, Paused, type AskSpec } from "./permission";
+import { taskWrite } from "@/lib/permission";
+import { shownAddress } from "@/lib/plain-words";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
+import { changeFiles, changeFilesTool, type ChangeArgs } from "./repo-change";
 import { readSkill, READ_SKILL_TOOL } from "./workspace-skills";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
@@ -136,7 +139,9 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
   // read_skill always: every bot has Bops' own skills, under their labels (sessions.ts lists them in its instructions).
-  // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
+  // call_api with the user's keys (keys.ts), and change_files with a GitHub key (repo-change.ts): a read runs at once;
+  // anything that changes something asks, on a card someone answers, every time (never an Always allow here: the
+  // task's browser reads pages anyone could have written). It pauses the run till then (NeedsOk), as in the chat.
   // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
   // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
   // One a member with Write started or told something (memberThread) has the logins its bot has: they reach the
@@ -145,6 +150,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   const outside = strangersTask(t.sessionId);
   const others = outsideTask(t.sessionId);
   const keyed = outside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
+  const changeTool = changeFilesTool(keyed);
   const tools = [
     { type: "computer" },
     { type: "web_search" },
@@ -156,7 +162,8 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     ...(t.apps && !outside ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
     ...(others ? [] : CRM_TOOLS(b)),
-    ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
+    ...(keyed.length ? [callApiTool(keyed)] : []),
+    ...(changeTool ? [changeTool] : []),
   ];
   const guard = newPageGuard();
   // A turn that was stopped mid-step, or paused at a call that needed the user's OK, owes OpenAI the outputs of the
@@ -296,13 +303,20 @@ async function answerPaused(t: ComputerTurn, a: AppApproval, call: { name: strin
       const owed = x.owed?.find((w) => w.id === callId);
       if (owed) owed.output = output;
     });
+  // An Always allow never answers a task's write (taskWrite): one from an older Bops, which still offered it or spread it
+  // from another card, is declined here, so the task asks again and someone answers that card itself.
+  if (a.reply?.reply === "always" && taskWrite(a)) {
+    const why = "Not done: an Always allow doesn't count for a change a task makes. Ask again: it needs Allow once on its own card.";
+    keep(why);
+    return { type: "function_call_output", call_id: callId, output: why };
+  }
   if (a.reply?.reply === "reject") {
-    t.step("note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    t.step("note", declinedStep(a));
     keep(declined(a));
     return { type: "function_call_output", call_id: callId, output: declined(a) };
   }
   keep("Not known: Bops stopped while doing it, so it may or may not have happened. Check before doing it again.");
-  const answered = await runFunction(t, { type: "function_call", call_id: callId, name: call.name, arguments: call.arguments }, guard, { approved: true });
+  const answered = await runFunction(t, { type: "function_call", call_id: callId, name: call.name, arguments: call.arguments }, guard, { approved: true, asked: a });
   const output = "pause" in answered ? "Failed: it still needs the user's OK." : answered.output;
   keep(typeof output === "string" ? output : (output.find((c) => c.type === "input_text")?.text ?? ""));
   return { type: "function_call_output", call_id: callId, output };
@@ -342,7 +356,7 @@ function record(t: ComputerTurn, o: OutputItem, more: boolean) {
     if (text) t.step("note", text);
   } else if (o.type === "web_search_call") {
     const a = o.action as { type?: string; query?: string; url?: string } | undefined;
-    t.step("search", a?.type === "open_page" && a.url ? `read ${a.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
+    t.step("search", a?.type === "open_page" && a.url ? `read ${shownAddress(a.url).replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)}` : a?.query ? `searched "${a.query.slice(0, 70)}"` : "searched the web");
   }
 }
 
@@ -531,7 +545,7 @@ const PAGE_TOOL = {
   type: "function",
   name: "page_script",
   description:
-    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
+    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. context.pages() lists the tabs (the receipt lists them once there are two or more): to work in another, call bringToFront() on it and use it (the next script's `page` is the tab in front); context.newPage() opens one. Close tabs you opened once you're done with them. A file the page downloads is saved to ~/Downloads, and the receipt gives its path; when a click starts a download, wait for it in the same script: const [d] = await Promise.all([page.waitForEvent('download'), <the click>]). To put a file into a page, give the page's file input that path with page.setInputFiles('input[type=file]', path) (or page.waitForEvent('filechooser'), then setFiles), never the system's file picker on the screen. To see two pages at once, await sideBySide(a, b): a in a window on the left half of the screen, b (a page, or an address to open) on the right half, so one look at the screen shows both and you can drag from one to the other; a page in a's own window opens again at its address in a new one, so finish what you typed there first. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -592,7 +606,32 @@ const VAULT_TOOL = {
 const clip = (s: string, max = 12_000) => (s.length > max ? `${s.slice(0, max / 2)}\n… (cut) …\n${s.slice(-max / 2)}` : s);
 
 /** What a page script's runner sends back (vm/page-script.cjs): its answer, the page it ended on, and its receipt. */
-type PageRun = { ok?: boolean; value?: string; error?: string; url?: string; changed?: boolean; dialogs?: string[]; downloads?: string[]; opened?: number; look?: boolean };
+type PageRun = {
+  ok?: boolean;
+  value?: string;
+  error?: string;
+  url?: string;
+  changed?: boolean;
+  dialogs?: string[];
+  /** Where each download was saved (an older runner said only its name). */
+  downloads?: string[];
+  /** Downloads that weren't saved, each with why. */
+  unsaved?: string[];
+  opened?: number;
+  /** The browser's tabs, once there are two or more. */
+  tabs?: { title?: string; url?: string; front?: boolean }[];
+  look?: boolean;
+};
+
+/** "Tabs open: "Pricing" https://… (in front), "Canva" https://…." for a receipt, each part cut short. */
+function tabsLine(tabs: NonNullable<PageRun["tabs"]>): string {
+  const cut = (v: unknown, max: number) => {
+    const one = String(v ?? "").replace(/\s+/g, " ").trim();
+    return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+  };
+  const each = tabs.map((t) => `"${cut(t.title, 80) || "(no title)"}" ${cut(t.url, 200)}${t.front ? " (in front)" : ""}`);
+  return `Tabs open: ${each.join(", ")}.`;
+}
 
 /**
  * A page script, run on the computer by its runner against the Chrome of the task's screen (its CDP
@@ -625,8 +664,10 @@ async function pageScript(t: ComputerTurn, script: string, seconds: number): Pro
   }
   const receipt = [
     ...(out.dialogs ?? []).map((d) => `The page showed a dialog (${d}); it was dismissed. To answer it, handle it in the script before the step that opens it: page.once("dialog", (d) => d.accept()).`),
-    ...(out.downloads ?? []).map((f) => `Downloaded ${f}.`),
+    ...(out.downloads ?? []).map((f) => (f.startsWith("/") ? `Saved a download to ${f}.` : `Downloaded ${f}.`)),
+    ...(out.unsaved ?? []).map((f) => `A download wasn't saved (${clip(f, 400)}).`),
     ...(out.opened ? [`It opened ${out.opened === 1 ? "a new tab" : `${out.opened} new tabs`}, now in front.`] : []),
+    ...(out.tabs && out.tabs.length > 1 ? [tabsLine(out.tabs)] : []),
   ];
   const on = out.url ? `\n\n(Now on ${out.url.slice(0, 300)})` : "";
   const said = out.ok ? clip(out.value ?? "") : `Failed: ${out.error ?? "the script stopped"}`;
@@ -702,7 +743,10 @@ function orStop<T>(t: ComputerTurn, work: Promise<T>): Promise<T> {
  * One tool call, answered. `approved`: the user said yes to this very call (its run paused for it). A call that
  * needs their OK and hasn't it answers `pause`, with what to ask: the run pauses there (pauseAt).
  */
-async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard(), opts: { approved?: boolean } = {}): Promise<FunctionOutput | { pause: AskSpec }> {
+async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard(), opts: { approved?: boolean; asked?: AppApproval } = {}): Promise<FunctionOutput | { pause: AskSpec }> {
+  // Stopped before it starts (a yes being resumed included): nothing of it runs. orStop can't take back work already
+  // begun, so the check comes before any is.
+  if (t.signal.aborted) return { type: "function_call_output", call_id: o.call_id, output: "Not run: the task was stopped first." };
   const s = session(t.sessionId)!;
   // A stranger's task has none of the owner's logins; anyone else's (a member's too) none of the CRM.
   const outside = strangersTask(t.sessionId);
@@ -755,8 +799,14 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
       t.step("use_app", `used ${String(args.action ?? "an app")}`);
       output = await orStop(t, runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, (args.account as string | null) ?? null, { approved: opts.approved }));
     } else if (o.name === "call_api" && !outside) {
-      const r = await orStop(t, callApi(s.botId, args, { sessionId: t.sessionId }));
+      const r = await orStop(t, callApi(s.botId, args, { sessionId: t.sessionId }, { task: true, approved: opts.approved }));
       t.step("call_api", r.did ?? `tried to call ${String(args.key ?? "an API")}`);
+      output = r.text;
+    } else if (o.name === "change_files" && !outside) {
+      // The yes is to the card it showed (its commit and files): the writes go only as that card said.
+      const change = opts.approved ? opts.asked?.api?.change : undefined;
+      const r = await orStop(t, changeFiles(s.botId, args as ChangeArgs, { sessionId: t.sessionId }, { task: true, approved: opts.approved, signal: t.signal, ...(change ? { asked: change } : {}) }));
+      t.step("change_files", r.did?.length ? r.did.join("; ") : `tried to change files with ${String(args.key ?? "a key")}`);
       output = r.text;
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);

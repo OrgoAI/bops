@@ -43,7 +43,7 @@ export function ReaderView({ botId, display, className }: { botId: string; displ
   return (
     <div className={`overflow-y-auto bg-white ${className ?? ""}`}>
       <article className="mx-auto flex max-w-[620px] flex-col gap-3 px-8 pb-16 pt-9">
-        <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-[#9A9A98]">{article.site}</span>
+        <span className="text-[12px] font-medium text-[#9A9A98]">{article.site}</span>
         <h1 className="text-[28px] font-semibold leading-[34px] tracking-[-0.02em] text-ink">{article.title}</h1>
         <div className="h-px bg-[#EFEFED]" />
         {article.blocks.length === 0 && <p className="text-[14px] text-[#6B6B6B]">There isn&apos;t much to read on this page.</p>}

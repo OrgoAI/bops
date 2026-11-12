@@ -68,9 +68,16 @@ const ANY: Record<NonNullable<AppApproval["kind"]>, string> = {
   api: "whatever it sends",
   data: "whatever it looks up",
   brain: "whatever it runs",
+  // A key's card has no Always allow: only a save (or Done) answers it.
+  key: "whatever it is for",
 };
 
 /** What Always allow covers, as the card says it: "Always allow Max to send an email, whoever it's to and whatever it says." */
+/**
+ * A task's write with a key (an "api" card asked from a thread): allowed once at a time, never by an Always allow,
+ * nor answered by one given on another card, as its browser reads pages anyone could have written (keys.ts, repo-change.ts).
+ */
+export const taskWrite = (a: Pick<AppApproval, "kind" | "threadId">) => a.kind === "api" && !!a.threadId;
 export const alwaysScope = (botName: string, a: Pick<AppApproval, "action" | "kind">) => `Always allow ${botName} to ${toDo(a.action)}, ${ANY[a.kind ?? "app"]}.`;
 
 /** The action every email to anyone but the user asks for (lib/server/mail.ts withOk): new ones and replies. */

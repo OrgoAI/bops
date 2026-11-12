@@ -70,7 +70,7 @@ const file = (n) => `/repos/acme/site/contents/src/components/form-section-${n}.
 const read = (id, s, path = file(id), label = "GitHub") => ({ id, chatId: "bot:boppy", role: "system", text: `Called ${label} GET ${path}`, at: T + s * 1000 });
 /** An approved write's note: who made it, what it called (appResult). */
 const wrote = (id, s, path = file(id), method = "PUT") => ({ id, chatId: "bot:boppy", role: "system", text: `Boppy: Called GitHub ${method} ${path}`, appResult: { action: `GitHub ${method} ${path}`, ok: true, output: "{}" }, at: T + s * 1000 });
-const failed = (id, s, path = file(id)) => ({ id, chatId: "bot:boppy", role: "system", text: "Boppy couldn't call it: GitHub answered 404", appResult: { action: `GitHub GET ${path}`, ok: false, output: "Not Found", unasked: true }, at: T + s * 1000 });
+const failed = (id, s, path = file(id)) => ({ id, chatId: "bot:boppy", role: "system", text: "Boppy couldn't call it: GitHub answered 404", appResult: { action: `GitHub GET ${path}`, ok: false, output: "Not Found", unasked: true, read: true }, at: T + s * 1000 });
 const said = (id, s, text, role = "bot") => ({ id, chatId: "bot:boppy", role, ...(role === "bot" ? { botId: "boppy" } : {}), text, at: T + s * 1000 });
 
 const stateWith = (messages, sessions = []) => ({
@@ -115,12 +115,25 @@ await test("a change says Changed, by whom; a single read says it too, its path 
   assert.deepEqual(lines(chat([posted])), ["Boppy changed something on Slack"]);
 });
 
-await test("another service, a change among reads, a failed call or a quarter of an hour between them starts a new line", () => {
+await test("another service, a change among reads, a failed write or a quarter of an hour between them starts a new line", () => {
   assert.deepEqual(lines(chat([read("r1", 1), read("r2", 2), read("s1", 3, "/v1/customers", "Stripe"), read("r3", 4)])), ["Looked at 2 files on GitHub", "Looked at something on Stripe", "Looked at a file on GitHub"]);
   assert.deepEqual(lines(chat([read("r1", 1), wrote("w1", 2), read("r2", 3)])), ["Looked at a file on GitHub", "Boppy changed a file on GitHub", "Looked at a file on GitHub"]);
-  const broken = chat([read("r1", 1), failed("f1", 2), read("r2", 3)]);
+  // A read the bot made on its own that didn't work (a file that isn't there) is one of its reads, said quietly: no red
+  // note in the chat for it. A write someone said yes to that failed keeps its own note, with why.
+  const looked = chat([read("r1", 1), failed("f1", 2), read("r2", 3)]);
+  assert.deepEqual(lines(looked), ["Looked at 3 files on GitHub, 1 didn&#x27;t work"]);
+  assert.doesNotMatch(looked, /couldn&#x27;t call/, "no red note for a read");
+  // One that starts the run, or stands alone: quiet too. Two that failed: said as two.
+  assert.deepEqual(lines(chat([failed("f1", 1), read("r1", 2)])), ["Looked at 2 files on GitHub, 1 didn&#x27;t work"]);
+  assert.deepEqual(lines(chat([failed("f1", 1)])), ["Looked at a file on GitHub, 1 didn&#x27;t work"]);
+  assert.deepEqual(lines(chat([failed("f1", 1), failed("f2", 2)])), ["Looked at 2 files on GitHub, 2 didn&#x27;t work"]);
+  // A call that changes something but wasn't asked about (an Always allow), a GET that posts: never quiet.
+  const posted = { id: "sp", chatId: "bot:boppy", role: "system", text: "Boppy couldn't call it: Slack answered 400", appResult: { action: "Slack GET /chat.postMessage", ok: false, output: "invalid", unasked: true }, at: T + 2000 };
+  assert.match(chat([read("r1", 1), posted]), /Boppy couldn&#x27;t call Slack/, "an unasked write that failed keeps its red note");
+  const failedWrite = { id: "fw", chatId: "bot:boppy", role: "system", text: "Boppy couldn't call it: GitHub answered 409", appResult: { action: `GitHub PUT ${file("fw")}`, ok: false, output: "Conflict" }, at: T + 2000 };
+  const broken = chat([read("r1", 1), failedWrite, read("r2", 3)]);
   assert.deepEqual(lines(broken), ["Looked at a file on GitHub", "Looked at a file on GitHub"]);
-  assert.match(broken, /Boppy couldn&#x27;t call GitHub/, "a failed one keeps its own note, with why");
+  assert.match(broken, /Boppy couldn&#x27;t call GitHub/, "a failed write keeps its own note, with why");
   assert.deepEqual(lines(chat([read("r1", 1), read("r2", 16 * 60)])), ["Looked at a file on GitHub", "Looked at a file on GitHub"]);
   assert.deepEqual(lines(chat([read("r1", 1), said("b1", 2, "Here it is."), read("r2", 3)])), ["Looked at a file on GitHub", "Looked at a file on GitHub"], "a message between them");
   // A thread's chip under a call ends its line there: nothing after it folds above the chip.
@@ -130,6 +143,14 @@ await test("another service, a change among reads, a failed call or a quarter of
   assert.deepEqual(lines(first), ["Looked at a file on GitHub", "Looked at a file on GitHub"], "a chip on the first");
   assert.ok(first.indexOf("Check the form") < first.lastIndexOf("data-api-calls"), "the chip before the next line");
   assert.deepEqual(lines(chat([read("r1", 1), chipped(read("r2", 2)), read("r3", 3)], thread)), ["Looked at a file on GitHub", "Looked at a file on GitHub", "Looked at a file on GitHub"], "a chip on a middle one");
+});
+
+await test("a bot's reply keeps its buttons (Go on) through the notes after it, until someone answers", () => {
+  const stopped = { ...said("b1", 1, "I checked the setup but haven't changed it yet."), options: ["Go on"] };
+  const goOn = (html) => /<button[^>]*>Go on<\/button>/.test(html);
+  assert.ok(goOn(chat([stopped])), "on the newest");
+  assert.ok(goOn(chat([stopped, read("r1", 2)])), "a note after it doesn't take the button away");
+  assert.ok(!goOn(chat([stopped, read("r1", 2), said("u1", 3, "go on", "user")])), "an answer does");
 });
 
 /* ---------------- Opened ---------------- */
@@ -164,6 +185,53 @@ await test("the line opens the list of what was called, each method and path who
   assert.equal(line.getAttribute("aria-expanded"), "false");
   await act(async () => r.unmount());
   box.remove();
+});
+
+await test("a read that didn't work says why in the opened list, as words anyone can read (not only on hover)", async () => {
+  const calls = [K.apiCallOf(read("r1", 1)), K.apiCallOf(failed("f1", 2))];
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const r = createRoot(box);
+  await act(async () => (r.render(h(K.ApiCalls, { calls })), await settle()));
+  await click(box.querySelector("[data-api-calls]"));
+  const shown = [...box.querySelectorAll("[data-api-call]")].map((e) => e.textContent.replace(/\s+/g, " ").trim());
+  assert.deepEqual(shown, [`GET ${file("r1")}`, `GET ${file("f1")} · didn't work: GitHub answered 404`]);
+  await act(async () => r.unmount());
+  box.remove();
+});
+
+await test("a long block of code in a reply folds behind a quiet line that opens it; a short one shows as it is", async () => {
+  const { Rich } = await import(pathToFileURL(`${root}/components/app/chat-view.tsx`).href);
+  const long = Array.from({ length: 40 }, (_, i) => `const line${i} = ${i};`).join("\n");
+  const short = "npm run build\nnpm start";
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const r = createRoot(box);
+  await act(async () => (r.render(h(Rich, { text: `Here's what changed:\n\`\`\`ts\n${long}\n\`\`\`\nAnd to run it:\n\`\`\`\n${short}\n\`\`\`` })), await settle()));
+  const fold = box.querySelector("[data-code-fold]");
+  assert.ok(fold, "the long one folds");
+  assert.equal(fold.textContent.trim(), "40 lines of code");
+  assert.equal(fold.getAttribute("aria-expanded"), "false");
+  assert.ok(!box.textContent.includes("const line20"), "its lines out of sight until opened");
+  assert.equal([...box.querySelectorAll("pre")].map((p) => p.textContent).join("|"), short, "the short one shows as it is");
+  await click(fold);
+  assert.equal(fold.getAttribute("aria-expanded"), "true");
+  assert.ok(box.textContent.includes("const line20"), "opened: all of it");
+  await act(async () => r.unmount());
+  box.remove();
+  // 15 lines show, 16 fold, whatever the line endings.
+  const lines = (n, nl) => Array.from({ length: n }, (_, i) => `line ${i}`).join(nl);
+  for (const [n, nl, folded] of [[15, "\n", false], [16, "\n", true], [15, "\r\n", false], [16, "\r\n", true]]) {
+    const b2 = doc.createElement("div");
+    doc.body.appendChild(b2);
+    const r2 = createRoot(b2);
+    await act(async () => (r2.render(h(Rich, { text: `Here:${nl}\`\`\`${nl}${lines(n, nl)}${nl}\`\`\`` })), await settle()));
+    const f2 = b2.querySelector("[data-code-fold]");
+    assert.equal(!!f2, folded, `${n} lines, ${JSON.stringify(nl)}`);
+    if (f2) assert.equal(f2.textContent.trim(), `${n} lines of code`);
+    await act(async () => r2.unmount());
+    b2.remove();
+  }
 });
 
 console.log(`\napi calls ui: ${passed} passed`);

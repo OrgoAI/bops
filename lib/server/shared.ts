@@ -11,6 +11,7 @@ import { onExit } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
 import { actWith, SharedCopy, switchedKeys, viewState, type ActResult, type ReadResult } from "./shared-core";
 import { getState, getVersion, stateUser, touchState } from "./store";
+import { changeBy } from "./change-replay";
 
 /**
  * Workspaces shared with the user (lib/shared.ts; the parts without the server are shared-core.ts), watched,
@@ -145,8 +146,12 @@ function openNow(): (Open & { at: SharedOpen; data: SharedWsState }) | null {
   return at && data ? { ...open, at, data } : null;
 }
 
-/** Whether a workspace shared with the user is open now: the window shows its owner's state, where nothing is the user's to do (a Send among them). */
-export const sharedOpen = () => !!openNow();
+/**
+ * Whether a workspace shared with the user is open now: the window shows its owner's state, where nothing is the user's to
+ * do (a Send among them). Never while this Mac does someone's change in one of its own workspaces through its own route
+ * (change-replay.ts): that's the owner's workspace, whatever the window has open.
+ */
+export const sharedOpen = () => !changeBy() && !!openNow();
 
 /** The Orgo id of the shared workspace open now (its bots' browsers are asked for by it: lib/server/browser-view.ts), else null. */
 export const sharedProjectId = () => openNow()?.at.projectId ?? null;
@@ -173,11 +178,11 @@ export function sharedAdminOpen({ anyRole = false } = {}): {
   you: string;
   botIds: string[];
   orgoUrl?: string;
-  cloud: (method: "GET" | "POST" | "PATCH", path: "people" | "routing" | "wake", body?: unknown) => Promise<{ status: number; json: Record<string, unknown> } | null>;
+  cloud: (method: "GET" | "POST" | "PATCH", path: "people" | "routing" | "wake" | "files", body?: unknown) => Promise<{ status: number; json: Record<string, unknown> } | null>;
   refresh: () => Promise<void>;
 } | null {
   const open = openNow();
-  // (`anyRole`: a Member too, for what Bops Cloud checks of them itself: waking a computer they may use.)
+  // (`anyRole`: a Member too, for what Bops Cloud checks of them itself: waking a computer they may use, a file for it.)
   if (!open || (!anyRole && open.at.role !== "admin") || !open.data.you) return null;
   const device = deviceIdFor(open.user);
   return {
@@ -199,6 +204,32 @@ export function sharedAdminOpen({ anyRole = false } = {}): {
     },
     refresh: () => open.copy.refresh(),
   };
+}
+
+/**
+ * The user's role in the shared workspace open now ("admin" or "member": lib/server/bot-files.ts SharedAs, which says
+ * Orgo's refusals as theirs), else null.
+ */
+export function sharedRole(): "admin" | "member" | null {
+  const role = openNow()?.at.role;
+  return role === "admin" || role === "member" ? role : null;
+}
+
+/**
+ * Where a file the user adds for a bot of the shared workspace open goes (app/api/bots/files): Bops Cloud's answer to
+ * POST /v1/ws/<project>/files (cloud/members.ts filesIn), which checks they may (an Admin, the bot at Write, on a
+ * computer of this workspace) and names the owner's computer it works on, woken as a message would wake it
+ * (lib/server/bot-files.ts sharedTarget reads it). Never a computer of the user's own bot of that id. Bops Cloud saying
+ * they may no longer see the workspace drops the copy, as an act's answer does (shared-core.ts actWith). Null when Bops
+ * Cloud couldn't be reached.
+ */
+export async function sharedFileTarget(botId: string, { screen = false } = {}): Promise<{ status: number; json: Record<string, unknown> } | null> {
+  const o = sharedAdminOpen({ anyRole: true });
+  if (!o) return { status: 409, json: { error: "Open the workspace again." } };
+  if (!o.botIds.includes(botId)) return { status: 404, json: { error: "That bot isn't in this workspace anymore." } };
+  const got = await o.cloud("POST", "files", { botId, ...(screen ? { screen: true } : {}) });
+  if (got && ((got.status === 404 && got.json.error === "No such workspace") || got.status === 401)) openNow()?.copy.gone();
+  return got;
 }
 
 /**
@@ -226,6 +257,24 @@ export function sharedKeysOpen(): {
     keyNames: s.keys && Array.isArray(s.keyNames) ? s.keyNames : [],
     bots: s.bots.flatMap((b) => (typeof b.id === "string" ? [{ id: b.id, keys: s.keys ? switchedKeys(b, acts) : [] }] : [])),
     refresh: () => open.copy.refresh(),
+  };
+}
+
+/**
+ * The shared workspace open now, for a change made there from this window (change-relay.ts): the id the window has for it,
+ * its bots, what the user may change there (SharedWsSlice.can) and whether the owner's Bops takes it (SharedWsSlice.changes). Null
+ * when none is open for the signed-in user.
+ */
+export function sharedChangesOpen(): { wsId: string; botIds: string[]; can: string[]; changes: boolean } | null {
+  const open = openNow();
+  if (!open) return null;
+  // (What Bops Cloud sent, unchecked: an older one's, or one still loading, may lack any of it.)
+  const s = open.data?.state;
+  return {
+    wsId: open.at.wsId,
+    botIds: (Array.isArray(s?.bots) ? s.bots : []).flatMap((b) => (typeof b?.id === "string" ? [b.id] : [])),
+    can: Array.isArray(s?.can) ? s.can.filter((x): x is string => typeof x === "string") : [],
+    changes: s?.changes === true,
   };
 }
 

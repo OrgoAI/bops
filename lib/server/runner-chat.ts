@@ -1,5 +1,7 @@
 import "server-only";
-import { TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnMember } from "@/cloud/protocol";
+import { mkdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnMember } from "@/cloud/protocol";
 import type { AppApproval, MemberTurn } from "@/lib/types";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
@@ -50,6 +52,12 @@ type Box = {
   identity?: () => Promise<"same" | "copy" | "unknown">;
   beatMs?: number;
   retryMs?: number[];
+  /** Tests: where this runner marks the replies it's answering (RUNNER_TURNS_DIR); an upgrade's hold is beside it. */
+  turnsDir?: string;
+  /** How many runs hold each reply's mark (the same turn delivered twice at once shares one): removed by the last. */
+  marks?: Map<string, number>;
+  /** Tests: how often a resume looks again at an upgrade's hold. */
+  holdPollMs?: number;
 };
 const g = globalThis as unknown as { __bopsRunnerChat?: Box };
 const box: Box = (g.__bopsRunnerChat ??= { running: new Map() });
@@ -176,6 +184,40 @@ function cancel(id: string) {
 const saidBy = (m: TurnMember | undefined): MemberTurn | undefined =>
   m ? { userId: m.userId, ...(m.email ? { email: m.email } : {}), name: m.name, ref: m.ref, ...(m.role === "admin" ? { role: "admin" as const } : {}) } : undefined;
 
+const turnsDir = () => box.turnsDir ?? RUNNER_TURNS_DIR;
+const holdOf = () => (box.turnsDir ? join(dirname(box.turnsDir), "upgrading") : RUNNER_HOLD);
+const markOf = (id: string) => join(turnsDir(), id.replace(/[^A-Za-z0-9_-]/g, "_"));
+const HOLD_STALE_MS = 5 * 60_000;
+
+/**
+ * `run` with this reply marked on its computer (RUNNER_TURNS_DIR), from before it's claimed until after its end is said
+ * to Bops Cloud, so an upgrade of this runner waits for all of it. `held`: an upgrade holds this runner (RUNNER_HOLD,
+ * set under 5 minutes ago), so a new reply isn't started (Bops Cloud gives it again); a resume goes on all the same.
+ * The mark is made before the hold is looked at, so an upgrade never misses a reply that starts as it holds. Best
+ * effort: a mark that can't be made never stops a reply.
+ */
+async function whileMarked<T>(id: string, run: () => Promise<T>, held?: () => T): Promise<T> {
+  const mark = markOf(id);
+  const marks = (box.marks ??= new Map());
+  marks.set(mark, (marks.get(mark) ?? 0) + 1);
+  try {
+    await mkdir(turnsDir(), { recursive: true }).then(() => writeFile(mark, ""), () => {});
+    if (held && (await holding())) return held();
+    // A resume (its OK already taken out, so it can't be given again later) waits for the hold to go: its mark stops
+    // an upgrade that hasn't swapped yet, and one that has restarts this runner (Bops Cloud keeps the turn paused).
+    if (!held) for (const end = Date.now() + HOLD_STALE_MS; (await holding()) && Date.now() < end; ) await new Promise((r) => setTimeout(r, box.holdPollMs ?? 1_000));
+    return await run();
+  } finally {
+    const left = (marks.get(mark) ?? 1) - 1;
+    if (left > 0) marks.set(mark, left);
+    else {
+      marks.delete(mark);
+      await unlink(mark).catch(() => {});
+    }
+  }
+}
+const holding = () => stat(holdOf()).then((h) => Date.now() - h.mtimeMs < HOLD_STALE_MS, () => false);
+
 /** The turn's beats while `run` runs, then its end: done (with its tapback), paused for an OK, or nothing (taken back). */
 async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }) {
   box.running.set(ctx.id, ctx);
@@ -189,7 +231,9 @@ async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } 
     void p.finally(() => beats.delete(p));
   };
   ctx.onActing = beat;
-  const every = setInterval(beat, box.beatMs ?? TURN_BEAT_MS);
+  // Its mark (whileMarked) stays fresh while it runs, so an upgrade of this runner keeps waiting for it.
+  const touch = () => void utimes(markOf(ctx.id), new Date(), new Date()).catch(() => {});
+  const every = setInterval(() => (beat(), touch()), box.beatMs ?? TURN_BEAT_MS);
   every.unref?.();
   // Its computer is in use while it answers (free-hours.ts counts a turn running).
   void import("./free-hours").then((m) => m.sayInUse(), () => {});
@@ -229,6 +273,10 @@ export async function answerTurn(ev: RunnerTurnEvent) {
   if (box.running.has(ev.id) || !stateReady()) return;
   // A copy of this computer never answers (it leaves); no answer from its VMM or Orgo: not now (Bops Cloud gives it again).
   if ((await (await identityOf())()) !== "same") return;
+  await whileMarked(ev.id, () => claimAndAnswer(ev), () => undefined);
+}
+
+async function claimAndAnswer(ev: RunnerTurnEvent) {
   // (A claim Bops Cloud didn't answer is sent again: a second for one it took is 409 "taken" by this runner, and the
   // sweep owes it again once its lease runs out.)
   const r = await postSure<RunnerClaim>(`/v1/runner/turns/${encodeURIComponent(ev.id)}/claim`, {});
@@ -257,22 +305,28 @@ export async function answerTurn(ev: RunnerTurnEvent) {
 export async function resumeAsTurn<T extends { paused?: boolean }>(a: AppApproval, go: () => Promise<T>): Promise<T> {
   const id = a.resume?.engine === "chat" ? a.resume.cloudTurn : undefined;
   if (!id || !a.chatId) return go();
+  return whileMarked(id, () => resumeMarked(a, id, go));
+}
+
+async function resumeMarked<T extends { paused?: boolean }>(a: AppApproval, id: string, go: () => Promise<T>): Promise<T> {
   const r = await postSure<RunnerResume>(`/v1/runner/turns/${encodeURIComponent(id)}/resume`, { approvalId: a.id });
   if (r.status !== 200 || !r.body?.ok) {
     console.warn(`[runner-chat] ${id}: not going on from ${a.id} (${r.status || "no answer"})`);
     return { paused: false } as T;
   }
-  const ctx: TurnContext = { id, chatId: a.chatId, botId: a.botId, offsetMs: r.body.now - Date.now(), humanAt: r.body.humanAt, acting: true, cancelled: false };
+  const ctx: TurnContext = { id, chatId: a.chatId!, botId: a.botId, offsetMs: r.body.now - Date.now(), humanAt: r.body.humanAt, acting: true, cancelled: false };
   let out: T | undefined;
   await asTurn(ctx, async () => (out = await go()));
   return out ?? ({ paused: false } as T);
 }
 
 /** For tests: how the turn is run and how this runner makes sure it's on its own computer (unset: the real ones), and the beat. */
-export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[] }) {
+export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[]; turnsDir?: string; holdPollMs?: number }) {
   box.answer = opts.answer;
   box.identity = opts.identity;
   box.beatMs = opts.beatMs;
+  box.turnsDir = opts.turnsDir;
+  box.holdPollMs = opts.holdPollMs;
   box.retryMs = opts.retryMs;
   box.running.clear();
 }

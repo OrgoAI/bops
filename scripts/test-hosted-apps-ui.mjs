@@ -1975,6 +1975,14 @@ await test("the calls of a site: its log, domains and settings read with it; the
   assert.notEqual(stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin", projectId: "p" }] } }), stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin" }] } }), "its project made");
   assert.notEqual(stamp({ shop: { ...hosting("shop"), lost: 5 } }), was, "its computer gone");
   assert.equal(stamp({ shop: { ...hosting("shop"), sites: [] } }), was);
+  // A Preview's new password, set as its deploy went live (here, or on its bot's computer, after the list was read): the
+  // list is read again, so the window shows the new one and the Preview tab's cookie follows it.
+  const set = (at) => ({ at, live: "d1" });
+  assert.notEqual(stamp({ shop: { ...hosting("shop"), passwordSet: set(5) } }), was, "its own site's password set");
+  assert.notEqual(stamp({ shop: { ...hosting("shop"), passwordSet: set(6) } }), stamp({ shop: { ...hosting("shop"), passwordSet: set(5) } }), "a new one");
+  const admin = (x) => stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin", projectId: "p", ...x }] } });
+  assert.notEqual(admin({ passwordSet: set(5) }), admin({}), "another site's");
+  assert.notEqual(admin({ passwordSet: set(6) }), admin({ passwordSet: set(5) }));
 });
 
 await test("a site picked, clicked: its settings (health too) and variables saved with it, its rollback and Deploy this site name it; Deploy all names none", async () => {
@@ -2882,6 +2890,29 @@ await test("Your Apps shared with an Admin, once the owner's Bops takes it (Shar
     // What an Admin did, said as it was: published, or tried to.
     assert.match(actLine({ key: "k", userId: "u", name: "Ada", act: "deploy", env: "prod", ok: true, at: 1 }), /^Ada published it · /);
     assert.match(actLine({ key: "k", userId: "u", name: "Ada", act: "deploy", env: "prod", ok: false, said: "No.", at: 1 }), /^Ada tried to publish it: No\. · /);
+    // Where Publish goes, said under it: GitHub when its production is there; else a domain not pointed at Orgo yet, as
+    // its visitors don't see a published change until it is (brandlord's Four Corners, 2026-11-05: Published "Live" with
+    // fourcorners.brandlord.agency still pointing at BrandLord's own server).
+    const waiting = { ...shop, sites: [{ ...shop.sites[0], url: null, domains: [{ domain: "shop.acme.example", status: "pending" }] }] };
+    const w = await mount(h(SharedAppsPage, { state: state("admin", true, waiting) }));
+    const wc = w.box.querySelector('[data-shared-app="shop"]');
+    assert.equal(wc.querySelector("[data-publish-where]")?.textContent, "Visitors to shop.acme.example won't see a publish until its DNS points at Orgo.");
+    await click(wc.querySelector("button[aria-expanded]"));
+    assert.equal(wc.querySelector('[data-domain-state="pending"]')?.textContent, "shop.acme.example · Waiting for its DNS", "the domain says it isn't live");
+    await w.done();
+    const gh = await mount(h(SharedAppsPage, { state: state("admin", true, { ...waiting, github: { repo: "acme/shop-site", branch: "main" } }) }));
+    assert.equal(gh.box.querySelector("[data-publish-where]")?.textContent, "Publish sends it to GitHub (acme/shop-site, main), where its own deploy puts it live.");
+    await gh.done();
+    // Live on its domain: nothing more to say, and the domain is just its name. A Member has no Publish, so no line.
+    for (const [why, st] of [["live on its domain", state("admin", true)], ["a Member", state("member", true, waiting)]]) {
+      const x = await mount(h(SharedAppsPage, { state: st }));
+      assert.equal(x.box.querySelector("[data-publish-where]"), null, why);
+      await x.done();
+    }
+    const lv = await mount(h(SharedAppsPage, { state: state("admin", true) }));
+    await click(lv.box.querySelector("button[aria-expanded]"));
+    assert.equal(lv.box.querySelector('[data-domain-state="active"]')?.textContent, "shop.acme.example");
+    await lv.done();
   } finally {
     delete routes["/api/workspaces/shared"];
   }
@@ -3250,7 +3281,32 @@ await test("the Preview tab's wiring (bops-app.tsx): its bot and chat, the owner
   assert.match(chat, /\.\.\.\(aboutApp \? \{ appNote: true \} : \{\}\)/, "and the message that goes with it is tagged appNote");
   const route = readFileSync(`${root}/app/api/chats/[chatId]/messages/route.ts`, "utf8");
   assert.match(route, /const aboutApp = appNote === true && fromBopsWindow\(request\) && !sharedOpen\(\) && appsOwnShown\(getState\(\)\);/, "appNote only from the owner's own window, where their apps show");
-  assert.match(route, /picked, aboutApp, aboutApp \? picksOf\(picks, text\?\.trim\(\) \?\? ""\) : undefined\);/, "what Select picked, only with appNote");
+  assert.match(route, /picked, aboutApp, aboutApp \? picksOf\(picks, text\?\.trim\(\) \?\? ""\) : undefined, added\);/, "what Select picked, only with appNote");
+});
+
+await test("production on GitHub (AppHosting.github): Published says where on GitHub and at which commit, its button pushes there, linked first, and never asks for a domain", () => {
+  const gh = (last) => ({ repo: "OrgoAI/orgo-brandlord", branch: "main", path: "formula", ...(last ? { last } : {}) });
+  const on = (github, extra = {}) => shopApp({ preview: STAGING(), serving: null, live: null, domain: null, domains: [], hosting: { ...hosting("shop"), github }, ...extra });
+  const unlinked = envLine(envsOf({ app: on(gh()) }), "prod");
+  assert.ok(unlinked.includes("GitHub OrgoAI/orgo-brandlord main, formula/, not linked yet"), "where, not linked yet");
+  assert.ok(unlinked.includes('data-app-env-state="Not linked"'));
+  assert.deepEqual(deployIn(unlinked, "Publish to GitHub"), { tip: "Link it to GitHub first, in the menu beside Publish.", disabled: true });
+  assert.ok(!unlinked.includes("Connect a domain"), "no domain asked for: GitHub deploys it");
+  const linked = envLine(envsOf({ app: on(gh({ ingot: id("c1"), sha: "a".repeat(40), when: min(5) })) }), "prod");
+  assert.ok(linked.includes("GitHub OrgoAI/orgo-brandlord main, formula/, at aaaaaaa") && linked.includes('data-app-env-state="On GitHub"'), "where, and the commit it last pushed");
+  assert.deepEqual(deployIn(linked, "Publish to GitHub"), { tip: null, disabled: false }, "the preview is newer: it goes");
+  // Whether GitHub has this preview already is the server's to say (Publish then sends nothing): never greyed for it here.
+  const same = envLine(envsOf({ app: on(gh({ ingot: id("e5"), sha: "b".repeat(40), when: min(5) })) }), "prod");
+  assert.deepEqual(deployIn(same, "Publish to GitHub"), { tip: null, disabled: false });
+  // The form as the route takes it.
+  assert.deepEqual(E.ghMirrorOf({ repo: " OrgoAI/orgo-brandlord ", branch: "", path: "formula", keep: "proxy.ts, notes/ ,", workflow: "deploy-formula.yml", inputs: "client=cclc, bad" }), {
+    repo: "OrgoAI/orgo-brandlord",
+    branch: "main",
+    path: "formula",
+    keep: ["proxy.ts", "notes/"],
+    dispatch: { workflow: "deploy-formula.yml", inputs: { client: "cclc" } },
+  });
+  assert.deepEqual(E.ghMirrorOf({ repo: "a/b", branch: "main", path: "", keep: "", workflow: "", inputs: "" }), { repo: "a/b", branch: "main", path: "" });
 });
 
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);

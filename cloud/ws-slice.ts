@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
-import { accessOf, adminAccess, appsLevelOf, currentFor, holdsKeys, isAccessLevel, levelOf, permits, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import { KEY_NAME, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedWsSlice, type WsRole } from "./protocol.ts";
+import { groupKeyOf } from "./group-key.ts";
+import { accessOf, adminAccess, appsLevelOf, cleanPowers, currentFor, holdsKeys, isAccessLevel, levelOf, permits, powersOf, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
+import { KEY_NAME, PREVIEW_PASSWORD, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedWsSlice, type WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -65,8 +66,12 @@ export function keep(v: unknown, spec: Spec): unknown {
 // Where its chat is answered (turns.ts mirrorOf), so an Admin's Settings shows the switch as it stands.
 const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true, chatAutoOff: true };
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
-/** An Admin's: its "How I work" too (Bot.persona), which they change (the "persona" act). Never a Member's. */
-const ADMIN_BOT: Spec = { ...BOT, persona: true };
+/**
+ * With Bot settings (member-access.ts Power "bots": an Admin always): its "How I work" (Bot.persona, the "persona" act),
+ * and whether it acts without asking first and has business data (Bot.autoApprove, Bot.dataOff), which they change (the
+ * "change" act). Never a Member's without it.
+ */
+const ADMIN_BOT: Spec = { ...BOT, persona: true, autoApprove: true, dataOff: true };
 /** With Keys (keysOf): the keys each bot may use too (Bot.keys: names only), which they switch (the "key" act). */
 const KEYS_BOT: Spec = { ...BOT, keys: true };
 const ADMIN_KEYS_BOT: Spec = { ...ADMIN_BOT, keys: true };
@@ -184,6 +189,9 @@ const MESSAGE: Spec = {
   email: { dir: true, from: true, to: true, cc: true, subject: true, files: [{ name: true, size: true }], bulk: true },
   emailed: true,
   images: [{ id: true, type: true, w: true, h: true }],
+  // Files added with it, on the Desktop of a bot's computer (lib/added-files.ts AddedFile): each chip shows for everyone
+  // given the bot it's for (sharedMessage leaves out one for a bot they aren't given).
+  files: [{ id: true, name: true, size: true, path: true, botId: true, hostId: true, hostName: true }],
   picture: { prompt: true },
   // `questionId`: where that exchange is in the two bots' own conversation (pairChatsOf), which "Asked ● Sam" opens at.
   asked: [{ botId: true, question: true, answer: true, questionId: true }],
@@ -236,6 +244,8 @@ export type SliceViewer = {
   keys?: boolean;
   /** Whether the owner's Bops takes the "key" act (protocol.ts KEYS_MIN_VERSION): SharedWsSlice.keyActs. */
   keyActs?: boolean;
+  /** Whether the owner's Bops takes the "change" act (change-routes.ts CHANGES_MIN_VERSION): SharedWsSlice.changes. */
+  changes?: boolean;
 };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
@@ -255,7 +265,9 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
   const o = isObject(kept) && currentFor(kept, viewer.joinedAt) ? kept : {};
   const bots: Record<string, AccessLevel> = Object.create(null);
   if (isObject(o.bots)) for (const [id, level] of Object.entries(o.bots)) bots[id] = isAccessLevel(level) ? level : "none";
-  return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(usesComputer(o) ? { computer: "use" as const } : {}) };
+  // What they may change (member-access.ts Power), the switches turned on for them: an Admin has every one whatever is kept (hasPower).
+  const can = cleanPowers(o.can);
+  return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}), ...(usesComputer(o) ? { computer: "use" as const } : {}), ...(can ? { can } : {}) };
 }
 
 export { adminAccess };
@@ -328,11 +340,33 @@ const SITE_SEEN = {
 } as const satisfies Spec;
 /** A site at Write (the owner gave them all of Your Apps): its Preview's password too. Never at Read. */
 const SITE_SEEN_WRITE: Spec = { ...SITE_SEEN, previewPassword: true };
+
+/**
+ * A Write viewer's sites (as SITE_SEEN_WRITE kept them) with each Preview's password as Bops Cloud keeps it from whoever
+ * set it last (Workspace.previewPasswords, cloud/preview-passwords.ts: "<app>/<site>"), for a site whose Preview link is
+ * the one it was set for: that one over the copy the owner's Mac read (appsForMembers), which stays for a site Bops
+ * Cloud has none for. One for a link the site no longer has is never shown. One a share never reached is put right by
+ * the owner's Mac as it reads Orgo for members (lib/server/apps-for-members.ts fixCloudCopy), and each sender keeps
+ * trying its newest for about 20 minutes (lib/server/preview-password-share.ts).
+ */
+function withCloudPasswords(app: string, sites: unknown, kept: Record<string, unknown>): unknown {
+  if (!Array.isArray(sites)) return sites;
+  return sites.map((s) => {
+    if (!isObject(s) || typeof s.name !== "string" || typeof s.preview !== "string") return s;
+    const key = `${app}/${s.name}`;
+    const p = Object.hasOwn(kept, key) ? kept[key] : undefined;
+    if (!isObject(p) || p.url !== s.preview || typeof p.password !== "string" || !PREVIEW_PASSWORD.test(p.password)) return s;
+    return { ...s, previewProtected: true, previewPassword: p.password, ...(typeof p.at === "number" ? { previewPasswordAt: p.at } : {}) };
+  });
+}
 const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
 /** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
 const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
 const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, env: true, ok: true, said: true, at: true };
 const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
+/** An app's GitHub production as shown (repo and branch, as the owner's Bops checked them when set), or none when malformed. */
+const githubOf = (g: unknown): { repo: string; branch: string } | undefined =>
+  isObject(g) && typeof g.repo === "string" && typeof g.branch === "string" && g.repo.length <= 201 && g.branch.length <= 200 ? { repo: g.repo, branch: g.branch } : undefined;
 /** The most apps a member is shown. */
 const MAX_SHARED_APPS = 30;
 
@@ -353,8 +387,10 @@ export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer
  * Admin always has Write: viewerAccess). A workspace with no apps yet gives an empty list. Allow lists only: of each app's record its name, its
  * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
  * members (Workspace.appsForMembers) its head, sites (each with its Preview's link and state), history, deploys and
- * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. Never its
- * variables, tokens, keys, logs, error text, computer or project ids.
+ * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. The
+ * password is the one Bops Cloud keeps from whoever set it last (Workspace.previewPasswords: withCloudPasswords), else
+ * the owner's Mac's copy; it changes their slice, so a Write viewer watching gets a new fingerprint and reads it. Never
+ * its variables, tokens, keys, logs, error text, computer or project ids.
  */
 export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>): SharedApps | undefined {
   const open = appsOpenFor(viewer);
@@ -368,6 +404,8 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   if (!isObject(workspace.hostedApps)) return { level: write ? "write" : "read", at: 0, list: [] };
   const seen = isObject(workspace.appsForMembers) ? workspace.appsForMembers : {};
   const seenApps = isObject(seen.apps) ? seen.apps : {};
+  // Each Preview's password as whoever set it last told Bops Cloud: Write only, over the owner's Mac's copy.
+  const passwords = write && isObject(workspace.previewPasswords) ? workspace.previewPasswords : {};
   const list: SharedApp[] = Object.entries(workspace.hostedApps)
     .filter(([name, h]) => /^[a-z0-9-]{1,64}$/.test(name) && isObject(h))
     .slice(0, MAX_SHARED_APPS)
@@ -381,9 +419,11 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
         ...(typeof host.botId === "string" && botsSeen.has(host.botId) ? { botId: host.botId } : {}),
         ...(typeof host.url === "string" ? { url: host.url } : {}),
         ...(typeof host.lost === "number" ? { lost: true } : {}),
+        // Its production on GitHub (lib/hosted-apps.ts AppHosting.github): where Publish sends it, its repo and branch only.
+        ...(githubOf(host.github) ? { github: githubOf(host.github) } : {}),
         ...(sites.length ? { siteNames: sites } : {}),
         ...(got.head === null ? { head: null } : isObject(got.head) ? { head: keep(got.head, { id: true, message: true, at: true }) } : {}),
-        ...(Array.isArray(got.sites) ? { sites: keep(got.sites, [write ? SITE_SEEN_WRITE : SITE_SEEN]) } : {}),
+        ...(Array.isArray(got.sites) ? { sites: write ? withCloudPasswords(name, keep(got.sites, [SITE_SEEN_WRITE]), passwords) : keep(got.sites, [SITE_SEEN]) } : {}),
         ...(Array.isArray(got.commits) ? { commits: keep(got.commits, [COMMIT_SEEN]) } : {}),
         ...(Array.isArray(got.deploys) ? { deploys: keep(got.deploys, [DEPLOY_SEEN]) } : {}),
         ...(Array.isArray(got.acts) ? { acts: keep(got.acts, [ACT_SEEN]) } : {}),
@@ -411,6 +451,9 @@ function hostOf(b: Record<string, unknown>, bots: Record<string, unknown>[], dep
  * The computers the `shown` bots of workspace `ws` work on with two or more of them on one besides the main bot
  * (lib/bot-groups.ts groups them in the sidebar): each by a key of its own, a hash of the workspace and the computer's id (never the id), its bots
  * shown, the name the owner gave it (Workspace.computerNames) and its bot when that's one shown. Undefined: none.
+ * Where the bots shown on one computer work on two or more apps (Workspace.botSites), each app's are a group of their
+ * own, as the sidebar's (lib/bot-groups.ts byApp): keyed and named by the computer's id and the app (groupNameKey),
+ * named for the app when the owner gave it no name.
  */
 export function computersOf(blob: Record<string, unknown>, ws: string, workspace: Record<string, unknown> | null, shown: Record<string, unknown>[]): SharedGroup[] | undefined {
   const all = list(blob.bots);
@@ -425,19 +468,34 @@ export function computersOf(blob: Record<string, unknown>, ws: string, workspace
     hosts.set(h.computerId, h.id);
   }
   const names = isObject(workspace?.computerNames) ? workspace.computerNames : {};
+  const sites = isObject(workspace?.botSites) ? workspace.botSites : {};
+  const appOf = (id: string) => {
+    const x = Object.hasOwn(sites, id) ? sites[id] : undefined;
+    return isObject(x) && typeof x.app === "string" && x.app ? x.app : undefined;
+  };
   const out: SharedGroup[] = [];
   const main = new Set(shown.flatMap((b) => (b.isMain === true ? [b.id] : [])));
   for (const [computerId, bots] of on) {
-    // As the sidebar groups them: two or more besides the main bot, which keeps its own row.
-    if (bots.filter((id) => !main.has(id)).length < 2) continue;
-    const name = Object.hasOwn(names, computerId) && typeof names[computerId] === "string" ? (names[computerId] as string).slice(0, 40) : undefined;
     const host = hosts.get(computerId);
-    out.push({
-      key: `c${createHash("sha256").update(`${ws}:${computerId}`).digest("hex").slice(0, 16)}`,
-      bots,
-      ...(name ? { name } : {}),
-      ...(typeof host === "string" && ids.has(host) ? { host } : {}),
-    });
+    // As the sidebar groups them: two or more besides the main bot, which keeps its own row; one app's bots apart
+    // where they work on two or more (lib/bot-groups.ts byApp, whose order and keys these follow).
+    const rows = bots.filter((id) => !main.has(id));
+    const parts = new Map<string, string[]>();
+    for (const id of rows) parts.set(appOf(id) ?? "", [...(parts.get(appOf(id) ?? "") ?? []), id]);
+    const split = [...parts.keys()].filter(Boolean).length >= 2;
+    for (const [app, list] of split ? [...parts] : [["", rows] as [string, string[]]]) {
+      if (list.length < 2) continue;
+      const nameKey = app ? `${computerId}/${app}` : computerId;
+      const own = Object.hasOwn(names, nameKey) && typeof names[nameKey] === "string" ? (names[nameKey] as string).slice(0, 40) : undefined;
+      const name = own || app || undefined;
+      out.push({
+        key: groupKeyOf(ws, nameKey),
+        // The main bot shown on it stays with the computer's own group (it's never a row), as it always was.
+        bots: app ? list : bots.filter((id) => main.has(id) || list.includes(id)),
+        ...(name ? { name } : {}),
+        ...(typeof host === "string" && ids.has(host) ? { host } : {}),
+      });
+    }
   }
   return out.length ? out : undefined;
 }
@@ -572,7 +630,12 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   // Keys: the keys the workspace sees and each bot's (names only), for someone who has it (keysOf).
   const keys = !!access && keysOf(viewer);
   const keyNames = keys ? keyNamesOf(s.workspace) : undefined;
-  const botSpec = viewer.role === "admin" ? (keys ? ADMIN_KEYS_BOT : ADMIN_BOT) : keys ? KEYS_BOT : BOT;
+  // What they may change (member-access.ts Power: an Admin every one), and whether they see every bot (the org chart is theirs only then).
+  const can = access ? powersOf(viewer.role, access.can) : undefined;
+  // A bot's settings to someone with Bot settings (an Admin always), once the owner's Bops takes a Member's (`changes`).
+  const settings = viewer.role === "admin" || (!!viewer.changes && !!can?.includes("bots"));
+  const botSpec = settings ? (keys ? ADMIN_KEYS_BOT : ADMIN_BOT) : keys ? KEYS_BOT : BOT;
+  const seesAll = !!access && seesEveryBot(access, list(blob.bots).flatMap((b) => (typeof b.id === "string" && wsOfBot(b) === ws ? [b.id] : [])));
   return {
     workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
     bots: all(s.bots, botSpec),
@@ -601,8 +664,26 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     // Keys (keysOf), what the workspace's bots see of keys, and whether the owner's Bops takes their "key" act: part of
     // the fingerprint, so being given Keys, a key added or the owner updating gives them a new one.
     ...(keys ? { keys: true as const, ...(keyNames ? { keyNames } : {}), ...(viewer.keyActs ? { keyActs: true as const } : {}) } : {}),
+    // What they may change (member-access.ts Power), whether the owner's Bops takes it, and how their last changes went (changedFor).
+    // Part of the fingerprint: a switch turned on or off, the owner updating, or a change done gives them a new one.
+    ...(can?.length ? { can, ...(viewer.changes ? { changes: true as const } : {}), ...changedFor(s.workspace, viewer) } : {}),
+    // The org chart, to someone who may change it and sees every bot (one who doesn't would see ids of bots hidden from them).
+    ...(can?.includes("chart") && seesAll && isObject(s.workspace?.chain) ? { chain: s.workspace.chain as Record<string, unknown> } : {}),
   };
 }
+
+/** What the owner's Mac did with `viewer`'s last changes (Workspace.changesDone: by who made them), or nothing. */
+function changedFor(workspace: Record<string, unknown> | null, viewer: SliceViewer): { changed?: { key: string; ok: boolean; error?: string }[] } {
+  const done = Array.isArray(workspace?.changesDone) ? (workspace.changesDone as unknown[]) : [];
+  const mine = done.flatMap((d) => {
+    if (!isObject(d) || d.by !== viewer.id || typeof d.key !== "string" || typeof d.ok !== "boolean") return [];
+    return [{ key: d.key, ok: d.ok, ...(typeof d.error === "string" ? { error: d.error.slice(0, 300) } : {}) }];
+  });
+  return mine.length ? { changed: mine } : {};
+}
+
+/** Whether someone sees every bot of the workspace, the ones made later too (an Admin always): who may change the org chart. */
+export const seesEveryBot = (access: MemberAccess, botIds: readonly string[]) => access.others !== "none" && botIds.every((id) => levelOf(access, id) !== "none");
 
 /**
  * The Orgo computer each of the `shown` bots works on (hostOf: its own, or the main bot's it shares), by bot id: for an
@@ -686,6 +767,10 @@ export function sharedMessage(json: Record<string, unknown>, bots?: ReadonlySet<
     if (!(out.asked as unknown[]).length) delete out.asked;
   }
   if (bots && Array.isArray(out.sessionIds) && out.sessionIds.some(ofApp)) out.sessionIds = (out.sessionIds as unknown[]).filter((id) => !ofApp(id));
+  if (bots && Array.isArray(out.files)) {
+    out.files = (out.files as Record<string, unknown>[]).filter((f) => typeof f.botId === "string" && bots.has(f.botId));
+    if (!(out.files as unknown[]).length) delete out.files;
+  }
   return out;
 }
 
@@ -700,7 +785,20 @@ export const sharedMessages = (all: Record<string, unknown>[], bots?: ReadonlySe
 export function canonical(v: unknown): string {
   return JSON.stringify(v, (_k, x) => (isObject(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
 }
-const digest = (v: unknown) => createHash("sha256").update(canonical(v)).digest("base64url").slice(0, 22);
+/**
+ * What a fingerprint is worked out from: canonical, but with no Preview password in it (a site's previewPassword, the
+ * password of each Workspace.previewPasswords entry). A fingerprint only says whether something changed, so it never
+ * needs one, and what does change with each new password is in it: the entry's own time (previewPasswords' `at`, and a
+ * Write viewer's previewPasswordAt beside it), and for the owner's Mac's copy the time it wrote it (appsForMembers.at).
+ */
+function fingerprintText(v: unknown): string {
+  return JSON.stringify(v, (k, x) => {
+    if (k === "previewPassword") return undefined;
+    if (k === "previewPasswords" && isObject(x)) return Object.fromEntries(Object.keys(x).sort().map((n) => [n, isObject(x[n]) ? { at: x[n].at, url: x[n].url } : null]));
+    return isObject(x) ? Object.fromEntries(Object.keys(x).sort().map((n) => [n, x[n]])) : x;
+  });
+}
+const digest = (v: unknown) => createHash("sha256").update(fingerprintText(v)).digest("base64url").slice(0, 22);
 
 /** A fingerprint of one workspace's whole part (live.ts: did it change?). */
 export const fullHash = (blob: Record<string, unknown>, ws: string) => digest(sliceOf(blob, ws));

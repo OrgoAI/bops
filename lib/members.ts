@@ -9,8 +9,8 @@
  * lib/member-access.ts), with those bots' chats and threads: watched with Read, and with Write chatted with,
  * set to work, answered and stopped too (lib/shared.ts, cloud/members.ts). Never the user's Vault keys or this
  * Mac's logins.
- * Bops keeps none of this itself: orgo-web holds the list, the invites and the plan's rules (Free
- * adds nobody, Pro 2 people, Max up to 5), and the app shows what it says. Nobody is added from an
+ * Bops keeps none of this itself: orgo-web holds the list, the invites and the plan's rules (how many
+ * people each plan includes: 5 on Free and Pro, 10 on Max, no limit for staff, for now), and the app shows what it says. Nobody is added from an
  * orgo-web that doesn't send its numbers (seats): one from before that rule holds no plan to it.
  *
  * The roles, said plainly in the sheet and the switcher: Owner (the account that owns the workspace: everything),
@@ -44,7 +44,8 @@ export type Invite = { email: string; role: MemberRole; expiresAt: number | null
 /**
  * Where the plan stands on people: orgo-web's numbers, which it holds the workspace to (never the
  * app's guess). `limit`: people besides the user (null: no limit). `used`: people with access and
- * invites still waiting. `upgrade`: the plan with more room ("plan" from Free, "max" from Pro).
+ * invites still waiting. `upgrade`: the plan with more room ("plan" from Free, "max" from Pro), null
+ * when orgo-web offers none (Bops plans aren't sold now): then the sheet shows no upgrade button.
  */
 export type MemberSeats = {
   /** The Bops plan, or "usage": billed by use, the seats are the Orgo plan's. */
@@ -215,7 +216,22 @@ export const COMPUTER_WORDS = {
   legend: "Use its computer lets them wake the bots' computers and run anything there as administrator. Turn it on only for people you trust with those computers.",
   needsWrite: "Give them Write on a bot first. Using its computer comes with Write.",
   onWithoutWrite: "They can't write to any bot now, so turn this off. Using its computer comes with Write.",
-  afterJoin: "You can turn on Use its computer once they've joined.",
+  afterJoin: "You can turn on Use its computer and Keys once they've joined.",
+};
+
+/**
+ * The access panel's words (components/app/members.tsx BotAccess): its groups, and the two bot rows that aren't one bot.
+ * No dashes: shown as they are.
+ */
+export const ACCESS_WORDS = {
+  bots: "Bots",
+  all: "All bots",
+  allTip: "Sets every bot here, and bots you make later.",
+  allMixed: "Not every bot is the same. Pick here to set them all to one level.",
+  later: "Bots you make later",
+  laterTip: "Where a bot you make later starts. The bots above keep their own.",
+  more: "Apps and computers",
+  moreNoApps: "Computers",
 };
 
 /**
@@ -270,6 +286,9 @@ export const WORDS = {
   orgoNotReadyShort: "Adding people isn't ready on Orgo yet.",
   upgradeRequired: "Your plan doesn't include adding people right now.",
   seatLimit: "Your plan has no room for more people right now.",
+  /** Beside Invited, when they can't be accepted now: the plan includes nobody, or more people than it includes. */
+  invitedNone: "Your plan doesn't include other people right now. Cancel invites or remove people.",
+  invitedOver: "You have more people than your plan includes. Cancel invites or remove people.",
   rateLimited: "That's a lot of invites for now. Try again in an hour.",
   self: "That's your own email.",
   badEmail: "Check the email address.",

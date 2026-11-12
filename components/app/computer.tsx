@@ -14,6 +14,7 @@ import { WatchSheet } from "./watch-sheet";
 import { WatchBadge, WatchOverlay } from "./watch-overlay";
 import { EmailCard, PaymentCard, SignInCard } from "./screen-cards";
 import { Mascot } from "./mascot";
+import { ScreenDrops, useScreenDrop } from "./attachments";
 import { PlanNote, usePlan } from "./plan-note";
 import { canWake, OUT_OF_CREDIT_WAKE } from "@/lib/bops-billing";
 import { freeHoursOutLine } from "@/lib/plan-includes";
@@ -144,6 +145,8 @@ export function ComputerView({
   // A shared workspace's bot works on the owner's computer or Mac, which nothing here streams: a screen
   // read by its id (the mirror, a screenshot, a page read) would be the viewer's own bot's of that id.
   const hasComputer = !state.shared && (mac || (!!c.computerId && c.computerStatus === "ready"));
+  // Files dropped on its screen go on that computer's Desktop (lib/server/bot-files.ts): a cloud computer's only.
+  const screenDrop = useScreenDrop(hasComputer && !mac ? b.id : undefined);
   // A task or the user on it wakes it, when it's asleep: nothing streams or reads its screens till then.
   const inUse = !mac && computerInUse(state, here);
   const { info, recheck } = useComputer(b.id, mac ? undefined : c.computerId, inUse);
@@ -478,7 +481,7 @@ export function ComputerView({
                   {s ? (
                     <>
                       <Mascot botId={botOn(d).id} color={botOn(d).color} size={13} antenna={false} />
-                      <span className="shrink-0 font-semibold">{whoOn(d)}</span>
+                      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{whoOn(d)}</span>
                       <span className="truncate text-[#3A3A38]">{doingOn(d)}</span>
                     </>
                   ) : (
@@ -523,10 +526,12 @@ export function ComputerView({
     <div
       data-screen={screenNo(display)}
       data-tiles={tiles.length || 1}
-      className={`flex min-h-0 flex-1 flex-col gap-3 ${mode === "focus" ? "px-5 pb-4 pt-3.5" : ""}`}
+      className={`relative flex min-h-0 flex-1 flex-col gap-3 ${mode === "focus" ? "px-5 pb-4 pt-3.5" : ""}`}
       // In the panel, the screen, its thumbnails and the status sit together in the middle.
       style={centered ? { containerType: "size", justifyContent: "center" } : undefined}
+      {...screenDrop.dropProps}
     >
+      <ScreenDrops over={screenDrop.over} drops={screenDrop.drops} onClose={screenDrop.close} host={c.name} />
       {mode === "focus" ? (
         <div className="flex items-center gap-2.5">
           <button onClick={onBack} className="flex items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
@@ -934,13 +939,13 @@ export function ComputerView({
                   {tasks.includes(d) ? (
                     <>
                       <Mascot botId={yours(d) ? b.id : botOn(d).id} color={yours(d) ? b.color : botOn(d).color} size={14} antenna={false} />
-                      <span className="shrink-0 font-semibold">{whoOn(d)}</span>
+                      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{whoOn(d)}</span>
                       <span className={`truncate ${inView ? "text-ink" : "text-[#6B6B6B]"}`}>{doingOn(d)}</span>
                     </>
                   ) : w ? (
                     <>
                       <EyeIcon />
-                      <span className="shrink-0 font-semibold">{w.site}</span>
+                      <span className="min-w-0 shrink-[0.01] truncate font-semibold">{w.site}</span>
                       {alert && <span className="truncate rounded-[4px] bg-highlighter px-1 text-ink">{w.alert!.text}</span>}
                     </>
                   ) : infoOn(d)?.kind === "held" ? (
@@ -1342,6 +1347,9 @@ function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
   const [failed, setFailed] = useState(false);
   const [control, setControl] = useState(false);
   const orgoUrl = state.shared?.orgoUrl;
+  // Files dropped on it go on that computer's Desktop, for whoever is shown it and may take control (an Admin: Bops Cloud
+  // checks it again, cloud/members.ts filesIn), with their own Orgo key (lib/server/bot-files.ts).
+  const screenDrop = useScreenDrop(b.id);
   if (failed)
     return (
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 py-2 text-[14px] leading-5 text-[#6B6B6B]">
@@ -1355,8 +1363,9 @@ function SharedScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
     );
   return (
     <div data-shared-screen className="flex flex-col gap-2">
-      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-[20px] bg-black" style={{ backgroundImage: botWash(b) }}>
+      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-[20px] bg-black" style={{ backgroundImage: botWash(b) }} {...screenDrop.dropProps}>
         <LiveDesktop botId={b.id} display={99} interactive={control} planUrl={`/api/workspaces/shared/screen?bot=${encodeURIComponent(b.id)}`} bot={b} busy={control} onFail={() => setFailed(true)} className="h-full w-full" />
+        <ScreenDrops over={screenDrop.over} drops={screenDrop.drops} onClose={screenDrop.close} host={workBot(b, state.bots).name} />
       </div>
       <div className="flex flex-wrap items-center gap-2 px-1">
         <button type="button" onClick={() => setControl((x) => !x)} className={`rounded-full px-3 py-1 text-[13px] font-medium leading-4 ${control ? "bg-ink text-white" : "text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-black/[0.04]"}`}>
@@ -1534,7 +1543,7 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
               <div className="flex min-w-0 items-center gap-[5px] text-[11px] leading-[14px]">
                 <StatusDot kind={t.kind} pulse={t.kind === "needsYou"} shared={!!state.shared} />
                 {who && <Mascot botId={who.id} color={who.color} size={14} antenna={false} />}
-                <span className="shrink-0 font-semibold">{who?.name ?? "A bot"}</span>
+                <span className="min-w-0 shrink-[0.01] truncate font-semibold">{who?.name ?? "A bot"}</span>
                 <span className="shrink-0 tabular-nums text-[#9A9A98]">{t.no}</span>
                 <span className="truncate text-[#6B6B6B]">{words}</span>
               </div>

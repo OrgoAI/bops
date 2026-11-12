@@ -54,6 +54,7 @@ globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({})
 
 const S = await import(pathToFileURL(`${root}/components/app/members.tsx`).href);
 const M = await import(pathToFileURL(`${root}/lib/members.ts`).href);
+const { POWERS } = await import(pathToFileURL(`${root}/lib/member-access.ts`).href);
 const A = await import(pathToFileURL(`${root}/lib/member-access.ts`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
@@ -120,37 +121,52 @@ function rowsOf(html) {
   }));
 }
 
-await test("the picker: Every bot first, then each bot with its mascot, one line each, None, Read or Write", () => {
+await test("the picker: three groups, each named; All bots, then each bot with its mascot, then bots made later, one line each, None, Read or Write", () => {
   const html = renderToStaticMarkup(h(S.BotAccess, { bots: S.sheetBots(base), value: { others: "none", bots: { boppy: "read", sam: "write" } }, onChange: noop }));
   const rows = rowsOf(html);
   assert.deepEqual(
     rows.map((r) => `${r.name}: ${r.levels}${r.mascot ? " (mascot)" : ""}`),
-    ["Every bot, new ones too: [None] Read Write", "Boppy: None [Read] Write (mascot)", "Sam: None Read [Write] (mascot)", "Use its computer: [Off] On"],
+    ["All bots: None Read Write", "Boppy: None [Read] Write (mascot)", "Sam: None Read [Write] (mascot)", "Bots you make later: [None] Read Write", "Use its computer: [Off] On"],
   );
   for (const r of rows.slice(0, -1)) assert.deepEqual(r.tips.slice(-3), [M.ACCESS_TIPS.none, M.ACCESS_TIPS.read, M.ACCESS_TIPS.write], `${r.name}: each level says what it does`);
   assert.equal(M.ACCESS_TIPS.write, "Can chat with this bot, have it do work, answer what it asks and stop it. Never your logins, keys or Macs.");
-  // Under the rows, what each level means, said plainly once.
+  // Each group has its name over it: Bots, then Computers (Your Apps isn't open here), then What they can change.
+  assert.deepEqual([...html.matchAll(/<h4[^>]*>([^<]*)<\/h4>/g)].map(([, t]) => t), [M.ACCESS_WORDS.bots, M.ACCESS_WORDS.moreNoApps, S.POWER_SHEET_WORDS.title]);
+  // Under the bots, what each level means, said plainly once.
   const levels = html.match(/<ul data-access-levels[^>]*>([\s\S]*?)<\/ul>/)?.[1] ?? "";
   assert.deepEqual(
     [...levels.matchAll(/<li>([\s\S]*?)<\/li>/g)].map(([, li]) => li.replace(/<[^>]+>/g, "").replace(/&#x27;/g, "'")),
     ["None: can't see this bot in Bops. On orgo.ai they still see its computer.", "Read: sees everything this bot does, including your chats with it.", "Write: can chat with this bot, have it do work, answer what it asks and stop it. Never your logins, keys or Macs."],
   );
-  assert.equal((html.match(/truncate/g) ?? []).length, 4, "every name is cut short, not wrapped");
+  // Every name is cut short: the five rows above, and each of What they can change (member-access.ts POWERS), all off.
+  assert.equal((html.match(/truncate/g) ?? []).length, 5 + POWERS.length, "every name is cut short, not wrapped");
+  const powers = [...html.matchAll(/data-power="([a-zA-Z]+)"[\s\S]*?aria-checked="true"[^>]*>([^<]+)</g)].map(([, p, on]) => `${p}: ${on}`);
+  assert.deepEqual(powers, POWERS.map((p) => `${p}: Off`), "every switch, off until turned on");
   assert.match(html, /aria-label="What they can do with Sam"/);
-  // Single bots set apart: Every bot's level is only the new bots', lighter, and says so, to a screen reader too.
-  const group = html.match(/<div role="radiogroup" aria-label="What they can do with bots you make later" aria-describedby="([^"]+)"[\s\S]*?<\/div>/);
-  assert.ok(group, "named for what its level is now: bots made later");
-  assert.match(group[0], /aria-checked="true"[^>]*class="[^"]*bg-white\/60/);
-  assert.match(rowsOf(html)[0].tips[0], /^Bots you make later: None\. Pick here to set every bot below too\.$/);
-  assert.match(html, new RegExp(`<span id="${group[1]}" class="sr-only">Bots you make later: None\\. Pick here to set every bot below too\\.</span>`));
+  // Single bots set apart: All bots has none picked, and says so on hover, to a screen reader too.
+  assert.match(html, /aria-label="What they can do with All bots"/);
+  assert.equal(rows[0].tips[0], M.ACCESS_WORDS.allMixed);
+  assert.match(rows.at(-2).tips[0], /^Where a bot you make later starts\. The bots above keep their own\.$/);
   const same = renderToStaticMarkup(h(S.BotAccess, { bots: S.sheetBots(base), value: { others: "read", bots: {} }, onChange: noop }));
-  assert.ok(!/bg-white\/60/.test(same), "every bot alike: Every bot's level shows as picked");
-  assert.match(same, /aria-label="What they can do with Every bot, new ones too"/);
+  assert.equal(rowsOf(same)[0].levels, "None [Read] Write", "every bot alike: All bots shows it picked");
+  assert.equal(rowsOf(same)[0].tips[0], M.ACCESS_WORDS.allTip);
+  for (const v of Object.values(M.ACCESS_WORDS)) assert.ok(!/[–—]/.test(v) && !v.includes(" - ") && !/orbit/i.test(v), v);
+});
+
+await test("bots made later: only their level changes, each bot keeps its own; All bots sets every one; Use its computer and the switches stay", () => {
+  const a = { others: "none", bots: { boppy: "write" }, computer: "use", can: { chart: true } };
+  assert.deepEqual(S.withOthers(a, ["boppy", "sam"], "read"), { others: "read", bots: { boppy: "write", sam: "none" }, computer: "use", can: { chart: true } });
+  assert.deepEqual(S.withOthers(a, ["boppy", "sam"], "write"), { others: "write", bots: { sam: "none" }, computer: "use", can: { chart: true } });
+  assert.deepEqual(S.withLevel(a, "sam", "read"), { others: "none", bots: { boppy: "write", sam: "read" }, computer: "use", can: { chart: true } }, "a bot picked keeps the switches");
+  assert.deepEqual(S.withLevel(a, null, "read"), { others: "read", bots: {}, computer: "use", can: { chart: true } });
+  assert.equal(S.allLevel({ others: "read", bots: {} }, ["boppy"]), "read");
+  assert.equal(S.allLevel({ others: "read", bots: { boppy: "none" } }, ["boppy"]), undefined);
+  for (const x of [S.withOthers(a, ["boppy", "sam"], "read"), S.withOthers(a, ["boppy", "sam"], "none")]) assert.deepEqual(A.cleanAccess(x), x);
 });
 
 await test("a bot added later shows at the level for bots not named", () => {
   const rows = rowsOf(renderToStaticMarkup(h(S.BotAccess, { bots: S.sheetBots(base), value: { others: "read", bots: { boppy: "none" } }, onChange: noop })));
-  assert.deepEqual(rows.map((r) => r.levels), ["None [Read] Write", "[None] Read Write", "None [Read] Write", "[Off] On"]);
+  assert.deepEqual(rows.map((r) => r.levels), ["None Read Write", "[None] Read Write", "None [Read] Write", "None [Read] Write", "[Off] On"], "All bots: none picked while they differ");
 });
 
 await test("a bot named Constructor is at the level kept for it, never one read off the object", () => {
@@ -158,7 +174,7 @@ await test("a bot named Constructor is at the level kept for it, never one read 
   const none = { others: "none", bots: {} };
   assert.equal(A.accessSummary(none, bots.map((b) => b.id)), "No bots");
   const rows = rowsOf(renderToStaticMarkup(h(S.BotAccess, { bots, value: none, onChange: noop })));
-  assert.deepEqual(rows.map((r) => `${r.name}: ${r.levels}`), ["Every bot, new ones too: [None] Read Write", "Boppy: [None] Read Write", "Sam: [None] Read Write", "Constructor: [None] Read Write", "Use its computer: [Off] On"]);
+  assert.deepEqual(rows.map((r) => `${r.name}: ${r.levels}`), ["All bots: [None] Read Write", "Boppy: [None] Read Write", "Sam: [None] Read Write", "Constructor: [None] Read Write", "Bots you make later: [None] Read Write", "Use its computer: [Off] On"]);
 });
 
 /* ---------------- The sheet, clicked ---------------- */
@@ -271,7 +287,8 @@ await test("the owner says Every bot; a person and an invite say which bots, and
   assert.match(summaryOf(alex), /^Every bot, 1 to write, new bots to read · expires Oct 28$/);
   assert.equal(buttonOf(alex, "Member").getAttribute("aria-checked"), "true", "an invite's role too");
   assert.equal(summaryOf(box.querySelector("form")), "Every bot, read", "an invite starts with every bot there now to read");
-  assert.equal(box.querySelector("[data-bot-access]"), null, "no picker open until asked");
+  assert.ok(box.querySelector("form [data-bot-access]"), "the invite form shows what they get, open from the start");
+  assert.equal(box.querySelectorAll("[data-bot-access]").length, 1, "and no person's picker open until asked");
   await done();
 });
 
@@ -292,14 +309,13 @@ await test("an invite goes out with the bots chosen, and the form starts over af
   const fake = bops();
   const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
   const form = box.querySelector("form");
-  await click(buttonOf(form, "Choose bots"));
   const picker = form.querySelector("[data-bot-access]");
-  assert.ok(picker, "Choose bots opens the picker in the form");
+  assert.ok(picker, "the picker is open in the form from the start");
   assert.equal(buttonOf(form, "Choose bots").getAttribute("aria-expanded"), "true");
   await click(levelButton(picker, "Sam", "Write"));
   assert.equal(summaryOf(form), "Every bot, 1 to write");
-  await click(levelButton(picker, "bots you make later", "None"));
-  assert.equal(summaryOf(form), "No bots", "Every bot sets each bot too");
+  await click(levelButton(picker, "All bots", "None"));
+  assert.equal(summaryOf(form), "No bots", "All bots sets each bot too");
   assert.equal(levelButton(picker, "Sam", "None").getAttribute("aria-checked"), "true");
   await click(levelButton(picker, "Boppy", "Read"));
   assert.equal(summaryOf(form), "1 bot, read");
@@ -308,7 +324,7 @@ await test("an invite goes out with the bots chosen, and the form starts over af
   // (Your Apps rides along at Read, a new invite's default: lib/member-access.ts inviteDefault.)
   assert.deepEqual(fake.sent, [{ method: "POST", body: { email: "riley@example.com", role: "viewer", access: { others: "none", bots: { boppy: "read" }, apps: "read" } } }]);
   assert.equal(summaryOf(box.querySelector("form")), "Every bot, read", "back to the default after it's sent");
-  assert.equal(box.querySelector("form [data-bot-access]"), null, "and the picker closed");
+  assert.ok(box.querySelector("form [data-bot-access]"), "and the picker open again");
   // Not chosen: every bot there now to read, new ones hidden.
   await type(box.querySelector("form input"), "sky@example.com");
   await submit(box.querySelector("form"));
@@ -378,11 +394,11 @@ await test("a change Bops turns down goes back to what was saved, with why under
   const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
   await click(buttonOf(rowOf(box, "Jamie Lee"), "Bots"));
   fake.refuse = true;
-  await click(levelButton(rowOf(box, "Jamie Lee").querySelector("[data-bot-access]"), "bots you make later", "Read"));
+  await click(levelButton(rowOf(box, "Jamie Lee").querySelector("[data-bot-access]"), "Bots you make later", "Read"));
   assert.equal(fake.sent.length, 1);
   const jamie = rowOf(box, "Jamie Lee");
   assert.equal(summaryOf(jamie), "1 bot, read", "back to what Bops has");
-  assert.equal(levelButton(jamie, "bots you make later", "None").getAttribute("aria-checked"), "true");
+  assert.equal(levelButton(jamie, "Bots you make later", "None").getAttribute("aria-checked"), "true");
   assert.equal(jamie.querySelector('[role="alert"]')?.textContent, "Couldn't change their bots. Try again.");
   await done();
 });
@@ -397,7 +413,6 @@ await test("an invite sent again keeps its bots, from its row or the form", asyn
   await type(form.querySelector("input"), "Alex@Example.com");
   assert.ok(buttonOf(form, "Resend invite"));
   assert.equal(summaryOf(form), "Every bot, 1 to write, new bots to read");
-  await click(buttonOf(form, "Choose bots"));
   assert.equal(levelButton(form, "Sam", "Write").getAttribute("aria-checked"), "true", "the picker starts from them");
   await submit(form);
   assert.deepEqual(fake.sent[1].body, { email: "alex@example.com", role: "viewer", access: { others: "read", bots: { sam: "write" } } });
@@ -484,7 +499,6 @@ await test("no dashes, and the sheet says the bots you pick, never the saved log
   }
   bops();
   const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
-  await click(buttonOf(box.querySelector("form"), "Choose bots"));
   await click(buttonOf(rowOf(box, "Jamie Lee"), "Bots"));
   noDashes(box.textContent);
   assert.match(box.textContent, /In Bops they see everything of the bots you pick, your chats with them too\./);
@@ -601,7 +615,6 @@ await test("Your Apps: a row of its own beside the bots under Access, Read for a
   assert.deepEqual(fake.sent.at(-1).body.access, { others: "none", bots: { boppy: "read", sam: "read" }, apps: "write" });
   // The invite form's picker has it too, and sends it.
   const form = m.box.querySelector("form");
-  await click(buttonOf(form, "Choose access"));
   await click(levelButton(form.querySelector("[data-bot-access]"), "Your Apps", "None"));
   assert.equal(summaryOf(form), "Every bot, read", "nothing said at None");
   await type(form.querySelector("input"), "riley@example.com");
@@ -740,12 +753,11 @@ await test("Use its computer goes to Orgo first: turned down it stays as it was,
   // An invite: the row is there, off and can't be turned on, even with Write and one kept from before; it says why.
   const html = renderToStaticMarkup(h(S.BotAccess, { bots: S.sheetBots(base), value: { others: "none", bots: { boppy: "write" }, computer: "use" }, onChange: noop, invite: true }));
   assert.equal(rowsOf(html).at(-1).levels, "[Off] On");
-  assert.match(html, /<span data-computer-note[^>]*>You can turn on Use its computer once they&#x27;ve joined\.<\/span>/);
+  assert.match(html, /<span data-computer-note[^>]*>You can turn on Use its computer and Keys once they&#x27;ve joined\.<\/span>/);
   assert.match(html, /role="radio" aria-checked="false" disabled=""[^>]*>On</);
   bops();
   const f = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
   const form = f.box.querySelector("form");
-  await click(buttonOf(form, "Choose bots"));
   await click(levelButton(form, "Boppy", "Write"));
   assert.equal(buttonOf(form.querySelector('[aria-label="Use its computer"]'), "On").disabled, true, "Write in the form: still not until they've joined");
   assert.equal(form.querySelector("[data-computer-note]").textContent, M.COMPUTER_WORDS.afterJoin);
@@ -794,6 +806,75 @@ await test("Keys: a switch per Member beside Use its computer, sent as {memberId
   for (const v of Object.values(M.KEYS_WORDS)) assert.ok(!/[–—]/.test(v) && !v.includes(" - ") && !/orbit/i.test(v), v);
 });
 
+/* ---------------- Free with people included ---------------- */
+
+/** A section of the sheet by its title, and what its header says beside the title. */
+const sectionOf = (box, title) => [...box.querySelectorAll("span")].find((s) => s.textContent === title)?.parentElement?.parentElement;
+const asideOf = (box, title) => sectionOf(box, title)?.firstElementChild?.children[1]?.textContent ?? null;
+
+await test("Free with people included (orgo-web's numbers, never the plan's name): the form and its counter while there's room, no plan to buy when full, and invites accepted until there are more than it includes", async () => {
+  const caps = { pro_bops: 2, max_bops: 5 };
+  const sheet = async (seats, change) => {
+    const fake = bops();
+    fake.info.seats = { plan: "free_bops", upgrade: null, caps, ...seats };
+    change?.(fake.info);
+    return mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  };
+  // 0 of 5: nobody yet, the form and its counter.
+  let m = await sheet({ canAdd: true, limit: 5, used: 0 }, (info) => ((info.people = []), (info.invites = [])));
+  assert.ok(sectionOf(m.box, "Add someone").querySelector("form"), "the invite form");
+  assert.equal(asideOf(m.box, "Add someone"), "0 of 5 people");
+  assert.equal(sectionOf(m.box, "Invited"), undefined, "no invites, no Invited");
+  await m.done();
+  // 2 of 5: still the form; the invite waiting can be accepted.
+  m = await sheet({ canAdd: true, limit: 5, used: 2 });
+  assert.ok(sectionOf(m.box, "Add someone").querySelector("form"));
+  assert.equal(asideOf(m.box, "Add someone"), "2 of 5 people");
+  assert.equal(asideOf(m.box, "Invited"), null, "the invite can be accepted");
+  assert.ok(!m.box.textContent.includes("Can't be accepted"));
+  await m.done();
+  // 5 of 5: why not, with the counter, and no button to a plan that can't be bought.
+  m = await sheet({ canAdd: false, limit: 5, used: 5 });
+  const add = sectionOf(m.box, "Add someone");
+  assert.equal(add.querySelector("form"), null);
+  assert.equal(asideOf(m.box, "Add someone"), "5 of 5 people");
+  assert.ok(add.textContent.includes("Bops includes 5 people, and you have 5. Remove someone or cancel an invite to add someone else."), add.textContent);
+  assert.ok(!/Free doesn't include|Pro|Max/.test(add.textContent), "never says Free adds nobody, nor names a plan to buy");
+  assert.equal(add.querySelector("button"), null, "no Purchase a plan, no Upgrade to Max");
+  assert.equal(asideOf(m.box, "Invited"), null, "a full plan's invites still hold their seats: they can be accepted");
+  await m.done();
+  // Over it (more than it includes, from before): the invites can't be accepted, and the tip says to make room, not upgrade.
+  m = await sheet({ canAdd: false, limit: 5, used: 7 });
+  assert.equal(asideOf(m.box, "Add someone"), null, "\"7 of 5\" would only puzzle");
+  assert.equal(asideOf(m.box, "Invited"), "Can't be accepted right now");
+  const tip = sectionOf(m.box, "Invited").firstElementChild.children[1].getAttribute("data-tip");
+  assert.equal(tip, M.WORDS.invitedOver);
+  assert.ok(!/upgrade|Pro|Max/i.test(tip));
+  assert.equal(buttonOf(m.box, "Purchase a plan"), undefined);
+  await m.done();
+  // An orgo-web that still says Free adds nobody (limit 0): those words, no counter, and its invites can't be accepted.
+  m = await sheet({ canAdd: false, limit: 0, used: 1 }, (info) => (info.people = []));
+  assert.equal(asideOf(m.box, "Add someone"), null);
+  assert.ok(sectionOf(m.box, "Add someone").textContent.includes("Free doesn't include adding people."));
+  assert.equal(buttonOf(m.box, "Purchase a plan"), undefined, "no button unless orgo-web offers an upgrade");
+  assert.equal(sectionOf(m.box, "Invited").firstElementChild.children[1].getAttribute("data-tip"), M.WORDS.invitedNone);
+  await m.done();
+  // ...and with the upgrade orgo-web offers, its button.
+  m = await sheet({ canAdd: false, limit: 0, used: 0, upgrade: "plan" }, (info) => ((info.people = []), (info.invites = [])));
+  assert.ok(buttonOf(m.box, "Purchase a plan"));
+  await m.done();
+  // Pro full, with an upgrade to Max offered: still its button; offered none, none.
+  m = await sheet({ plan: "pro_bops", canAdd: false, limit: 2, used: 2, upgrade: "max" });
+  assert.ok(buttonOf(m.box, "Upgrade to Max"));
+  assert.equal(asideOf(m.box, "Add someone"), "2 of 2 people");
+  await m.done();
+  m = await sheet({ plan: "pro_bops", canAdd: false, limit: 2, used: 2, upgrade: null });
+  assert.equal(buttonOf(m.box, "Upgrade to Max"), undefined);
+  assert.ok(!/Max|upgrade/i.test(sectionOf(m.box, "Add someone").textContent), sectionOf(m.box, "Add someone").textContent);
+  await m.done();
+  for (const t of [M.WORDS.invitedNone, M.WORDS.invitedOver]) assert.ok(!/[–—]/.test(t) && !t.includes(" - "), t);
+});
+
 /* ---------------- An Admin's sheet of a workspace shared with them ---------------- */
 
 await test("an Admin's sheet: the owner's row has no controls and says what stays theirs; their own row says You, with Leave; Member or Admin, never Owner; no plan to upgrade", async () => {
@@ -830,6 +911,26 @@ await test("an Admin's sheet: the owner's row has no controls and says what stay
   assert.ok(box.textContent.includes(M.ADMIN_WORDS.confirmBodyShared), "the Make Admin question in an Admin's words");
   globalThis.fetch = real;
   await done();
+});
+
+await test("an Admin's sheet of a full workspace with no plan to buy: why, and never to ask the owner for more seats; billed by use, still to ask", async () => {
+  const sheet = async (seats) => {
+    const fake = bops();
+    fake.info.people.push({ id: "m2", name: "Ada Admin", email: "ada@example.com", role: "admin", guest: false, access: { others: "none", bots: {} } });
+    fake.info.shared = { me: "m2", can: true };
+    fake.info.seats = { ...fake.info.seats, canAdd: false, ...seats };
+    const admin = { ...base, shared: { projectId: "p9", name: "Acme", owner: "tess@example.com", role: "admin", wsId: "shared_p9", adminActs: true } };
+    return mount(h(S.Members, { state: admin, onClose: noop, onUpgrade: noop, source: "/api/workspaces/shared/people" }));
+  };
+  let m = await sheet({ plan: "free_bops", used: 5, limit: 5, upgrade: null });
+  const add = sectionOf(m.box, "Add someone");
+  assert.ok(add.textContent.includes("Bops includes 5 people, and you have 5."), add.textContent);
+  assert.ok(!m.box.textContent.includes(M.ADMIN_SHEET_WORDS.seats), "the owner has no more seats to get");
+  assert.equal(buttonOf(m.box, "Upgrade to Max"), undefined);
+  await m.done();
+  m = await sheet({ plan: "usage", used: 1, limit: 1, upgrade: null });
+  assert.ok(m.box.textContent.includes(M.ADMIN_SHEET_WORDS.seats), "the owner can upgrade their Orgo plan");
+  await m.done();
 });
 
 await test("an Admin's sheet while orgo-web or Bops Cloud don't let them change people: it reads only, says why, and Leave still goes", async () => {

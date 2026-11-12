@@ -1,15 +1,18 @@
 import "server-only";
-import { isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
+import { cleanChange } from "@/cloud/change-routes";
+import { cleanMemberFiles, isAppAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
 import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
 import { botChatId, keptPersona, workBot, workspaceOf, type MemberSaid, type MemberTurn, type Message, type Workspace } from "@/lib/types";
+import type { AddedFile } from "@/lib/added-files";
 import { answerMessage, handleMessage } from "./chat";
 import { replyToAsk } from "./permission";
 import { onRunner } from "./persist";
 import { compactThread, dismissWaiting, replyToSession, setWhere, stopSession } from "./sessions";
 import { compactChat } from "./chat-summary";
+import { changeRefused, doChange, refuseChange } from "./change-acts";
 import { addMessage, bot, chat, getState, ownerName, pullState, session, update } from "./store";
 import type { OrgoMember } from "./orgo";
 
@@ -51,7 +54,13 @@ const short = (v: unknown, max: number) => typeof v === "string" && v.length > 0
 function actOf(a: unknown): MemberAct | null {
   if (!a || typeof a !== "object") return null;
   const x = a as Record<string, unknown>;
-  if (x.act === "chat") return short(x.chatId, 120) && short(x.text, MEMBER_MAX_TEXT) && (x.replyTo === undefined || short(x.replyTo, 120)) ? (x as MemberAct) : null;
+  // Words, files on a bot's computer already (cloud/protocol.ts cleanMemberFiles), or both.
+  if (x.act === "chat") {
+    const files = cleanMemberFiles(x.files);
+    const text = typeof x.text === "string" && x.text.length <= MEMBER_MAX_TEXT ? x.text : null;
+    if (!short(x.chatId, 120) || !files || text === null || (!text.trim() && !files.length) || (x.replyTo !== undefined && !short(x.replyTo, 120))) return null;
+    return { act: "chat", chatId: x.chatId as string, text, ...(typeof x.replyTo === "string" ? { replyTo: x.replyTo } : {}), ...(files.length ? { files } : {}) };
+  }
   if (x.act === "reply") return short(x.sessionId, 120) && short(x.text, MEMBER_MAX_TEXT) ? (x as MemberAct) : null;
   if (x.act === "answer") return short(x.askId, 120) && ["once", "always", "reject"].includes(x.reply as string) && (x.message === undefined || (typeof x.message === "string" && x.message.length <= MEMBER_MAX_NOTE)) ? (x as MemberAct) : null;
   if (x.act === "stop") return Array.isArray(x.sessionIds) && x.sessionIds.length > 0 && x.sessionIds.length <= MEMBER_STOP_MAX && x.sessionIds.every((id) => short(id, 120)) ? (x as MemberAct) : null;
@@ -63,6 +72,10 @@ function actOf(a: unknown): MemberAct | null {
     return short(x.botId, 120) && [x.text, x.was].every((v) => typeof v === "string" && v.length <= MEMBER_MAX_TEXT) ? { act: "persona", botId: x.botId as string, text: x.text as string, was: x.was as string } : null;
   if (x.act === "key") return short(x.botId, 120) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" ? { act: "key", botId: x.botId as string, name: x.name, on: x.on } : null;
   if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain") return appActOf(x);
+  if (x.act === "change") {
+    const call = cleanChange(x);
+    return call ? { act: "change", ...call } : null;
+  }
   return null;
 }
 
@@ -183,6 +196,8 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
   if (!ws) return "no such workspace";
   const access = accessFor(p, who, admin);
   if (!access) return "access from before they joined";
+  // An Admin, or a Member with the switch a power needs (member-access.ts POWER_OF, MemberAccess.can).
+  const me = { admin, ...(access.can ? { can: access.can } : {}) };
   const apps = appsOpen(getState()) && appsLevelOf(access) === "write";
   const threadOk = (id: string) => {
     const s = session(id);
@@ -201,9 +216,11 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     const h = ws.hostedApps?.[act.app];
     if (!h || !sitesOfHosting(h, act.app).includes(act.site ?? act.app)) return "no such app";
     // Publish, or going back on Published: the owner's and an Admin's (member-access.ts ADMIN_POWERS).
-    if (isPublish(act) && !adminMay("publish", admin)) return "not an Admin";
+    if (isPublish(act) && !adminMay("publish", me)) return "not an Admin";
     return null;
   }
+  // A change as the owner's window makes it (change-acts.ts): the power it needs, this workspace's bots and apps alone.
+  if (act.act === "change") return changeRefused(ws.id, act, admin ? "admin" : "member", access);
   // Compact: a chat's as saying something there, a thread's as replying in it.
   const as: MemberAct = act.act === "compact" ? ("chatId" in act ? { act: "chat", chatId: act.chatId, text: "" } : { act: "reply", sessionId: act.sessionId, text: "" }) : act;
   switch (as.act) {
@@ -216,11 +233,11 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     case "reply":
     case "dismiss":
       if (!threadOk(as.sessionId)) return "not at Write";
-      if (threadOwnersOnly(session(as.sessionId), admin)) return "on the owner's Mac";
+      if (threadOwnersOnly(session(as.sessionId), me)) return "on the owner's Mac";
       return !computer && onComputer(as.sessionId) ? "no computer" : null;
     case "where": {
       // An Admin's (member-access.ts ADMIN_POWERS), and only to the bot's computer: the owner's Mac is theirs to pick.
-      if (!adminMay("where", admin)) return "not an Admin";
+      if (!adminMay("where", me)) return "not an Admin";
       if (as.to !== "cloud") return "on the owner's Mac";
       if (!threadOk(as.sessionId)) return "not at Write";
       return session(as.sessionId)?.askWhere ? null : "not waiting";
@@ -237,7 +254,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     }
     // A bot's "How I work": an Admin's (member-access.ts ADMIN_POWERS.instructions), for a bot of this workspace.
     case "persona": {
-      if (!adminMay("instructions", admin)) return "not an Admin";
+      if (!adminMay("instructions", me)) return "not an Admin";
       const b = bot(as.botId);
       if (!b || workspaceOf(b) !== ws.id) return "no such bot";
       return (b.persona ?? "") === as.was ? null : "changed since";
@@ -247,7 +264,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
       if (!a) return "no such ask";
       if (!writes(ws, access, a.botId)) return "not at Write";
       // The owner's Connected apps or keys, or a thread on the owner's Mac: theirs, and an Admin's (member-access.ts askOwnersOnly).
-      const why = askOwnersOnly(a, a.threadId ? session(a.threadId) : undefined, admin);
+      const why = askOwnersOnly(a, a.threadId ? session(a.threadId) : undefined, me);
       if (why === "logins") return "the owner's apps or keys";
       if (why === "mac") return "on the owner's Mac";
       if (!computer && (a.threadId ? onComputer(a.threadId) : hasComputer(a.botId))) return "no computer";
@@ -282,7 +299,10 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
     noteMemberAct(p.wsId, act.app, keptAct(p, act, who, false, REFUSED[why] ?? "That didn't go."));
     return void console.warn(`[members] event ${eventId}: not done (${why})`);
   }
+  // A change that won't go: kept as why, so their window says so.
+  if (why && act.act === "change") refuseChange(p.wsId, p.key, who, why);
   if (why) return void console.warn(`[members] event ${eventId}: not done (${why})`);
+  if (act.act === "change") return void doChange(p.wsId, act, who, p.key).catch((e: Error) => console.warn(`[members] event ${eventId}: ${e.message}`));
   if (isAppAct(act)) {
     going.add(doing);
     void appEvent(p, act, who, eventId).finally(() => going.delete(doing));
@@ -299,17 +319,27 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
       // Switched to Bops Cloud since it was queued: only Bops Cloud stamps a member's words there now (it would refuse this
       // Mac's row, MEMBER_STAMP), so it's dropped, and their window says it didn't go.
       if (cloudChatHere(p.wsId)) return void console.warn(`[members] event ${eventId}: not done (the workspace's chat goes through Bops Cloud now)`);
+      // Their files as this state has them (filesFor): only ones on the computer a bot of the chat works on now.
+      const files = filesFor(act.chatId, act.files);
+      // Files alone, none of them there anymore (the owner set the bot to work on this Mac meanwhile): nothing to say to
+      // the bot, so no empty message for it to answer; a note says why.
+      if (!act.text.trim() && !files) {
+        const c = chat(act.chatId);
+        addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: `${who.name} added ${act.files?.length === 1 ? "a file" : "files"} on a computer the bot doesn't work on now, so nothing was sent.` });
+        return void console.warn(`[members] event ${eventId}: not done (its files aren't on the bot's computer now)`);
+      }
       // Not let use its computer (Use its computer, as this state says it), for a bot that has one: their words stay,
-      // with a note, and nothing runs for them.
+      // with their files and a note, and nothing runs for them.
       if (!mayUse(p, who, admin) && chatUsesComputer(act.chatId)) {
-        addMessage({ chatId: act.chatId, role: "user", text: act.text, member: { ...said, noUse: true } });
+        addMessage({ chatId: act.chatId, role: "user", text: act.text, ...(files ? { files } : {}), member: { ...said, noUse: true } });
         const c = chat(act.chatId);
         const name = c?.botIds.length === 1 ? (bot(c.botIds[0])?.name ?? "The bot") : "The bots";
         addMessage({ chatId: act.chatId, role: "system", ...(c?.botIds.length === 1 ? { botId: c.botIds[0] } : {}), text: noUseNote(ownerName(), who.name, name) });
         return;
       }
-      // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message.
-      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin)).catch(warn);
+      // An Admin's turn goes by the role (chat.ts TurnOptions.member), never kept on their message. Their files are on the
+      // bot's computer already: kept on the message, and the bot told where in their name (lib/added-files.ts filesNote).
+      void handleMessage(act.chatId, act.text, act.replyTo, undefined, undefined, undefined, undefined, undefined, undefined, turnOf(said, admin), undefined, undefined, undefined, files).catch(warn);
       return;
     }
     case "reply": {
@@ -447,6 +477,23 @@ async function answerOne(p: MemberActPayload, who: MemberWho, chatId: string, me
   const at = getState().messages.find((m) => m.id === messageId)!.at;
   if (getState().messages.some((m) => m.chatId === chatId && m.role === "bot" && m.at > at)) return;
   await answerMessage(chatId, messageId, turnOf(said, admin));
+}
+
+/**
+ * A member's files for a chat as this state has it (Bops Cloud checked them against it too: cloud/members.ts filesFit):
+ * each for a bot of the chat, on the computer that bot works on now, named by that computer's bot as this state names
+ * it (never as the member's Bops sent it: it's shown to everyone, and told to the bot). One that isn't is left out,
+ * never told to the bot.
+ */
+function filesFor(chatId: string, files: readonly AddedFile[] | undefined): AddedFile[] | undefined {
+  const c = chat(chatId);
+  const { host, bots } = getState();
+  const kept = (files ?? []).flatMap((f) => {
+    const b = c?.botIds.includes(f.botId) ? bot(f.botId) : undefined;
+    const on = b && host !== "mac" && b.runsOn !== "mac" ? workBot(b, bots) : undefined;
+    return on && on.id === f.hostId ? [{ ...f, hostName: on.name?.trim() || b!.name?.trim() || f.hostName }] : [];
+  });
+  return kept.length ? kept : undefined;
 }
 
 /** What a refused act on an app says, on the app where the member sees it (and the owner's rows). */

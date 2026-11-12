@@ -242,10 +242,11 @@ globalThis.__fake = {
         if (command.includes('echo "current=$c"')) {
           const dir = /\/opt\/bops\/runner\/([^/ ]+)\/server\.js/.exec(command)[1];
           const ident = command.includes('echo "ident=') ? `ident=${orgo.ident}\n` : "";
-          return { output: `current=${x.current}\nkey=${x.key ? "yes" : "no"}\n${ident}have=${x.have.has(dir) ? "yes" : "no"}\nsup=yes\n`, exit_code: 0 };
+          return { output: `current=${x.current}\nkey=${x.key ? "yes" : "no"}\n${ident}have=${x.have.has(dir) ? "yes" : "no"}\nsup=yes\nbusy=${x.busy ? "yes" : "no"}\n`, exit_code: 0 };
         }
         if (command.includes("__BOPS_INSTALLED__")) {
           orgo.duringInstall?.();
+          if (x.busyAtInstall) return { output: "__BOPS_BUSY__\n", exit_code: 0 };
           if (orgo.installFails) return { output: "tar: something went wrong\n", exit_code: 2 };
           const dir = /mv -Tf "\$d\/current\.next"/.test(command) && /ln -sfn '([^']+)'/.exec(command)[1];
           // As the script does: the upload unpacked when it's there (and gone after), else the build there already, else nothing.
@@ -729,6 +730,39 @@ await check("one that's up isn't set up again while a run of its goes (one pause
   run.status = "done";
   await I.lookAtRunners();
   assert.deepEqual([runner().status, runner().version], ["running", "0.0.29"]);
+});
+
+await check("one that's up isn't set up again while it answers a reply (a restart would cut it off: \"stopped partway\"), nor when one starts before its files are swapped; it's set up once the reply is over", async () => {
+  for (const at of ["probe", "install"]) {
+    reset();
+    pc(C1).key = true;
+    pc(C1).current = "0.0.28-old";
+    pc(C1).have = new Set(["0.0.28-old"]);
+    if (at === "probe") pc(C1).busy = true;
+    else pc(C1).busyAtInstall = true;
+    state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyMade: true, keyId: "key-0", at: Date.now() - 86_400_000 } };
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().version, runner().upgrading, runner().error], ["running", "0.0.28", undefined, undefined], `${at}: left up as it was`);
+    assert.equal(pc(C1).current, "0.0.28-old", `${at}: its files never swapped`);
+    if (at === "probe") assert.ok(!bashText().includes("__BOPS_INSTALLED__"), "nothing sent to set it up");
+    assert.ok(T.retryAt(C1) > Date.now(), `${at}: tried again later`);
+    // The reply is over: at the next try, it's set up.
+    pc(C1).busy = false;
+    pc(C1).busyAtInstall = false;
+    T.reset();
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().version], ["running", "0.0.29"], `${at}: set up once the reply is over`);
+  }
+  const probe = I.probeScript("0.0.29-buildA1");
+  assert.ok(probe.includes("find /var/run/bops/turns -type f -mmin -2") && probe.includes("echo busy=yes || echo busy=no"), "the probe reads the runner's marks");
+  // In the install script: unpacking first (it takes a while), then the hold, then the marks, then the swap and restart.
+  const script = I.installScript({ name: "bops-server.tgz", sha256: "0".repeat(64), version: "0.0.29", buildId: "buildA1" }, "#!/bin/sh\n");
+  const at = (x) => script.indexOf(x);
+  assert.ok(at("tar -xzf") < at("touch /var/run/bops/upgrading"), "held only after unpacking");
+  assert.ok(at("touch /var/run/bops/upgrading") < at("find /var/run/bops/turns -type f -mmin -2"), "the marks read after the hold");
+  assert.ok(at("find /var/run/bops/turns") < at('ln -sfn') && at("find /var/run/bops/turns") < at("supervisorctl restart"), "both before any file is swapped");
+  assert.ok(at("supervisorctl restart") < at('rm -rf "$v"'), "the builds before go only after the restart");
+  assert.ok(script.includes("trap 'rm -f /var/run/bops/upgrading' EXIT"), "the hold goes when the script ends, whatever happens");
 });
 
 await check("a runner kept on for a run paused for the owner's OK (routines moved to the Mac) whose workspace is then shared: that run ends for good with it, as no runner is left to read the answer; so does one of a runner that failed with no key of Bops' to take back", async () => {

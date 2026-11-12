@@ -2,7 +2,7 @@
 
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
-import { alwaysScope, apiDeletes, apiFacts, askHeadline } from "@/lib/permission";
+import { alwaysScope, apiDeletes, apiFacts, askHeadline, taskWrite } from "@/lib/permission";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { trackEvent } from "@/lib/analytics";
 import { BLOCKER_ASK, BRAINS_ON, COMPACTED, live, ownerSent, pairChatId, routineSent, threadCompactBlocked, threadCompacts, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, withRemoteTyping, workBot, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
@@ -20,17 +20,17 @@ import { CrmNote } from "./crm";
 import { AppChangeCard } from "./app-change";
 import { LookingAt, MadeAppLine } from "./made-apps";
 import { MacIcon } from "./mac-tab";
-import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
+import { AttachmentTray, MessageFiles, MessageImages, useAttachments } from "./attachments";
 import { useComposerListen, withLine, type ComposerReceiver } from "./composer-bridge";
 import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
 import { Fold } from "./fold";
 import { SaveSkillDialog } from "./skill-dialog";
-import { undash } from "./side-group";
+import { Chevron, undash } from "./side-group";
 import { SelectIcon, TickBar, TickRow, TrashIcon, UndoLine, useMessageDeletes, type Gone } from "./message-deletes";
 import { num, privacyOf } from "@/lib/privacy";
 import { compactBlocked } from "@/lib/chat-summary";
-import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, oneLine, type ApiCall } from "./keys";
+import { ApiAsk, apiAskOf, apiCallOf, ApiCalls, ApiNote, KeyAskCard, oneLine, quietCall, type ApiCall } from "./keys";
 import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { AGENTS, aiOf, hasProfile, isCli, threadAgent, upper } from "@/lib/agents";
 import { AgentChip, AgentMark } from "./agent-marks";
@@ -77,19 +77,39 @@ const isFileLink = (href: string) => /^(\/workspace\/|~\/|\/Users\/|file:\/\/\/)
 export function Rich({ text, botId }: { text: string; botId?: string }) {
   // Code blocks (ASCII diagrams, commands) keep their monospace layout; the rest is inline text.
   // A model's citation markers are for it, not for people: they go.
-  const blocks = dropCitations(text).split(/```[a-z0-9-]*\n?([\s\S]*?)```/g);
+  const blocks = dropCitations(text).split(/```[a-z0-9-]*\r?\n?([\s\S]*?)```/g);
   return (
     <LinkedBy.Provider value={botId}>
-      {blocks.map((b, i) =>
-        i % 2 ? (
-          <pre key={i} className="my-1.5 overflow-x-auto whitespace-pre rounded-xl bg-black/[0.045] px-3 py-2 font-mono text-[12px] leading-[17px] [overflow-wrap:normal]">
-            {b.replace(/\n$/, "")}
-          </pre>
-        ) : (
-          <Prose key={i} text={b} />
-        ),
-      )}
+      {blocks.map((b, i) => (i % 2 ? <CodeBlock key={i} code={b.replace(/\r?\n$/, "")} /> : <Prose key={i} text={b} />))}
     </LinkedBy.Provider>
+  );
+}
+
+/** Past this many lines a block of code folds: a whole file pasted into a report is for whoever asks for it. */
+const CODE_FOLD_LINES = 15;
+
+/** A block of code in a reply: a short one (a command, a diagram) as it is; a long one behind a quiet line that opens it. */
+function CodeBlock({ code }: { code: string }) {
+  const [open, setOpen] = useState(false);
+  const lines = code.split("\n").length;
+  const pre = (
+    <pre className="my-1.5 overflow-x-auto whitespace-pre rounded-xl bg-black/[0.045] px-3 py-2 font-mono text-[12px] leading-[17px] [overflow-wrap:normal]">{code}</pre>
+  );
+  if (lines <= CODE_FOLD_LINES) return pre;
+  return (
+    <div className="my-1.5">
+      <button
+        type="button"
+        data-code-fold
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex items-center gap-1.5 rounded-full bg-black/[0.045] px-3 py-1 text-[12px] leading-4 text-[#6B6B6B] outline-none hover:bg-black/[0.07] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+      >
+        {lines} lines of code
+        <Chevron open={open} />
+      </button>
+      {open && pre}
+    </div>
   );
 }
 
@@ -288,8 +308,8 @@ function Inline({ text }: { text: string }) {
 }
 
 /**
- * A bot's ask to sign in for it (Message.signIn): its browser opened at that page, in the viewer's control, for someone
- * who may use it; nothing for anyone else (its words say what it needs).
+ * A bot's ask to sign in for it (Message.signIn): its browser opened at that page, in its own tab (`here`), in the
+ * viewer's control, for someone who may use it; nothing for anyone else (its words say what it needs).
  */
 function SignInAsk({ botId, url, state }: { botId: string; url: string; state: AppState }) {
   const inBrowser = useContext(OpenInBrowser);
@@ -297,7 +317,7 @@ function SignInAsk({ botId, url, state }: { botId: string; url: string; state: A
   if (!inBrowser || !b || !/^https?:\/\//i.test(url) || !inBrowser.may(botId)) return null;
   return (
     <div className="flex pt-0.5">
-      <button onClick={() => inBrowser.open(botId, url)} data-sign-in-ask className="rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white">
+      <button onClick={() => inBrowser.open(botId, url, true)} data-sign-in-ask className="rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white">
         {`Sign in in ${b.name}'s browser`}
       </button>
     </div>
@@ -545,11 +565,26 @@ export function ChatView({
   }, [c.id, c.readAt, lastAt]);
 
   // What the user just sent shows at once, before the server has it (then the real message takes its place).
-  const [pending, setPending] = useState<{ id: string; chatId: string; text: string; at: number; previews?: string[] }[]>([]);
+  const [pending, setPending] = useState<{ id: string; chatId: string; text: string; at: number; previews?: string[]; files?: { name: string; size: number }[] }[]>([]);
   // When each of the last few messages went, so the real copy can carry on its pending one's motion (arrivalOf).
   const [sent, setSent] = useState<{ chatId: string; text: string; at: number }[]>([]);
-  // Images about to go with the next message (the + button, pasting, or dropping them on the chat).
-  const attach = useAttachments();
+  // Images and files about to go with the next message (the + button, pasting, or dropping them on the chat). A file
+  // goes where the chat's bot works: in a group, the main bot's (else its first bot's) computer.
+  const fileBot = solo ?? members.find((m) => m.isMain) ?? members[0];
+  // In a workspace shared with the user, that computer is the owner's: a file goes there for an Admin, who has Write on
+  // the chat's bots and Use its computer (Bops Cloud checks it again: cloud/members.ts filesIn; Orgo's uploads take no
+  // Member yet: FILES_ADMINS_ONLY), and a picture goes as a file too, since one for the model to look at would stay on
+  // this Mac. Anyone else adding one is told why.
+  const filesWhy = !state.shared
+    ? null
+    : !canAct(state, c.botIds)
+      ? "You can watch these bots, not add files for them."
+      : state.shared.role !== "admin"
+        ? "Only the owner and Admins can add files here for now."
+        : state.shared.computer !== true
+          ? "The owner hasn't let you use this bot's computer, so you can't add files for it."
+          : null;
+  const attach = useAttachments(() => (filesWhy ? undefined : fileBot?.id), { asFiles: () => !!state.shared });
   // What the Preview tab's Select and Draw put in the box (composer-bridge.tsx), never sent by themselves: its
   // pictures' keys in the tray and its lines in the draft (each with where it is in the page's code, never shown), so
   // the message that goes with any of them still there is tagged appNote, and carries those lines' code for the bot.
@@ -584,22 +619,65 @@ export function ChatView({
     const t = setTimeout(() => setMicError(null), 6000);
     return () => clearTimeout(t);
   }, [micError]);
-  const attaching = attach.items.filter((a) => a.status !== "failed");
+  // What's in this chat's box: images, and the files added for one of its bots (a file added in another chat stays
+  // there, still uploading, for when you go back).
+  const tray = attach.items.filter((a) => a.kind === "image" || (!!a.botId && c.botIds.includes(a.botId)));
+  const attaching = tray.filter((a) => a.status !== "failed");
+  // Messages go to the server in the order they were sent, each after the one before (one waiting on a big file holds
+  // the next back, so the bot never answers the next before the file's there).
+  const sending = useRef(new Map<string, Promise<unknown>>());
+  const inTurn = async (chatId: string, go: () => Promise<unknown>) => {
+    const before = sending.current.get(chatId) ?? Promise.resolve();
+    const mineGoes = before.catch(() => {}).then(go);
+    sending.current.set(chatId, mineGoes);
+    await mineGoes.finally(() => sending.current.get(chatId) === mineGoes && sending.current.delete(chatId));
+  };
+  // The chat showing now, so words put back after a refusal (backInBox) go only into the box they came from.
+  const showing = useRef(c.id);
+  useEffect(() => {
+    showing.current = c.id;
+  });
+  // Words that didn't go, with nothing of them kept to try again: back in the box while it's still empty, with what they replied to.
+  const backInBox = (chatId: string, text: string, was: Message | null) => {
+    if (showing.current !== chatId) return;
+    if (text) setDraft((d) => (d.trim() ? d : text));
+    if (was) setReplying((r) => r ?? was);
+  };
+  // The files that didn't make it, under the box.
+  const sayFailed = (failed: { name: string; error: string }[]) =>
+    failed.length && setMicError(failed.length === 1 ? `${failed[0].name} didn't go: ${failed[0].error}` : `${failed.length} of them didn't go: ${failed[0].error}`);
   const send = async () => {
     const text = draft.trim();
     if (!text && !attaching.length) return;
-    // In a shared workspace (the viewer has Write on every bot here): their words go to the owner's Bops through
-    // Bops Cloud (shared-act.ts), shown as theirs at once. Pictures stay on this Mac (view-only.ts uploads).
+    // In a shared workspace (the viewer has Write on every bot here): their words, and the files they put on the owner's
+    // computer, go to the owner's Bops through Bops Cloud (shared-act.ts), shown as theirs at once. Pictures for the model
+    // stay on this Mac (view-only.ts uploads): the box adds them as files here.
     if (state.shared) {
-      if (attaching.length || !text) return setMicError("Pictures can't be sent in a shared workspace.");
+      if (attaching.some((a) => a.kind === "image")) return setMicError("Pictures can't be sent in a shared workspace.");
+      const items = attaching;
+      const chatId = c.id;
+      const was = replying;
+      const replyTo = was?.id;
       setDraft("");
       setReplying(null);
-      const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now() };
+      attach.release(tray.map((a) => a.key));
+      const filed = items.map((a) => ({ name: a.name, size: a.size }));
+      const mine = { id: `pending_${Date.now()}`, chatId, text, at: Date.now(), files: filed.length ? filed : undefined };
       setPending((p) => [...p, mine]);
-      setSent((x) => [...x.slice(-19), { chatId: c.id, text, at: mine.at }]);
-      const r = await memberAct({ act: "chat", chatId: c.id, text, ...(replying ? { replyTo: replying.id } : {}) });
-      setPending((p) => p.filter((x) => x.id !== mine.id));
-      if (!r.ok && r.error) setMicError(r.error);
+      setSent((x) => [...x.slice(-19), { chatId, text, at: mine.at }]);
+      // Once its files are on the owner's computer, after the message sent before it: Bops Cloud names them on the message.
+      await inTurn(chatId, async () => {
+        const got = await Promise.all(items.map((a) => a.done));
+        const files = got.flatMap((x) => (x && "file" in x ? [x.file] : []));
+        sayFailed(got.flatMap((x) => (x && "failed" in x ? [x.failed] : [])));
+        if (text || files.length) {
+          const r = await memberAct({ act: "chat", chatId, text, ...(replyTo ? { replyTo } : {}), ...(files.length ? { files } : {}) });
+          if (!r.ok && r.error) setMicError(r.error);
+          // (Refused before it was kept to try again under their message: a file not ready anymore, Bops not reached.)
+          if (!r.ok && r.unsent) backInBox(chatId, text, was);
+        }
+        setPending((p) => p.filter((x) => x.id !== mine.id));
+      });
       return;
     }
     const items = attaching;
@@ -609,26 +687,46 @@ export function ChatView({
     const aboutApp = items.some((a) => fromApp.current.keys.has(a.key)) || [...fromApp.current.lines.keys()].some((l) => text.includes(l));
     fromApp.current = { keys: new Set(), lines: new Map() };
     // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
-    const previews = attach.items.map((a) => a.preview);
+    const previews = tray.flatMap((a) => (a.preview ? [a.preview] : []));
+    const was = replying;
     setDraft("");
     setReplying(null);
-    attach.clear();
-    const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), previews: items.length ? items.map((a) => a.preview) : undefined };
+    attach.release(tray.map((a) => a.key));
+    const pics = items.flatMap((a) => (a.preview ? [a.preview] : []));
+    const filed = items.filter((a) => a.kind === "file").map((a) => ({ name: a.name, size: a.size }));
+    const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), previews: pics.length ? pics : undefined, files: filed.length ? filed : undefined };
     const drop = () => {
       setPending((p) => p.filter((x) => x.id !== mine.id));
       previews.forEach((u) => URL.revokeObjectURL(u));
     };
     setPending((p) => [...p, mine]);
     setSent((s) => [...s.slice(-19), { chatId: c.id, text, at: mine.at }]);
-    // Shows at once; goes once its images have finished uploading (usually they already have).
-    const images = (await Promise.all(items.map((a) => a.done))).filter((x) => !!x);
-    if (!text && !images.length) return drop();
     // Only a pick the bot can run now goes; one that can't anymore is let go (boxAgents).
     const pick = solo && agentPicks[c.id] ? boxAgents(state, solo, agentPicks[c.id], boxKeys).picked?.id : undefined;
     if (agentPicks[c.id] && !pick) dropPick();
-    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined, lookingAt: looking?.id, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) }).finally(drop);
+    const chatId = c.id;
+    const replyTo = replying?.id;
+    const lookingAt = looking?.id;
+    // Shows at once; goes once its images and files have finished uploading (usually they already have), after the
+    // message sent before it. One that didn't make it says so under the box.
+    const go = async () => {
+      const got = await Promise.all(items.map((a) => a.done));
+      const images = got.flatMap((x) => (x && "pic" in x ? [x.pic] : []));
+      const files = got.flatMap((x) => (x && "file" in x ? [x.file.id] : []));
+      sayFailed(got.flatMap((x) => (x && "failed" in x ? [x.failed] : [])));
+      if (!text && !images.length && !files.length) return drop();
+      const res = await post(`/api/chats/${encodeURIComponent(chatId)}/messages`, { text, replyTo, images: images.length ? images : undefined, files: files.length ? files : undefined, lookingAt, ...(pick ? { agent: pick } : {}), ...(aboutApp ? { appNote: true } : {}), ...(picks.length ? { picks } : {}) })
+        .finally(drop)
+        .catch(() => null);
+      // Not taken (a file not ready anymore, Bops Cloud not reached): said under the box, and the words put back, never gone without a word.
+      if (!res?.ok) {
+        setMicError(((await res?.json().catch(() => null)) as { error?: string } | null)?.error ?? "That didn't send. Try again.");
+        backInBox(chatId, text, was);
+      }
+    };
+    await inTurn(chatId, go);
   };
-  const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => f.type.startsWith("image/"));
+  const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])];
   // Sent messages the server's state doesn't have yet.
   const waiting = pending.filter((p) => p.chatId === c.id && !messages.some((m) => m.role === "user" && m.text === p.text && m.at >= p.at - 5000));
   // The person writing here, or what they just sent still on its way: the header's and an empty chat's idle bot looks down at the box.
@@ -688,7 +786,7 @@ export function ChatView({
       inRun.add(m.id);
       continue;
     }
-    run = call && call.failed === undefined && !chip ? { calls: [call], at: m.at } : null;
+    run = call && quietCall(call) && !chip ? { calls: [call], at: m.at } : null;
     if (run) callRuns.set(m.id, run.calls);
   }
 
@@ -697,16 +795,16 @@ export function ChatView({
     <main
       className="relative flex min-h-0 min-w-0 flex-1 flex-col border-r border-[#ECECEA] bg-white"
       onDragOver={(e) => {
-        // Nothing's sent in a shared workspace, so it takes no images (the window refuses them: bops-app.tsx).
-        if (state.shared || ![...e.dataTransfer.types].includes("Files")) return;
+        if (![...e.dataTransfer.types].includes("Files")) return;
         e.preventDefault();
-        if (!dropping) setDropping(true);
+        // (One that can't add files here is told why as it drops: filesWhy.)
+        if (!dropping && !filesWhy) setDropping(true);
       }}
       onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropping(false)}
       onDrop={(e) => {
         e.preventDefault();
         setDropping(false);
-        if (state.shared) return;
+        if (filesWhy) return setMicError(filesWhy);
         const files = filesOf(e.dataTransfer);
         if (files.length) {
           attach.add(files);
@@ -716,7 +814,9 @@ export function ChatView({
     >
       {dropping && (
         <div className="pointer-events-none absolute inset-3 z-[40] flex items-center justify-center rounded-[20px] border-2 border-dashed border-[#0A0A0A]/25 bg-white/85 backdrop-blur-[2px]">
-          <span className="text-[14px] font-medium text-[#3A3A38]">Drop images to send {solo ? `to ${solo.name}` : "to the group"}</span>
+          <span className="text-[14px] font-medium text-[#3A3A38]">
+            {state.shared ? `Drop to put it on ${fileBot ? `${workBot(fileBot, state.bots).name}'s` : "the bot's"} Desktop` : `Drop images or files to send ${solo ? `to ${solo.name}` : "to the group"}`}
+          </span>
         </div>
       )}
       {pair && <PairSheet state={state} pairId={pair.id} focusId={pair.focus} onClose={() => setPair(null)} />}
@@ -869,6 +969,7 @@ export function ChatView({
             // Up from the composer as you send it (not again when you come back to the chat before it lands).
             <div key={p.id} className={`flex max-w-[86%] flex-col items-end gap-1 self-end ${seen.has(p.id) ? "" : "motion-send-in"}`}>
               {p.previews && <MessageImages previews={p.previews} />}
+              {p.files && <MessageFiles files={p.files} />}
               {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[#0A0A0A] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]"><AddressBreaks text={p.text} /></div>}
             </div>
           ))}
@@ -1015,28 +1116,25 @@ export function ChatView({
               e.preventDefault();
               void send();
             }}
-            className={`flex flex-col rounded-[22px] bg-white py-2 ${state.shared ? "pl-4" : "pl-2"} pr-2 shadow-[0_0_0_1px_#E2E2DF]`}
+            className="flex flex-col rounded-[22px] bg-white py-2 pl-2 pr-2 shadow-[0_0_0_1px_#E2E2DF]"
           >
-            <AttachmentTray items={attach.items} onRemove={attach.remove} />
+            <AttachmentTray items={tray} onRemove={attach.remove} />
             <div className="flex items-end gap-2">
-            {/* No pictures in a shared workspace: they'd stay on this Mac (view-only.ts uploads). */}
-            {!state.shared && (
+            {/* In a shared workspace, files only, on the owner's computer (filesWhy says why not): pictures would stay on this Mac (view-only.ts uploads). */}
             <button
               type="button"
-              onClick={() => filePicker.current?.click()}
-              aria-label="Attach images"
-              data-tip="Attach images · or paste / drop them"
+              onClick={() => (filesWhy ? setMicError(filesWhy) : filePicker.current?.click())}
+              aria-label="Add images or files"
+              data-tip={state.shared ? "Add files · they go on the bot's computer" : "Add images or files · or paste / drop them"}
               className="flex size-[30px] shrink-0 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink"
             >
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
                 <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
             </button>
-            )}
             <input
               ref={filePicker}
               type="file"
-              accept="image/*"
               multiple
               hidden
               onChange={(e) => {
@@ -1051,8 +1149,11 @@ export function ChatView({
               onChange={setDraft}
               onPaste={(e) => {
                 const files = filesOf(e.clipboardData);
-                if (!files.length || state.shared) return;
+                if (!files.length) return;
+                // Words copied with a picture of them (cells from a sheet, a paragraph from a document): pasted as words where files can't go.
+                if (filesWhy && e.clipboardData.types.includes("text/plain")) return;
                 e.preventDefault();
+                if (filesWhy) return setMicError(filesWhy);
                 attach.add(files);
               }}
               onKeyDown={(e) => e.key === "Escape" && replying && (e.stopPropagation(), setReplying(null))}
@@ -1466,13 +1567,14 @@ const reactionKey = (r: NonNullable<Message["reactions"]>[number]) => `${r.by}:$
 const QUICK_EMOJI = ["🔥", "🙏", "👀", "🎉"];
 
 /** The latest message in each chat and for each watch, worked out once per state (not once per message drawn). */
-const lastsCache = new WeakMap<Message[], { byChat: Map<string, string>; byWatch: Map<string, string> }>();
+/** The newest message said in each chat (a person's or a bot's: Bops' own notes after it don't count), and each watch's newest. */
+const lastsCache = new WeakMap<Message[], { saidByChat: Map<string, string>; byWatch: Map<string, string> }>();
 function lasts(all: Message[]) {
   let v = lastsCache.get(all);
   if (!v) {
-    v = { byChat: new Map(), byWatch: new Map() };
+    v = { saidByChat: new Map(), byWatch: new Map() };
     for (const x of all) {
-      v.byChat.set(x.chatId, x.id);
+      if (x.role !== "system") v.saidByChat.set(x.chatId, x.id);
       if (x.watch) v.byWatch.set(x.watch.id, x.id);
     }
     lastsCache.set(all, v);
@@ -1541,7 +1643,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   const said = saidBy(m, state);
   const outgoing = said === "you";
   // The bot's latest message can offer replies as buttons (see ASKING); tapping one sends it.
-  const newest = lasts(state.messages).byChat.get(m.chatId) === m.id;
+  // A reply's buttons stay through the notes after it (what it read, called), until someone says something.
+  const newestSaid = lasts(state.messages).saidByChat.get(m.chatId) === m.id;
   const mine = m.reactions?.find((r) => r.by === "owner");
   const setReaction = (r: { type?: Tapback; emoji?: string } | null) => {
     setPicking(false);
@@ -1844,6 +1947,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             {balloons}
             <div className={`flex flex-col gap-1 ${outgoing ? "items-end" : "items-start"}`}>
               {!!m.images?.length && <MessageImages images={m.images} align={outgoing ? "end" : "start"} />}
+              {!!m.files?.length && <MessageFiles files={m.files} align={outgoing ? "end" : "start"} />}
               {m.text && (
                 <div className={`select-text whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${outgoing ? "bg-ink text-white" : "bg-white text-ink shadow-[0_0_0_1px_#E2E2DF]"}`}><AddressBreaks text={m.text} /></div>
               )}
@@ -1867,7 +1971,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             via {CHANNEL_NAME[m.via]}
           </span>
         )}
-        {m.memberSend && <MemberSendLine send={m.memberSend} retry={(key) => void memberAct({ act: "chat", chatId: m.chatId, text: m.text, ...(m.replyTo ? { replyTo: m.replyTo } : {}) }, key)} />}
+        {m.memberSend && <MemberSendLine send={m.memberSend} retry={(key) => void memberAct({ act: "chat", chatId: m.chatId, text: m.text, ...(m.replyTo ? { replyTo: m.replyTo } : {}), ...(m.files?.length ? { files: m.files } : {}) }, key)} />}
         {replies}
         {chipList}
       </div>
@@ -1947,7 +2051,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   if (m.role === "system")
     return (
       <div className={`flex w-full flex-col items-center gap-1.5 self-center py-0.5 ${enterClass}`}>
-        {api ? api.failed !== undefined ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
+        {api ? !quietCall(api) ? <ApiNote call={api} /> : <ApiCalls calls={apiRun ?? [api]} /> : <SystemNote text={m.text} />}
         {chipList}
       </div>
     );
@@ -1992,7 +2096,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         {m.signIn && m.botId && <SignInAsk botId={m.botId} url={m.signIn.url} state={state} />}
         {replies}
         {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} state={state} />}
-        {newest && (!ro || writes) && !!m.options?.length && (
+        {newestSaid && (!ro || writes) && !!m.options?.length && (
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {m.options.map((o) => (
               <button
@@ -3319,6 +3423,18 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
   const shownError = going ? null : (error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null));
   const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
   const answerer = askAnswerer(state, a);
+  // A bot asking for a key: the Logins form, answered by saving it (keys.tsx KeyAskCard).
+  if (a.kind === "key")
+    return (
+      <KeyAskCard state={state} approval={a} answerer={answerer} busy={busy} onAnswer={(reply) => void decide(reply)} className={className}>
+        {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
+        {shownError && (
+          <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+            {shownError}
+          </span>
+        )}
+      </KeyAskCard>
+    );
   return (
     <div className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${className}`}>
       <div className="flex items-start gap-2.5">
@@ -3377,9 +3493,11 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
             <button disabled={busy} onClick={() => void decide("reject")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
               Deny
             </button>
-            <button disabled={busy} onClick={() => void decide("always")} title={alwaysScope(name, a)} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-              Always allow
-            </button>
+            {!taskWrite(a) && (
+              <button disabled={busy} onClick={() => void decide("always")} title={alwaysScope(name, a)} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+                Always allow
+              </button>
+            )}
             <button disabled={busy} onClick={() => void decide("once")} className={`${btn} bg-ink text-white`}>
               Allow once
             </button>

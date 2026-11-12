@@ -1285,6 +1285,9 @@ async function hostingCall<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path:
  * its first deploy is live. Nothing here calls the computer: Orgo queues a deploy and builds it once the
  * computer runs.
  */
+/** How a deploy project builds and is checked, as orgo-web takes them when it's made or changed (empty: Orgo finds it). */
+export type DeploySettings = { install_cmd?: string; build_cmd?: string; start_cmd?: string; health_path?: string };
+
 export const deploys = {
   /** The computer's deploy projects, each with its newest deploys. */
   projects: (computerId: string) => hostingCall<{ projects?: OrgoDeployProject[] }>("GET", `/computers/${encodeURIComponent(computerId)}/deploy-projects`),
@@ -1297,7 +1300,7 @@ export const deploys = {
    * deploy queues that. `env`: its variables, saved with it (Orgo keeps them encrypted), so its first build
    * has them; sent only when there are some.
    */
-  create: (computerId: string, app: { repo: string; name: string; port: number; env?: Record<string, string>; publicUrl?: false }) =>
+  create: (computerId: string, app: { repo: string; name: string; port: number; env?: Record<string, string>; publicUrl?: false; settings?: DeploySettings }) =>
     hostingCall<OrgoDeployProject>("POST", `/computers/${encodeURIComponent(computerId)}/deploy-projects`, {
       source: "ingot",
       repo: app.repo,
@@ -1307,6 +1310,8 @@ export const deploys = {
       ...(app.env && Object.keys(app.env).length ? { env: app.env } : {}),
       // (No public URL of its own: a Published site lives on its domains only. An orgo-web without the flag ignores it.)
       ...(app.publicUrl === false ? { public_url: false } : {}),
+      // How it builds and is checked, set as it's made (a project's settings can't be changed after with a computer's own sign in).
+      ...(app.settings ?? {}),
     }),
   /** Queue a deploy of one changeset (none: the newest on main). A newer deploy replaces one still queued. */
   deploy: (computerId: string, projectId: string, at?: string) =>

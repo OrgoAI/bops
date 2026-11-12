@@ -11,7 +11,9 @@
 // that runs it (Session.by), with the replies and steps of both and a stop, a move to the Mac or a dismiss
 // asked from elsewhere. A thread, routine or watch kept between us (secret) on either side stays so,
 // whichever side's copy wins: a merge never takes the mark back. A bot's How I work changed on one side only is that side's
-// (an Admin's that Bops Cloud kept never loses to the Mac's older words). Anything else changed on both sides still keeps the merging side's copy whole.
+// (an Admin's that Bops Cloud kept never loses to the Mac's older words), and so is a Preview password only Bops Cloud
+// writes (Workspace.previewPasswords), which the Mac's next save carries as it was. Anything else changed on both sides
+// still keeps the merging side's copy whole.
 //
 // Pure functions: nothing reaches Bops Cloud.
 // Usage: node scripts/test-state-merge.mjs
@@ -660,6 +662,33 @@ check("a bot's settings page settings (Workspace.botSettings): two Macs setting 
     const r = M.merge3(clone(base), clone(base), older);
     assert.equal(appsOf(r), undefined, "reads as none");
     assert.equal(M.keepAppsLevels([{ id: "x", memberAccess: { [AVA]: { others: "none", bots: {}, invite: true } } }], [[{ id: "x", memberAccess: { [AVA]: { others: "none", bots: {}, invite: true, apps: "read" } } }]])[0].memberAccess[AVA].apps, "read", "from a copy that was an invite too");
+  });
+}
+
+{
+  // Workspace.previewPasswords: only Bops Cloud writes it (cloud/preview-passwords.ts); the owner's Mac carries it along.
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  const kept = { "shop/shop": { url: "https://k7p2qxm4wr3d.orgo.dev", password: "Kq7mZ3x", at: 5 } };
+  const blob = (extra = {}) => ({ owner: { name: "Ava" }, workspace: "ws_main", workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, hostedApps: { shop: { botId: "boppy", computerId: "c1" } }, ...extra }], bots: [{ id: "boppy", isMain: true, name: "Boppy" }], chats: [] });
+  check("a Preview password Bops Cloud kept lands on the Mac's merge, and goes back up as it was with the Mac's next save", () => {
+    const base = blob();
+    const mine = clone(base);
+    mine.workspaces[0].name = "Renamed here";
+    mine.owner.name = "Ava B";
+    // Bops Cloud wrote it meanwhile (a version by "cloud"): the Mac's 409, or its read, merges it in.
+    const merged = M.merge3(clone(base), mine, blob({ previewPasswords: kept }));
+    assert.deepEqual(merged.workspaces[0].previewPasswords, kept);
+    assert.equal(merged.workspaces[0].name, "Renamed here");
+    // Its next save over that (the merged blob is its base now): still there, as Bops Cloud wrote it.
+    const later = clone(merged);
+    later.owner.name = "Ava C";
+    const up = M.toShared(M.fromShared(later, "mac_a"), "mac_a");
+    assert.deepEqual(up.workspaces[0].previewPasswords, kept);
+    // A newer one from Bops Cloud over the Mac's copy of the older one: the newer one.
+    const newer = { "shop/shop": { ...kept["shop/shop"], password: "Wq4tY7p", at: 9 } };
+    assert.deepEqual(M.merge3(clone(merged), clone(merged), blob({ previewPasswords: newer })).workspaces[0].previewPasswords, newer);
+    // Taken out there (turned off): out here too.
+    assert.equal(M.merge3(clone(merged), clone(merged), blob()).workspaces[0].previewPasswords, undefined);
   });
 }
 

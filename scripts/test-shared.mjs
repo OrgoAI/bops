@@ -568,6 +568,13 @@ await check("while a shared workspace is open, what its bots wait on the owner's
   assert.match(src, /const answerer = threadAnswerer\(state, s, kind\);/);
   // A reply from the window never goes while a shared workspace is open (their own Bops has none of the owner's requests to answer either: test-members.mjs).
   assert.equal(callAllowed("POST", "/api/apps/approvals"), false, "a member's reply never leaves the window");
+  // Keys go: the keys routes act on the shared workspace's own keys while it's open (lib/server/shared-keys.ts), so someone
+  // with Keys adds, replaces, removes and switches them from Logins or a key card. Every other write still doesn't.
+  for (const [method, path] of [["POST", "/api/keys"], ["PATCH", "/api/keys"], ["DELETE", "/api/keys/NOTION_API_KEY?scope=workspace"], ["POST", "/api/keys/reveal"]])
+    assert.equal(callAllowed(method, path), true, `${method} ${path}`);
+  assert.equal(callAllowed("POST", "/api/keysmith"), false);
+  const routes = ["route.ts", "[name]/route.ts", "reveal/route.ts"].map((f) => readFileSync(`${root}/app/api/keys/${f}`, "utf8"));
+  assert.ok(routes.every((src) => /sharedOpen\(\)/.test(src)), "each keys route takes the shared workspace's path while one is open");
 });
 
 await check("while a shared workspace is open, the user's own news still chimes: the window is sent what of theirs is worth it", async () => {
@@ -1026,12 +1033,15 @@ await check("Bops' own lines in the owner's voice read as the owner's in a share
     { id: "t4", chatId: "bot:boppy", role: "system", text: "Running “Pay invoice” in the cloud (you texted it) · say “run it on my Mac” to change that", at: 7, sessionIds: ["noted", "stopped"] },
     { id: "t5", chatId: "bot:boppy", role: "system", text: "Linked your phone +1 (415) 555-0100 to Dana's Boppy's number +1 (628) 555-0199: it texted first, so calls and texts from it count as you now.", at: 8 },
     { id: "t6", chatId: "bot:boppy", role: "bot", botId: "boppy", text: "Sent you the list", at: 9 },
+    // Your Apps is the page's name for everyone (lib/apps-access.ts APPS_NAME), not the owner's "your": it stays as named.
+    { id: "t7", chatId: "bot:boppy", role: "bot", botId: "boppy", bops: true, appNote: true, text: "Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.", at: 10 },
   ];
   // The viewer's own credit is out: their bots, not the owner's.
   const state = viewState({ ...own(), credits: { out: true, at: 1 } }, { ...listed, role: "member", wsId: WS }, c, {});
   const chat = renderToStaticMarkup(h(ChatView, chatProps(state, "bot:boppy")));
-  assert.deepEqual(yous(chat, "Sent you the list"), []);
+  assert.deepEqual(yous(chat, "Sent you the list", "press Publish in Your Apps"), []);
   const ct = text(chat);
+  assert.ok(ct.includes("press Publish in Your Apps, to put what Preview serves") && !ct.includes("owner's Apps"), ct);
   for (const said of ["The owner took over from Dana's Boppy · paused Buy tickets", "Texted the owner: the invoice is paid", "Dana's Boppy didn't send it: the owner said no", "Running “Pay invoice” in the cloud (the owner texted it)", "Linked the owner's phone to Dana's Boppy's number"]) assert.ok(ct.includes(said), `${said} | ${ct}`);
   assert.ok(!/run it on my Mac|555-0100|Out of AI credit/.test(ct), ct);
   const sheetOf = (id) => renderToStaticMarkup(h(ThreadSheet, { state, session: state.sessions.find((x) => x.id === id), onClose: noop, onShowComputer: noop }));
@@ -1085,6 +1095,18 @@ await check("the rest of what Bops says in the owner's voice reads as theirs: an
   const ct = text(chat);
   for (const said of ["Owner: Book the flight", "While their Mac was away, the owner called", "I'm out of AI credit, so I've stopped."]) assert.ok(ct.includes(said), `${said} | ${ct}`);
   assert.ok(!/You: |you called|Upgrade in Settings|couldn't finish Book flight/.test(ct), ct);
+  // A thread or a routine stopped for the owner's credit says whose credit it is, as the chat does, for a Member and an Admin.
+  const credit = "I'm out of Orgo credit, so I've stopped. Add credit in Settings to keep me going.";
+  const c2 = cloudState();
+  c2.state.sessions = [{ ...c2.state.sessions[0], id: "broke", status: "failed", error: credit }];
+  c2.state.routines = [{ ...c2.state.routines[0], last: { at: 1, status: "failed", error: credit } }];
+  for (const role of ["member", "admin"]) {
+    const v = viewState(own(), { ...listed, role, wsId: WS }, c2, {});
+    for (const said of [v.sessions.find((x) => x.id === "broke").error, v.routines[0].last.error]) {
+      assert.match(said, /It's the owner's credit: only they can add more\./, `${role}: ${said}`);
+      assert.doesNotMatch(said, /in Settings/, `${role}: ${said}`);
+    }
+  }
   // The owner's own stop waits on nobody.
   assert.equal(needsYou(state.sessions.find((x) => x.id === "stopped")), false);
   const sheetOf = (id) => renderToStaticMarkup(h(ThreadSheet, { state, session: state.sessions.find((x) => x.id === id), onClose: noop, onShowComputer: noop }));
@@ -1184,12 +1206,12 @@ await check("a New tab carried over, a watch's Edit and its sheet, clicking into
   assert.ok(!/Change what bank\.test is watched for|>Edit<|take over when you need to|group\/screen[^"]*cursor-pointer/.test(computer), text(computer).slice(0, 600));
   // A watch's suggestions read a bot's screen by its id: the user's own bot of that id, so the read never goes.
   assert.equal(callAllowed("GET", "/api/watches?botId=boppy&display=100"), false);
-  // The bot's profile: it never works on the viewer's own Mac; the Memory and Phone tabs say the owner's.
+  // The bot's profile: it never works on the viewer's own Mac; the Skills and Memory tabs say the owner's.
   const panel = (section, state = st) => text(renderToStaticMarkup(h(BotPanel, { state: { ...state, vault: [] }, bot: state.bots[0], section, onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop })));
   assert.doesNotMatch(panel("skills"), /Works on (your|the owner's) Mac/, "runsOn auto, on the viewer's Mac app");
   const onMac = viewState({ ...own(), host: "mac" }, { ...listed, role: "member", wsId: WS }, { ...c, state: { ...c.state, bots: [{ ...c.state.bots[0], runsOn: "mac" }] } }, {});
   assert.match(panel("skills", onMac), /Works on the owner's Mac/);
-  for (const section of ["skills", "memory", "phone"]) assert.deepEqual(yous(renderToStaticMarkup(h(BotPanel, { state: { ...st, vault: [] }, bot: st.bots[0], section, onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop }))), [], section);
+  for (const section of ["skills", "memory"]) assert.deepEqual(yous(renderToStaticMarkup(h(BotPanel, { state: { ...st, vault: [] }, bot: st.bots[0], section, onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop }))), [], section);
   // A helper's task is the bot's own words, as it wrote them; Bops' own lines in a bot's voice are the owner's.
   const c2 = cloudState();
   c2.state.sessions = [{ ...c2.state.sessions[0], title: "Weekly report", steps: [{ at: 1, tool: "helper", detail: "brought in a helper for You are a research helper. Check your calendar access first" }, { at: 2, tool: "find_app_actions", detail: 'looked for "your invoices" in your apps' }] }];
@@ -1354,7 +1376,8 @@ await check("while one is open, every write to the app's server is answered View
   assert.equal(callAllowed("POST", "https://example.com/x"), true, "not the app's server");
   // The user's own vault, account and name are still theirs to change.
   for (const ok of ["/api/vault", "/api/account/checkout", "/api/owner", "/api/owner-email"]) assert.equal(callAllowed("POST", ok), true, ok);
-  assert.equal(callAllowed("POST", "/api/keys"), false, "keys are a workspace's too");
+  // Keys go: since a shared workspace has keys of its own, its keys routes act on those alone while it's open (below).
+  assert.equal(callAllowed("POST", "/api/keys"), true, "a shared workspace's own keys");
   // Reads the server answers from the user's own bot or workspace of that id: never the shared one's.
   for (const no of ["/api/memory?bot=boppy", "/api/memory/categories?ws=x", "/api/orbit/issues?ws=shared_p1", "/api/skills?ws=x", "/api/routines/suggestions?botId=boppy", "/api/vnc?bot=boppy&display=1", "/api/computer?bot=boppy", "/api/reader?bot=boppy", "/api/crm?ws=x", "/api/made-apps/app_x", "/api/hosted-apps?ws=x", "/api/domains?ws=x", "/api/domains/search?ws=x&q=acme", "/api/domains/6a6a6a6a-1111-4222-8333-444455556666?ws=x"])
     assert.equal(callAllowed("GET", no), false, no);
@@ -2114,7 +2137,8 @@ await check("every card kind, for every role: live buttons for whoever may answe
     elsewhere: { owner: "you", memberRead: 3, memberWrite: 3, memberAdminsAct: 3, memberNoComputer: 3, admin: 3, adminOld: 3, adminOldCloud: 3 },
     sign_in: { owner: "you", memberRead: 7, memberWrite: 0, memberAdminsAct: 1, memberNoComputer: 0, admin: "you", adminOld: "you", adminOldCloud: "you" },
     payment: { owner: "you", memberRead: 4, memberWrite: 4, memberAdminsAct: 4, memberNoComputer: 4, admin: 4, adminOld: 4, adminOldCloud: 4 },
-    mac: { owner: "you", memberRead: 7, memberWrite: 5, memberAdminsAct: 5, memberNoComputer: 5, admin: 5, adminOld: 5, adminOldCloud: 5 },
+    // A thread on the owner's Mac: an Admin's too, once the owner's Bops takes their acts (member-access.ts ADMIN_POWERS.macThread).
+    mac: { owner: "you", memberRead: 7, memberWrite: 5, memberAdminsAct: 5, memberNoComputer: 5, admin: "you", adminOld: 5, adminOldCloud: 5 },
   };
   const card = (html) => {
     const c = html.slice(html.indexOf("rounded-2xl bg-[#FBFFE0]"));

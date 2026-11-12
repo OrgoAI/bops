@@ -25,7 +25,7 @@ import { NoticeCard } from "./notice-popup";
 import { forgetWorkspaceHere } from "@/lib/workspace-local";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouDot, post, RoundButton, SideToggleIcon, useNow } from "./ui";
 import { ChartIcon } from "./team-chart";
-import { ownerWho, roleHere, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
+import { mayChange, ownerWho, roleHere, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
 import { APPS_NAME, appsLine, appsShown } from "@/lib/apps-access";
 import { botGroups, groupedList, siteLabel } from "@/lib/bot-groups";
 import { codersOf } from "@/lib/bot-mood";
@@ -312,7 +312,7 @@ export function Sidebar({
                 group={g}
                 folded={folds.isFolded(g.key)}
                 onFold={(f) => folds.fold(g.key, f)}
-                onRename={!state.shared && g.computerId ? (name) => renameComputer(ws, g.computerId!, name) : undefined}
+                onRename={g.nameKey && mayChange(state, "workspace") ? (name) => renameComputer(ws, g.nameKey!, name) : undefined}
                 waiting={item.chats.some((c) => c.id !== chatId && (attention.bots.has(chatBot(c) ?? "") || unreadChat(state, c, false)))}
                 rows={item.chats.map(chatItem)}
                 selected={open && chatItem(open)}
@@ -1148,8 +1148,8 @@ export function WorkspaceSwitcher({
             </div>
           )}
           <div className="mx-2 my-1 h-px bg-[#ECECEA]" />
-          {/* The open workspace's org chart, below the list so it never reads as a workspace of its own; never one shared with the user. */}
-          {onTeamChart && !state.shared && current && (
+          {/* The open workspace's org chart, below the list so it never reads as a workspace of its own; in one shared with the user, with its switch in Team (an Admin always). */}
+          {onTeamChart && mayChange(state, "chart", { soon: true }) && current && (
             <button
               type="button"
               data-team-chart-row

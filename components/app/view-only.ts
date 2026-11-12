@@ -1,5 +1,7 @@
 "use client";
 
+import { changeRouteOf } from "@/cloud/change-routes";
+
 /**
  * While a workspace shared with the user is open (AppState.shared, lib/shared.ts), nothing in the window
  * changes anything through the app's own routes: every call that would (anything but a GET) to the app's own
@@ -18,8 +20,8 @@
 /**
  * The calls that still go while it's open: the switcher (leaving, switching, its names, and an Admin's live screen of a
  * bot there, /api/workspaces/shared/screen, which takes the computer from the shared copy), signing in and out,
- * notices, usage events, what's on screen, the user's own vault, account and name, and the shared bot's browser
- * (/api/browser: Bops Cloud decides who may watch it).
+ * notices, usage events, what's on screen, the user's own vault, account and name, the shared bot's browser
+ * (/api/browser: Bops Cloud decides who may watch it), and a file added for a shared bot (/api/bots/files: the same).
  */
 const ALLOWED = [
   /^\/api\/workspaces(\/|\?|$)/,
@@ -33,6 +35,14 @@ const ALLOWED = [
   // The bot's browser (bot-browser.tsx): asked of Bops Cloud for the shared workspace's bot (lib/server/browser-view.ts
   // names its project), never the user's own bot of that id; Bops Cloud lets through only an Admin, or Write with Use its computer.
   /^\/api\/browser(\?|$)/,
+  // Keys (keys.tsx: Logins and a bot's key card in the chat): while a shared workspace is open, every keys route acts on
+  // that workspace's own keys alone (lib/server/shared-keys.ts: orgo-web with the user's own Orgo key, which checks they
+  // have Keys there; a bot's switch is an act through Bops Cloud), never the user's own vault or bots.
+  /^\/api\/keys(\/|\?|$)/,
+  // A file added in a chat or dropped on a bot's screen (attachments.tsx sendFile): while a shared workspace is open it goes
+  // on the owner's computer Bops Cloud names for that bot (lib/server/shared.ts sharedFileTarget), for an Admin, with the
+  // user's own Orgo key; never on the user's own bot of that id. (attachments.tsx sendFile asks sendRefused: XMLHttpRequest.)
+  /^\/api\/bots\/files(\?|$)/,
 ];
 
 /** The reads that don't go while it's open: answered from the user's own bot or workspace of that id, never the shared one's. */
@@ -80,12 +90,17 @@ function ownPath(url: string): string | null {
   }
 }
 
-/** Whether a call goes while a shared workspace is open: a read (but not one of OWN_READS), a call elsewhere, or one of ALLOWED. */
+/**
+ * Whether a call goes while a shared workspace is open: a read (but not one of OWN_READS), a call elsewhere, one of
+ * ALLOWED, or a change the owner's own window makes (cloud/change-routes.ts): its route sends it to the owner's Mac for
+ * someone allowed to make it, and refuses anything else there, never acting on the user's own bot of that id
+ * (lib/server/change-relay.ts).
+ */
 export function callAllowed(method: string | undefined, url: string): boolean {
   const path = ownPath(url);
   if (path === null) return true;
   if (!method || ["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase())) return !OWN_READS.some((r) => r.test(path));
-  return !path.startsWith("/api/") || ALLOWED.some((r) => r.test(path));
+  return !path.startsWith("/api/") || ALLOWED.some((r) => r.test(path)) || !!changeRouteOf(method.toUpperCase(), path);
 }
 
 const g = globalThis as unknown as { bopsViewOnly?: { line: string | null; fetch?: typeof fetch } };
@@ -109,3 +124,12 @@ export function viewOnly(line: string | null) {
 
 /** Whether a read that doesn't go through fetch (a screen's EventSource, an image's src) may go now: always, unless a shared workspace is open and it's one of OWN_READS. */
 export const readAllowed = (url: string) => !g.bopsViewOnly?.line || callAllowed("GET", url);
+
+/**
+ * Why a write that doesn't go through fetch (a file's upload, which XMLHttpRequest sends for its progress:
+ * attachments.tsx sendFile) can't go now, the same line a fetch would be refused with; null when it may.
+ */
+export function sendRefused(method: string, url: string): string | null {
+  const line = g.bopsViewOnly?.line;
+  return line && !callAllowed(method, url) ? line : null;
+}

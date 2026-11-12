@@ -3,6 +3,7 @@ import { appsOwnShown } from "@/lib/apps-access";
 import { handleMessage } from "@/lib/server/chat";
 import { sendsThroughCloud, sendThroughCloud } from "@/lib/server/cloud-chat";
 import { uploadPath } from "@/lib/server/uploads";
+import { addedFile } from "@/lib/server/bot-files";
 import { clearChat, deletePicked, removeMessages, type Removed } from "@/lib/server/remove";
 import { sharedOpen } from "@/lib/server/shared";
 import { chat, getState, react } from "@/lib/server/store";
@@ -15,12 +16,14 @@ export async function POST(request: Request, ctx: RouteContext<"/api/chats/[chat
   const unready = notReady();
   if (unready) return unready;
   const { chatId } = await ctx.params;
-  const { text, replyTo, images, lookingAt, agent, appNote, picks } = (await request.json()) as {
+  const { text, replyTo, images, files, lookingAt, agent, appNote, picks } = (await request.json()) as {
     text?: string;
     /** The agent picked in the message box for the threads this message starts (Message.agent): from the Bops window only. */
     agent?: string;
     replyTo?: string;
     images?: { id: string; type: string; w?: number; h?: number }[];
+    /** Files added for the bot first (POST /api/bots/files), by their ids: only ones added here are taken. */
+    files?: unknown;
     /** The app open beside the chat (lib/server/made-apps.ts), which a change the user asks for is about. */
     lookingAt?: string;
     /**
@@ -32,19 +35,24 @@ export async function POST(request: Request, ctx: RouteContext<"/api/chats/[chat
     /** With appNote: what Select put in it, each line and where it is in the page's code (lib/app-preview.ts picksOf), for the bot only. */
     picks?: unknown;
   };
-  if (!chat(chatId)) return Response.json({ error: "no such chat" }, { status: 404 });
+  const c = chat(chatId);
+  if (!c) return Response.json({ error: "no such chat" }, { status: 404 });
   const pics = (images ?? []).filter((i) => uploadPath(i.id)).slice(0, 10);
-  if (!text?.trim() && !pics.length) return Response.json({ error: "empty message" }, { status: 400 });
+  const named = (Array.isArray(files) ? files : []).filter((f): f is string => typeof f === "string");
+  // One that isn't here anymore (Bops restarted, or it was added a day ago) is on the Desktop with nothing telling the bot: said, never sent without it.
+  if (named.some((f) => !addedFile(f))) return Response.json({ error: "A file you added isn't ready anymore. Add it again." }, { status: 409 });
+  const added = named.flatMap((f) => addedFile(f) ?? []).filter((f) => c.botIds.includes(f.botId)).slice(0, 10);
+  if (!text?.trim() && !pics.length && !added.length) return Response.json({ error: "empty message" }, { status: 400 });
   const picked = typeof agent === "string" && fromBopsWindow(request) ? agent : undefined;
   const aboutApp = appNote === true && fromBopsWindow(request) && !sharedOpen() && appsOwnShown(getState());
   // A workspace whose chat goes through Bops Cloud: written there, and answered on the bot's computer (lib/server/cloud-chat.ts).
   const words = text?.trim() ?? "";
-  if (words && !sharedOpen() && sendsThroughCloud(chatId, { images: pics.length, lookingAt: typeof lookingAt === "string" ? lookingAt : undefined, appNote: aboutApp, picks: picks !== undefined })) {
+  if (words && !sharedOpen() && sendsThroughCloud(chatId, { images: pics.length, files: added.length, lookingAt: typeof lookingAt === "string" ? lookingAt : undefined, appNote: aboutApp, picks: picks !== undefined })) {
     const how = await sendThroughCloud(chatId, words, replyTo);
     if (how === "sent") return Response.json({ ok: true });
     if (how === "failed") return Response.json({ error: "That didn't reach Bops Cloud. Try again." }, { status: 502 });
   }
-  void handleMessage(chatId, text?.trim() ?? "", replyTo, pics, undefined, undefined, undefined, undefined, typeof lookingAt === "string" ? lookingAt : undefined, undefined, picked, aboutApp, aboutApp ? picksOf(picks, text?.trim() ?? "") : undefined);
+  void handleMessage(chatId, text?.trim() ?? "", replyTo, pics, undefined, undefined, undefined, undefined, typeof lookingAt === "string" ? lookingAt : undefined, undefined, picked, aboutApp, aboutApp ? picksOf(picks, text?.trim() ?? "") : undefined, added);
   return Response.json({ ok: true });
 }
 

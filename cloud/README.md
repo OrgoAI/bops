@@ -79,7 +79,8 @@ token is a computer whatever Orgo says: one whose profile names no computer is r
 is a computer key Orgo never bound to its computer (`computer_key: true` without the computer scope).
 
 A computer calls only the routes marked `computer: true` (`cloud/http.ts`): `GET`/`PUT /v1/state`,
-`GET /v1/state/head`, `GET`/`POST /v1/messages`, `POST /v1/session`, and the providers' routes. Everything
+`GET /v1/state/head`, `GET`/`POST /v1/messages`, `POST /v1/session`, `POST /v1/apps/preview-password`
+(its own apps' only), and the providers' routes. Everything
 else is 403 `computer_not_allowed` ("A computer's identity can't do this."): numbers and lines, mail
 handles, Slack links, codes, backups, notices, usage, the iPhone's agent, and the tunnel (`/v1/connect`:
 one per user, so a computer there would drop the user's Mac).
@@ -195,6 +196,7 @@ Webhooks are public and proven by the provider's signature instead.
 | 1 | `GET /v1/live?ws=` (Server-Sent Events), `POST /v1/live` | Mac, iPhone | what each bot of a workspace is doing right now, to every device of the user's (see "Live") |
 | 1 | `GET /v1/live?project=`, `GET /v1/ws/<project>/state` | Mac | a workspace shared with the user, watched (see "Shared workspaces") |
 | 1 | `POST /v1/ws/<project>/act` | Mac | something a member with Write does there, queued for the owner's Mac (see "Shared workspaces") |
+| 1 | `POST /v1/apps/preview-password` | Mac, computer | a site's Preview password just set, from the owner's Bops or the app's own computer, kept for the people with Your Apps at Write (`preview-passwords.ts`); the owner's Mac's check of what Orgo has lands only over the entry it saw (`seen`); 204, never said back |
 | 1 | `POST /v1/internal/members-changed` | orgo-web | someone's access to a project changed (signed; see "Shared workspaces") |
 | 3,4 | `POST /hooks/agentphone` | AgentPhone | texts and call turns for any user's number |
 | 3,4 | `POST /hooks/openai` | OpenAI | incoming GPT-Live calls over a SIP trunk (dormant) |

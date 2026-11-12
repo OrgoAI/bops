@@ -28,8 +28,8 @@ const TRIES = 3;
 const g = globalThis as unknown as { __bopsCloudChat?: { fetch?: typeof fetch } };
 
 /** Whether this message goes through Bops Cloud (see above). */
-export function sendsThroughCloud(chatId: string, extra: { images?: number; lookingAt?: string; appNote?: boolean; picks?: boolean }): boolean {
-  if (onRunner() || !cloudOn() || extra.images || extra.lookingAt || extra.appNote || extra.picks) return false;
+export function sendsThroughCloud(chatId: string, extra: { images?: number; files?: number; lookingAt?: string; appNote?: boolean; picks?: boolean }): boolean {
+  if (onRunner() || !cloudOn() || extra.images || extra.files || extra.lookingAt || extra.appNote || extra.picks) return false;
   const c = chat(chatId);
   if (!c || c.kind === "group" || c.botIds.length !== 1) return false;
   const st = getState();

@@ -9,7 +9,8 @@ import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
  * the server's memory alone (never in the user's state, never synced, never on disk), and it's shown in
  * place of the user's own workspace while it's open.
  */
-import { askOwnersOnly, threadOwnersOnly } from "@/lib/member-access";
+import { APPS_NAME } from "@/lib/apps-access";
+import { askOwnersOnly, threadOwnersOnly, type Power, type PowerWho } from "@/lib/member-access";
 
 /** The roles in a workspace: the owner everything; an Admin every bot, its computer and its apps, all but deleting it; a Member what the owner picks. */
 export type SharedRole = "owner" | "admin" | "member";
@@ -60,6 +61,12 @@ export type SharedOpen = SharedWorkspace & {
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
   /** The same for a bot's How I work (bot-panel.tsx HowIWork). */
   personaActs?: { key: string; botId: string; state: "sending" | "waiting" | "failed"; error?: string }[];
+  /** What they may change here (cloud/member-access.ts Power: an Admin every one, a Member the ones turned on for them in Team). */
+  can?: string[];
+  /** The owner's Bops takes their changes (SharedWsSlice.changes). */
+  changes?: true;
+  /** Their changes on their way to the owner's Mac, or that didn't go (with why): lib/server/change-relay.ts. */
+  changeActs?: { key: string; path: string; state: "sending" | "waiting" | "failed"; error?: string }[];
   /**
    * Keys (cloud/ws-slice.ts keysOf): the user manages this workspace's own keys and picks which bots use any key it sees
    * (keys.tsx). `keyActs`: the owner's Bops takes those switches; without it they wait for its update.
@@ -165,6 +172,23 @@ export const Your = (state: Viewing) => (state.shared ? "The owner's" : "Your");
 /** "your Mac" to the owner, "the owner's Mac" in a shared workspace. */
 export const yourMac = (state: Viewing) => `${your(state)} Mac`;
 /**
+ * Whether the user may change something that needs `power` (cloud/member-access.ts Power) in the workspace open: always in their own;
+ * in one shared with them, when it's theirs there (an Admin has every one, a Member the ones turned on for them in Team)
+ * and the owner's Bops takes changes. `soon`: theirs, with the owner's Bops not yet new enough (the window says so).
+ */
+/**
+ * Who the viewer is for an Admin power (cloud/member-access.ts adminMay): an Admin the owner's Bops takes acts from, with
+ * their switches too once the owner's Bops takes those (a Member with The owner's Mac on answers its asks).
+ */
+export const powerWho = (state: Viewing): PowerWho => ({
+  admin: adminActs(state),
+  ...(state.shared?.changes ? { can: Object.fromEntries((state.shared.can ?? []).map((p) => [p, true])) as Partial<Record<Power, true>> } : {}),
+});
+
+export const mayChange = (state: Viewing, power: Power, { soon = false } = {}) =>
+  !state.shared || (!!state.shared.can?.includes(power) && (soon || state.shared.changes === true));
+
+/**
  * Whether the viewer may act in a shared workspace for these bots: every one at Write (a group with one at Read
  * stays watch only). Never in the user's own, where everything's theirs and nothing goes through Bops Cloud.
  */
@@ -269,7 +293,7 @@ export function askAnswerer(state: Viewing & { sessions?: readonly { id: string;
   if (!state.shared) return "you";
   if (readOnly(state, [a.botId])) return readOnlyLine([a.botId], state.shared.levels);
   const t = a.threadId ? state.sessions?.find((x) => x.id === a.threadId) : undefined;
-  if (askOwnersOnly(a, t, adminActs(state))) return ownersLine(state);
+  if (askOwnersOnly(a, t, powerWho(state))) return ownersLine(state);
   if (appWorkBlocked(state, t)) return APP_WORK_LINE;
   if (t && !reachesComputer(state, t)) return NO_COMPUTER_LINE;
   return "you";
@@ -302,7 +326,7 @@ export function threadAnswerer(state: Viewing & { bots: readonly { id: string; r
   if (s.blocker === "payment") return OWNER_PAY_LINE;
   if (kind === "elsewhere") return OWNER_PHONE_LINE;
   if (readOnly(state, [s.botId])) return readOnlyLine([s.botId], state.shared.levels);
-  if (threadOwnersOnly(s, adminActs(state))) return ON_MAC_LINE;
+  if (threadOwnersOnly(s, powerWho(state))) return ON_MAC_LINE;
   if (kind === "brain") return OWNER_ONLY_LINE;
   if (appWorkBlocked(state, s)) return APP_WORK_LINE;
   if (s.blocker) return screenAskMine(state, s.botId, s.blocker) ? "you" : state.shared.role === "admin" ? OWNER_ONLY_LINE : ownersLine(state);
@@ -348,7 +372,8 @@ export const SHARED_SCREEN_WORDS = {
  */
 export function ownerVoice(text: string, keep: readonly string[] = []): string {
   // Quoted spans at odd places, as said, and what `keep` names (a thread's title), as written: only what's around them is Bops' line.
-  const kept = keep.filter((k) => k.trim()).map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // Your Apps too: it's the page's name for everyone (lib/apps-access.ts APPS_NAME), never the owner's "your".
+  const kept = [...keep, APPS_NAME].filter((k) => k.trim()).map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   // (What `keep` names first: one that starts with a quote of its own is kept whole, not cut at its first inner quote.)
   // A web address is never Bops' words either ("Read https://example.com/what-you-need-to-know", "Stopped watching your-bank.com").
   const spans = new RegExp(`(${kept.length ? `${kept.join("|")}|` : ""}“[^”]*”|"[^"\n]*"|https?:\\/\\/[^\\s"“”]+|\\b[\\w-]+(?:\\.[\\w-]+)*\\.[A-Za-z]{2,}\\b(?:\\/[^\\s"“”]*)?)`);
@@ -391,5 +416,14 @@ export function ownerCall(text: string): string {
     .replace(/^You: /gm, "Owner: ");
 }
 
-/** A bot's line Bops wrote for it (out of AI credit), as a viewer reads it: what to do about the owner's credit is the owner's (ownerVoice). */
-export const ownerCredit = (text: string) => (/^I'm out of (?:AI|Orgo) credit, so I've stopped\./.test(text) ? text.replace(/\s*(?:Upgrade|Add credit) in Settings to [^.]*\.?$/, "") : text);
+/** What a teammate reads in place of the owner's "Add credit in Settings": whose credit it is, and who can add more. */
+export const OWNER_CREDIT_LINE = "It's the owner's credit: only they can add more.";
+
+/**
+ * A bot's line Bops wrote for it (out of AI credit), as a viewer reads it: what to do about the owner's credit is the
+ * owner's (ownerVoice), so it says whose credit it is and who can add more (OWNER_CREDIT_LINE).
+ */
+export const ownerCredit = (text: string) =>
+  /^I'm out of (?:AI|Orgo) credit, so I've stopped\./.test(text) && !text.includes(OWNER_CREDIT_LINE)
+    ? `${text.replace(/\s*(?:Upgrade|Add credit) in Settings to [^.]*\.?$/, "")} ${OWNER_CREDIT_LINE}`
+    : text;

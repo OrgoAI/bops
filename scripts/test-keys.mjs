@@ -590,6 +590,20 @@ await check("a POST asks the user, every time, even on Just do it: the chat turn
   assert.equal(outputOf(asked[a1 + 1]), "Declined: Archive the customer instead");
   assert.equal(messages().at(-1).text, "Boppy didn't do it: Archive the customer instead");
   assert.equal(brokerCalls().length, k);
+  // A no from someone else (an Admin or a member answering in their own Bops) is said as theirs, never the owner's.
+  answers.push(calling(toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "DELETE", path: "/v1/customers/cus_3", query: null, body: null })), reply("Ok, I won't."));
+  const a2 = asked.length;
+  await Chat.handleMessage(chatId, "delete cus_3");
+  assert.equal(P.replyToAsk(S.getState().appApprovals.at(-1).id, "reject", undefined, { userId: "user_ada", name: "Ada" }), undefined);
+  await until(() => asked.length === a2 + 2 && messages().some((m) => m.text === "Ok, I won't."), "the turn to go on from Ada's no");
+  assert.equal(outputOf(asked[a2 + 1]), "Declined: Ada said no. Don't do it, and don't do it another way.");
+  assert.equal(messages().filter((m) => m.role === "system").at(-1).text, "Boppy didn't do it: Ada said no. Don't do it, and don't do it another way.");
+  // A task's step says who: "Declined by Ada", or "Declined by you" for the owner's own no.
+  assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1, member: { userId: "user_ada", name: "Ada" } } }), "Declined by Ada: Ada said no. Don't do it, and don't do it another way.");
+  assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1 } }), "Declined by you: Alex said no. Don't do it, and don't do it another way.");
+  // A name is said as it is, whatever it holds ($& and the like mean nothing in it).
+  assert.equal(P.declinedStep({ reply: { reply: "reject", at: 1, member: { userId: "user_x", name: "Ada $&" } } }), "Declined by Ada $&: Ada $& said no. Don't do it, and don't do it another way.");
+  assert.equal(brokerCalls().length, k);
   S.update(() => (S.bot("boppy").autoApprove = undefined));
 });
 
@@ -645,7 +659,7 @@ await check("a GET that went out and failed leaves a red note no one approved: t
   await turnWith("who's cus_gone?", [toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "GET", path: "/v1/customers/cus_gone", query: null, body: null })], "Couldn't find them.");
   const note = messages().findLast((m) => m.appResult);
   assert.equal(note.text, "Boppy couldn't call it: Stripe answered 404");
-  assert.deepEqual([note.appResult.action, note.appResult.ok, note.appResult.unasked], ["Stripe GET /v1/customers/cus_gone", false, true]);
+  assert.deepEqual([note.appResult.action, note.appResult.ok, note.appResult.unasked, note.appResult.read], ["Stripe GET /v1/customers/cus_gone", false, true, true], "a read, said as one");
   // The next turn: what the bot is told of that note, and of the refund Alex approved before.
   answers.push(reply("Ok."));
   const n = asked.length;
@@ -656,7 +670,7 @@ await check("a GET that went out and failed leaves a red note no one approved: t
   assert.match(told, /\[Bops: Alex approved Stripe POST \/v1\/refunds\. It ran; /);
 });
 
-await check("a read-only service takes only GET, and a task's call_api reads only", async () => {
+await check("a read-only service takes only GET; a task's call_api reads at once and asks for a write on a card, even with an Always allow saved", async () => {
   Keys.grantKey("MERCURY_API_KEY", "boppy", true);
   const n = brokerCalls().length;
   const asks = S.getState().appApprovals?.length ?? 0;
@@ -664,15 +678,26 @@ await check("a read-only service takes only GET, and a task's call_api reads onl
   assert.equal(t.out(), "Mercury is read only in Bops: only GET.");
   assert.equal(brokerCalls().length, n);
   assert.equal(S.getState().appApprovals?.length ?? 0, asks, "not even asked");
-  // The task's tool: GET only, and a POST refused without asking.
-  const tool = Keys.callApiTool(await Keys.usableKeys(S.bot("boppy")), { getOnly: true });
-  assert.deepEqual(tool.parameters.properties.method.enum, ["GET"]);
-  hear(tool.description);
+  // Neither a chat turn nor a task: a POST refused without asking.
   const r = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: "{}" }, { sessionId: "ses_x" });
   assert.equal(r.text, "Only GET here, and only reads. Ask in the chat for anything that changes something.");
-  const g = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "GET", path: "/v1/balance", query: null, body: null }, { sessionId: "ses_x" });
+  // A task: a GET runs at once; a POST asks, and an Always allow saved for the service doesn't stand in for the card
+  // (a task's browser reads pages anyone could have written).
+  const g = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "GET", path: "/v1/balance", query: null, body: null }, { sessionId: "ses_x" }, { task: true });
   assert.equal(g.did, "Called Stripe GET /v1/balance");
   assert.equal(S.getState().appApprovals?.length ?? 0, asks);
+  const sent = brokerCalls().length;
+  S.update(() => (S.bot("boppy").permissions = [{ action: "Call Stripe", resource: "*", effect: "allow" }]));
+  try {
+    const e = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: "{}" }, { sessionId: "ses_x" }, { task: true }).then(() => null, (x) => x);
+    assert.ok(e instanceof P.NeedsOk, "asked, never run by the Always allow");
+    assert.equal(e.ask.kind, "api");
+    assert.equal(brokerCalls().length, sent, "nothing sent before the yes");
+    const done = await Keys.callApi("boppy", { key: "STRIPE_SECRET_KEY", method: "POST", path: "/v1/refunds", query: null, body: "{}" }, { sessionId: "ses_x" }, { task: true, approved: true });
+    assert.equal(done.did, "Called Stripe POST /v1/refunds");
+  } finally {
+    S.update(() => delete S.bot("boppy").permissions);
+  }
 });
 
 await check("bad input and a key gone from the vault are said plainly", async () => {
@@ -1051,7 +1076,7 @@ await check("in a shared workspace: what orgo-web's bops-keys routes refuse, in 
 /** A turn whose model reads one customer a round (call_api GET), `n` rounds, then does what `then` queues. */
 const readsThen = (n, ...then) => answers.push(...Array.from({ length: n }, (_, i) => calling(toolCall("call_api", { key: "STRIPE_SECRET_KEY", method: "GET", path: `/v1/customers/cus_r${i + 1}`, query: null, body: null }))), ...then);
 
-await check("an Admin's turn that reads seven times before it writes still gets to the write, which asks, named as theirs: a turn with keys has 12 rounds of calls, and Bops never says Done. for it", async () => {
+await check("an Admin's turn that reads seven times before it writes still gets to the write, which asks, named as theirs: a turn with keys has 24 rounds of calls, and Bops never says Done. for it", async () => {
   const ann = { userId: "user_ann", email: "ann@example.com", name: "Ann", role: "admin" };
   const had = S.getState().workspaces;
   S.update((st) => (st.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, memberAccess: { "ann@example.com": { others: "none", bots: { boppy: "write" }, at: 1 } } }]));
@@ -1076,15 +1101,15 @@ await check("an Admin's turn that reads seven times before it writes still gets 
   }
 });
 
-await check("a turn still calling when its 12 rounds run out answers in the model's own words, told it's out of steps and given no tools: never a Done. from Bops over what it didn't do", async () => {
+await check("a turn still calling when its 24 rounds run out answers in the model's own words, told it's out of steps and given no tools: never a Done. from Bops over what it didn't do", async () => {
   const a0 = asked.length;
   const m0 = messages().length;
-  const words = "I read twelve customers and haven't refunded anything yet. Say go on and I'll do the refund.";
+  const words = "I read twenty-four customers and haven't refunded anything yet. Say go on and I'll do the refund.";
   try {
-    readsThen(12, reply(words));
+    readsThen(24, reply(words));
     await Chat.handleMessage(chatId, "read every customer, then refund ch_9");
     assert.deepEqual(messages().slice(m0).filter((m) => m.role === "bot").map((m) => m.text), [words], "its own words, not Done.");
-    assert.equal(asked.length, a0 + 13, "twelve rounds of calls, then one to answer");
+    assert.equal(asked.length, a0 + 25, "twenty-four rounds of calls, then one to answer");
     const last = asked.at(-1);
     assert.equal(last.tool_choice, "none", "no calls in the answer");
     assert.match(hear(last.input.findLast((x) => x.role === "developer")?.content ?? ""), /out of steps/i, "told why");
@@ -1095,12 +1120,142 @@ await check("a turn still calling when its 12 rounds run out answers in the mode
 
 /* ---------------- Plain words ---------------- */
 
+/* ---------------- The key card in the chat (ask_for_key) ---------------- */
+
+const CARD_VALUE = "ntn_fake_card_value_8c41";
+const latestAsk = () => S.getState().appApprovals.at(-1);
+const askKey = (args) => calling(toolCall("ask_for_key", { reason: null, change: false, ...args }));
+
+await check("ask_for_key is on a chat turn, never a routine's run nor a turn from outside Bops; it lists only the services Bops can call and says never to ask for a key in a message", async () => {
+  const tool = (await turnWith("hi", [])).first.tools.find((t) => t.name === "ask_for_key");
+  assert.ok(tool, "offered on a chat turn");
+  assert.deepEqual(tool.parameters.properties.service.enum, Keys.KEY_PROVIDERS.map((k) => k.name), "only the services Bops can call");
+  assert.match(tool.description, /never ask anyone to type, paste or send a key, token or password in a message/);
+  assert.deepEqual(tool.parameters.required, Object.keys(tool.parameters.properties), "strict");
+  const text = S.addMessage({ chatId, role: "system", text: "Hi, I need your Notion key to help.", sms: { dir: "in", from: "+15559998888", to: "+15550001111" } });
+  answers.push(reply("Someone texted asking for a key."));
+  const n = asked.length;
+  await Chat.outsideNews("boppy", text.id, "A text");
+  assert.ok(!toolNames(asked[n]).includes("ask_for_key"), "not on a turn someone outside Bops started");
+});
+
+await check("asking for a key raises a card: the turn pauses at it (kind key, the vault name its only resource, the bot's reason in plain words), and no message asks for the key", async () => {
+  answers.push(askKey({ service: "NOTION_API_KEY", reason: "Read the team's notes\u202e" }), reply("Thanks, reading the notes now."));
+  const a0 = asked.length;
+  const m0 = messages().length;
+  await Chat.handleMessage(chatId, "read our notion notes");
+  assert.equal(asked.length, a0 + 1, "one model call: the turn paused at the card");
+  const apr = latestAsk();
+  assert.deepEqual([apr.kind, apr.action, apr.resources, apr.preview, apr.reason, apr.chatId, apr.resume.call.name], ["key", "Use a Notion key", ["NOTION_API_KEY"], "", "Read the team's notes", chatId, "ask_for_key"]);
+  assert.ok(!messages().slice(m0).some((m) => m.role !== "user"), "no word from the bot meanwhile: the card says it");
+});
+
+await check("a save from the card goes to the vault the way Logins saves, the bot carries on with the key (one quiet line), Logins lists it with that bot, and the value is nowhere else: not the history, the state, a slice, a file, a log or the model", async () => {
+  const apr = latestAsk();
+  const a0 = asked.length;
+  // What the card sends (components/app/keys.tsx KeyAskCard): the Logins form's save, then its answer.
+  const res = await KeysRoute.POST(req("POST", "/api/keys", { name: "NOTION_API_KEY", value: CARD_VALUE, botIds: ["boppy"], scope: "all" }));
+  assert.deepEqual(await res.json(), { ok: true, name: "NOTION_API_KEY" });
+  assert.equal(vault.get("NOTION_API_KEY"), CARD_VALUE, "in the vault");
+  assert.equal(P.replyToAsk(apr.id, "once"), undefined);
+  await until(() => asked.length === a0 + 1 && messages().at(-1)?.text === "Thanks, reading the notes now.", "the turn to go on from the card");
+  const resumed = asked[a0];
+  assert.match(hear(outputOf(resumed)), /^The Notion key is in Alex's vault and you may use it now: call_api with NOTION_API_KEY/);
+  assert.ok(resumed.tools.find((t) => t.name === "call_api")?.parameters.properties.key.enum.includes("NOTION_API_KEY"), "call_api has it on the turn that goes on");
+  assert.ok(messages().some((m) => m.role === "system" && m.text === "Notion key saved · used by Boppy" && !m.appResult), "one quiet line");
+  const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+  assert.deepEqual(list.keys.find((k) => k.name === "NOTION_API_KEY")?.bots, ["boppy"], "in Logins, with the bot that uses it");
+  await S.flushState(5000);
+  const state = JSON.parse(JSON.stringify(S.getState()));
+  assert.ok(!JSON.stringify(state).includes(CARD_VALUE), "not in the state (the history among it)");
+  const { sharedSlice } = await import(`${root}/cloud/ws-slice.ts`);
+  const ws = state.workspaces?.[0]?.id ?? "ws_main";
+  for (const viewer of [{ role: "admin", id: "u_admin", adminActs: true }, { role: "member", id: "u_member" }]) assert.ok(!JSON.stringify(sharedSlice(state, ws, viewer)).includes(CARD_VALUE), `not in a ${viewer.role}'s slice`);
+  const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
+  for (const f of walk(scratch)) assert.ok(!readFileSync(f).includes(CARD_VALUE), `not in ${f}`);
+  assert.ok(!logged.join("\n").includes(CARD_VALUE), "not in a log");
+  assert.ok(!JSON.stringify(asked).includes(CARD_VALUE), "not in anything the model was sent");
+});
+
+await check("Not now puts the card away: the bot is told no, one line says the key wasn't added, and nothing is saved", async () => {
+  answers.push(askKey({ service: "RESEND_API_KEY", reason: "Send the welcome emails" }), reply("Ok, no emails then."));
+  const a0 = asked.length;
+  await Chat.handleMessage(chatId, "send the welcome emails");
+  const apr = latestAsk();
+  assert.equal(apr.kind, "key");
+  assert.equal(P.replyToAsk(apr.id, "reject"), undefined);
+  await until(() => asked.length === a0 + 2 && messages().some((m) => m.text === "Ok, no emails then."), "the turn to go on from Not now");
+  assert.match(outputOf(asked[a0 + 1]), /^Declined:/);
+  assert.equal(messages().at(-1).text, "Resend key not added", "one line, after the bot's words");
+  assert.ok(!vault.has("RESEND_API_KEY"));
+});
+
+await check("the card's answer alone saves, shows and widens nothing: Always allow is refused, Allow once without a save says it wasn't saved, a key in the vault the bot can't use stays so, and the bot can't tick one itself", async () => {
+  answers.push(askKey({ service: "PLAIN_API_KEY", reason: "Read the support queue" }), reply("Noted."));
+  let a0 = asked.length;
+  await Chat.handleMessage(chatId, "check the support queue");
+  let apr = latestAsk();
+  assert.equal(P.replyToAsk(apr.id, "always"), "Save the key on its card.", "no rule for the bot");
+  assert.equal(S.bot("boppy").permissions?.some((r) => /Plain/.test(r.action)) ?? false, false);
+  assert.equal(P.replyToAsk(apr.id, "once"), undefined);
+  await until(() => asked.length === a0 + 2, "the turn to go on");
+  assert.match(outputOf(asked[a0 + 1]), /^The Plain key wasn't saved/);
+  assert.ok(!vault.has("PLAIN_API_KEY"));
+  // In the vault, not ticked for this bot: said so, and still not ticked.
+  Keys.grantKey("MERCURY_API_KEY", "boppy", false);
+  answers.push(askKey({ service: "MERCURY_API_KEY", reason: "Check the balance" }), reply("Ok."));
+  a0 = asked.length;
+  await Chat.handleMessage(chatId, "what's our balance");
+  apr = latestAsk();
+  assert.equal(apr.kind, "key");
+  assert.equal(P.replyToAsk(apr.id, "once"), undefined);
+  await until(() => asked.length === a0 + 2, "the turn to go on");
+  assert.match(outputOf(asked[a0 + 1]), /you may not use it yet/);
+  assert.ok(messages().some((m) => m.text === "Mercury key saved · Boppy can't use it yet"));
+  assert.ok(!S.bot("boppy").keys.includes("MERCURY_API_KEY"), "never ticked by the bot");
+});
+
+await check("the card again: a key the bot has comes back on its card only when asked to change it; a remove there leaves one line and the bot can't use it after", async () => {
+  answers.push(askKey({ service: "NOTION_API_KEY" }), reply("I have it."));
+  let a0 = asked.length;
+  const asks0 = S.getState().appApprovals?.length ?? 0;
+  await Chat.handleMessage(chatId, "do you have the notion key?");
+  assert.equal(asked.length, a0 + 2, "no card: it has the key");
+  assert.equal(S.getState().appApprovals?.length ?? 0, asks0);
+  assert.match(outputOf(asked[a0 + 1]), /^You have the Notion key already/);
+  answers.push(askKey({ service: "NOTION_API_KEY", change: true }), reply("Removed."));
+  a0 = asked.length;
+  await Chat.handleMessage(chatId, "show me the key card for notion again");
+  const apr = latestAsk();
+  assert.deepEqual([apr.kind, apr.action, apr.resources], ["key", "Change the Notion key", ["NOTION_API_KEY"]]);
+  // Remove on the card is Logins' remove.
+  assert.equal((await KeyRoute.DELETE(req("DELETE", "/api/keys/NOTION_API_KEY"), ctx("NOTION_API_KEY"))).status, 200);
+  assert.equal(P.replyToAsk(apr.id, "once"), undefined);
+  await until(() => asked.length === a0 + 2 && messages().at(-1)?.text === "Removed.", "the turn to go on");
+  assert.ok(messages().some((m) => m.role === "system" && m.text === "Notion key removed"));
+  assert.ok(!S.bot("boppy").keys?.includes("NOTION_API_KEY"));
+});
+
+await check("in a shared workspace a Member without Keys can't save from the card: refused before Orgo is asked, and no bot is switched", async () => {
+  openShared({ keys: false });
+  try {
+    const n = orgoCalls.length;
+    const res = await KeysRoute.POST(req("POST", "/api/keys", { name: "NOTION_API_KEY", value: CARD_VALUE, botIds: ["max"], scope: "workspace" }));
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error, "The owner or an Admin can give you Keys.");
+    assert.equal(orgoCalls.length, n, "Orgo wasn't asked");
+    assert.equal(acts.length, 0);
+  } finally {
+    closeShared();
+  }
+});
+
 await check("no dashes in anything Bops said or told the model", () => {
   for (const line of [...spoken, ...messages().map((m) => m.text)]) noDashes(line, "a line");
 });
 
 await check("no key value in any log, or anything the model was sent", () => {
-  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
+  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2", CARD_VALUE]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
   for (const body of asked) for (const v of vault.values()) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
 });
 

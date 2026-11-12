@@ -1,5 +1,5 @@
 import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_PERSONA, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_NO_KEYS, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, PERSONA_CHANGED, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
-import { askOwnersOnly, threadOwnersOnly } from "@/lib/member-access";
+import { askOwnersOnly, cleanPowers, threadOwnersOnly, type Power } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
 import { ADMIN_LINE, APP_WORK_LINE, KEYS_GIVEN_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
 import { COMPACTED, keptPersona, pairChatId, workBot, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
@@ -48,8 +48,8 @@ const LIVE = new Set(["running", "queued", "starting"]);
 
 /** The bots an act touches, as the copy has them: none when what it names is gone. */
 function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
-  // An app's act touches no bot: Your Apps' level says (refusal, settle).
-  if (isAppAct(act)) return [];
+  // An app's act touches no bot: Your Apps' level says (refusal, settle). Nor does a change: its power says (change-relay.ts).
+  if (isAppAct(act) || act.act === "change") return [];
   const thread = (id: string) => d.state.sessions.find((x) => x.id === id);
   const ids = (xs: unknown[]) => xs.flatMap((x) => (typeof x === "string" ? [x] : []));
   if (act.act === "chat" || (act.act === "compact" && "chatId" in act)) {
@@ -60,6 +60,9 @@ function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
   if (act.act === "persona" || act.act === "key") return d.state.bots.some((b) => b.id === act.botId) ? [act.botId] : [];
   return ids((act.act === "stop" ? act.sessionIds : [act.sessionId]).map((id) => thread(id)?.botId));
 }
+
+/** The switches a viewer has (SharedWsSlice.can), as member-access.ts keeps them: only known ones. */
+const canOf = (v: unknown): Partial<Record<Power, true>> => cleanPowers(Array.isArray(v) ? Object.fromEntries(v.map((x) => [x, true])) : undefined) ?? {};
 
 /** Whether a bot of the copy has these How I work words (none: ""), or is gone. */
 const samePersona = (d: SharedWsState, botId: string, words: string) => {
@@ -108,6 +111,9 @@ function landed(d: SharedWsState, messages: Record<string, unknown>[], p: Pendin
       const t = thread(a.sessionId);
       return !t || (!LIVE.has(String(t.status)) && Array.isArray(t.steps) && t.steps.some((x) => typeof x?.at === "number" && x.at >= p.at && (x.tool === COMPACTED || x.tool === "note")));
     }
+    // A change: the owner's Mac said how it went (SharedWsSlice.changed), done or why not (settle).
+    case "change":
+      return !!d.state.changed?.some((x) => x.key === p.key && x.ok);
     // An app's: the owner's Mac kept it on the app, done or refused (its `ok` and `said` show there).
     default:
       return !!d.state.apps?.list.find((x) => x.name === a.app)?.acts?.some((x) => x.key === p.key);
@@ -246,6 +252,11 @@ export class SharedCopy {
     const levels = c.data.state.levels ?? {};
     for (const [key, p] of this.pending) {
       if (p.state !== "failed" && landed(c.data, messages, p)) this.pending.delete(key);
+      // A change the owner's Mac wouldn't do: why, as it said it.
+      else if (p.state !== "failed" && p.act.act === "change" && c.data.state.changed?.some((x) => x.key === key && !x.ok))
+        this.pending.set(key, { ...p, state: "failed", error: c.data.state.changed.find((x) => x.key === key)?.error ?? "That didn't go." });
+      // A change is checked by its power (change-relay.ts), not a bot's level.
+      else if (p.act.act === "change") continue;
       // A bot's How I work with other words now than its edit began from (someone else saved first): it won't go.
       else if (p.state !== "failed" && p.act.act === "persona" && !samePersona(c.data, p.act.botId, p.act.was)) this.pending.set(key, { ...p, state: "failed", error: PERSONA_CHANGED });
       // A bot's key: Keys, not Write (a bot at Read takes one too).
@@ -299,6 +310,8 @@ export class SharedCopy {
   refusal(act: MemberAct): { status: number; error: string; code?: string } | null {
     const c = this.copy;
     if (!c) return { status: 409, error: "Open the workspace again." };
+    // A change: its power was checked as it was made (change-relay.ts), and Bops Cloud checks it again.
+    if (act.act === "change") return null;
     if ((act.act === "chat" || act.act === "reply") && act.text.trim().length > MEMBER_MAX_TEXT) return { status: 400, error: ACT_TOO_LONG };
     // An app's: Your Apps at Write, an app they're shown (cloud/members.ts appsTouched says the same, and more).
     if (isAppAct(act)) {
@@ -319,10 +332,12 @@ export class SharedCopy {
     // An Admin whose acts the owner's Bops takes (SharedWsSlice.adminActs): the same rules as Bops Cloud and the owner's Mac (member-access.ts ADMIN_POWERS).
     const role = c.open.role;
     const admin = role === "admin" && c.data.state.adminActs === true;
+    // A Member's switches (member-access.ts POWER_OF), once the owner's Bops takes them: Bops Cloud says the same.
+    const me = { admin, ...(c.data.state.changes ? { can: canOf(c.data.state.can) } : {}) };
     // A bot's How I work: an Admin's (whether the owner's Bops takes it yet, Bops Cloud says: OWNER_BOPS_OLD).
-    if (act.act === "persona" && role !== "admin") return { status: 403, error: ADMIN_LINE, code: ADMIN_ONLY };
+    if (act.act === "persona" && role !== "admin" && !me.can?.bots) return { status: 403, error: ADMIN_LINE, code: ADMIN_ONLY };
     if (act.act === "persona" && act.text.trim().length > MEMBER_MAX_PERSONA) return { status: 400, error: ACT_TOO_LONG };
-    if (act.act === "where") {
+    if (act.act === "where" && !me.can?.bots) {
       if (role !== "admin") return { status: 403, error: ADMIN_LINE, code: ADMIN_ONLY };
       if (!admin) return c.data.state.ownerOld ? { status: 409, error: OWNER_UPDATE_LINE, code: OWNER_BOPS_OLD } : { status: 403, error: "Only the owner can pick this for now.", code: MEMBER_OWNER_ONLY };
     }
@@ -330,7 +345,7 @@ export class SharedCopy {
     if (!bots.every((id) => levels[id] === "write")) return { status: 403, error: "You can watch this bot, not act for it. Ask the owner for Write.", code: MEMBER_READ_ONLY };
     // What only the owner does, whatever the level (cloud/members.ts botsTouched says the same).
     const thread = (id: unknown) => (typeof id === "string" ? c.data.state.sessions.find((x) => x.id === id) : undefined);
-    if ((act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act)) && threadOwnersOnly(thread(act.sessionId), admin)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    if ((act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act)) && threadOwnersOnly(thread(act.sessionId), me)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
     // The owner's app work: Your Apps at Write too (cloud/members.ts appWorkRefused).
     const appThread = act.act === "answer" ? thread(c.data.state.approvals?.find((x) => x.id === act.askId)?.threadId) : act.act === "reply" || act.act === "dismiss" || (act.act === "compact" && "sessionId" in act) ? thread(act.sessionId) : undefined;
     if (appThread && "app" in appThread && !!appThread.app && c.data.state.apps?.level !== "write") return { status: 403, error: APP_WORK_LINE, code: MEMBER_APPS_READ_ONLY };
@@ -341,7 +356,7 @@ export class SharedCopy {
     }
     if (act.act === "answer") {
       const a = c.data.state.approvals?.find((x) => x.id === act.askId);
-      const why = a ? askOwnersOnly(a, thread(a.threadId), admin) : null;
+      const why = a ? askOwnersOnly(a, thread(a.threadId), me) : null;
       // An Admin's to answer once the owner's Bops is new enough (ownerOld): said so, not "only the owner".
       if (why && role === "admin" && c.data.state.ownerOld && !askOwnersOnly(a!, thread(a!.threadId), true)) return { status: 409, error: OWNER_UPDATE_LINE, code: OWNER_BOPS_OLD };
       if (why === "logins") return { status: 403, error: THEIR_LOGINS, code: MEMBER_OWNER_ONLY };
@@ -535,7 +550,9 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   // The site each bot works on, when the owner gave the user Your Apps (cloud/ws-slice.ts sitesOf): read as the owner's are (siteOf).
   // Where its chat is answered (an Admin's Settings shows the switch: chat-switch.tsx), as Bops Cloud mirrors it.
   const chatOn = s.workspace?.chatOn === "cloud" || s.workspace?.chatOn === "mac" ? { chatOn: s.workspace.chatOn as "cloud" | "mac" } : {};
-  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}), ...chatOn, ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}), ...(s.workspace?.chatAutoOff === true ? { chatAutoOff: true } : {}) };
+  // The org chart, for someone who may change it (cloud/ws-slice.ts sharedSlice): the chart draws it as the owner's does.
+  const chain = s.chain && typeof s.chain === "object" ? { chain: s.chain as unknown as Workspace["chain"] } : {};
+  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}), ...chatOn, ...chain, ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}), ...(s.workspace?.chatAutoOff === true ? { chatAutoOff: true } : {}) };
   // A bot's keys, for someone with Keys: as switched here until the owner's Bops has it (switchedKeys).
   const bots = s.bots.map((b) => {
     const { keys: _keys, ...rest } = b;
@@ -563,12 +580,13 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...t,
       ...(stopping.has(t.id) && !t.stopAsked ? { stopAsked: "Stopping" } : {}),
       ...(typeof t.title === "string" ? { title: onTheirMac(t.title) } : {}),
-      ...(typeof t.error === "string" ? { error: ownerVoice(t.error) } : {}),
+      // A thread stopped for the owner's credit says whose credit it is, as the chat does (ownerCredit).
+      ...(typeof t.error === "string" ? { error: ownerVoice(ownerCredit(t.error)) } : {}),
       replies: [...(Array.isArray(t.replies) ? t.replies : []).map((r) => (typeof r.note === "string" ? { ...r, note: ownerVoice(r.note) } : r)), ...mine],
       steps: (Array.isArray(t.steps) ? t.steps : []).map((st) => (typeof st.detail === "string" && BOPS_STEPS.has(st.tool) ? { ...st, detail: ownerVoice(st.detail, searched(st.detail)) } : st)),
     };
   });
-  const routines = (s.routines as unknown as Routine[]).map((r) => (typeof r.last?.error === "string" ? { ...r, last: { ...r.last, error: ownerVoice(r.last.error) } } : r));
+  const routines = (s.routines as unknown as Routine[]).map((r) => (typeof r.last?.error === "string" ? { ...r, last: { ...r.last, error: ownerVoice(ownerCredit(r.last.error)) } } : r));
   const watches = (s.watches ?? []) as unknown as Watch[];
   // And the owner's calls to a bot (their card: "You: …"), and a bot's line about the owner's credit.
   const messages = (data.messages as unknown as Message[]).map((raw) => {
@@ -592,7 +610,7 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   const chatIds = new Set(chats.map((c) => c.id));
   for (const p of acts)
     if (p.act.act === "chat" && chatIds.has(p.act.chatId))
-      messages.push({ id: `acting_${p.key}`, chatId: p.act.chatId, role: "user", text: p.act.text, at: p.at, ...(p.act.replyTo ? { replyTo: p.act.replyTo } : {}), member: { ...p.me, ref: p.key }, memberSend: sendOf(p) });
+      messages.push({ id: `acting_${p.key}`, chatId: p.act.chatId, role: "user", text: p.act.text, at: p.at, ...(p.act.replyTo ? { replyTo: p.act.replyTo } : {}), ...(p.act.files?.length ? { files: p.act.files } : {}), member: { ...p.me, ref: p.key }, memberSend: sendOf(p) });
   // (A watch's heads-up, "Heads up, something new in <window> on your Mac: “…”" or "Heads up, <site> changed. It looks like what
   // you're watching for: …" (watches.ts tell), and the digest, "While you were busy:" (attention.ts flush): the owner's Mac, what
   // the owner watches for, the owner who was busy. The window's title, the news and what's watched for stay as written.)
@@ -713,6 +731,9 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...(open.role === "admin" && s.screens && Object.keys(s.screens).length ? { screens: Object.keys(s.screens).filter((id) => ids.has(id)) } : {}),
       // Its bots' How I work changes on their way, for the box (bot-panel.tsx HowIWork): Saved only once the copy has them.
       ...(acts.some((x) => x.act.act === "persona") ? { personaActs: acts.flatMap((x) => (x.act.act === "persona" ? [{ key: x.key, botId: x.act.botId, state: x.state, ...(x.error ? { error: x.error } : {}) }] : [])) } : {}),
+      // What they may change here (cloud/member-access.ts Power), whether the owner's Bops takes it, and their changes on their way or not gone.
+      ...(Array.isArray(s.can) && s.can.length ? { can: s.can.filter((x) => typeof x === "string"), ...(s.changes ? { changes: true as const } : {}) } : {}),
+      ...(acts.some((x) => x.act.act === "change") ? { changeActs: acts.flatMap((x) => (x.act.act === "change" ? [{ key: x.key, path: x.act.path, state: x.state, ...(x.error ? { error: x.error } : {}) }] : [])) } : {}),
       ...(s.apps && acts.some((x) => isAppAct(x.act)) ? { appActs: acts.filter((x) => isAppAct(x.act)).map((x) => ({ key: x.key, act: x.act as MemberAppAct, at: x.at, state: x.state, ...(x.error ? { error: x.error } : {}) })) } : {}),
     },
     // What of the user's own is worth a chime meanwhile: their own news still reaches them (lib/pings.ts).

@@ -267,9 +267,9 @@ const owner = await person("owner");
 const sam = await person("sam");
 const shot = (p, name) => p.screenshot({ path: join(OUT, "shots", `${name}.png`) });
 
-/** What a person's Browser tab shows: the address bar, the state (its look, line and the line's background), the frame's src. */
-const view = (p) =>
-  p.evaluate(() => {
+/** What a person's Browser tab shows: the address bar, the state (its look, line and the line's background), the frame (once drawn: true, or with `withFrame` its canvas as a JPEG). */
+const view = (p, withFrame = false) =>
+  p.evaluate((withFrame) => {
     const box = document.querySelector('[data-bot-browser]');
     if (!box) return null;
     const line = box.querySelector("[data-browser-line]");
@@ -279,9 +279,13 @@ const view = (p) =>
       look: box.getAttribute("data-browser-look"),
       line: line?.textContent ?? null,
       lineBg: line ? getComputedStyle(line).backgroundColor : null,
-      frame: box.querySelector("img")?.getAttribute("src") ?? null,
+      // Encoded only when asked: a JPEG of the canvas on every poll would load the page being timed.
+      frame: withFrame ? (() => {
+        const c = box.querySelector("canvas[data-browser-frame]");
+        return c && c.dataset.drawn !== undefined ? c.toDataURL("image/jpeg", 0.95) : null;
+      })() : box.querySelector("canvas[data-browser-frame][data-drawn]") ? true : null,
     };
-  });
+  }, withFrame);
 const HIGHLIGHTER = "rgb(233, 255, 59)";
 /**
  * B2.5: a state of the tab, shot as it is and with every colour taken out (the delete-the-colour test). A CDP shot of
@@ -344,7 +348,7 @@ const diff = (p, a, b) =>
 async function onFrame(p, x, y) {
   const size = await onPage("[innerWidth, innerHeight]");
   const r = await p.evaluate(() => {
-    const b = document.querySelector('[data-bot-browser] img').getBoundingClientRect();
+    const b = document.querySelector('[data-bot-browser] canvas[data-browser-frame]').getBoundingClientRect();
     return { left: b.left, top: b.top, width: b.width, height: b.height };
   });
   return { x: r.left + (x / size[0]) * r.width, y: r.top + (y / size[1]) * r.height };
@@ -404,7 +408,7 @@ async function seesNavigation(p, who) {
   const direct = await directShot();
   // The frame that matches it: the first one at or after the address, within the 2 s.
   const matched = await until(async () => {
-    const v = await view(p);
+    const v = await view(p, true);
     const d = v?.frame ? await diff(p, v.frame, direct) : 255;
     return d < MATCH && { v, d, at: Date.now() };
   }, `${who}'s frame to show ${nav.word}`, 5000);
@@ -774,6 +778,57 @@ try {
     assert.equal(await relayHeld(), null, "nobody has control");
   });
 
+  await test("tabs: a link opens in a new tab of Boppy's browser, the bot's page kept; the strip switches tabs; hand back puts the bot's tab in front again", async () => {
+    const chromeTabs = async () => (await (await fetch(`http://127.0.0.1:${ports.chrome}/json/list`)).json()).filter((t) => t.type === "page" && !t.url.startsWith("devtools:"));
+    const strip = (p) => p.evaluate(() => [...document.querySelectorAll("[data-bot-browser] [data-browser-tab]")].map((b) => ({ name: b.textContent, front: b.getAttribute("aria-selected") === "true" })));
+    // From one tab: the bot's own, on the site.
+    for (const t of (await chromeTabs()).slice(1)) await fetch(`http://127.0.0.1:${ports.chrome}/json/close/${t.id}`);
+    await until(async () => (await chromeTabs()).length === 1, "one tab");
+    await until(async () => ["idle", "browsing"].includes((await view(sam.page))?.look), "sam's tab free");
+    await botStep({ do: "goto", url: `${site}/` });
+    const botTab = (await chromeTabs())[0].id;
+    await until(async () => (await view(sam.page))?.look === "idle", "the bot idle", 6000);
+    assert.deepEqual(await strip(sam.page), [], "one tab: no strip");
+    // Sam opens a link from the chat: a new tab, in front, in sam's control; the bot's page is still open.
+    mark("sam opens a link from the chat in a new tab of Boppy's browser");
+    const local = `${site}/other`;
+    await sam.page.getByRole("link", { name: "the other page" }).last().click();
+    await until(async () => (await view(sam.page))?.look === "you", "sam in control", 3000);
+    const two = await until(async () => {
+      const t = await chromeTabs();
+      return t.length === 2 && t;
+    }, "a second tab in the bot's Chrome", 5000);
+    assert.deepEqual(two.map((t) => t.url).sort(), [`${site}/`, local].sort(), "the bot's page kept, the link beside it");
+    assert.equal(await onPage("location.href"), local, "the new tab in front");
+    const shown = await until(async () => {
+      const s = await strip(sam.page);
+      return s.length === 2 && s.find((x) => x.front)?.name === "Another test page" && s;
+    }, "sam's strip: two tabs, the new one in front", 5000);
+    assert.equal(shown[0].name, "Acme test page", "oldest first");
+    await until(async () => (await strip(owner.page)).length === 2, "the owner sees the same tabs", 5000);
+    await shot(sam.page, "tabs-link-in-new-tab");
+    // The strip switches: the bot's tab in front, its page there.
+    await sam.page.locator(`[data-bot-browser] [data-browser-tab="${botTab}"]`).click();
+    await until(async () => (await onPage("location.href")) === `${site}/`, "the bot's tab in front", 5000);
+    await until(async () => (await strip(sam.page)).find((x) => x.front)?.name === "Acme test page", "the strip says so", 5000);
+    assert.deepEqual((await strip(sam.page)).map((x) => x.name), ["Acme test page", "Another test page"], "nothing moved");
+    // Back to sam's tab, then hand back: the bot's tab is in front again, sam's still open.
+    await sam.page.locator("[data-bot-browser] [data-browser-tab]").nth(1).click();
+    await until(async () => (await onPage("location.href")) === local, "sam's tab in front", 5000);
+    await sam.page.getByRole("button", { name: "Hand back", exact: true }).click();
+    await until(async () => (await onPage("location.href")) === `${site}/`, "the bot's tab in front after hand back", 5000);
+    assert.equal((await chromeTabs()).length, 2);
+    await until(async () => ["idle", "browsing"].includes((await view(sam.page))?.look), "handed back");
+    // Nobody in control: pressing a tab takes over and switches (as pressing the page does); in control, a tab closes.
+    await sam.page.locator("[data-bot-browser] [data-browser-tab]").nth(1).click();
+    await until(async () => (await view(sam.page))?.look === "you" && (await onPage("location.href")) === local, "taken over and switched", 5000);
+    await sam.page.getByRole("button", { name: "Close Another test page" }).click();
+    await until(async () => (await chromeTabs()).length === 1 && (await strip(sam.page)).length === 0, "one tab again, no strip", 5000);
+    await sam.page.getByRole("button", { name: "Hand back", exact: true }).click();
+    await until(async () => ["idle", "browsing"].includes((await view(sam.page))?.look), "handed back");
+    assert.equal(await onPage("location.href"), `${site}/`);
+  });
+
   await test("B2 criterion 11: the bot asks for a sign-in; sam signs in in its browser and hands back; the bot reads the signed-in page", async () => {
     mark("the bot asks sam to sign in");
     const step = botStep({ do: "signin" });
@@ -872,7 +927,7 @@ try {
     await clickOnFrame(sam.page, "#note");
     await sam.page.keyboard.type("hello from Sam", typing());
     await until(async () => (await onPage("document.getElementById('echo').textContent")) === "hello from Sam", "the field to take sam's typing");
-    await until(async () => (await diff(sam.page, (await view(sam.page)).frame, await directShot())) < MATCH, "sam's frame to show it");
+    await until(async () => (await diff(sam.page, (await view(sam.page, true)).frame, await directShot())) < MATCH, "sam's frame to show it");
     await shot(sam.page, "sam-in-control-typed");
     await still(sam, "sam in control, typed");
     // A method outside the allowlist: refused before it reaches the bot's computer.

@@ -1,6 +1,7 @@
 /** Shared shapes for the Bops app state, used by both the server and the UI. */
 
 import type { SharedKey } from "@/cloud/protocol";
+import type { AddedFile } from "./added-files";
 import type { AppHosting, AppsForMembers, IngotToken } from "./hosted-apps";
 import type { Chain } from "./chain";
 import type { ComputerSize } from "./bops-billing";
@@ -338,10 +339,17 @@ export type Workspace = {
   /**
    * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
    * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
-   * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain); like
-   * memberAccess it never goes to a member (cloud/ws-slice.ts).
+   * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain), for
+   * them or for someone with the Org chart switch (a "change" act: lib/server/change-acts.ts); it goes to someone
+   * with that switch who sees every bot (cloud/ws-slice.ts sharedSlice), never to anyone else.
    */
   chain?: Chain;
+  /**
+   * What the owner's Mac did with the last changes people made from their own windows (the "change" act:
+   * lib/server/change-acts.ts), newest last, at most CHANGES_KEPT: each by their act's key and who made it (their
+   * Orgo user id), done or why not. Bops Cloud shows each person their own (cloud/ws-slice.ts changedFor).
+   */
+  changesDone?: { key: string; by: string; ok: boolean; error?: string; at: number }[];
   /**
    * When this Mac gave everyone already here Your Apps at Read (workspaces.ts giveAppsRead): once, so an entry an older
    * Bops rewrote later is never given Read again by that.
@@ -353,6 +361,16 @@ export type Workspace = {
    * (cloud/ws-slice.ts appsFor); never variables, tokens, keys, logs or error text.
    */
   appsForMembers?: AppsForMembers;
+  /**
+   * Each site's newest Preview password, by "<app>/<site>" (the app's own site named as the app): the link it's for, the
+   * password, and when Bops Cloud took it, by its clock. Only Bops Cloud writes it, as whoever set the password tells it
+   * (cloud/preview-passwords.ts: this Mac, or the app's own computer's runner, which can set one but never read one
+   * back: lib/server/preview-password-share.ts), so people with Your Apps at Write get each new one whether this Mac is
+   * on or not (cloud/ws-slice.ts appsFor). This Mac only carries it along, and tells Bops Cloud what Orgo has where a
+   * share missed (lib/server/apps-for-members.ts fixCloudCopy): never in a bot's chat or prompt, never read
+   * by a computer (cloud/computer-scope.ts forComputer), and never in a window that doesn't show apps (lib/apps-access.ts).
+   */
+  previewPasswords?: Record<string, { url: string; password: string; at: number }>;
   /**
    * The keys this workspace's bots see (lib/server/keys.ts keysOf), by name and whose, as this Mac last read the vault:
    * what people with Keys are shown (cloud/ws-slice.ts keyNamesOf), so they switch bots on and off for any of them. Only
@@ -829,7 +847,7 @@ export type Message = {
    * the bot sees whether it worked. `unasked`: a call that went out without asking them (a GET that
    * failed: keys.ts callApi), which is never read as their approval.
    */
-  appResult?: { action: string; ok: boolean; output: string; unasked?: true };
+  appResult?: { action: string; ok: boolean; output: string; unasked?: true; read?: true };
   /** Set on a bot's reply: the API calls it made with the user's keys for it (call_api), "Called Stripe GET /v1/customers". */
   called?: string[];
   /** Set on a heads-up from a watched screen: which watch, so the message can offer to show it or reply. */
@@ -885,6 +903,8 @@ export type Message = {
   lookingAt?: string;
   /** Images attached to it (shown from /api/uploads/<id>; bots see them too). */
   images?: { id: string; type: string; w?: number; h?: number }[];
+  /** Files the user added with it, put where the bot works (lib/added-files.ts): the bot is told where they are. */
+  files?: AddedFile[];
   /** A picture the bot made (make_image): what it was asked to show, so it knows what it sent. */
   picture?: { prompt: string };
   /**
@@ -2243,7 +2263,8 @@ export type AppApproval = {
   action: string;
   resources: string[];
   preview: string;
-  kind?: "app" | "email" | "api" | "data" | "brain";
+  /** `key`: a bot asking for one of the user's API keys (lib/server/keys.ts askForKey): its card is the Logins key form, and `resources` is the key's vault name. */
+  kind?: "app" | "email" | "api" | "data" | "brain" | "key";
   /**
    * A call to an API with one of the user's keys: the key, its service, the method and the whole path. `change`: a change
    * to files in one go (lib/server/repo-change.ts), which is several calls: where, and each file.
