@@ -1953,6 +1953,18 @@ test("Your Apps at Read, in a workspace of Orgo's team: the apps by name, their 
   assert.deepEqual(s.workspace, { id: "ws_apps", name: "Apps" }, "the workspace's own fields stay as they were");
 });
 
+test("Your Apps says where an app whose production is on GitHub publishes to (its repo and branch), never its folder, kept files or point; nothing for a malformed setting", () => {
+  const github = { repo: "acme/shop-site", branch: "main", path: "web", keep: [".env.example"], dispatch: { workflow: "deploy.yml", inputs: { client: "shop" } }, last: { sha: "abc123", ingot: "cs-2", when: 9 } };
+  const blob = appsBlob({ apps: "read" });
+  const ws = (blob.workspaces as Record<string, Record<string, Record<string, Record<string, unknown>>>>[])[0];
+  ws.hostedApps.shop.github = github;
+  ws.hostedApps.notes.github = { repo: 7, branch: "main" };
+  const s = sharedSlice(blob, "ws_apps", TOM_VIEW);
+  assert.deepEqual(s.apps?.list[0].github, { repo: "acme/shop-site", branch: "main" });
+  assert.equal(s.apps?.list[1].github, undefined, "a malformed setting shows nothing");
+  for (const hidden of ["web", ".env.example", "deploy.yml", "abc123"]) assert.ok(!JSON.stringify(s.apps).includes(`"${hidden}"`), `"${hidden}" isn't shown`);
+});
+
 test("Your Apps at Write adds each site's settings and the workspace's domains, whatever the member's email; nothing for None, an older entry, the owner, a workspace whose owner isn't Orgo's team, or no apps", () => {
   const SAM_VIEW: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam", ownerEmail: STAFF_OWNER };
   for (const viewer of [TOM_VIEW, SAM_VIEW]) {

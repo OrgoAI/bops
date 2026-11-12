@@ -1994,6 +1994,16 @@ await check("A redeploy of an older changeset goes to the same Preview at the sa
   assert.equal(what.status, 400);
 });
 
+await check("publishWent: only deployForBot's two success shapes say a publish went; every refusal shape, and a Preview line, do not", () => {
+  assert.equal(H.publishWent("Published: publishing recipe-box at abc1234, what its Preview serves. It's live on its domain once its DNS points at Orgo."), true);
+  assert.equal(H.publishWent("Published (on GitHub): fourcorners at aa1fb97, what its Preview serves, to GitHub OrgoAI/orgo-brandlord main: pushed."), true);
+  assert.equal(H.publishWent("Published not changed: recipe-box has no domain yet. Connect one in Your Apps (Published, Domain, From Cloudflare), then say publish again."), false);
+  assert.equal(H.publishWent("Published not changed: Publish puts what its Preview serves (abc1234). Deploy def5678 to its Preview first, look at it, then publish."), false);
+  assert.equal(H.publishWent("Published of recipe-box not changed: Boppy has no GitHub key for this app, so it can't publish it to GitHub from here. Nothing went live."), false);
+  assert.equal(H.publishWent("Preview: deploying the newest commit of recipe-box on Boppy's computer."), false);
+  assert.equal(H.publishWent("Not deployed: this turn read something from outside Bops."), false);
+});
+
 await check("deploy_app in the chat: to its Preview at its fixed link unless Alex's own words ask to publish it; Publish needs a domain first, then puts what the Preview serves on Published; the list and the bots' prompt never show an orgo.dev name for Published", async () => {
   web.liveAtOnce = true;
   const AFTER = "Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.";
@@ -2019,11 +2029,28 @@ await check("deploy_app in the chat: to its Preview at its fixed link unless Ale
   const pp = prodProject("recipe-box");
   web.domains.push({ id: "cd_pub", computerId: "c_boppy", domain: "recipes.acme.test", target_port: pp.port, status: "pending", token: "t", managed: false });
   const served = newestFirst(previewProject("recipe-box")).find((d) => d.state === "succeeded").source_version;
+  // Nothing of the preview deploys or the refused publish is said in the chat as Published.
+  assert.ok(!messages().some((m) => m.bops && m.text.startsWith("Published")), "no Published line before a publish goes");
   const yes = await turnWith("Publish the recipe app", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "prod" })], "Done.");
   assert.equal(yes.out(), `Published: publishing recipe-box at ${served.slice(0, 7)}, what its Preview serves. It's live on its domain once its DNS points at Orgo.`);
+  // The publish is said in the chat as Bops, as a Preview deploy is (deployAfterTask): the person sees it went, and a later
+  // turn asking "is it live?" has it (a system note isn't heard by the model: lib/chat-summary.ts heard).
+  const pub = messages().filter((m) => m.bops && m.appNote && m.text.startsWith("Published"));
+  assert.equal(pub.length, 1, "one Published line in the chat");
+  assert.equal(pub[0].role, "bot");
+  assert.equal(pub[0].text, yes.out());
   assert.equal(newestFirst(pp)[0].source_version, served, "the Preview's exact commit");
   assert.equal(pp.url, null, "Published got no public URL");
   assert.equal(web.envs.get(pp.id)?.get("AUTH_URL"), "https://recipes.acme.test", "sign in at its domain, set as it had none");
+  // A Preview note says where Publish goes: Published, whose domain doesn't point at Orgo yet, so its visitors don't see
+  // it there; and, for an app whose production is on GitHub, GitHub (brandlord's Four Corners and CCLC, 2026-11-05).
+  const pvAgain = () => turnWith("Put the recipe app on its preview", [toolCall("deploy_app", { app: "recipe-box", at: null, where: "preview" })], "Done.");
+  const waiting = await pvAgain();
+  assert.ok(waiting.out().endsWith("Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on Published once it looks right. Visitors to recipes.acme.test won't see it until its DNS points at Orgo."), waiting.out());
+  S.update((st) => void (st.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].github = { repo: "acme/recipes", branch: "main", path: "app" }));
+  const toGithub = await pvAgain();
+  assert.ok(toGithub.out().endsWith("Published is as it was: once it looks right, say publish or press Publish in Your Apps to send what Preview serves to GitHub (acme/recipes, main), where its own deploy puts it live."), toGithub.out());
+  S.update((st) => void delete st.workspaces.find((w) => w.id === WS).hostedApps["recipe-box"].github);
   web.liveAtOnce = false;
   forgetListed();
   const a = await H.listApps(WS);
