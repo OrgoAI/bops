@@ -227,7 +227,9 @@ async function messageIn(linkId: string, m: Incoming, pool?: ChannelLink[]) {
   };
   const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && (!x.routineId || askedFor(x.id)));
   for (const t of started.filter((x) => !x.channelBack && !x.textBack)) patchSession(t.id, { channelBack: place });
-  const replies = getState().messages.filter((x) => x.chatId === chatId && x.role === "bot" && x.botId === b.id && x.at >= mine.at && turnsOwn(x, started));
+  // The bot's answer, never Bops' own words about an app said in the chat meanwhile (Message.appNote: a publish that
+  // went, chat.ts deploy_app): those stay in Bops, and the answer says what happened.
+  const replies = getState().messages.filter((x) => x.chatId === chatId && x.role === "bot" && x.botId === b.id && x.at >= mine.at && !x.appNote && turnsOwn(x, started));
   const failed = (err: Error) => addMessage({ chatId, role: "system", text: `Couldn't send this back to ${KIND_NAME[l.kind]}: ${err.message}` });
   for (const r of replies) await send(l, place, r.text).catch(failed);
   if (!replies.length) {
