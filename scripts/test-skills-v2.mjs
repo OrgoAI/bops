@@ -837,7 +837,9 @@ await check("On a computer's runner with the owner's Mac off: Orgo's published s
     assert.equal(n, 1);
     const all = sent.join("\n");
     assert.match(all, /capabilities\/skills\/close-the-books\/SKILL\.md/);
-    assert.match(all, new RegExp(`${Buffer.from(CLOSE).toString("base64").replace(/[+/=]/g, "\\$&")}[\\s\\S]*chmod 755 '/workspace/capabilities/skills/close-the-books/scripts/close\\.sh'`));
+    const closeAt = all.indexOf(Buffer.from(CLOSE).toString("base64"));
+    assert.ok(closeAt >= 0, "the approved script's content goes");
+    assert.ok(all.indexOf("chmod 755 '/workspace/capabilities/skills/close-the-books/scripts/close.sh'", closeAt) > closeAt, "and is made runnable after it is written");
     assert.ok(!all.includes(Buffer.from(OTHER).toString("base64")), "an unapproved script's content never goes");
     assert.doesNotMatch(all, /chmod 755 '[^']*other\.sh'/);
     assert.doesNotMatch(all, /ana-only/, "Ana's isn't Ben's");
