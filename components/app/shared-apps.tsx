@@ -186,11 +186,11 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
       )}
       <Fold lazy open={open}><div className="flex min-w-0 flex-col gap-5 border-b border-rule px-4 py-4">
         {!write && <span className="text-[13px] text-pencil">{W.readOnly}</span>}
-        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? W.publishLine} busy={!!going}
+        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? W.publishLine} busy={!!going} updateAlso
           password={site?.previewProtected ? <AppPassword password={write ? site.previewPassword ?? null : null}/> : undefined}
           onUpdate={write ? () => void send({ act: "deploy", app: a.name }) : undefined}
           onPublish={publish ? at => send({ act: "deploy", app: a.name, env: "prod", ...(pv && !a.siteNames?.length ? { at } : {}) }) : undefined}
-          history={a.commits?.length ? <AppVersions versions={a.commits} preview={serving ?? null} published={liveAt} busy={!!going} onRestore={write ? id => void send({ act: "deploy", app: a.name, at: id }) : undefined}/> : undefined}
+          history={a.commits?.length ? <AppVersions versions={a.commits} preview={serving ?? null} published={liveAt} busy={!!going} allSites={!!a.siteNames?.length} onRestore={write ? id => void send({ act: "deploy", app: a.name, at: id }) : undefined}/> : undefined}
           technical={<div data-technical-details className="flex flex-col gap-4 rounded-xl bg-desk p-4">
           <Part title={W.sites}>
             {(a.sites ?? []).map((s) => (

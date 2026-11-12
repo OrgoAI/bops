@@ -24,7 +24,7 @@ export function statusForApp(app: HostedApp, commits: AppCommit[] = []): ReviewS
 export function reviewLabel(status: ReviewStatus, input?: Pick<AppStatusInput, "preview" | "live">): string {
   if (status.sentence.startsWith("Its computer is gone")) return "Needs a new home";
   if (status.tone === "working") return status.sentence.includes("preview") ? "Updating preview" : "Publishing";
-  if (status.tone === "failed") return status.action === "update-preview" ? "Preview update failed" : "Publish failed";
+  if (status.tone === "failed") return status.sentence.startsWith("The last preview update failed") ? "Preview update failed" : "Publish failed";
   if (status.action === "update-preview") return "Preview needs updating";
   if (status.action === "connect-domain") return "Not live";
   if (status.action === "publish") {

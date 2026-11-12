@@ -165,7 +165,7 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
   const gh = a.hosting?.github;
   if (gh) {
     if (!a.preview?.serving) return "The preview isn't live yet. Deploy a preview first.";
-    if (!gh.last) return "Link it to GitHub first, in the menu beside Publish.";
+    if (!gh.last) return "Link it to GitHub first: open Technical details, then the menu on the Published line.";
     // (Whether GitHub has this preview already is the server's to say: Publish then sends nothing.)
     return undefined;
   }
@@ -378,7 +378,7 @@ export function AppEnvs({
     return run("github", async () => {
       const r = await act(app.name, { ws, action: "github", github: v ? ghMirrorOf(v) : null });
       if (r.app) setGhForm(null);
-      return r.app ? { ...r, said: v ? "Saved. Link it to GitHub next, in the menu beside Publish." : "Publish deploys on Orgo again." } : r;
+      return r.app ? { ...r, said: v ? "Saved. Link it to GitHub next, from the menu on the Published line in Technical details." : "Publish deploys on Orgo again." } : r;
     });
   };
   // GitHub's changes into Ingot, GitHub's version winning where both changed a file (what Publish's conflict says to do).
@@ -438,7 +438,7 @@ export function AppEnvs({
   const prodState: EnvState = gh
     ? gh.last
       ? { word: "On GitHub", dot: DOTS.on, tip: `Publish pushes what the Preview serves to ${gh.repo} ${gh.branch}, where its own workflow deploys it.` }
-      : { word: "Not linked", dot: DOTS.off, tip: "Link it to GitHub in the menu beside Publish." }
+      : { word: "Not linked", dot: DOTS.off, tip: "Link it to GitHub from the menu on this line." }
     : lost ?? (noDomain && neverLive ? { word: "Not published", dot: DOTS.off } : (() => {
     const st = many && !site ? allSites(sites) : deployState(app);
     return st.word === "Not deployed yet" ? { ...st, word: "Not published" } : st;

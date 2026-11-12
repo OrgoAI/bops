@@ -26,35 +26,46 @@ export function AppPassword({ password, waiting, error }: { password: string | n
 }
 
 type Version = Pick<AppCommit, "id" | "message" | "author" | "at"> & Partial<Pick<AppCommit, "changes">>;
-export function AppVersions({ versions, preview, published, busy, onRestore, whyRestore, children }: { versions: Version[]; preview: string | null; published: string | null; busy?: boolean; onRestore?: (id: string) => void; whyRestore?: (id: string) => string | undefined; children?: ReactNode }) {
+/** `allSites`: Restore puts the version on every site's Preview (an app of more than one site), and says so. */
+export function AppVersions({ versions, preview, published, busy, onRestore, whyRestore, allSites = false, children }: { versions: Version[]; preview: string | null; published: string | null; busy?: boolean; onRestore?: (id: string) => void; whyRestore?: (id: string) => string | undefined; allSites?: boolean; children?: ReactNode }) {
+  const restore = allSites ? "Restore to preview, all sites" : "Restore to preview";
   return <div data-history className={`${appList} @container`}>
     {versions.map(v => <div key={v.id} data-version={v.id} className={`${appRow} flex-wrap @[600px]:flex-nowrap`}>
       <span className="min-w-0 flex-1 basis-full truncate text-[14px] leading-[18px] @[600px]:basis-0" title={`${v.message}\n${v.id}${v.changes ? `\n${v.changes.added} added, ${v.changes.modified} changed, ${v.changes.deleted} deleted` : ""}`}>{v.message.split("\n")[0] || "No message"}</span>
       <span data-version-tag className="w-[84px] shrink-0 text-[12.5px] font-medium leading-4">{v.id === preview ? "Preview" : v.id === published ? "Published" : ""}</span>
       <span className="hidden w-[120px] shrink-0 truncate text-right text-[12.5px] text-pencil @[600px]:block" title={v.author}>{v.author}</span>
       <span className="w-8 shrink-0 text-right text-[12px] tabular-nums text-pencil" title={new Date(v.at).toLocaleString()}>{ago(v.at)}</span>
-      {onRestore && <span data-tip={whyRestore?.(v.id)}><button className={appGhost} disabled={busy || v.id === preview || !!whyRestore?.(v.id)} aria-label={`Restore ${v.message} to preview`} onClick={() => { if (!whyRestore?.(v.id)) onRestore(v.id); }}>Restore to preview</button></span>}
+      {onRestore && <span data-tip={whyRestore?.(v.id)}><button className={appGhost} disabled={busy || v.id === preview || !!whyRestore?.(v.id)} aria-label={`Restore ${v.message} to preview${allSites ? ", all sites" : ""}`} onClick={() => { if (!whyRestore?.(v.id)) onRestore(v.id); }}>{restore}</button></span>}
     </div>)}
     {children}
   </div>;
 }
 
-/** Same review decisions for the owner and members; callers retain their existing request contracts. */
-export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt, versions = [], password, github, destination, busy, whyUpdate, whyPublish, onUpdate, onPublish, onDomain, technical, history, env = "preview", onEnv, publishLine, historyOpen = false }: {
+/**
+ * Same review decisions for the owner and members; callers retain their existing request contracts. `updateAlso`: Update
+ * preview stays beside Publish (an Admin's page, which has no Technical details line of its own to update it from), so
+ * whoever may publish may also rebuild the Preview. "Add a domain" shows only with `onDomain`: without it (a member),
+ * Update preview takes its place, or nothing.
+ */
+export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt, versions = [], password, github, destination, busy, whyUpdate, whyPublish, onUpdate, onPublish, onDomain, technical, history, env = "preview", onEnv, publishLine, historyOpen = false, updateAlso = false }: {
   historyOpen?: boolean; publishLine?: string; status: ReviewStatus; previewUrl: string | null; liveUrl: string | null; previewAt: string | null; publishedAt: string | null;
   versions?: Version[]; password?: ReactNode; github?: boolean; destination: string; busy?: boolean; whyUpdate?: string; whyPublish?: string;
   onUpdate?: () => void; onPublish?: (at: string) => Promise<boolean>; onDomain?: () => void;
-  technical: ReactNode; history?: ReactNode; env?: "preview" | "prod"; onEnv?: (env: "preview" | "prod") => void;
+  technical: ReactNode; history?: ReactNode; env?: "preview" | "prod"; onEnv?: (env: "preview" | "prod") => void; updateAlso?: boolean;
 }) {
   const [help, setHelp] = useState(false);
   const [confirm, setConfirm] = useState<{ at: string; note: string; destination: string } | null>(null);
   const [sending, setSending] = useState(false);
   const shown = env === "preview" ? previewAt : publishedAt;
   const change = versions.find(v => v.id === shown);
-  const update = status.action === "update-preview" || (!onPublish && !!onUpdate);
-  const domain = status.action === "connect-domain";
+  // (A domain to add with no way to add one here: Update preview, the one thing that can still be pressed.)
+  const noDomainHere = status.action === "connect-domain" && !onDomain;
+  const update = status.action === "update-preview" || (!!onUpdate && (!onPublish || noDomainHere));
+  const domain = status.action === "connect-domain" && !update;
   const label = update ? "Update preview" : domain ? "Add a domain" : "Publish changes";
   const why = update ? whyUpdate : whyPublish;
+  const primary = update ? !!onUpdate : domain ? !!onDomain : !!onPublish;
+  const updateBeside = updateAlso && !update && !!onUpdate;
   const url = env === "preview" ? previewUrl : liveUrl;
   const moved = !!confirm && (confirm.at !== previewAt || confirm.destination !== destination);
   const unpublished = hasUnpublishedPreview(status);
@@ -69,7 +80,8 @@ export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt,
       <div className="flex flex-wrap items-center gap-3 px-4 py-4">
         {url ? <a href={url} target="_blank" rel="noreferrer" className={env === "preview" && unpublished && !confirm ? appAttention : appOutline}>{env === "preview" ? unpublished ? "Review preview" : "Open preview" : "Open website"}<ArrowUpRight {...appIcon}/></a> : <span className="text-[13px] text-pencil">{env === "preview" ? "No preview yet" : github ? "Website address not available" : "Not live yet"}</span>}
         {env === "preview" && password}<span className="hidden flex-1 @[512px]:block"/>
-        {env === "preview" && (onUpdate || onPublish || onDomain) && <span data-tip={why ?? status.sentence}><button data-review-publish className={appPrimary} disabled={busy || sending || !!why || (!status.action && !update) || (update ? !onUpdate : domain ? !onDomain : !onPublish)} onClick={() => { if (update) onUpdate?.(); else if (domain) onDomain?.(); else if (previewAt) setConfirm({ at: previewAt, note: change?.message ?? previewAt, destination }); }}>{busy || sending ? "Working…" : label}</button></span>}
+        {env === "preview" && updateBeside && <span data-tip={whyUpdate}><button data-review-update className={appOutline} disabled={busy || sending || !!whyUpdate} onClick={() => onUpdate?.()}>Update preview</button></span>}
+        {env === "preview" && primary && <span data-tip={why ?? status.sentence}><button data-review-publish className={appPrimary} disabled={busy || sending || !!why || (!status.action && !update)} onClick={() => { if (update) onUpdate?.(); else if (domain) onDomain?.(); else if (previewAt) setConfirm({ at: previewAt, note: change?.message ?? previewAt, destination }); }}>{busy || sending ? "Working…" : label}</button></span>}
       </div>
       <div className="flex items-center gap-3 border-t border-rule px-4 py-4"><span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-[18px]" title={change?.message}>{change?.message.split("\n")[0] ?? (shown ? "Version details unavailable" : "No version here yet")}</span><span className={appTag}>{env === "preview" ? "Preview" : github ? "Sent to GitHub" : "Last published"}</span>{change && <span className="shrink-0 text-[12.5px] text-pencil">{ago(change.at)}</span>}</div>
     </div>

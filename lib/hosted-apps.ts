@@ -879,16 +879,21 @@ export function appStatus(i: AppStatusInput): { sentence: string; detail?: strin
   if (!i.head) return { sentence: "Nothing built yet.", tone: "quiet" };
   if (going(i.preview?.state)) return { sentence: "Updating the preview…", tone: "working" };
   if (going(i.live.state)) return { sentence: i.github ? "Pushing to GitHub…" : "Publishing…", tone: "working" };
-  if (i.preview?.state === "failed") return { sentence: "The last preview update failed.", action: "update-preview", tone: "failed" };
   // What the preview holds that isn't live is there to publish, the newest change or an earlier version put back on it
   // (Restore): the preview is "behind" only while it has nothing, or what's live already, and the newest change isn't on it.
   const holds = !!i.preview?.serving && i.preview.serving !== i.live.serving;
   const behind = !i.preview?.serving || (i.preview.serving !== i.head && !holds);
+  const canLive = i.domain || i.wasLive || !!i.github;
+  // A failed preview update leaves the preview serving what it did: when that isn't live and can go live, publishing it
+  // is still the press (the failed build is retried with Update preview, beside it or in Technical details).
+  if (i.preview?.state === "failed")
+    return holds && canLive && (!i.github || i.github.linked)
+      ? { sentence: "The last preview update failed. What the preview still has can be published.", action: "publish", tone: "failed" }
+      : { sentence: "The last preview update failed.", action: "update-preview", tone: "failed" };
   // (The press that can go through now: the preview to update first when it's behind, else publishing again.)
   if (i.live.state === "failed") return { sentence: "The last publish failed.", action: behind ? "update-preview" : "publish", tone: "failed" };
   if (behind || !i.preview) return { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" };
   if (i.github && !i.github.linked) return { sentence: "The preview is ready. Link it to GitHub to publish.", tone: "waits" };
-  const canLive = i.domain || i.wasLive || !!i.github;
   if (i.preview.serving === i.live.serving) return canLive ? { sentence: "Live and up to date.", tone: "quiet" } : { sentence: "Not published yet.", action: "connect-domain", tone: "waits" };
   if (!canLive) return { sentence: "The preview is ready. Connect a domain to publish it.", action: "connect-domain", tone: "waits" };
   // (An earlier version put back on the preview, to go back to: the history counts no change between live and it.)

@@ -185,7 +185,12 @@ await test("the list with none, before it's read, and when it couldn't be", () =
   assert.match(none, /data-no-apps[^]*data-add-app="true"[^>]*>.*Add app<\/button>/, "Add app beside it");
   assert.equal(none.match(/data-add-app="true"/g).length, 1, "once: not in the title too while there are none");
   assert.ok(!none.includes("data-hosted-app="));
-  assert.match(list({ enabled: false, why: "Hosting apps on the web isn't open to your Orgo account yet.", apps: [] }), /data-add-app="true" disabled=""/, "empty hosting keeps its disabled reason available");
+  // None, and hosting isn't open here: no invitation to make a site that can't go on the web (no Add app), only why,
+  // quietly; the tools still listed.
+  const closed = list({ enabled: false, why: "Hosting apps on the web isn't open to your Orgo account yet.", apps: [] }, { tools: h("div", { "data-tool-row": "" }, "A tool") });
+  assert.ok(!closed.includes("data-no-apps") && !closed.includes("data-add-app") && !closed.includes("Ask a bot"), "no invitation where hosting is closed");
+  assert.match(closed, /data-apps-closed[^>]*>Hosting apps on the web isn&#x27;t open to your Orgo account yet\.</, "why, in one quiet line");
+  assert.ok(closed.includes("data-tool-row") && closed.includes(">Your Apps<"), "the title and the tools stay");
   const reading = list(null);
   assert.ok(reading.includes(">Your Apps<") && !reading.includes("Ask a bot") && !reading.includes("Couldn"), "nothing but the title while it's read");
   assert.ok(list(null, { failed: true }).includes("Couldn&#x27;t read them just now."), "a quiet line when it couldn't be read");
@@ -2168,7 +2173,7 @@ await test("Remove app: the domains Orgo kept on its computer said where the tab
     await d.done();
   }
   const restore=await mount(h(H.HostedAppView,{ws:"ws_all",answer:{enabled:true},app:suiteApp(),history:HISTORY,onChanged:noop}));
-  try { await click(button(restore.box,"Back to app")); await click(button(restore.box,"Version history")); routes={"/api/hosted-apps/suite":{body:{app:suiteApp()}}}; const n=calls.length; await click(restore.box.querySelector('[data-version] button')); assert.deepEqual(posts(n,"/api/hosted-apps/suite").map(c=>c.body),[{ws:"ws_all",action:"deploy",env:"preview",at:id("e5")}]); } finally { await restore.done(); }
+  try { await click(button(restore.box,"Back to app")); await click(button(restore.box,"Version history")); routes={"/api/hosted-apps/suite":{body:{app:suiteApp()}}}; const n=calls.length; const r=restore.box.querySelector('[data-version] button'); assert.equal(r.textContent,"Restore to preview, all sites","said: every site's Preview, whichever is picked"); await click(r); assert.deepEqual(posts(n,"/api/hosted-apps/suite").map(c=>c.body),[{ws:"ws_all",action:"deploy",env:"preview",at:id("e5")}]); } finally { await restore.done(); }
 
 });
 
@@ -2711,6 +2716,37 @@ await test("an Admin's review of an app whose production is on GitHub reads Live
   });
 });
 
+await test("an Admin keeps Update preview beside Publish, and never gets an Add a domain they can't use", async () => {
+  routes={"/api/workspaces/shared":{body:{ok:true}}};
+  // Up to date (preview and live the same): Publish has nothing to do, Update preview still rebuilds the Preview.
+  await sharedAdmin({...sharedReviewApp,sites:[{...sharedReviewApp.sites[0],serving:"cs2"}]},async({box})=>{
+    assert.equal(button(box,"Publish changes").disabled,true);
+    const u=box.querySelector("[data-review-update]");
+    assert.equal(u?.textContent,"Update preview");
+    assert.equal(u.disabled,false);
+    const n=calls.length; await click(u);
+    assert.deepEqual(posts(n,"/api/workspaces/shared").map(c=>c.body.act),[{act:"deploy",app:"shop"}]);
+  });
+  // Changes to publish: both, Publish the primary.
+  await sharedAdmin(sharedReviewApp,async({box})=>{
+    assert.equal(button(box,"Publish changes").disabled,false);
+    assert.equal(box.querySelector("[data-review-update]")?.disabled,false);
+  });
+  // A new app with no domain and never live: only the owner adds a domain, so Update preview is the press.
+  await sharedAdmin({...sharedReviewApp,url:undefined,sites:[{...sharedReviewApp.sites[0],url:null,serving:null,live:null,domains:[]}]},async({box,state})=>{
+    assert.equal(state,"Not live");
+    assert.equal(button(box,"Add a domain"),undefined);
+    assert.equal(box.querySelector("[data-review-publish]")?.textContent,"Update preview");
+    assert.equal(box.querySelector("[data-review-update]"),null,"once");
+  });
+  // A Write Member: Update preview alone, as before.
+  await sharedAdmin(sharedReviewApp,async({box})=>{
+    assert.equal(box.querySelector("[data-review-publish]")?.textContent,"Update preview");
+    assert.equal(box.querySelector("[data-review-update]"),null);
+  },"member");
+});
+
+
 /* ---------------- Local, Staging and Prod, all on the app's computer ---------------- */
 
 const E = await import(pathToFileURL(`${root}/components/app/app-envs.tsx`).href);
@@ -2988,7 +3024,9 @@ await test("production on GitHub (AppHosting.github): Published says where on Gi
   const on = (github, extra = {}) => shopApp({ preview: STAGING(), serving: null, live: null, domain: null, domains: [], hosting: { ...hosting("shop"), github }, ...extra });
   const unlinkedApp=on(gh());
   const unlinked=await envsOf({app:unlinkedApp}); assert.ok(unlinked.includes("not linked yet"));
-  assert.match(E.whyNotEnv({enabled:true},unlinkedApp,"prod",[unlinkedApp]),/Link it to GitHub first/);
+  assert.equal(E.whyNotEnv({enabled:true},unlinkedApp,"prod",[unlinkedApp]),"Link it to GitHub first: open Technical details, then the menu on the Published line.");
+  // (Publish isn't beside that menu any more: no words send anyone to look for it there.)
+  for(const f of ["components/app/app-envs.tsx","lib/server/github-mirror.ts"]) assert.ok(!readFileSync(`${root}/${f}`,"utf8").includes("menu beside Publish"),f);
   const linkedApp=on(gh({ingot:id("c1"),sha:"a".repeat(40),when:min(5)}));
   const linked=await envsOf({app:linkedApp}); assert.ok(linked.includes("at aaaaaaa"));
   assert.equal(E.whyNotEnv({enabled:true},linkedApp,"prod",[linkedApp]),undefined);

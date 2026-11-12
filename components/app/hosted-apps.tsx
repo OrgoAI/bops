@@ -566,12 +566,11 @@ export function HostedApps({ state, ws, tools }: { state?: Pick<AppState, "works
 }
 
 /**
- * One line per app: its state, name, public address (opened in the browser), the short id of the changeset
- * its site serves, and Deploy (the newest changeset). The rest of the line opens its tab. Nothing until
- * it's read, one quiet line when there are none, and nothing at all when there are none and deploying
- * isn't open here (no invitation to make a site that can't go on the web). Add app, in its title (and
- * beside the line that says there are none): a form, and the workspace's main bot (`builder`) builds it;
- * `onStarted` opens that task.
+ * One line per app: its name, public address (opened in the browser), where its review stands, and Review changes
+ * or Open app (its tab). Nothing until it's read and one quiet line when there are none; when there are none and
+ * deploying isn't open here, only why (no invitation to make a site that can't go on the web), with the tools still
+ * listed. Add app, in its title (and beside the line that says there are none): a form, and the workspace's main
+ * bot (`builder`) builds it; `onStarted` opens that task.
  */
 export function HostedAppsList({
   ws,
@@ -630,12 +629,15 @@ export function HostedAppsList({
       {!answer ? (
         failed && <span className={QUIET}>Couldn&apos;t read them just now.</span>
       ) : !answer.apps.length ? (
-        !adding && (
+        !adding &&
+        (answer.enabled ? (
           <div data-no-apps className="flex flex-wrap items-center gap-2">
             <span className={QUIET}>Ask a bot to make a website, or add one here.</span>
             {addButton}
           </div>
-        )
+        ) : (
+          <span data-apps-closed className={QUIET}>{why}</span>
+        ))
       ) : (
         <div className={appList}>
           {answer.apps.map((a) => {
@@ -1011,7 +1013,7 @@ export function HostedAppView({
     historyBox.current.scrollIntoView?.({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }, [atHistory, historyReady]);
   const versions = <div data-history-panel ref={historyBox}>
-    {history === null ? <span className={QUIET}>Reading history…</span> : history === false ? <span className={QUIET}>Couldn&apos;t read the history just now.</span> : history.offline ? <span data-offline className={QUIET}>History is unavailable while its computer is offline.</span> : !history.commits.length ? <span className={QUIET}>No versions yet.</span> : <AppVersions versions={history.commits} preview={view.preview?.serving ?? null} published={published} busy={isSending(app.name) || deploying(view.preview ?? { live: null })} whyRestore={id => whyNot(answer, app, id, undefined, "preview")} onRestore={id => void run(id, app.name, { ws, action: "deploy", env: "preview", at: id })}>
+    {history === null ? <span className={QUIET}>Reading history…</span> : history === false ? <span className={QUIET}>Couldn&apos;t read the history just now.</span> : history.offline ? <span data-offline className={QUIET}>History is unavailable while its computer is offline.</span> : !history.commits.length ? <span className={QUIET}>No versions yet.</span> : <AppVersions versions={history.commits} preview={view.preview?.serving ?? null} published={published} busy={isSending(app.name) || deploying(view.preview ?? { live: null })} whyRestore={id => whyNot(answer, app, id, undefined, "preview")} allSites={!!sites?.length} onRestore={id => void run(id, app.name, { ws, action: "deploy", env: "preview", at: id })}>
       {history.next && older && <button data-older className={`${appGhost} self-start`} disabled={older.reading} onClick={older.go}>{older.reading ? "Reading…" : older.failed ? "Couldn't read older ones. Try again" : "Show older"}</button>}
     </AppVersions>}
   </div>;

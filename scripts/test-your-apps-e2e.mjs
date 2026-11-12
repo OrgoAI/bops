@@ -371,6 +371,7 @@ async function sam(browser,width) {
     await click(fc,'Version history'); await layout(page,fc,`Admin versions ${width}`); await snap(page,'admin-versions',width);
     await fc.locator('[data-version]').nth(2).getByRole('button',{name:/Restore/}).click();
     check(`Admin restore keeps its request ${width}`,same(model.acts.at(-1),{act:'deploy',app:'fourcorners',at:F.id('c3')}));
+    check(`Admin keeps Update preview beside Publish ${width}`,await fc.locator('[data-review-update]').isEnabled() && await fc.locator('[data-review-publish]').innerText()==='Publish changes');
     const n=model.acts.length; await click(fc,'Publish changes');
     check(`Admin publishing asks before sending ${width}`,model.acts.length===n && await fc.locator('[data-publish-confirmation]').count()===1);
     const said=await fc.locator('[data-publish-confirmation]').innerText();

@@ -21,6 +21,7 @@ registerHooks({
   },
 });
 const { appStatus, changesBetween } = await import(pathToFileURL(`${root}/lib/hosted-apps.ts`).href);
+const { reviewLabel, hasUnpublishedPreview } = await import(pathToFileURL(`${root}/lib/app-review.ts`).href);
 
 let passed = 0;
 const check = (name, fn) => {
@@ -44,6 +45,21 @@ check("a failed preview update or publish: said, and the same press offered agai
   assert.deepEqual(appStatus({ ...base, preview: { serving: "h1", state: "failed" } }), { sentence: "The last preview update failed.", action: "update-preview", tone: "failed" });
   assert.deepEqual(appStatus({ ...base, live: { serving: "h1", state: "failed" } }), { sentence: "The last publish failed.", action: "publish", tone: "failed" });
   assert.deepEqual(appStatus({ ...base, live: { serving: "h1", state: "failed" }, preview: null }), { sentence: "The last publish failed.", action: "update-preview", tone: "failed" }, "with no preview to publish from, the preview comes first");
+});
+check("a failed preview update with a preview that still serves something not live: Publish stays the press, said with the failure", () => {
+  const failed = { ...base, head: "h3", preview: { serving: "h2", state: "failed" }, live: { serving: "h1", state: "succeeded" }, changes: 1 };
+  assert.deepEqual(appStatus(failed), { sentence: "The last preview update failed. What the preview still has can be published.", action: "publish", tone: "failed" });
+  assert.equal(appStatus({ ...failed, github: { linked: true } }).action, "publish", "on GitHub, linked");
+  assert.equal(appStatus({ ...failed, github: { linked: false } }).action, "update-preview", "not linked to GitHub: nothing to publish to");
+  assert.equal(appStatus({ ...failed, domain: false, wasLive: false }).action, "update-preview", "nowhere to publish to");
+  assert.equal(appStatus({ ...failed, preview: { serving: null, state: "failed" } }).action, "update-preview", "a preview serving nothing");
+  assert.equal(reviewLabel(appStatus(failed)), "Preview update failed");
+  assert.equal(hasUnpublishedPreview(appStatus(failed)), false, "a failure never borrows the pending review color");
+});
+check("a failed publish reads as one, whichever press comes next", () => {
+  assert.equal(reviewLabel(appStatus({ ...base, live: { serving: "h1", state: "failed" } })), "Publish failed");
+  assert.equal(reviewLabel(appStatus({ ...base, live: { serving: "h1", state: "failed" }, preview: null })), "Publish failed", "even with the preview to update first");
+  assert.equal(reviewLabel(appStatus({ ...base, preview: { serving: "h1", state: "failed" } })), "Preview update failed");
 });
 check("the preview behind the newest change (or none yet): Update preview", () => {
   assert.deepEqual(appStatus({ ...base, preview: { serving: "h1", state: "succeeded" } }), { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" });
@@ -79,7 +95,7 @@ check("changesBetween: live and the preview in the history, by their distance; n
   assert.equal(changesBetween(log, "h3", "h1"), 0, "live ahead of the preview reads as nothing waiting");
 });
 check("no dashes in any sentence", () => {
-  const all = [appStatus(base), appStatus({ ...base, lost: true }), appStatus({ ...base, head: null }), appStatus({ ...base, github: { linked: false } }), appStatus({ ...base, domain: false, wasLive: false })];
+  const all = [appStatus(base), appStatus({ ...base, lost: true }), appStatus({ ...base, head: null }), appStatus({ ...base, github: { linked: false } }), appStatus({ ...base, domain: false, wasLive: false }), appStatus({ ...base, preview: { serving: "h2", state: "failed" } })];
   for (const s of all) assert.ok(!NO_DASHES.test(s.sentence), s.sentence);
 });
 console.log(`${passed} passed`);
