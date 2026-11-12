@@ -15,6 +15,7 @@ import {
   type PreviewPassword,
 } from "@/lib/hosted-apps";
 import { onRunner } from "./persist";
+import { sharePreviewPassword } from "./preview-password-share";
 import { getState, stateReady, stateTooNew, update } from "./store";
 
 /*
@@ -88,29 +89,79 @@ const canonical = (v: unknown) => JSON.stringify(v, (_k, x) => (x && typeof x ==
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-/** Each site's Preview password as last read for members, by "<ws>\n<app>\n<site>", with the link and when Bops set it (PreviewSite.passwordAt) then. */
-const passwordsRead = new Map<string, { url: string; at: number | undefined; password: string | null }>();
+/**
+ * Each site's Preview password as last read for members, by "<ws>\n<app>\n<site>", with the link, when Bops set it then,
+ * and when that read began (`readAt`, this Mac's clock: fixCloudCopy).
+ */
+const passwordsRead = new Map<string, { url: string; at: number | undefined; password: string | null; readAt: number }>();
+
+/** When Bops last set a site's Preview password, as the state says now (AppHosting.passwordSet; undefined: it doesn't say). */
+function setAtNow(wsId: string, name: string, site: string | undefined): number | undefined {
+  const h = getState().workspaces?.find((w) => w.id === wsId)?.hostedApps?.[name];
+  const s = !h ? undefined : !site || site === name ? h : h.sites?.find((x) => x.name === site);
+  return s?.passwordSet?.at;
+}
+
+/*
+ * Bops Cloud's copy of each Preview password (Workspace.previewPasswords: whoever set one shared it) is what Write
+ * viewers are shown over this Mac's (cloud/ws-slice.ts appsFor). A share can miss: Bops Cloud away for longer than its
+ * sender kept trying, an older Bops that sets one and never shares, two sets whose shares crossed. So as this Mac reads
+ * Orgo for members, it tells Bops Cloud what Orgo has where its copy for that link differs (sharePreviewPassword, with
+ * `seen`: only in place of the entry seen here, so never over a share that landed since). Only a copy older than the
+ * read by CLOUD_FIX_AFTER_MS (Bops Cloud's clock against this Mac's): a share that came after the read began, its
+ * password made after Orgo answered, never loses to it, nor does one whose clock is a little off.
+ */
+export const CLOUD_FIX_AFTER_MS = 2 * 60_000;
+
+/** Bops Cloud's copy of a site's Preview password as this Mac's state has it, for link `url` alone (one for another link is never shown). */
+function cloudCopy(wsId: string, name: string, site: string | undefined, url: string) {
+  const p = getState().workspaces?.find((w) => w.id === wsId)?.previewPasswords?.[`${name}/${site ?? name}`];
+  return p && p.url === url ? p : undefined;
+}
+
+/** Tell Bops Cloud what Orgo has for link `url` (`password`; null: it asks for none), read from `readAt`, where its copy is another and older than that read. */
+function fixCloudCopy(wsId: string, name: string, site: string | undefined, url: string, password: string | null, readAt: number) {
+  const kept = cloudCopy(wsId, name, site, url);
+  if (!kept || kept.password === password || kept.at > readAt - CLOUD_FIX_AFTER_MS) return;
+  void sharePreviewPassword({ ws: wsId, app: name, site: site ?? name, url, password, seen: kept.at });
+}
 
 /**
  * A site's Preview password for members with Your Apps at Write (null: none to show: Orgo kept only its cookie's check,
- * or the user's key can't read it), read from Orgo again only once its link or when Bops set it is another.
+ * or the user's key can't read it), read from Orgo again only once its link or when Bops set it is another, or once
+ * Bops Cloud's copy differs from it and a read now would be well after that copy (fixCloudCopy). When it was set is the
+ * state's own, read after Orgo answered (the page's `at` may be older than a set made since, by this read or by a deploy
+ * going live meanwhile), and a read that couldn't answer never stands in an older password once that moved.
+ * (This copy is what members get only where Bops Cloud has none: whoever sets a password shares it there,
+ * preview-password-share.ts, and that one is shown over this one: cloud/ws-slice.ts appsFor.)
  */
 async function passwordFor(wsId: string, name: string, site: string | undefined, url: string, at: number | undefined, r: AppsReaders): Promise<string | null> {
   const key = `${wsId}\n${name}\n${site ?? name}`;
   const was = passwordsRead.get(key);
-  if (was && was.url === url && was.at === at) return was.password;
+  const kept = cloudCopy(wsId, name, site, url);
+  // (Bops Cloud's copy says another, and is old enough to be told what Orgo has, while the read kept here isn't new enough to: read again.)
+  const doubt = !!was && !!kept && kept.password !== was.password && kept.at <= Date.now() - CLOUD_FIX_AFTER_MS && kept.at > was.readAt - CLOUD_FIX_AFTER_MS;
+  if (was && was.url === url && was.at === (setAtNow(wsId, name, site) ?? at) && !doubt) {
+    fixCloudCopy(wsId, name, site, url, was.password, was.readAt);
+    return was.password;
+  }
+  const readAt = Date.now();
   const got = await r.password(wsId, name, site).catch(() => null);
-  // (Couldn't be read just now: the one read before for that link, and asked again next time.)
-  if (!got) return was?.url === url ? was.password : null;
+  const after = setAtNow(wsId, name, site) ?? got?.at ?? at;
+  // (Couldn't be read just now: the one read before for that link while it's still the one set, and asked again next time.)
+  if (!got) return was && was.url === url && was.at === after ? was.password : null;
   const password = got.on && got.url === url && typeof got.password === "string" && got.password ? got.password : null;
-  // None to show is asked for again next time, not kept until the next deploy.
-  if (password) passwordsRead.set(key, { url, at, password });
+  // None to show is asked for again next time, not kept until the next deploy; nor is one read while another was set
+  // (the read's own time isn't the state's after it), which may be the older one, and Bops Cloud isn't told that one.
+  const settled = got.at === undefined || got.at === after;
+  if (password && settled) passwordsRead.set(key, { url, at: after, password, readAt });
   else passwordsRead.delete(key);
+  if (settled && got.url === url && (password || got.on === false)) fixCloudCopy(wsId, name, site, url, password, readAt);
   return password;
 }
 
-/** One app as members see it, from what the page read: the allow list, field by field. */
-async function appFor(wsId: string, a: HostedApp, r: AppsReaders, acts: MemberAppAct[] | undefined): Promise<AppForMembers> {
+/** One app as members see it, from what the page read (`readAt`: when, by this Mac's clock): the allow list, field by field. */
+async function appFor(wsId: string, a: HostedApp, r: AppsReaders, acts: MemberAppAct[] | undefined, readAt: number): Promise<AppForMembers> {
   // (Its address is Published's first active domain, never an orgo.dev name; its Preview's link beside it.)
   const sites = a.sites ?? [{ name: a.name, projectId: null, url: null, serving: a.serving, live: a.live, domain: a.domain ?? null, preview: a.preview, ...(a.domains ? { domains: a.domains } : {}) }];
   const log = await r.commits(wsId, a.name).catch(() => null);
@@ -131,6 +182,8 @@ async function appFor(wsId: string, a: HostedApp, r: AppsReaders, acts: MemberAp
     // Its Preview's password, while it asks for one and someone has Your Apps at Write.
     const pass = writers && s.preview?.url && s.preview.protected === true ? await passwordFor(wsId, a.name, site, s.preview.url, s.preview.passwordAt, r) : null;
     if (pass) passwords[s.name] = pass;
+    // (One that asks for none now, turned off where its share never got to Bops Cloud: its copy there goes too.)
+    if (writers && s.preview?.url && s.preview.protected === false) fixCloudCopy(wsId, a.name, site, s.preview.url, null, readAt);
   }
   return {
     head,
@@ -198,11 +251,13 @@ async function see(wsId: string, from: HostedApp[] | undefined, readers: AppsRea
     return;
   }
   const r = readers ?? (await realReaders());
+  // (When the list was read, by this Mac's clock: the page's own read just before this, or the one here.)
+  const readAt = Date.now();
   const list = from ?? (await r.list(wsId).catch(() => null))?.apps;
   if (!list) return;
   const kept = ws.appsForMembers;
   const apps: Record<string, AppForMembers> = {};
-  for (const a of list.filter((x) => x.hosting).slice(0, MEMBER_APPS)) apps[a.name] = await appFor(wsId, a, r, kept?.apps[a.name]?.acts);
+  for (const a of list.filter((x) => x.hosting).slice(0, MEMBER_APPS)) apps[a.name] = await appFor(wsId, a, r, kept?.apps[a.name]?.acts, readAt);
   const first = list.find((x) => x.hosting)?.name;
   const opts = first ? await r.owned(wsId, first).catch(() => null) : null;
   const owned = (opts?.owned ?? []).map((d) => ({ id: d.id, domain: d.domain }));

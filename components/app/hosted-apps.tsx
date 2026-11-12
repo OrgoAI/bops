@@ -161,17 +161,20 @@ const hostingIn = (state: Pick<AppState, "workspaces"> | null | undefined, ws: s
 
 /**
  * What of a workspace's apps changes in the app's state when this Mac deploys one (where it runs, its
- * site, a deploy queued): the list is read again whenever it does, so the page follows a bot's deploy
- * while the window keeps its focus.
+ * site, a deploy queued), or a Preview gets a new password (each site's passwordSet: set as its deploy
+ * went live, here or on its bot's computer, after the list was read): the list is read again whenever it
+ * does, so the page follows a bot's deploy while the window keeps its focus, and the password shown and
+ * the Preview tab's cookie follow the new one (preview-password.tsx usePreviewPassword).
  */
 export const appsStamp = (state: Pick<AppState, "workspaces"> | null | undefined, ws: string) =>
   Object.entries(hostingIn(state, ws))
     .map(
       ([name, h]) =>
         `${name}:${h.botId}:${h.computerId}:${h.projectId ?? ""}:${h.url ?? ""}:${h.queuedAt ?? ""}` +
-        // Its other sites, and its computer gone, only when it has them (an app with one site's is as it was).
-        (h.sites?.length ? `:${h.sites.map((x) => `${x.name}=${x.projectId ?? ""}=${x.url ?? ""}`).join("|")}` : "") +
-        (h.lost ? `:lost${h.lost}` : ""),
+        // Its other sites, its computer gone and when a password was set, only when it has them (an app with one site's is as it was).
+        (h.sites?.length ? `:${h.sites.map((x) => `${x.name}=${x.projectId ?? ""}=${x.url ?? ""}${x.passwordSet ? `=${x.passwordSet.at}` : ""}`).join("|")}` : "") +
+        (h.lost ? `:lost${h.lost}` : "") +
+        (h.passwordSet ? `:pw${h.passwordSet.at}` : ""),
     )
     .sort()
     .join(",");
