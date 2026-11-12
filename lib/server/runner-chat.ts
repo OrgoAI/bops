@@ -2,7 +2,7 @@ import "server-only";
 import { mkdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnMember } from "@/cloud/protocol";
-import type { AppApproval, MemberTurn } from "@/lib/types";
+import { workspaceOf, type AppApproval, type MemberTurn } from "@/lib/types";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
 import { getState, pullState, stateReady } from "./store";
@@ -17,7 +17,8 @@ import { runInTurn, type TurnContext } from "./turn-context";
  * 1. makes sure it's on its own computer (runner.ts checkIdentity: a copy never answers), then claims it (Bops Cloud gives
  *    it only to this computer's device, one at a time per chat, and checks again that a member still may);
  * 2. reads the state until it has the message (Bops Cloud wrote it, never this runner);
- * 3. runs the same turn the Mac would (chat.ts answerMessage) in the turn's context (turn-context.ts): its rows carry the
+ * 3. reads the skills published in Orgo (runner-skills.ts, at most once a minute), then runs the same turn the Mac would
+ *    (chat.ts answerMessage) in the turn's context (turn-context.ts): its rows carry the
  *    turn and Bops Cloud's clock, and the first thing it does that can't be done twice is said at once, so a runner that
  *    goes quiet after that never has it run again;
  * 4. beats every TURN_BEAT_MS while it runs (a 409 means Bops Cloud took it back: it stops and writes nothing more),
@@ -292,7 +293,17 @@ async function claimAndAnswer(ev: RunnerTurnEvent) {
   }
   const ctx: TurnContext = { id: t.id, chatId: t.chatId, botId: t.botId, offsetMs, humanAt: t.humanAt, acting: false, cancelled: false };
   const answer = await answerOf();
-  await asTurn(ctx, () => answer(t.chatId, t.messageId, saidBy(t.member)), { messageId: t.messageId });
+  await asTurn(
+    ctx,
+    async () => {
+      // The skills the owner or an Admin published in Orgo, read first (runner-skills.ts, a few seconds at most): the bot
+      // follows them with the owner's Mac off.
+      const b = getState().bots.find((x) => x.id === t.botId);
+      if (b) await import("./runner-skills").then((m) => m.refreshRunnerSkills(workspaceOf(b)), () => {});
+      return answer(t.chatId, t.messageId, saidBy(t.member));
+    },
+    { messageId: t.messageId },
+  );
 }
 
 /**

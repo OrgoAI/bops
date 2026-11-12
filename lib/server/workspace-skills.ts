@@ -43,6 +43,7 @@ import {
   type Problem,
 } from "./skill-bundle";
 import { onRunner } from "./persist";
+import { exportedFile, refreshRunnerSkills, runnerBundle, runnerOverlay, type ExportFile, type RunnerSkill } from "./runner-skills";
 import { botIdsOn } from "@/cloud/computer-scope";
 import { bot, getState, ownerName, update, userDir } from "./store";
 import { outbox } from "./sync-outbox";
@@ -181,13 +182,57 @@ const versionDir = (wsId: string, kind: SkillKind, slug: string, version: string
 
 /* ---------------- What's in the state ---------------- */
 
-/** A workspace's skills and apps (both, or one kind), oldest first. */
+/**
+ * A workspace's skills and apps (both, or one kind), oldest first. On a computer's runner, Orgo's published ones as it
+ * last read them (runner-skills.ts) laid over the state's: Orgo's name, description, version, bots and label for one it
+ * lists, one only Orgo has added, and one Orgo had (remoteId) but no longer lists as published shown as a draft, so
+ * with the owner's Mac off its bots use what the owner or an Admin published. Without a read: the state's, as before.
+ */
 export function refsOf(wsId: string, kind?: SkillKind): SkillRef[] {
   adoptProcedures();
   labelRefs(wsId);
   const w = workspaceById(wsId);
   if (!w) return [];
-  return kind ? [...(w[listKey(kind)] ?? [])] : [...(w.skills ?? []), ...(w.apps ?? [])];
+  const own = kind ? [...(w[listKey(kind)] ?? [])] : [...(w.skills ?? []), ...(w.apps ?? [])];
+  const over = onRunner() && w.orgoProjectId ? runnerOverlay(w.orgoProjectId) : null;
+  return over ? overlaid(own, over.skills, kind) : own;
+}
+
+/** A published skill Orgo lists, as a ref here: published at its version, for its bots or by its label. */
+const runnerRef = (x: RunnerSkill, r?: SkillRef): SkillRef => {
+  const { label: _label, risk: _risk, ...rest } = r ?? ({} as Partial<SkillRef>);
+  return {
+    ...(rest as Partial<SkillRef>),
+    slug: x.slug,
+    kind: x.kind,
+    name: x.name,
+    description: x.description,
+    ...(x.label ? { label: x.label } : {}),
+    labelBy: "skill",
+    status: "published",
+    version: x.version,
+    ...(x.risk && (RISKS as readonly string[]).includes(x.risk) ? { risk: x.risk as SkillRisk } : {}),
+    botIds: x.botIds,
+    source: r?.source ?? "orgo",
+    createdAt: r?.createdAt ?? 0,
+    updatedAt: Date.parse(x.updatedAt) || r?.updatedAt || 0,
+    remoteId: x.id,
+  };
+};
+
+function overlaid(own: SkillRef[], theirs: RunnerSkill[], kind?: SkillKind): SkillRef[] {
+  const used = new Set<RunnerSkill>();
+  const out = own.map((r) => {
+    const x = theirs.find((t) => t.kind === r.kind && !used.has(t) && (r.remoteId ? t.id === r.remoteId : t.slug === r.slug)) ?? theirs.find((t) => t.kind === r.kind && !used.has(t) && t.slug === r.slug);
+    if (x) {
+      used.add(x);
+      return runnerRef(x, r);
+    }
+    // Orgo had it and doesn't list it as published now (taken back to a draft, or deleted there): not its bots' here.
+    return r.status === "published" && r.remoteId ? { ...r, status: "draft" as const } : r;
+  });
+  for (const x of theirs) if (!used.has(x) && (!kind || x.kind === kind)) out.push(runnerRef(x));
+  return out;
 }
 
 export const findRef = (wsId: string, kind: SkillKind, slug: string) => refsOf(wsId, kind).find((r) => r.slug === slug);
@@ -718,6 +763,10 @@ function readBundle(dir: string | null): Bundle | null {
  * is written again here from the procedure kept in the state.
  */
 function publishedBundle(wsId: string, r: SkillRef): Bundle | null {
+  // On a computer's runner: the version Orgo serves, as it last read it (runner-skills.ts).
+  const pid = onRunner() && r.version ? workspaceById(wsId)?.orgoProjectId : undefined;
+  const fromOrgo = pid ? runnerBundle(pid, r.kind, r.slug, r.version!) : null;
+  if (fromOrgo) return fromOrgo;
   if (r.version) {
     const v = readBundle(versionDir(wsId, r.kind, r.slug, r.version));
     if (v) return v;
@@ -1219,7 +1268,11 @@ export function dropBotFromSkills(botId: string, wsId: string) {
 
 export type SkillFileInfo = { path: string; size: number; sha256: string; executable: boolean; script: boolean; approved: boolean; binary: boolean };
 
-const approvedIn = (wsId: string) => new Set((workspaceById(wsId)?.approvals ?? []).map((a) => a.sha256));
+/** The contents approved to run in a workspace: the state's, and on a computer's runner, the owner's and Admins' Orgo has (runner-skills.ts). */
+const approvedIn = (wsId: string) => {
+  const pid = onRunner() ? workspaceById(wsId)?.orgoProjectId : undefined;
+  return new Set([...(workspaceById(wsId)?.approvals ?? []).map((a) => a.sha256), ...(pid ? (runnerOverlay(pid)?.approvals ?? []) : [])]);
+};
 
 /** A skill as the window shows it: its SKILL.md (a version, else what's being worked on), its files, and where its folder is. */
 export function skillDetail(wsId: string, kind: SkillKind, slug: string, version?: string) {
@@ -1337,7 +1390,7 @@ export function readSkill(botId: string, nameOrSlug: string, file?: string | nul
   }
   const wsId = workspaceOf(b);
   const bundle = publishedBundle(wsId, r);
-  if (!bundle) return `"${r.name}" isn't on this Mac right now.`;
+  if (!bundle) return `"${r.name}" isn't on this ${onRunner() ? "computer" : "Mac"} right now.`;
   if (file?.trim()) {
     const n = normalizePath(file.trim());
     const f = "reason" in n ? undefined : bundle.files.find((x) => x.path === n.path);
@@ -1764,6 +1817,8 @@ const PIECE = 96 * 1024;
  * copied it rather than clear it.
  */
 export async function copySkillsToComputer(botId: string, computerId: string, bash: (computerId: string, command: string, timeout?: number) => Promise<{ output: string; exit_code: number }>) {
+  // On a computer's runner: what Orgo publishes now, read first (runner-skills.ts), so the copy is whole.
+  if (onRunner() && bot(botId)) await refreshRunnerSkills(workspaceOf(bot(botId)!));
   const team = sharers(botId);
   if (onRunner() && team.some((id) => skillsFor(id).some((r) => !publishedBundle(workspaceOf(bot(id)!), r)))) return 0;
   const bundles = bundlesFor(team, { builtins: true });
@@ -2691,26 +2746,6 @@ async function syncLabelInfo(wsId: string, pid: string): Promise<boolean> {
       if (x && !x.skillLabelInfoUnsent) x.skillLabelInfo = rows;
     });
   return true;
-}
-
-type ExportFile = { content?: string; url?: string; sha256?: string; executable?: boolean };
-
-/**
- * A file of Orgo's export as it was stored: its text inline, or its bytes from `url` (a short presigned GET,
- * no key sent: orgo-web gives one for every binary file and for large text). Checked against its sha256;
- * null when it can't be fetched or doesn't match, so nothing half there is ever written.
- */
-async function exportedFile(path: string, f: ExportFile): Promise<{ path: string; content: string | null; data?: Buffer; executable: boolean } | null> {
-  let bytes: Buffer;
-  if (typeof f.content === "string") bytes = Buffer.from(f.content, "utf8");
-  else if (typeof f.url === "string" && /^https?:\/\//.test(f.url)) {
-    const res = await fetch(f.url, { signal: AbortSignal.timeout(120_000) }).catch(() => null);
-    if (!res?.ok) return null;
-    bytes = Buffer.from(await res.arrayBuffer());
-  } else return null;
-  if (f.sha256 && sha256Hex(bytes) !== f.sha256) return null;
-  const text = typeof f.content === "string" ? f.content : textOf(path, bytes);
-  return text !== null ? { path, content: text, executable: !!f.executable } : { path, content: null, data: bytes, executable: !!f.executable };
 }
 
 /** Two bundles' text and files the same (the blank line after the frontmatter aside): what skillDetail calls unchanged. */
