@@ -149,7 +149,7 @@ const server = createServer(async (req, res) => {
   if (!sub && req.method === "GET") {
     const v = url.searchParams.get("version") ?? s.current;
     if (!s.versions.includes(v)) return send(res, 404, { error: "That version does not exist.", code: "version_not_found" });
-    return send(res, 200, { skill: { ...view(s), current_version: undefined }, version: { version: v, frontmatter: { name: s.slug, description: s.description }, body: s.body, files: s.files.map(({ content: _c, ...f }) => f) }, versions: s.versions });
+    return send(res, 200, { skill: { ...view(s), current_version: undefined }, version: { version: v, frontmatter: { name: s.slug, description: s.description }, body: s.body, files: s.files.map((f) => Object.fromEntries(Object.entries(f).filter(([k]) => k !== "content"))) }, versions: s.versions });
   }
   if (sub === "files" && req.method === "GET") {
     const f = s.files.find((x) => x.path === decodeURIComponent(rest ?? ""));
