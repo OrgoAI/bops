@@ -22,6 +22,7 @@ import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
+import { OpenSkill } from "./skill-drafts";
 import { BoppyLoading, BotMoodsFrom, CallTalking, Mascot, talkingStore } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { BROWSER_TAB, BrowserGoTo, browserTabOf, browsesHere, CHAT_TAB, electron, forgetTab, hostOf, isReading, LocalOnly, memoryAgain, NewTab, OpenBotLocal, OpenInBrowser, OpenLink, OpenPreview, TabBar, WebTab, type BrowserGo, type PanelTab, type PreviewOpened } from "./panel-tabs";
@@ -1034,6 +1035,7 @@ function Bops({ state }: { state: AppState | null }) {
     <OpenMadeApp.Provider value={openMadeApp}>
     <OpenHostedApp.Provider value={openHostedApp}>
     <OpenSettings.Provider value={(at) => openSettings(at)}>
+    <OpenSkill.Provider value={openSkills}>
     <OpenAppTask.Provider value={openAppTask}>
     <OpenBotComputer.Provider value={openBotComputer}>
     <OpenPreview.Provider value={openPreview}>
@@ -1472,6 +1474,7 @@ function Bops({ state }: { state: AppState | null }) {
     </OpenPreview.Provider>
     </OpenBotComputer.Provider>
     </OpenAppTask.Provider>
+    </OpenSkill.Provider>
     </OpenSettings.Provider>
     </OpenHostedApp.Provider>
     </OpenMadeApp.Provider>

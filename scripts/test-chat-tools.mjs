@@ -972,14 +972,17 @@ await check("read_skill, create_skill (a draft), update_skill, and start_task fo
   assert.equal(t.out(1), 'No skill called "Taxes". Your labels: Apps and source control (7), Finance (1). Open one with read_skill and label to see its skills.');
   assert.equal(skillNamed("Weekly invoice summary").uses, 1, "a read counts as a use");
   const v = await turnWith("remember how you post the standup", [toolCall("create_skill", { name: "Standup post", description: "When Alex asks for \"the standup notes\"", steps: "1. Read yesterday's chat.\n2. Post three lines.", pitfalls: null })]);
-  assert.equal(v.out(), 'Saved "Standup post" as a draft. Alex can publish it in Skills, in Knowledge; then you\'ll use it.');
+  assert.equal(v.out(), 'Saved "Standup post" as a draft. Alex or an Admin can read it and publish it in Skills, in Knowledge (the card under your answer opens it there); then you\'ll use it.');
+  // Its card under the answer: which one, to open in Skills (never a publish of its own).
+  assert.deepEqual(messages().findLast((m) => m.role === "bot").skillDrafts, [{ kind: "skill", slug: "standup-post", name: "Standup post" }]);
   assert.equal(skillNamed("Standup post").from.chatId, chatId);
   assert.equal(skillNamed("Standup post").status, "draft", "a bot's skill is a draft until Alex publishes it");
   assert.deepEqual(skillNamed("Standup post").botIds, ["boppy"]);
   assert.ok(!W.skillsNote("boppy").includes("Standup post"), "a draft isn't in its list yet");
   assert.equal(messages().findLast((m) => m.role === "system").text, 'Saved the skill "Standup post" as a draft');
   const w = await turnWith("update that skill: just post three lines", [toolCall("update_skill", { name: "standup post", description: "When Alex asks for standup notes", steps: "1. Post three lines.", pitfalls: null })]);
-  assert.match(w.out(), /^Updated "/);
+  assert.match(w.out(), /^Updated "[Ss]tandup post" as a draft\. Alex can publish it in Skills, in Knowledge; then you'll use it\.$/, `a change to one is the owner's to publish: ${w.out()}`);
+  assert.equal(messages().findLast((m) => m.role === "bot").skillDrafts, undefined, "no card for a change");
   const w0 = await turnWith("update that skill: the payroll one", [toolCall("update_skill", { name: "Payroll", description: "x", steps: "1. x", pitfalls: null })]);
   assert.equal(w0.out(), 'Not changed: you have no skill called "Payroll". Use create_skill for a new one.');
   // A secret in it: refused, said by where and what kind, never the text.
@@ -2107,6 +2110,8 @@ await check("an Admin's turn (MemberTurn.role) has every bot and Your Apps at Wr
       await Chat.handleMessage(chatId, "can you change the site?", undefined, undefined, undefined, undefined, undefined, undefined, undefined, { ...ivy, ref, role: "admin" });
       assert.ok(asked[n], `answered with ${tag}`);
       for (const tool of appTools) assert.ok(toolNames(asked[n]).includes(tool), `${tag}: ${tool}`);
+      // An Admin's turn keeps create_skill and update_skill (an Admin can do everything but delete the workspace or pay).
+      for (const tool of ["create_skill", "update_skill"]) assert.ok(toolNames(asked[n]).includes(tool), `${tag}: ${tool}`);
       const kept = messages().find((m) => m.member?.ref === ref);
       assert.deepEqual(kept.member, { ...ivy, ref }, "the role isn't kept on the message");
       // A computer's runner (runner-chat.ts answerMessage): a message Bops Cloud wrote, answered as an Admin's.
@@ -2670,7 +2675,7 @@ await check("the owner's turn on the bot's computer: its apps on the web and its
   const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
   // A stand in for orgo-web's skills route: what each POST asked, answered as the test says.
   const posts = [];
-  let answer = { status: 201, json: { skill: { id: "sk_1", name: "Weekly recap" } } };
+  let answer = { status: 201, json: { skill: { id: "sk_1", slug: "weekly-recap", name: "Weekly recap" } } };
   orgoFake.handle = async (req) => {
     const u = new URL(req.url);
     // (Anything else this turn asks of orgo-web, its keys say: not found.)
@@ -2699,7 +2704,9 @@ await check("the owner's turn on the bot's computer: its apps on the web and its
     const names = toolNames(t.first);
     for (const x of ["work_on_app", "deploy_app", "local_app", "create_skill", "update_skill", "propose_skill_change", "start_task"]) assert.ok(names.includes(x), `has ${x}`);
     for (const x of ["schedule", "manage_routine", "watch", "make_page", "make_image", "make_app", "change_app", "create_bot"]) assert.ok(!names.includes(x), `no ${x}`);
-    assert.equal(t.out(), "Saved \"Weekly recap\" as a draft in your workspace's skills. Alex can publish it in Skills, in Knowledge; then you'll use it.");
+    assert.equal(t.out(), "Saved \"Weekly recap\" as a draft in your workspace's skills. Alex or an Admin can read it and publish it in Skills, in Knowledge (the card under your answer opens it there); then you'll use it.");
+    // Its card under the answer, by Orgo's slug for it.
+    assert.deepEqual(messages().findLast((m) => m.role === "bot").skillDrafts, [{ kind: "skill", slug: "weekly-recap", name: "Weekly recap" }]);
     const noteOf = (req) => req.input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
     assert.match(noteOf(t.first), /not from Alex's Mac\. Your workspace's apps on the web \(Local, Preview and Published\) work from here as always\. So do skills: a new one is saved as a draft/);
     assert.equal(posts.length, 1);

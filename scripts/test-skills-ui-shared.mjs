@@ -87,6 +87,7 @@ const { act, createElement: h } = await import("react");
 const { SkillsPage } = await import(pathToFileURL(`${root}/components/app/skills.tsx`).href);
 const { MemoryView } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
 const { sharedWsId } = await import(`${root}/lib/shared.ts`);
+const { SkillDrafts, OpenSkill } = await import(pathToFileURL(`${root}/components/app/skill-drafts.tsx`).href);
 
 let passed = 0;
 let failures = 0;
@@ -272,6 +273,39 @@ await check("Knowledge in a shared workspace: Skills for an Admin, Open Skills u
     }
   }
   assert.ok(!calls.some((c) => c.url.startsWith("/api/skills")), "a Member's window never asks");
+});
+
+await check("a bot's draft in a chat: a card that opens it in Skills (never a publish of its own), for the owner and an Admin; a Member sees none", async () => {
+  reset();
+  const msg = { id: "m1", chatId: "bot:max", role: "bot", botId: "max", text: "Saved it.", at: 1, skillDrafts: [{ kind: "skill", slug: "weekly-report", name: "Weekly report" }] };
+  const opened = [];
+  const card = (st) => h(OpenSkill.Provider, { value: (item) => opened.push(item) }, h(SkillDrafts, { message: msg, state: st }));
+  // An Admin of a shared workspace.
+  let m = await mount(card(state("admin")));
+  try {
+    assert.match(look(m.box), /Saved as a draft: Weekly report/);
+    await click(button(m.box, "Review and publish"));
+    assert.deepEqual(opened, ["skill:weekly-report"]);
+    assert.deepEqual(calls, [], "the card itself sends nothing");
+  } finally {
+    await m.done();
+  }
+  // A Member there: nothing.
+  m = await mount(card(state("member")));
+  try {
+    assert.equal(m.box.querySelector("[data-skill-drafts]"), null);
+  } finally {
+    await m.done();
+  }
+  // The owner, in their own workspace: once it's published, it says so.
+  const own = { ...state(), shared: undefined, workspaces: [{ id: "ws_main", name: "Mine", createdAt: 0, skills: [{ ...lists.skills[0], status: "published", version: "0.1.0" }] }] };
+  m = await mount(card(own));
+  try {
+    assert.match(look(m.box), /Published: Weekly report/);
+    assert.ok(button(m.box, "Open in Skills"));
+  } finally {
+    await m.done();
+  }
 });
 
 await check("nothing on these pages has a dash or says Orbit", async () => {

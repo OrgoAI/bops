@@ -1006,7 +1006,7 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
  * rest. Nothing is kept on the computer or in its state: a computer may not write a workspace's skills
  * (cloud/computer-scope.ts), and the owner's Bops keeps their folders. Answers its name, or why it wasn't saved.
  */
-export async function saveSkillFromComputer(wsId: string, input: { name: string; description: string; body: string; label: string | null; botId: string }): Promise<{ ok: true; name: string } | { ok: false; why: string }> {
+export async function saveSkillFromComputer(wsId: string, input: { name: string; description: string; body: string; label: string | null; botId: string }): Promise<{ ok: true; name: string; slug?: string } | { ok: false; why: string }> {
   const pid = workspaceById(wsId)?.orgoProjectId;
   if (!pid) return { ok: false, why: "this workspace isn't on Orgo yet, so a skill can be saved only where its folders are kept" };
   const who = bot(input.botId);
@@ -1032,12 +1032,13 @@ export async function saveSkillFromComputer(wsId: string, input: { name: string;
   const { apiKey, callOrgo } = await import("./orgo");
   const key = await apiKey().catch(() => "");
   if (!key) return { ok: false, why: "this computer isn't signed in to Orgo right now" };
-  const r = await callOrgo<{ skill?: { name?: string }; error?: string; code?: string }>(key, `/api/projects/${encodeURIComponent(pid)}/skills`, {
+  const r = await callOrgo<{ skill?: { name?: string; slug?: string }; error?: string; code?: string }>(key, `/api/projects/${encodeURIComponent(pid)}/skills`, {
     method: "POST",
     body: { name, description, type: "skill", body: md, files: [], bot_ids: [input.botId], status: "draft" },
     timeoutMs: 20_000,
   });
-  if (r?.status === 201) return { ok: true, name: r.json.skill?.name ?? name };
+  // (Its slug, Orgo's, so the card under the answer opens it in Skills.)
+  if (r?.status === 201) return { ok: true, name: r.json.skill?.name ?? name, ...(typeof r.json.skill?.slug === "string" && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(r.json.skill.slug) ? { slug: r.json.skill.slug } : {}) };
   if (!r) return { ok: false, why: "Orgo didn't answer" };
   const plain = r.status === 403 && typeof r.json.code === "string" ? skillRefusedWords(r.json.code, who.name) : undefined;
   if (plain) return { ok: false, why: plain };

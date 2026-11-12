@@ -205,6 +205,9 @@ const MESSAGE: Spec = {
   // Replies a bot wrote for the owner to send (lib/types.ts ReplyDraft), read only: who and where, the words, and
   // whether they went. Never the account, thread or channel ids they go by, nor a Send in progress or why one failed.
   drafts: [{ id: true, app: true, toName: true, to: true, subject: true, where: true, text: true, sent: { at: true, text: true } }],
+  // Skills a bot saved as drafts (Message.skillDrafts): which one, so an Admin's card opens it in Skills to read and
+  // publish there with their own sign in (components/app/skill-drafts.tsx). Its name only: the skill is Orgo's.
+  skillDrafts: [{ kind: true, slug: true, name: true }],
 };
 
 /** `asking` is a map (asker → teammate): its entries are each a bot id, and with `bots` (someone else's view) both of them a bot they see. */

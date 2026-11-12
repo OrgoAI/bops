@@ -249,6 +249,19 @@ test("a reply a bot drafted for the owner is shown read only: who, where, the wo
   });
 });
 
+test("a skill a bot saved as a draft comes with its message: which one (kind, slug, name), so an Admin's card opens it in Skills; nothing else of it", () => {
+  const saved = { kind: "skill", slug: "weekly-recap", name: "Weekly recap", body: "# Weekly recap", botIds: ["max"] };
+  assert.deepEqual(sharedMessage({ id: "m1", chatId: "bot:max", role: "bot", botId: "max", text: "Saved it.", at: 3, skillDrafts: [saved] }, new Set(["max"])), {
+    id: "m1",
+    chatId: "bot:max",
+    role: "bot",
+    botId: "max",
+    text: "Saved it.",
+    at: 3,
+    skillDrafts: [{ kind: "skill", slug: "weekly-recap", name: "Weekly recap" }],
+  });
+});
+
 test("a member given a bot sees all of it: the owner's own messages to it, one kept between us, the answers, and the threads that came of it, live too", () => {
   const blob = {
     workspaces: [{ id: "ws_acme", name: "Acme", memberAccess: { "sam@example.com": { others: "none", bots: { boppy: "read" } } } }],

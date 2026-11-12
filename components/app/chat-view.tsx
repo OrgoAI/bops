@@ -40,6 +40,7 @@ import { AskInPlace, ChatAvatar, chatName, clockTime, memberAnswers, needsYou, p
 import { ReplyDrafts } from "./reply-drafts";
 import { dropCitations, isLocalLink, isTableRow as isRow, isTableRule as isRule, localOnlyLine, plainStep, plainTitle, tableCells as cells } from "@/lib/plain-words";
 import { SkillProposals } from "./skill-proposals";
+import { SkillDrafts } from "./skill-drafts";
 
 /** Light markdown for bot text: **bold** and [links](url). */
 /** How many messages a chat draws at first, and how many more each "Show earlier messages" adds. */
@@ -2093,6 +2094,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         <ReplyDrafts message={m} state={state} />
         {/* Changes it proposed to a skill, each a card with Accept and Reject (read only in a shared workspace). */}
         <SkillProposals message={m} state={state} />
+        {/* Skills it saved as drafts, each a card that opens it in Skills to read and publish. */}
+        <SkillDrafts message={m} state={state} />
         {m.signIn && m.botId && <SignInAsk botId={m.botId} url={m.signIn.url} state={state} />}
         {replies}
         {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} state={state} />}

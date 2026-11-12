@@ -970,7 +970,16 @@ export type Message = {
    * Nothing changes until the owner presses Accept in the window (lib/server/skill-proposals.ts).
    */
   skillProposals?: SkillProposal[];
+  /**
+   * Set on a bot's message: skills it saved as drafts this turn (chat.ts create_skill), each a card under the message
+   * that opens it in Skills, in Knowledge, to read and publish (components/app/skill-drafts.tsx). Publishing is a
+   * person's, there, with their own sign in: the owner, or an Admin of a shared workspace.
+   */
+  skillDrafts?: SkillDraftNote[];
 };
+
+/** A skill a bot saved as a draft (Message.skillDrafts): which one, to open in Skills. */
+export type SkillDraftNote = { kind: SkillKind; slug: string; name: string };
 
 /**
  * A reply a bot wrote for the user, to an email, a Slack message or a Discord message it read with the user's
