@@ -246,6 +246,10 @@ export type SliceViewer = {
   keyActs?: boolean;
   /** Whether the owner's Bops takes the "change" act (change-routes.ts CHANGES_MIN_VERSION): SharedWsSlice.changes. */
   changes?: boolean;
+  /** Whether the owner's last Mac takes the GitHub acts (protocol.ts GITHUB_ACTS_MIN_VERSION): SharedWsSlice.appGithub. */
+  githubActs?: boolean;
+  /** Whether the viewer's own Bops knows the GitHub acts (GITHUB_ACTS_MIN_VERSION): else they're left out of what it's shown (appsFor). */
+  githubSeen?: boolean;
 };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
@@ -424,11 +428,33 @@ function sitesFilled(name: string, host: Record<string, unknown>, mac: unknown[]
 const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
 /** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
 const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
-const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, env: true, ok: true, said: true, at: true };
+const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, env: true, ok: true, going: true, said: true, at: true };
+/** A member's act on an app a Bops from before GITHUB_ACTS_MIN_VERSION doesn't know (its window would read one as a domain's). */
+const GITHUB_ACT = new Set(["github", "githubLink", "githubPull"]);
 const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
-/** An app's GitHub production as shown (repo and branch, as the owner's Bops checked them when set), or none when malformed. */
-const githubOf = (g: unknown): { repo: string; branch: string } | undefined =>
-  isObject(g) && typeof g.repo === "string" && typeof g.branch === "string" && g.repo.length <= 201 && g.branch.length <= 200 ? { repo: g.repo, branch: g.branch } : undefined;
+/**
+ * An app's GitHub production as shown (repo and branch, as the owner's Bops or Bops Cloud checked them when set), or none
+ * when malformed. At Write (`write`) also its folder, the paths left alone, the workflow it runs and where it was last the
+ * same as GitHub (`linked`, of its point: never more than its commits' ids and when), so Your Apps links it and brings
+ * GitHub's changes in.
+ */
+const githubOf = (g: unknown, write = false): SharedApp["github"] | undefined => {
+  if (!isObject(g) || typeof g.repo !== "string" || typeof g.branch !== "string" || g.repo.length > 201 || g.branch.length > 200) return undefined;
+  if (!write) return { repo: g.repo, branch: g.branch };
+  const words = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max;
+  const keep = Array.isArray(g.keep) ? g.keep.filter((k): k is string => words(k, 300)).slice(0, 50) : [];
+  const d = isObject(g.dispatch) && words(g.dispatch.workflow, 120) ? g.dispatch : undefined;
+  const inputs = d && isObject(d.inputs) ? Object.fromEntries(Object.entries(d.inputs).filter((e): e is [string, string] => e[0].length <= 50 && words(e[1], 200)).slice(0, 10)) : undefined;
+  const last = isObject(g.last) && words(g.last.sha, 64) && words(g.last.ingot, 64) && typeof g.last.when === "number" ? g.last : undefined;
+  return {
+    repo: g.repo,
+    branch: g.branch,
+    ...(words(g.path, 300) ? { path: g.path } : {}),
+    ...(keep.length ? { keep } : {}),
+    ...(d ? { dispatch: { workflow: d.workflow as string, ...(inputs && Object.keys(inputs).length ? { inputs } : {}) } } : {}),
+    ...(last ? { linked: { sha: last.sha as string, ingot: last.ingot as string, when: last.when as number } } : {}),
+  };
+};
 /**
  * The most apps a member is shown: as many as a workspace's computers may make (computer-scope.ts MAX_APPS_FROM_COMPUTER),
  * as new ones come last. The owner's Mac reads the first 30 for members (lib/hosted-apps.ts MEMBER_APPS); each one after
@@ -490,14 +516,15 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
         ...(typeof host.botId === "string" && botsSeen.has(host.botId) ? { botId: host.botId } : {}),
         ...(typeof host.url === "string" ? { url: host.url } : {}),
         ...(typeof host.lost === "number" ? { lost: true } : {}),
-        // Its production on GitHub (lib/hosted-apps.ts AppHosting.github): where Publish sends it, its repo and branch only.
-        ...(githubOf(host.github) ? { github: githubOf(host.github) } : {}),
+        // Its production on GitHub (lib/hosted-apps.ts AppHosting.github): where Publish sends it, its repo and branch; at Write the rest (githubOf).
+        ...(githubOf(host.github) ? { github: githubOf(host.github, write) } : {}),
         ...(sites.length ? { siteNames: sites } : {}),
         ...(got.head === null ? { head: null } : isObject(got.head) ? { head: keep(got.head, { id: true, message: true, at: true }) } : {}),
         ...(rows ? { sites: write ? withCloudPasswords(name, keep(rows, [SITE_SEEN_WRITE]), passwords) : keep(rows, [SITE_SEEN]) } : {}),
         ...(Array.isArray(got.commits) ? { commits: keep(got.commits, [COMMIT_SEEN]) } : {}),
         ...(Array.isArray(got.deploys) ? { deploys: keep(got.deploys, [DEPLOY_SEEN]) } : {}),
-        ...(Array.isArray(got.acts) ? { acts: keep(got.acts, [ACT_SEEN]) } : {}),
+        // The GitHub ones only to a Bops that knows them (githubSeen).
+        ...(Array.isArray(got.acts) ? { acts: keep(viewer.githubSeen ? got.acts : got.acts.filter((x) => !isObject(x) || !GITHUB_ACT.has(String(x.act))), [ACT_SEEN]) } : {}),
         ...(settings && Object.keys(settings).length ? { settings } : {}),
       };
       return app as SharedApp;
@@ -732,6 +759,9 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     ...(access && viewer.adminActs ? { adminActs: true as const } : access && viewer.role === "admin" ? { ownerOld: true as const } : {}),
     // An Admin's Publish in Your Apps, once the owner's Bops takes it (members.ts adminGate).
     ...(access && viewer.role === "admin" && viewer.adminPublish ? { adminPublish: true as const } : {}),
+    // Where an app publishes on GitHub, its Link and Bring in, at Your Apps Write, for whoever has the power of Publish (an
+    // Admin, a Member with App secrets), once the owner's last Mac takes them (members.ts adminGate, GITHUB_ACTS_MIN_VERSION).
+    ...(apps?.level === "write" && viewer.githubActs && (viewer.role === "admin" || !!can?.includes("appSecrets")) ? { appGithub: true as const } : {}),
     // Keys (keysOf), what the workspace's bots see of keys, and whether the owner's Bops takes their "key" act: part of
     // the fingerprint, so being given Keys, a key added or the owner updating gives them a new one.
     ...(keys ? { keys: true as const, ...(keyNames ? { keyNames } : {}), ...(viewer.keyActs ? { keyActs: true as const } : {}) } : {}),

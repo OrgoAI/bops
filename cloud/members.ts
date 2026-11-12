@@ -68,6 +68,14 @@ import {
   WS_NOT_SHAREABLE,
   WS_ROLES,
   isAppAct,
+  isGithubAct,
+  GITHUB_ACTS_MIN_VERSION,
+  GITHUB_KEY_LINE,
+  GITHUB_NO_KEY,
+  NOT_LINKED,
+  type GithubSetting,
+  type MemberGithubAct,
+  type TurnJob,
   type MemberAct,
   type MemberAppAct,
   type MemberActAnswer,
@@ -84,7 +92,9 @@ import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentM
 import { isConnected, queueForMac } from "./tunnel.ts";
 import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, keyNamesOf, list, seesEveryBot, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange } from "./change-routes.ts";
-import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckTurns, routedWorkspaces, routingOf, setRouting, takeMessage, wakeComputer, type WakeRefusal } from "./turns.ts";
+import { appActKept, cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckTurns, routedWorkspaces, routingOf, setRouting, takeAppJob, takeMessage, wakeComputer, withAppAct, withHosting, type WakeRefusal } from "./turns.ts";
+import { cleanGithubMirror, GITHUB_KEY_NAME, keepsPoint, sameDestination, type GithubMirror } from "./github-config.ts";
+import { appVersionOf, olderThan } from "./app-version.ts";
 
 /**
  * Shared workspaces (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -94,9 +104,12 @@ import { cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckT
  * given), its threads with their notes and results, its routines and watches, what Needs you, the moods
  * as they happen. Never another bot's, nor the owner's vault, logins, keys, Macs or settings
  * (ws-slice.ts). Members never publish (POST /v1/live only ever goes into the caller's own account), and
- * Bops Cloud edits the owner's state for an Admin in two places only: the bots a Member has (peopleWrite), entry by
- * entry as the owner's Mac keeps them, which the owner's Macs merge in; and a bot's How I work while the owner's Mac is
- * away, in a workspace whose chat goes through Bops Cloud, with the owner's Bops new enough to keep it (personaHere).
+ * Bops Cloud edits the owner's state for an Admin in three places only: the bots a Member has (peopleWrite), entry by
+ * entry as the owner's Mac keeps them, which the owner's Macs merge in; a bot's How I work while the owner's Mac is
+ * away, in a workspace whose chat goes through Bops Cloud, with the owner's Bops new enough to keep it (personaHere); and
+ * an app's GitHub production from Your Apps (an Admin's, or a Member's with App secrets), where it publishes (githubHere)
+ * and how a Link or Bring in its computer did went (turns.ts takeAppJob, finish), with the owner's Bops new enough to
+ * keep both (GITHUB_ACTS_MIN_VERSION).
  *
  * - **Who may**: orgo-web says, with the caller's own Orgo key (GET /api/projects/<id>/bops-role: the
  *   owner, an admin or a member; 404 for anyone else; and, from an orgo-web that sends it, when their
@@ -242,9 +255,10 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
  * began (access set before isn't theirs), their Use its computer and Keys as orgo-web says them, and the owner's email (apps).
  * `adminActs` and `adminPublish`: the owner's Bops takes an Admin's acts, and publishes for them (adminGate). `keyActs`: it
  * takes the "key" act (KEYS_MIN_VERSION), said to someone with Keys. `changes`: it takes the "change" act (change-routes.ts
- * CHANGES_MIN_VERSION), said to anyone but the owner.
+ * CHANGES_MIN_VERSION), said to anyone but the owner. `github`: the owner's last Mac takes the GitHub acts, and the
+ * viewer's own Bops knows them (GITHUB_ACTS_MIN_VERSION: SharedWsSlice.appGithub, and the acts shown on an app).
  */
-export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false, keyActs = false, changes = false): SliceViewer => ({
+export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false, keyActs = false, changes = false, github: { acts?: boolean; seen?: boolean } = {}): SliceViewer => ({
   role: access.role,
   ...(adminActs && access.role !== "owner" ? { adminActs: true } : {}),
   ...(adminPublish && access.role === "admin" ? { adminPublish: true } : {}),
@@ -256,6 +270,9 @@ export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, a
   ...(access.keys !== undefined ? { keys: access.keys } : {}),
   ...(keyActs && access.role !== "owner" && holdsKeys(access.role, access.keys) ? { keyActs: true } : {}),
   ...(changes && access.role !== "owner" ? { changes: true } : {}),
+  // The GitHub acts (protocol.ts GITHUB_ACTS_MIN_VERSION): the owner's last Mac takes them (`acts`), the viewer's own Bops knows them (`seen`).
+  ...(github.acts && access.role !== "owner" ? { githubActs: true } : {}),
+  ...(github.seen ? { githubSeen: true } : {}),
 });
 
 /** Whether the caller, someone other than the owner, has Keys (member-access.ts holdsKeys: as orgo-web says, an Admin when it doesn't). */
@@ -457,6 +474,8 @@ const readState: Route = {
       keysHeld(access) && (await adminGate(target.account, KEYS_MIN_VERSION)),
       // Whether it takes a "change" act (change-routes.ts), said to anyone but the owner.
       access.role !== "owner" && (await adminGate(target.account, CHANGES_MIN_VERSION)),
+      // The GitHub acts: the owner's last Mac takes them, and this caller's Bops knows them (an older one reads one as a domain's).
+      { acts: access.role !== "owner" && (await adminGate(target.account, GITHUB_ACTS_MIN_VERSION)), seen: knowsGithubActs(req) },
     );
     const slice = sharedSlice(blob, target.ws, viewer);
     const bots = viewer.role === "owner" ? undefined : botsOf(slice);
@@ -572,6 +591,9 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
     case "rollback":
     case "settings":
     case "domain":
+    case "github":
+    case "githubLink":
+    case "githubPull":
       return appAct(key, x);
     default:
       return null;
@@ -588,6 +610,17 @@ const command = (v: unknown) => typeof v === "string" && v.length <= 1000;
 /** An act on an app (Your Apps at Write), its fields checked as cleanAct's others are: the shapes only; what they name is checked against the slice (appsTouched). */
 function appAct(key: string, x: Record<string, unknown>): { key: string; act: MemberAct } | null {
   if (!appName(x.app) || (x.site !== undefined && !appName(x.site, 32))) return null;
+  // Its GitHub production: one folder is one app, so never a site. Where it publishes, cleaned as the owner's own is
+  // (github-config.ts cleanGithubMirror: one it won't take is said in its words, githubWhy), or null for Orgo again.
+  if (x.act === "github" || x.act === "githubLink" || x.act === "githubPull") {
+    if (x.site !== undefined) return null;
+    if (x.act !== "github") return { key, act: { act: x.act, app: x.app } };
+    if (x.link !== undefined && x.link !== true) return null;
+    const link = x.link === true ? { link: true as const } : {};
+    if (x.github === null) return { key, act: { act: "github", app: x.app, github: null, ...link } };
+    const c = cleanGithubMirror(x.github);
+    return "ok" in c ? { key, act: { act: "github", app: x.app, github: c.ok, ...link } } : null;
+  }
   const site = x.site !== undefined ? { site: x.site as string } : {};
   // Where a deploy or a rollback goes: the Preview (none), or Published ("prod": an Admin's, checked as it's taken).
   const envOk = x.env === undefined || x.env === "prod";
@@ -612,10 +645,24 @@ function appAct(key: string, x: Record<string, unknown>): { key: string; act: Me
   return null;
 }
 
+/** Why a "github" act's setting won't do, in the owner's own words for it (github-config.ts cleanGithubMirror), or null. */
+export function githubWhy(raw: unknown): string | null {
+  const a = raw && typeof raw === "object" ? (raw as { act?: unknown }).act : undefined;
+  if (!a || typeof a !== "object" || (a as { act?: unknown }).act !== "github" || (a as { github?: unknown }).github === null) return null;
+  const c = cleanGithubMirror((a as { github?: unknown }).github);
+  return "why" in c ? c.why : null;
+}
+
+/** What a GitHub act on an app that isn't one folder says (lib/server/hosted-apps.ts setGithubMirror's words). */
+const ONE_FOLDER = (app: string) => `${app} runs more than one site, and one GitHub folder is one app. Publish it on Orgo.`;
+export const GITHUB_NOT_SET = "Set where it publishes on GitHub first.";
+export const GITHUB_NOT_LINKED = "Link it to GitHub first, then bring GitHub's changes in.";
+
 /**
  * An act on an app, against the caller's own view of the apps (ws-slice.ts appsFor): an app they aren't shown is "no
  * such" (never saying whether it exists), Read is MEMBER_APPS_READ_ONLY, a domain the workspace doesn't own or a site
- * the app doesn't have "no such", a deploy that can't be put back NOT_WAITING. The owner's Mac checks it all again.
+ * the app doesn't have "no such", a deploy that can't be put back NOT_WAITING. Its GitHub production: an app with one site
+ * alone, a Link once it has where to, Bring in once it's linked (NOT_LINKED). The owner's Mac checks it all again.
  */
 function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct) {
   const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)));
@@ -627,6 +674,12 @@ function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, acc
   if (![app.name, ...(app.siteNames ?? [])].includes(site)) throw new HttpError(404, "No such app.");
   if (act.act === "domain" && !apps.owned?.some((d) => d.id === act.zone)) throw new HttpError(404, "Pick a domain this workspace has.");
   if (act.act === "rollback" && !app.deploys?.some((d) => d.id === act.deployment && d.site === site && d.canRollback)) throw new HttpError(409, "That deploy can't be put back.", { code: NOT_WAITING });
+  if (isGithubAct(act)) {
+    if (app.siteNames?.length && !(act.act === "github" && act.github === null)) throw new HttpError(409, ONE_FOLDER(app.name), { code: NOT_WAITING });
+    if (act.act === "githubLink" && !app.github) throw new HttpError(409, GITHUB_NOT_SET, { code: NOT_LINKED });
+    if (act.act === "githubPull" && !app.github?.linked) throw new HttpError(409, GITHUB_NOT_LINKED, { code: NOT_LINKED });
+  }
+  return app;
 }
 
 /** Whether a thread of the owner's is an app thread left out of this view (ws-slice.ts appThreadsFor). */
@@ -901,6 +954,14 @@ let count: (userId: string, what?: "act" | "file") => Promise<void> = countAct;
 let wake: typeof wakeComputer = (...a) => wakeComputer(...a);
 /** Bops Cloud answers a computer's runner's ask itself while the owner's Mac is away (answerOnComputer). */
 let answerHere: (o: Parameters<typeof answerOnComputer>[0]) => Promise<boolean> = (o) => answerOnComputer(o);
+/** An app's GitHub job owed to its computer, or why it can't be (turns.ts takeAppJob). */
+let takeJob: typeof takeAppJob = (...a) => takeAppJob(...a);
+
+/** Whether a caller's Bops knows the GitHub acts (protocol.ts GITHUB_ACTS_MIN_VERSION): it says its version, at that or newer. */
+const knowsGithubActs = (req: IncomingMessage) => {
+  const v = appVersionOf(req);
+  return !!v && !olderThan(v, GITHUB_ACTS_MIN_VERSION);
+};
 
 /**
  * Who the member is on what they did, as the owner's Bops shows it: their Orgo name, else their email's name, made
@@ -932,6 +993,9 @@ const actIn: Route = {
       raw = null;
     }
     const body = cleanAct(raw);
+    // A GitHub setting that won't do: said in the owner's own words for it.
+    const why = body ? null : githubWhy(raw);
+    if (why) throw new HttpError(400, why);
     if (!body) throw new HttpError(400, "Send {key, act}");
     // Counted before orgo-web is asked, so a flood never reaches it.
     await count(user!.id);
@@ -954,12 +1018,22 @@ const actIn: Route = {
     // Publish from Your Apps (env "prod"): an Admin's, with the owner's Bops new enough (an older one would put it on the Preview).
     // A Member's with App secrets on (actor.can: the owner's Bops takes switches, so it's new enough to publish for them).
     if ((body.act.act === "deploy" || body.act.act === "rollback") && body.act.env === "prod" && !actor.can?.appSecrets) adminOnly({ role: role.role, adminActs: await adminGate(target.account, ADMIN_PUBLISH_MIN_VERSION) });
+    // Its GitHub production: the same power as Publish (an Admin always, a Member with App secrets), once the owner's last
+    // Mac takes it (GITHUB_ACTS_MIN_VERSION: an older one drops the job and can put an older setting back over it).
+    if (isGithubAct(body.act)) {
+      if (role.role !== "admin" && !actor.can?.appSecrets) throw new HttpError(403, `The owner or an Admin can let you change ${POWER_WORDS.appSecrets.name} in Team.`, { code: ADMIN_ONLY });
+      if (!(await adminGate(target.account, GITHUB_ACTS_MIN_VERSION))) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
+    }
     const viewer = viewerOf(user!, role, actor.adminActs);
     // Their own view, every item whole and with the owner's ids: what they may act on is only what they're shown.
     const slice = sliceOf(blob, target.ws, viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
-    if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
+    if (isAppAct(body.act)) {
+      appsTouched(slice, viewer, access, body.act);
+      // Done here (the setting) and by the app's own computer (Link, Bring in), the owner's Mac on or off (githubAct).
+      if (isGithubAct(body.act)) return githubAct(res, { user: user!, role, target, viewer, projectId, key: body.key, act: body.act, blob, bearer: bearer(req), still: () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked });
+    }
     // A change as the owner's window makes it: the power it needs (an Admin has every one), and only this workspace's
     // bots (at Write) and apps (Your Apps at Write), once the owner's Bops takes it (changeTouched).
     else if (body.act.act === "change") {
@@ -1233,6 +1307,151 @@ async function cloudChat(
     await queue(target.account, "member", payload, `member:${user.id}:${key}`, new Date(Date.now() + STORED_ACT_MS));
   }
   sendJson(res, 202, { ok: true, macOn: true, stored: true, messageId: String(taken.message.id), ...(taken.turn ? { turn: taken.turn.id } : {}) } satisfies MemberActAnswer);
+}
+
+/* ---------------- An app's GitHub production, from Your Apps ---------------- */
+
+/**
+ * Whether the workspace has a GitHub key of its own (This workspace, in Keys): as orgo-web lists its own keys now, with
+ * the caller's key (liveWorkspaceKeys); when it can't say (they don't have Keys, or no answer), as the owner's Mac last
+ * said them (keyNamesOf: scope "workspace", not another workspace's switched on). Fails closed: neither, no.
+ */
+async function githubKeyFor(workspace: Record<string, unknown> | null, key: string, projectId: string): Promise<boolean> {
+  const live = await liveWorkspaceKeys(key, projectId);
+  if (live) return live.has(GITHUB_KEY_NAME);
+  return !!keyNamesOf(workspace)?.some((k) => k.name === GITHUB_KEY_NAME && k.scope === "workspace" && !k.from);
+}
+
+/** A workspace's app record in the owner's state (Workspace.hostedApps[app]), or null. */
+const hostingIn = (blob: Record<string, unknown>, ws: string, app: string): Record<string, unknown> | null => {
+  const w = list(blob.workspaces).find((x) => x.id === ws);
+  const h = w && w.hostedApps && typeof w.hostedApps === "object" && !Array.isArray(w.hostedApps) && Object.hasOwn(w.hostedApps, app) ? (w.hostedApps as Record<string, unknown>)[app] : null;
+  return h && typeof h === "object" && !Array.isArray(h) ? (h as Record<string, unknown>) : null;
+};
+const settingOf = (h: Record<string, unknown> | null) => (h?.github && typeof h.github === "object" && !Array.isArray(h.github) ? (h.github as GithubMirror) : null);
+
+/** How a GitHub act on an app says where it publishes, in the app's bot's chat (the folder: "the whole repo" for ""). */
+const whereWords = (g: GithubSetting) => `GitHub ${g.repo}, ${g.branch}, ${g.path ? `folder ${g.path}` : "the whole repo"}`;
+/** What a "githubLink" or "githubPull" act says in the app's bot's chat as it goes to its computer. */
+export const jobAsked = (name: string, bot: string, act: TurnJob["act"], app: string) =>
+  act === "githubLink" ? `${name} asked ${bot}'s computer to link ${app} to GitHub.` : `${name} asked ${bot}'s computer to bring in GitHub's changes to ${app}.`;
+/** 409 GITHUB_NO_KEY: the app's computer can't call GitHub (no bot on it was given the key), and the owner's Mac isn't on to do it. */
+export const noGithubKey = (bot: string, saved: boolean) =>
+  `${bot}'s computer has no GitHub key, so it can't do this while the owner's Mac is off. Give ${bot} the GitHub key in Keys, then try again.${saved ? " Where it publishes is saved." : ""}`;
+
+/**
+ * A GitHub act on an app (protocol.ts MemberGithubAct), checked by actIn (the power of Publish, the owner's last Mac at
+ * GITHUB_ACTS_MIN_VERSION, the app at Your Apps Write with one site). "github": a new repo, branch, folder or workflow only
+ * with a GitHub key of the workspace's own (githubKeyFor; the owner's key for all their workspaces is theirs to point),
+ * then written here (githubHere). "githubLink" (or "github" with `link`) and "githubPull": owed to the app's own computer
+ * as a job (turns.ts takeAppJob) when its runner can do it, the owner's Mac on or off; else the owner's Mac does it, as a
+ * member's other app acts (a "member" event), unless only the key is missing and that Mac is off (GITHUB_NO_KEY).
+ */
+async function githubAct(
+  res: ServerResponse,
+  o: { user: CloudUser; role: WsAccess; target: LiveTarget; viewer: SliceViewer; projectId: string; key: string; act: MemberGithubAct; blob: Record<string, unknown>; bearer: string; still: () => boolean },
+) {
+  const { user, role, target, viewer, projectId, key, act } = o;
+  const who = whoOf(user);
+  if (act.act === "github") {
+    const was = settingOf(hostingIn(o.blob, target.ws, act.app));
+    // Asked of orgo-web before the lock; under it, a destination that moved meanwhile is checked again (githubHere).
+    const ownKey = act.github && !sameDestination(was, act.github) ? await githubKeyFor(list(o.blob.workspaces).find((w) => w.id === target.ws) ?? null, o.bearer, projectId) : true;
+    if (!ownKey) throw new HttpError(403, GITHUB_KEY_LINE, { code: MEMBER_OWNER_ONLY });
+    await githubHere({ target, viewer, act, who, key, ownKey, still: o.still });
+    if (!act.link) return sendJson(res, 202, { ok: true, macOn: true, stored: true } satisfies MemberActAnswer);
+  }
+  const job: TurnJob = { act: act.act === "github" ? "githubLink" : act.act, app: act.app };
+  const taken = await takeJob({
+    account: target.account,
+    wsId: target.ws,
+    job,
+    id: `msg_job_${user.id}_${key}`,
+    member: {
+      ...who,
+      ref: key,
+      ...(role.joinedAt !== undefined ? { joinedAt: role.joinedAt } : {}),
+      projectId,
+      ...(role.role === "admin" ? { role: "admin" as const } : {}),
+      job,
+    },
+    words: (bot) => jobAsked(who.name, bot, job.act, job.app),
+    // Under the lock, on the state as it is then: still theirs to do (appsTouched), as actIn found it.
+    check: (locked) => {
+      const slice = sliceOf(locked, target.ws, viewer);
+      if (!slice.workspace) throw new HttpError(404, "No such workspace");
+      appsTouched(slice, viewer, viewerAccess(slice.workspace, viewer), { act: job.act, app: job.app });
+    },
+    still: o.still,
+  });
+  if (taken.where === "computer") return sendJson(res, 202, { ok: true, macOn: true, stored: true, computer: true, turn: taken.turn.id } satisfies MemberActAnswer);
+  // The app's computer can't do it now: the owner's Mac, which has the owner's own key, as a member's other app acts. Only
+  // the key missing, and that Mac off: said now, as it would wait for nothing.
+  if (taken.why === "key" && !isOn(target.account)) throw new HttpError(409, noGithubKey(taken.bot, act.act === "github"), { code: GITHUB_NO_KEY });
+  const payload: MemberActPayload = {
+    projectId,
+    wsId: target.ws,
+    member: who,
+    ...(role.joinedAt !== undefined ? { joinedAt: role.joinedAt } : {}),
+    key,
+    at: Date.now(),
+    act: { act: job.act, app: job.app },
+    ...(role.role === "admin" ? { role: "admin" as const } : {}),
+  };
+  await queue(target.account, "member", payload, `member:${user.id}:${key}`, new Date(Date.now() + MEMBER_ACT_MS));
+  if (!o.still()) {
+    await drop(projectId, user.id).catch((e: Error) => console.warn(`[members] couldn't drop what waited: ${e.message}`));
+    throw new HttpError(404, "No such workspace");
+  }
+  sendJson(res, 202, { ok: true, macOn: isOn(target.account) } satisfies MemberActAnswer);
+}
+
+/**
+ * Where an app publishes on GitHub (the "github" act), written on the owner's state by Bops Cloud, the owner's Mac on or
+ * off: that Mac merges it field by field with its own (lib/server/state-merge.ts keeps the setting whole), from
+ * GITHUB_ACTS_MIN_VERSION. Checked again under the owner's lock, on the state as it is then (appsTouched: theirs to
+ * change, one site; a destination someone moved meanwhile needs the workspace's own key again), and only while orgo-web
+ * sent no notice for them. Its point (github.last) stays only when keepsPoint says (the same folder, every path left
+ * alone still left alone); null puts it back on Orgo. Kept on the app as theirs (appsForMembers acts, by their key: the
+ * same act again changes nothing) and said in the app's bot's chat.
+ */
+async function githubHere(o: { target: LiveTarget; viewer: SliceViewer; act: Extract<MemberGithubAct, { act: "github" }>; who: MemberWho; key: string; ownKey: boolean; still: () => boolean }) {
+  const { target, act, who, key } = o;
+  const out = await tx(async (c) => {
+    await lockUser(c, target.account);
+    const blob = await lockedState(c, target.account);
+    const slice = sliceOf(blob, target.ws, o.viewer);
+    if (!slice.workspace) throw new HttpError(404, "No such workspace");
+    appsTouched(slice, o.viewer, viewerAccess(slice.workspace, o.viewer), act);
+    if (appActKept(blob, target.ws, act.app, key)) return null;
+    const h = hostingIn(blob, target.ws, act.app);
+    if (!h) throw new HttpError(404, "No such app.");
+    const was = settingOf(h);
+    if (act.github && !o.ownKey && !sameDestination(was, act.github)) throw new HttpError(403, GITHUB_KEY_LINE, { code: MEMBER_OWNER_ONLY });
+    const next: Record<string, unknown> = { ...h };
+    if (act.github) next.github = { ...act.github, ...(keepsPoint(was, act.github) && was?.last ? { last: was.last } : {}) };
+    else delete next.github;
+    const kept = withHosting(blob, target.ws, act.app, next);
+    const written = withAppAct(kept, target.ws, act.app, { key, userId: who.userId, name: who.name, act: "github", ok: true, at: now() });
+    await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+    // After the write, before it's kept: an orgo-web notice for them that landed meanwhile (even during it) takes it back.
+    if (!o.still()) throw new HttpError(404, "No such workspace");
+    return { written, botId: typeof h.botId === "string" ? h.botId : null };
+  });
+  if (!out) return;
+  announce(target.account);
+  stateWritten(target.account, out.written, "cloud");
+  if (out.botId)
+    await writeMessages(target.account, [
+      {
+        id: `msg_github_${who.userId}_${key}`,
+        chatId: `bot:${out.botId}`,
+        role: "system",
+        botId: out.botId,
+        text: act.github ? `${who.name} set ${act.app} to publish to ${whereWords(act.github)}.` : `${who.name} set ${act.app} to publish on Orgo again.`,
+        at: now(),
+      },
+    ]);
 }
 
 const one = (v: string | string[] | undefined) => (Array.isArray(v) ? (v[0] ?? "") : (v ?? ""));
@@ -1594,6 +1813,8 @@ export function resetMembers(
     answerHere?: (o: Parameters<typeof answerOnComputer>[0]) => Promise<boolean>;
     /** How a computer is woken for an answer Bops Cloud wrote (unset: turns.ts wakeComputer). */
     wake?: typeof wakeComputer;
+    /** An app's GitHub job (unset: turns.ts takeAppJob, on the owner's state in Postgres). */
+    takeJob?: typeof takeAppJob;
   } = {},
 ) {
   kept.clear();
@@ -1607,6 +1828,7 @@ export function resetMembers(
   // (A test that fakes the owner's state has no state in Postgres to answer on: the act waits for the Mac, unless it says.)
   answerHere = opts.answerHere ?? (opts.state ? async () => false : (o) => answerOnComputer(o));
   wake = opts.wake ?? ((...a) => wakeComputer(...a));
+  takeJob = opts.takeJob ?? ((...a) => takeAppJob(...a));
   queue = opts.queue ?? realQueue;
   isOn = opts.isOn ?? realIsOn;
   drop = opts.drop ?? dropActs;

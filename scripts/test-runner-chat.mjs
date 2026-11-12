@@ -18,7 +18,7 @@ for (const k of Object.keys(process.env)) if (/^(BOPS|ORGO)_/.test(k)) delete pr
 process.env.BOPS_RUNNER = "1";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const FAKES = { store: ["getState", "pullState", "stateReady"], cloud: ["cloudFetch"], "free-hours": ["sayInUse"] };
+const FAKES = { store: ["getState", "pullState", "stateReady", "addMessage"], cloud: ["cloudFetch"], "free-hours": ["sayInUse"] };
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "server-only") return { url: "data:text/javascript,", shortCircuit: true };
@@ -73,7 +73,8 @@ const answers = new Map();
 let stream = null;
 const enc = new TextEncoder();
 globalThis.__fake = {
-  store: { getState: () => state, pullState: async () => (pulls++, onPull()), stateReady: () => true },
+  // addMessage as the store's own: its row stamped with the turn it's added in (turn-context.ts stamp).
+  store: { getState: () => state, pullState: async () => (pulls++, onPull()), stateReady: () => true, addMessage: (m) => (state.messages.push(globalThis.__stamp({ id: `msg_${state.messages.length}`, at: Date.now(), ...m })), state.messages.at(-1)) },
   "free-hours": { sayInUse: async () => {} },
   cloud: {
     cloudFetch: async (path, init = {}) => {
@@ -100,6 +101,7 @@ globalThis.__fake = {
 };
 
 const TC = await import(`${root}/lib/server/turn-context.ts`);
+globalThis.__stamp = TC.stamp;
 const R = await import(`${root}/lib/server/runner-chat.ts`);
 
 /** Bops Cloud's answer to a claim: its clock `ahead` ms ahead of this computer's. */
@@ -445,6 +447,56 @@ await check("the stream gives it turns, turn-cancel stops one, and state reads t
   stream.send("state", {});
   await until(() => pulls > before, "a read of the state");
   R.stopRunnerChat();
+});
+
+/* ---------------- An app's GitHub job ---------------- */
+
+await check("a turn that's an app's GitHub job runs the job, never the model: it says at once it's acting, its words go in the chat as Bops' own, and its result goes with its end", async () => {
+  reset();
+  const T = Date.now();
+  // Its message is Bops Cloud's note of who asked (role system): the job needs none of it.
+  state.messages.push({ id: "m_job", chatId: "bot:max", role: "system", botId: "max", text: "Ada asked Max's computer to bring in GitHub's changes to site.", at: T });
+  answers.set("claim", claimed("t_job", "m_job", T, 0, { userId: "u-ada", name: "Ada", ref: "k_job", projectId: "p1", role: "admin", job: { act: "githubPull", app: "site" } }));
+  let answered = 0;
+  let asked;
+  R.runnerChatForTests({
+    identity: async () => "same",
+    answer: async () => (answered++, { text: "never" }),
+    job: async (botId, job, by) => {
+      asked = { botId, job, by, turn: TC.currentTurn()?.id, beats: paths().filter((p) => p === "beat").length };
+      return { ok: true, said: "Brought 2 changes from GitHub into Ingot. Deploy the newest to the preview to see them there." };
+    },
+  });
+  await R.answerTurn(ev("t_job", "m_job"));
+  assert.equal(answered, 0, "no model saw it");
+  assert.deepEqual(asked, { botId: "max", job: { act: "githubPull", app: "site" }, by: "Ada", turn: "t_job", beats: 1 }, "in Ada's name, as the turn, once it said it's acting");
+  assert.deepEqual(sent.find((x) => x.path.endsWith("/beat"))?.body, { phase: "tools" });
+  const rows = state.messages.filter((m) => m.role === "bot");
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].text, rows[0].appNote, rows[0].bops, rows[0].turn, rows[0].botId], ["Brought 2 changes from GitHub into Ingot. Deploy the newest to the preview to see them there.", true, true, "t_job", "max"]);
+  assert.ok(rows[0].at > T, "after the note that asked");
+  assert.deepEqual(sent.at(-1), { path: "/v1/runner/turns/t_job/done", body: { state: "done", job: { ok: true, said: "Brought 2 changes from GitHub into Ingot. Deploy the newest to the preview to see them there." } } });
+  assert.equal(TC.turnsRunning(), false);
+});
+
+await check("a job that doesn't go says why in the chat and with its end; one taken back before it starts does nothing, and says nothing more", async () => {
+  reset();
+  const T = Date.now();
+  answers.set("claim", claimed("t_job2", "m_job2", T, 0, { userId: "u-sam", name: "Sam", ref: "k_job2", job: { act: "githubLink", app: "site" } }));
+  R.runnerChatForTests({ identity: async () => "same", job: async () => ({ ok: false, said: "Ingot and GitHub differ in lib/look.ts. Make them the same first (or add them to the files left alone), then link." }) });
+  await R.answerTurn(ev("t_job2", "m_job2"));
+  const row = state.messages.find((m) => m.role === "bot");
+  assert.equal(row.text, "Couldn't link site to GitHub: Ingot and GitHub differ in lib/look.ts. Make them the same first (or add them to the files left alone), then link.");
+  assert.ok(!/[\u2013\u2014]| - /.test(row.text), "no dashes");
+  assert.deepEqual(sent.at(-1).body, { state: "done", job: { ok: false, said: "Ingot and GitHub differ in lib/look.ts. Make them the same first (or add them to the files left alone), then link." } });
+  // Taken back (its member's access changed) before it acts: nothing runs, and its end isn't said (Bops Cloud said it).
+  reset();
+  let ran = 0;
+  answers.set("claim", claimed("t_job3", "m_job3", T, 0, { userId: "u-sam", name: "Sam", ref: "k_job3", job: { act: "githubPull", app: "site" } }));
+  answers.set("beat", { status: 409, body: { code: "over" } });
+  R.runnerChatForTests({ identity: async () => "same", job: async () => (ran++, { ok: true, said: "x" }) });
+  await R.answerTurn(ev("t_job3", "m_job3"));
+  assert.deepEqual([ran, paths(), state.messages.length], [0, ["claim", "beat"], 0]);
 });
 
 console.log(`runner chat: ${passed} passed, ${failures} failed`);

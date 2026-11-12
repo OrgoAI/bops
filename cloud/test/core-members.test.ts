@@ -5,10 +5,10 @@ import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
 import { accessSummary, adminMay, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, sameAccess, withEntry, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
-import { accessFor, adminGate, cleanAct, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
+import { accessFor, adminGate, cleanAct, githubWhy, GITHUB_NOT_LINKED, GITHUB_NOT_SET, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange, THIS_WS } from "../change-routes.ts";
 import type { WakeRefusal } from "../turns.ts";
-import { ADMIN_POWERS_MIN_VERSION, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
+import { ADMIN_POWERS_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
 /**
@@ -2333,6 +2333,238 @@ test("Publish from Your Apps (a deploy or a rollback with env prod) is an Admin'
   // cleanAct: env prod kept on a deploy and a rollback; never on settings or a domain.
   assert.deepEqual(cleanAct({ key: "k_12345678", act: { act: "deploy", app: "shop", env: "prod" } }), { key: "k_12345678", act: { act: "deploy", app: "shop", env: "prod" } });
   assert.deepEqual(cleanAct({ key: "k_12345678", act: { act: "settings", app: "shop", port: 3000, env: "prod" } }), { key: "k_12345678", act: { act: "settings", app: "shop", port: 3000 } });
+});
+
+/* ---------------- An app's GitHub production, from Your Apps ---------------- */
+
+/** A workspace of Orgo's team with one app on GitHub ("site": linked) and one not yet ("blog"), and one of two sites ("shop"). */
+const ghBlob = (more: { site?: Record<string, unknown>; sam?: Record<string, unknown>; keys?: unknown } = {}): Record<string, unknown> => ({
+  workspaces: [
+    {
+      id: "ws_gh",
+      name: "Gh",
+      memberAccess: {
+        // Sam: Your Apps at Write and App secrets (Team). Ivy: Your Apps at Write, no switch. Rob: Your Apps at Read, App secrets.
+        "sam@example.com": { others: "none", bots: { max: "write" }, apps: "write", can: { appSecrets: true }, ...more.sam },
+        "ivy@example.com": { others: "none", bots: { max: "write" }, apps: "write" },
+        "rob@example.com": { others: "none", bots: { max: "read" }, apps: "read", can: { appSecrets: true } },
+      },
+      hostedApps: {
+        site: {
+          botId: "max",
+          computerId: "comp-1",
+          projectId: "proj-1",
+          url: "https://site.orgo.dev",
+          github: { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts"], dispatch: { workflow: "deploy.yml", inputs: { client: "acme" } }, last: { sha: "a".repeat(40), ingot: "b".repeat(64), keep: ["proxy.ts"], when: 7 } },
+          ...more.site,
+        },
+        blog: { botId: "max", computerId: "comp-1", projectId: "proj-3", github: { repo: "example-org/web", branch: "main", path: "blog" } },
+        shop: { botId: "max", computerId: "comp-1", projectId: "proj-2", sites: [{ name: "admin", projectId: "proj-4" }] },
+      },
+      appsForMembers: {
+        at: 10,
+        apps: {
+          site: {
+            head: null,
+            sites: [],
+            commits: [],
+            deploys: [],
+            acts: [
+              { key: "k_gh_000a", userId: "u-sam", name: "Sam", act: "githubPull", ok: true, going: true, at: 9 },
+              { key: "k_dep_001", userId: "u-sam", name: "Sam", act: "deploy", ok: true, at: 8 },
+            ],
+          },
+        },
+      },
+      ...(more.keys !== undefined ? { keysForMembers: more.keys } : {}),
+    },
+  ],
+  bots: [{ id: "max", name: "Max", workspaceId: "ws_gh", computerId: "comp-1", keys: ["GITHUB_TOKEN"] }],
+  chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_gh" }],
+});
+const ghViewer = (role: "admin" | "member", email: string, more: Partial<SliceViewer> = {}): SliceViewer => ({ role, email, id: `u-${email.split("@")[0]}`, ownerEmail: STAFF_OWNER, changes: true, ...more });
+
+test("cleanAct: the GitHub acts take an app (never a site); where it publishes is cleaned as the owner's own, null for Orgo again, and link only as true", () => {
+  const key = "k_gh_00001";
+  assert.deepEqual(cleanAct({ key, act: { act: "githubPull", app: "site", extra: 1 } }), { key, act: { act: "githubPull", app: "site" } });
+  assert.deepEqual(cleanAct({ key, act: { act: "githubLink", app: "site" } }), { key, act: { act: "githubLink", app: "site" } });
+  assert.deepEqual(cleanAct({ key, act: { act: "github", app: "site", github: null } }), { key, act: { act: "github", app: "site", github: null } });
+  assert.deepEqual(
+    cleanAct({ key, act: { act: "github", app: "site", link: true, github: { repo: "https://github.com/example-org/web.git", branch: "", path: "/formula/", keep: ["proxy.ts", " clients/acme/ ", "proxy.ts"], last: { sha: "x", ingot: "y" } } } }),
+    { key, act: { act: "github", app: "site", link: true, github: { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts", "clients/acme/"] } } },
+    "cleaned as lib/hosted-apps.ts cleanGithubMirror cleans it; never a point from the window",
+  );
+  for (const bad of [
+    { key, act: { act: "githubPull", app: "site", site: "admin" } },
+    { key, act: { act: "githubLink", app: "Not An App" } },
+    { key, act: { act: "github", app: "site" } },
+    { key, act: { act: "github", app: "site", github: { repo: "nope" } } },
+    { key, act: { act: "github", app: "site", github: { repo: "a/b", branch: "../x" } } },
+    { key, act: { act: "github", app: "site", github: { repo: "a/b" }, link: "yes" } },
+    { key, act: { act: "github", app: "site", site: "site", github: null } },
+  ])
+    assert.equal(cleanAct(bad), null, JSON.stringify(bad));
+  // One that won't do is said in the owner's own words for it.
+  assert.match(githubWhy({ key, act: { act: "github", app: "site", github: { repo: "nope" } } }) ?? "", /Which GitHub repo/);
+  assert.match(githubWhy({ key, act: { act: "github", app: "site", github: { repo: "a/b", dispatch: { workflow: "rm -rf" } } } }) ?? "", /workflow/);
+  assert.equal(githubWhy({ key, act: { act: "github", app: "site", github: null } }), null);
+  assert.equal(githubWhy({ key, act: { act: "deploy", app: "site" } }), null);
+});
+
+test("the slice: GitHub's folder, paths left alone, workflow and point at Write only; appGithub to an Admin or a Member with App secrets, once the owner's Mac takes them; GitHub acts only to a Bops that knows them", () => {
+  const blob = ghBlob();
+  const s = (v: SliceViewer) => sharedSlice(blob, "ws_gh", v);
+  const sam = s(ghViewer("member", "sam@example.com", { githubActs: true, githubSeen: true }));
+  const site = sam.apps!.list.find((a) => a.name === "site")!;
+  assert.deepEqual(site.github, {
+    repo: "example-org/web",
+    branch: "main",
+    path: "formula",
+    keep: ["proxy.ts"],
+    dispatch: { workflow: "deploy.yml", inputs: { client: "acme" } },
+    linked: { sha: "a".repeat(40), ingot: "b".repeat(64), when: 7 },
+  });
+  assert.deepEqual(sam.apps!.list.find((a) => a.name === "blog")!.github, { repo: "example-org/web", branch: "main", path: "blog" }, "set, not linked");
+  assert.equal(sam.appGithub, true);
+  assert.deepEqual(site.acts?.map((a) => [a.act, a.going]), [["githubPull", true], ["deploy", undefined]]);
+  // At Read: where Publish goes, nothing more, and no GitHub buttons.
+  const rob = s(ghViewer("member", "rob@example.com", { githubActs: true, githubSeen: true }));
+  assert.deepEqual(rob.apps!.list.find((a) => a.name === "site")!.github, { repo: "example-org/web", branch: "main" });
+  assert.equal(rob.appGithub, undefined);
+  // A Member at Write without App secrets, or anyone while the owner's last Mac is older: none.
+  assert.equal(s(ghViewer("member", "ivy@example.com", { githubActs: true })).appGithub, undefined);
+  assert.equal(s(ghViewer("member", "sam@example.com", { githubActs: false })).appGithub, undefined);
+  assert.equal(s(ghViewer("admin", "ada@example.com", { githubActs: true })).appGithub, true, "an Admin always has it");
+  assert.equal(s(ghViewer("admin", "ada@example.com")).appGithub, undefined);
+  // A viewer's Bops from before the GitHub acts never gets one (its window would read it as a domain's).
+  const old = s(ghViewer("member", "sam@example.com", { githubActs: true }));
+  assert.deepEqual(old.apps!.list.find((a) => a.name === "site")!.acts?.map((a) => a.act), ["deploy"]);
+  // Each is part of the fingerprint.
+  assert.notEqual(sharedHash(sam), sharedHash(s(ghViewer("member", "sam@example.com", { githubActs: false, githubSeen: true }))));
+  assert.notEqual(sharedHash(sam), sharedHash(old));
+  // viewerOf: the owner's gate is said to anyone but the owner; the viewer's own Bops is theirs.
+  const who = { id: "u-sam", email: "sam@example.com" } as Parameters<typeof viewerOf>[0];
+  const wa = (role: WsAccess["role"]) => ({ role, ownerUserId: "gh-owner", bopsWsId: "ws_gh", name: "Gh" }) as WsAccess;
+  assert.deepEqual([viewerOf(who, wa("member"), false, false, false, false, { acts: true, seen: true }).githubActs, viewerOf(who, wa("owner"), false, false, false, false, { acts: true }).githubActs], [true, undefined]);
+});
+
+test("over HTTP: the GitHub acts are the power of Publish (an Admin, a Member with App secrets) at Your Apps Write, once the owner's last Mac takes them; one folder an app; a Link needs where to, Bring in a link", async () => {
+  const blob = ghBlob();
+  let ghNew = true;
+  const jobs: Parameters<NonNullable<Parameters<typeof resetMembers>[0]>["takeJob"] & {}>[0][] = [];
+  let jobSays: "computer" | "runner" | "key" = "computer";
+  let macOn = true;
+  const fakes = () =>
+    resetMembers({
+      state: async () => blob,
+      queue: async (owner, kind, payload, dedupe, expires) => void queued.push({ owner, kind, payload: payload as MemberActPayload, dedupe, expires }),
+      isOn: () => macOn,
+      drop: async () => {},
+      count: async () => {},
+      adminGate: async (_owner: string, min: string = ADMIN_POWERS_MIN_VERSION) => (min === GITHUB_ACTS_MIN_VERSION ? ghNew : true),
+      takeJob: async (o) => {
+        jobs.push(o);
+        o.check(blob);
+        return jobSays === "computer"
+          ? { where: "computer", fresh: true, turn: { id: `turn_${o.id}` } as never }
+          : { where: "mac", why: jobSays, bot: "Max" };
+      },
+    });
+  fakes();
+  queued.length = 0;
+  for (const [u, role] of [["gh-ada", "admin"], ["gh-sam", "member"], ["gh-ivy", "member"], ["gh-rob", "member"]] as const) {
+    roles[`${u} proj-gh`] = { role, ownerUserId: "gh-owner", bopsWsId: "ws_gh", name: "Gh", ownerEmail: STAFF_OWNER };
+    emails[u] = `${u.slice(3)}@example.com`;
+  }
+  const go = (user: string, a: unknown, key = `k_gh_${String(Math.random()).slice(2, 10)}`) => act(user, { key, act: a }, "proj-gh");
+  const refused = async (user: string, a: unknown, status: number, code?: string, words?: RegExp) => {
+    const r = await go(user, a);
+    assert.deepEqual([r.status, r.json.code], [status, code], `${user} ${JSON.stringify(a)}`);
+    if (words) assert.match(String(r.json.error), words);
+  };
+  // An Admin's Bring in: owed to the app's computer (takeAppJob), named as theirs with the role, nothing for the Mac.
+  const r = await go("gh-ada", { act: "githubPull", app: "site" }, "k_gh_pull_01");
+  assert.equal(r.status, 202);
+  assert.deepEqual(r.json, { ok: true, macOn: true, stored: true, computer: true, turn: `turn_msg_job_gh-ada_k_gh_pull_01` });
+  assert.deepEqual([jobs.at(-1)?.job, jobs.at(-1)?.member.role, jobs.at(-1)?.member.ref, jobs.at(-1)?.member.projectId, jobs.at(-1)?.wsId], [{ act: "githubPull", app: "site" }, "admin", "k_gh_pull_01", "proj-gh", "ws_gh"]);
+  assert.equal(jobs.at(-1)?.words("Max"), "ada asked Max's computer to bring in GitHub's changes to site.");
+  assert.equal(queued.length, 0);
+  // A Member with App secrets links; one without, or at Read, is refused, nothing done.
+  assert.equal((await go("gh-sam", { act: "githubLink", app: "site" })).status, 202);
+  assert.equal(jobs.at(-1)?.member.role, undefined);
+  const n = jobs.length;
+  await refused("gh-ivy", { act: "githubPull", app: "site" }, 403, "admin_only", /App secrets in Team/);
+  await refused("gh-rob", { act: "githubPull", app: "site" }, 403, "member_apps_read_only");
+  // One folder is one app; a Link needs where to; Bring in needs a link.
+  await refused("gh-ada", { act: "githubLink", app: "shop" }, 409, "not_waiting", /one GitHub folder is one app/);
+  await refused("gh-ada", { act: "github", app: "shop", github: { repo: "example-org/web", path: "shop" } }, 409, "not_waiting");
+  await refused("gh-ada", { act: "githubPull", app: "blog" }, 409, "not_linked", new RegExp(GITHUB_NOT_LINKED));
+  await refused("gh-ada", { act: "githubLink", app: "nope" }, 404);
+  void GITHUB_NOT_SET;
+  // A setting that won't do: the owner's own words for it.
+  await refused("gh-ada", { act: "github", app: "site", github: { repo: "nope" } }, 400, undefined, /Which GitHub repo/);
+  assert.equal(jobs.length, n, "nothing refused reached a computer");
+  // The owner's last Mac older than the GitHub acts: refused for everyone first.
+  ghNew = false;
+  fakes();
+  await refused("gh-ada", { act: "githubPull", app: "site" }, 409, "owner_bops_old");
+  await refused("gh-sam", { act: "githubLink", app: "site" }, 409, "owner_bops_old");
+  ghNew = true;
+  // No runner on the app's computer that can: the owner's Mac does it, as a member's other app acts.
+  jobSays = "runner";
+  fakes();
+  const m = await go("gh-sam", { act: "githubPull", app: "site" }, "k_gh_mac_001");
+  assert.deepEqual([m.status, m.json.macOn, m.json.computer], [202, true, undefined]);
+  assert.deepEqual([queued.at(-1)?.payload.act, queued.at(-1)?.dedupe], [{ act: "githubPull", app: "site" }, "member:gh-sam:k_gh_mac_001"]);
+  // No bot on that computer has the GitHub key: the owner's Mac, when it's on; with it off, said now.
+  jobSays = "key";
+  macOn = false;
+  fakes();
+  const before = queued.length;
+  await refused("gh-sam", { act: "githubPull", app: "site" }, 409, "github_no_key", /Max's computer has no GitHub key/);
+  assert.equal(queued.length, before, "never left to wait for nothing");
+  macOn = true;
+  fakes();
+  assert.equal((await go("gh-sam", { act: "githubPull", app: "site" })).status, 202);
+  assert.equal(queued.length, before + 1);
+});
+
+test("over HTTP: someone other than the owner points the GitHub key somewhere new only with a GitHub key of the workspace's own", async () => {
+  const keys = (names: string[]) => ({ at: 5, keys: names.map((name) => ({ name, scope: name.startsWith("OWN_") ? "all" : "workspace" })) });
+  let blob = ghBlob({ keys: { at: 5, keys: [{ name: "GITHUB_TOKEN", scope: "all" }] } });
+  resetMembers({ state: async () => blob, queue: async () => {}, isOn: () => true, drop: async () => {}, count: async () => {}, adminGate: async () => true });
+  roles["gh-ada proj-gh"] = { role: "admin", ownerUserId: "gh-owner", bopsWsId: "ws_gh", name: "Gh", ownerEmail: STAFF_OWNER };
+  emails["gh-ada"] = "ada@example.com";
+  const go = (a: unknown) => act("gh-ada", { key: `k_gk_${String(Math.random()).slice(2, 10)}`, act: a }, "proj-gh");
+  const elsewhere = { act: "github", app: "site", github: { repo: "example-org/other", branch: "main", path: "formula" } };
+  // Only the owner's own GitHub key (for all their workspaces), as orgo-web lists the workspace's own keys now: refused.
+  liveKeys["proj-gh"] = ["STRIPE_SECRET_KEY"];
+  let r = await go(elsewhere);
+  assert.deepEqual([r.status, r.json.code, r.json.error], [403, "member_owner_only", GITHUB_KEY_LINE]);
+  // orgo-web can't say (an older one, or no Keys for them): the owner's Mac's last word, which has it only as the owner's.
+  liveKeys["proj-gh"] = 403;
+  r = await go(elsewhere);
+  assert.equal(r.status, 403);
+  // A workspace and a different workflow, a folder, a branch: each a new destination.
+  for (const g of [{ repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts"], dispatch: { workflow: "other.yml" } }, { repo: "example-org/web", branch: "dev", path: "formula" }, { repo: "example-org/web", branch: "main", path: "elsewhere" }])
+    assert.equal((await go({ act: "github", app: "site", github: g })).status, 403, JSON.stringify(g));
+  // Past the check, it's written under the owner's lock (cloud/test/edge-turns.test.ts), which this file has no database for.
+  const passed = async (a: unknown) => {
+    const x = await go(a);
+    assert.notEqual(x.json.code, "member_owner_only", JSON.stringify(a));
+    assert.notEqual(x.status, 202, "(no database here to write it)");
+  };
+  // The same destination with more left alone, or back to Orgo: no key needed.
+  await passed({ act: "github", app: "site", github: { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts", "clients/acme/"], dispatch: { workflow: "deploy.yml", inputs: { client: "acme" } } } });
+  await passed({ act: "github", app: "site", github: null });
+  // The workspace's own GITHUB_TOKEN, as orgo-web lists it, or (when it can't say) as the owner's Mac said it: past the check.
+  liveKeys["proj-gh"] = ["GITHUB_TOKEN"];
+  await passed(elsewhere);
+  liveKeys["proj-gh"] = 404;
+  blob = ghBlob({ keys: keys(["GITHUB_TOKEN"]) });
+  await passed(elsewhere);
+  delete liveKeys["proj-gh"];
+
 });
 
 /* ---------------- What someone may change: Team's switches and the "change" act ---------------- */

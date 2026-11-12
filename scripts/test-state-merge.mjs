@@ -577,6 +577,31 @@ check("an older Bops's kept copy keeps the team chart it doesn't know, and never
   assert.deepEqual(M.merge3(base, odd, newer, OLD).workspaces[0].chain, newer.workspaces[0].chain);
 });
 
+/* ---------------- An app's GitHub setting: one value, kept as Bops Cloud wrote it ---------------- */
+
+check("an app's GitHub setting Bops Cloud kept (an Admin's: cloud/members.ts githubHere) stays through this Mac's save of other fields of the app; changed on both it's never a mix: the side that moved where it publishes goes whole over one that only moved its point", () => {
+  const G = { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts"], last: { sha: "a1", ingot: "b1", keep: ["proxy.ts"], when: 1 } };
+  const app = (more) => ({ botId: "max", computerId: "c1", previewLive: null, github: G, ...more });
+  const blob = (shop) => ({ workspaces: [{ id: "ws_acme", name: "Acme", hostedApps: { shop } }] });
+  const shopOf = (b) => b.workspaces[0].hostedApps.shop;
+  const base = blob(app());
+  const elsewhere = { repo: "example-org/other", branch: "main", path: "" };
+  // This Mac's Preview deploy moved; Bops Cloud pointed it elsewhere for an Admin (its point gone): both kept.
+  const merged = shopOf(M.merge3(base, blob(app({ previewLive: { id: "d2" } })), blob(app({ github: elsewhere }))));
+  assert.deepEqual([merged.previewLive, merged.github], [{ id: "d2" }, elsewhere]);
+  // This Mac published meanwhile (its point moved): the new destination goes whole, never with the old repo's point.
+  const published = { ...G, last: { sha: "c1", ingot: "d1", keep: ["proxy.ts"], when: 2 } };
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: elsewhere })))).github, elsewhere);
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: elsewhere })), blob(app({ github: published })))).github, elsewhere, "whichever side merges");
+  // Back on Orgo (removed) while this Mac moved the point: removed.
+  assert.equal(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: undefined })))).github, undefined);
+  // Both moved only the point (this Mac published, the app's computer brought GitHub's changes in): one side's whole,
+  // never one's commit with the other's changeset: this Mac's, an older Bops's theirs.
+  const pulled = { ...G, last: { sha: "e1", ingot: "f1", keep: ["proxy.ts"], when: 3 } };
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: pulled })))).github, published);
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: pulled })), OLD)).github, pulled);
+});
+
 /* ---------------- A bot's settings page: kept on its workspace, by bot id ---------------- */
 
 check("a bot's settings page settings (Workspace.botSettings): two Macs setting different bots keep both, field by field", () => {

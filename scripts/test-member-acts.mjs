@@ -27,7 +27,7 @@ const FAKES = {
   "chat-summary": forward("chat-summary", ["compactChat"]),
   permission: forward("permission", ["replyToAsk"]),
   persist: forward("persist", ["onRunner"]),
-  "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew", "askDeployAgain"]),
+  "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew", "askDeployAgain", "linkGithubMirror", "pullGithubMirror", "personAuthor"]),
   "apps-for-members": forward("apps-for-members", ["noteMemberAct", "actKept", "seeApps"]),
   keys: forward("keys", ["keyName", "keyProvider", "listKeys", "keysOf", "keysProject", "grantKey"]),
 };
@@ -75,9 +75,9 @@ function fresh(o = {}) {
         name: "Acme",
         memberAccess: {
           "sam@example.com": { others: "none", bots: { max: o.maxLevel ?? "write", ivy: "read" }, at: JOINED + 1000, computer: o.samComputer ?? "use" },
-          "tom@orgo.ai": { others: "none", bots: { max: "write" }, at: JOINED + 1000, apps: o.tomApps ?? "write", computer: "use" },
+          "tom@orgo.ai": { others: "none", bots: { max: "write" }, at: JOINED + 1000, apps: o.tomApps ?? "write", computer: "use", ...(o.tomCan ? { can: o.tomCan } : {}) },
         },
-        hostedApps: { shop: { botId: "max", computerId: "c1", sites: [{ name: "admin" }] } },
+        hostedApps: { shop: { botId: "max", computerId: "c1", sites: [{ name: "admin" }] }, site: { botId: "max", computerId: "c1", github: { repo: "example-org/web", branch: "main", path: "formula", last: { sha: "a".repeat(40), ingot: "b".repeat(64), when: 1 } } } },
       },
     ],
     bots: [
@@ -180,7 +180,8 @@ globalThis.__fake = {
   )),
   "apps-for-members": {
     noteMemberAct: (wsId, app, act) => kept.push([wsId, app, act]),
-    actKept: (wsId, app, key) => kept.some((k) => k[0] === wsId && k[1] === app && k[2].key === key),
+    // As apps-for-members.ts: with `act`, only that act's done or refused (never one Bops Cloud kept going, or its setting).
+    actKept: (wsId, app, key, act) => kept.some((k) => k[0] === wsId && k[1] === app && k[2].key === key && (!act || (k[2].act === act && !k[2].going))),
     seeApps: async () => void did.push(["seeApps"]),
   },
   // The owner's vault, as keys.ts reads it: `vault` (null: Orgo didn't answer), each key by name and Orgo project; the
@@ -217,6 +218,20 @@ let compactSays = { ok: true };
 const kept = [];
 let appFails = null;
 
+// Link and Bring in (hosted-apps.ts linkGithubMirror, pullGithubMirror): what they were asked, and what they say.
+Object.assign(hosted, {
+  linkGithubMirror: async (...a) => {
+    did.push(["linkGithubMirror", ...a]);
+    if (appFails) throw new Error(appFails);
+    return { app: {}, said: "Linked site to GitHub example-org/web main, folder formula at aaaaaaa." };
+  },
+  pullGithubMirror: async (...a) => {
+    did.push(["pullGithubMirror", ...a]);
+    if (appFails) throw new Error(appFails);
+    return { app: {}, said: "Brought 1 change from GitHub into Ingot. Deploy the newest to the preview to see them there." };
+  },
+  personAuthor: (name) => `bops; ${name}`,
+});
 const { memberEvent, resetAdmins } = await import(`${root}/lib/server/member-acts.ts`);
 // `computer`: Bops Cloud vouched for their Use its computer (as orgo-web keeps it), unless `computer: false`.
 const event = (act, o = {}) => ({
@@ -659,6 +674,57 @@ await check("Your Apps: refused at Read, from before they joined, apps not open 
   fresh({ ownerEmail: "owner@orgo.ai" });
   await memberEvent(event({ act: "deploy", app: "shop" }, { member: SAM }), "e");
   assert.ok(!did.some((d) => d[0] === "deployApp"), "an email apps aren't open to");
+});
+
+await check("GitHub's Link and Bring in, when the app's computer can't: done here for an Admin or a Member with App secrets, Ingot's commit in their name, kept with how it went; never without the switch, at Read, for an app of more sites, nor where it publishes (Bops Cloud's)", async () => {
+  fresh({ ownerEmail: "owner@orgo.ai", tomCan: { appSecrets: true } });
+  kept.length = 0;
+  await memberEvent(TOM_EV({ act: "githubPull", app: "site" }, { key: "key_ghp_0001" }), "e1");
+  await memberEvent(TOM_EV({ act: "githubLink", app: "site" }, { key: "key_ghl_0001" }), "e2");
+  await settleApps();
+  assert.deepEqual(did.filter((d) => d[0] !== "seeApps"), [
+    ["pullGithubMirror", "ws_acme", "site", "bops; Tom"],
+    ["linkGithubMirror", "ws_acme", "site"],
+  ]);
+  assert.deepEqual(kept.map((k) => [k[2].key, k[2].act, k[2].ok, k[2].name, k[2].said]), [
+    ["key_ghp_0001", "githubPull", true, "Tom", "Brought 1 change from GitHub into Ingot. Deploy the newest to the preview to see them there."],
+    ["key_ghl_0001", "githubLink", true, "Tom", "Linked site to GitHub example-org/web main, folder formula at aaaaaaa."],
+  ]);
+  // Bops Cloud kept "Save and link"'s setting under the same key: its Link is still done here, once.
+  kept.push(["ws_acme", "site", { key: "key_ghs_0001", userId: "user_tom", name: "Tom", act: "github", ok: true, at: 1 }]);
+  await memberEvent(TOM_EV({ act: "githubLink", app: "site" }, { key: "key_ghs_0001" }), "e3");
+  await memberEvent(TOM_EV({ act: "githubLink", app: "site" }, { key: "key_ghs_0001" }), "e4");
+  await settleApps();
+  assert.equal(did.filter((d) => d[0] === "linkGithubMirror").length, 2);
+  // What the mirror says when it won't: kept as said.
+  appFails = "Ingot and GitHub differ in lib/look.ts. Make them the same first (or add them to the files left alone), then link.";
+  await memberEvent(TOM_EV({ act: "githubLink", app: "site" }), "e5");
+  await settleApps();
+  appFails = null;
+  assert.deepEqual([kept.at(-1)[2].ok, kept.at(-1)[2].said], [false, "Ingot and GitHub differ in lib/look.ts. Make them the same first (or add them to the files left alone), then link."]);
+  // An Admin, with no entry at all.
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  kept.length = 0;
+  await memberEvent(event({ act: "githubPull", app: "site" }, { member: { userId: "user_ada", email: "ada@example.com", name: "Ada" }, role: "admin", key: "key_ghp_ada1" }), "e6");
+  await settleApps();
+  assert.deepEqual(did.filter((d) => d[0] === "pullGithubMirror"), [["pullGithubMirror", "ws_acme", "site", "bops; Ada"]]);
+  // Refused, said on the app: no switch, at Read, an app of more sites. Nothing done.
+  const no = async (o, act, said) => {
+    fresh({ ownerEmail: "owner@orgo.ai", ...o });
+    kept.length = 0;
+    await memberEvent(TOM_EV(act), "e");
+    await settleApps();
+    assert.ok(!did.some((d) => d[0] === "linkGithubMirror" || d[0] === "pullGithubMirror"), said);
+    assert.deepEqual([kept[0]?.[2].ok, kept[0]?.[2].said], [false, said]);
+  };
+  await no({}, { act: "githubPull", app: "site" }, "Only the owner, an Admin, or someone with App secrets can do this.");
+  await no({ tomApps: "read", tomCan: { appSecrets: true } }, { act: "githubPull", app: "site" }, "The owner took away Write on Your Apps.");
+  await no({ tomCan: { appSecrets: true } }, { act: "githubLink", app: "shop" }, "It runs more than one site, and one GitHub folder is one app.");
+  // Where it publishes is Bops Cloud's to write (cloud/members.ts githubHere): this Mac never does it from an event.
+  fresh({ ownerEmail: "owner@orgo.ai", tomCan: { appSecrets: true } });
+  await memberEvent(TOM_EV({ act: "github", app: "site", github: { repo: "example-org/other", branch: "main", path: "" } }), "e7");
+  await settleApps();
+  assert.deepEqual(did, []);
 });
 
 /* ---------------- An Admin (Orgo's role, MemberActPayload.role) ---------------- */

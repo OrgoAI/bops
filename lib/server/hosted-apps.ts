@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appsOpen } from "@/lib/apps-access";
 import { botChatId, live as isLive, routineSent, siteBotOf, siteOf, workBot, workspaceOf, type Session, type Workspace } from "@/lib/types";
-import { appCoders, appEnvOf, copyBotOf, DEV_PORT, DNS_TYPES, dnsNeeds, ENV_NAME, ENV_RESERVED, isCopyName, isSiteName, localAddress, localsOf, localWords, LOG_LINE, LOG_LINES, MAX_SITES, offersInOrder, PASS_COOKIE, REGISTRANT_FIELDS, subdomainTyped, cleanGithubMirror} from "@/lib/hosted-apps";
+import { appCoders, appEnvOf, copyBotOf, DEV_PORT, DNS_TYPES, dnsNeeds, ENV_NAME, ENV_RESERVED, isCopyName, isSiteName, localAddress, localsOf, localWords, LOG_LINE, LOG_LINES, MAX_SITES, offersInOrder, PASS_COOKIE, REGISTRANT_FIELDS, subdomainTyped, cleanGithubMirror, keepsPoint } from "@/lib/hosted-apps";
 import { screenMap } from "@/lib/screens";
 import type {
   AddAppAnswer,
@@ -91,7 +91,7 @@ import {
 import { onRunner, selfHosted } from "./persist";
 import { hostingChangeAllowed, hostingScope, type Blob } from "@/cloud/computer-scope";
 import { isLabelOf, labelGiven, newLabel } from "./app-labels";
-import { GITHUB_KEY, linkMirror, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
+import { GITHUB_KEY, linkAndSay, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
 import { appFolder, authorOf, byBots, changesTo, dropToken, ensureIngotCli, folderChanges, hasToken, ingot, INGOT_BIN, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotChange, type IngotChangeset, type IngotRepo } from "./ingot";
 import { addMessage, bot, flushState, getState, ownerName, sameState, session, update } from "./store";
 import { tailnetUp } from "./tailnet";
@@ -2191,45 +2191,87 @@ export async function setGithubMirror(wsId: string, name: string, v: unknown): P
         if (!x) return x;
         const was = x.github;
         // The same folder, with every path it left alone still left alone (more is fine): its point holds. Else Link again.
-        const keeps = (was?.keep ?? []).every((k) => (c.ok.keep ?? []).includes(k));
-        const same = was && was.repo === c.ok.repo && was.branch === c.ok.branch && was.path === c.ok.path && keeps;
-        return { ...x, github: { ...c.ok, ...(same && was?.last ? { last: was.last } : {}) } };
+        // (The rule Bops Cloud keeps an Admin's setting by too: cloud/github-config.ts keepsPoint.)
+        return { ...x, github: { ...c.ok, ...(keepsPoint(was, c.ok) && was?.last ? { last: was.last } : {}) } };
       });
     }
     return { app: await appNow(wsId, name, ours) };
   });
 }
 
-/** Link an app to its GitHub folder as both are now (github-mirror.ts linkMirror: only when they have the same files). */
-export async function linkGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp }> {
+/**
+ * Link, or Bring in GitHub's changes, of an app (under withApp: nothing else under way on it), one way for everyone who
+ * may: the owner's own window (linkGithubMirror, pullGithubMirror), the owner's Mac for an Admin or a Member with App
+ * secrets (lib/server/member-acts.ts), and the app's own computer for one, the owner's Mac on or off (githubJob). Link
+ * (github-mirror.ts linkAndSay): GitHub has no file Ingot lacks or has otherwise; Bring in (mirrorPull): GitHub's version
+ * wins where both changed a file, Ingot's commit by `author`. Its point (github.last) is kept only while the setting it ran
+ * with is still the app's (sameMirror), the one change a computer's runner may make to it (cloud/computer-scope.ts).
+ */
+async function githubNow(wsId: string, name: string, act: "githubLink" | "githubPull", author: string): Promise<string> {
+  const cfg = hostingOf(wsId, name)?.github;
+  if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409, { code: "NOT_SET" });
+  const done = await (act === "githubLink" ? linkAndSay(wsId, name, cfg) : mirrorPull(wsId, name, cfg, author)).catch((e) => {
+    throw asAppError(e);
+  });
+  keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last: done.last } } : x));
+  return done.said;
+}
+
+/** Ingot's author for a person's GitHub act done by this Mac (X-Ingot-Author: "<who> via <the owner>"); a computer's are its token's. */
+export const personAuthor = (name: string) => `bops; ${name.replace(/[\u0000-\u001f\u007f;]+/g, " ").trim().slice(0, 80) || "Bops"}`;
+
+/** Link an app to its GitHub folder as both are now (github-mirror.ts linkAndSay: GitHub has nothing Ingot lacks or has otherwise). */
+export async function linkGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp; said: string }> {
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
   const ours = sameState();
   return withApp(wsId, name, "deploy", async () => {
-    const cfg = hostingOf(wsId, name)?.github;
-    if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409);
-    const last = await linkMirror(wsId, name, cfg).catch((e) => {
-      throw asAppError(e);
-    });
-    keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last } } : x));
-    return { app: await appNow(wsId, name, ours) };
+    const said = await githubNow(wsId, name, "githubLink", authorOf(undefined));
+    return { app: await appNow(wsId, name, ours), said };
   });
 }
 
-/** Bring in GitHub's changes (github-mirror.ts mirrorPull), GitHub's version winning where both changed a file: the owner's word, from the Bops window. */
-export async function pullGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp; said: string }> {
+/** Bring in GitHub's changes (github-mirror.ts mirrorPull), GitHub's version winning where both changed a file: the owner's word, from the Bops window; or a member's, as `author`. */
+export async function pullGithubMirror(wsId: string, name: string, author = authorOf(undefined)): Promise<{ app: HostedApp; said: string }> {
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
   const ours = sameState();
   return withApp(wsId, name, "deploy", async () => {
-    const cfg = hostingOf(wsId, name)?.github;
-    if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409);
-    const done = await mirrorPull(wsId, name, cfg, authorOf(undefined)).catch((e) => {
-      throw asAppError(e);
-    });
-    keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last: done.last } } : x));
-    return { app: await appNow(wsId, name, ours), said: done.said };
+    const said = await githubNow(wsId, name, "githubPull", author);
+    return { app: await appNow(wsId, name, ours), said };
   });
+}
+
+/** Whether a bot of workspace `wsId` on this computer was given the GitHub key (Bot.keys): the only way Orgo's broker lets it call GitHub. */
+const githubKeyHere = (wsId: string) => {
+  const here = (process.env.BOPS_RUNNER_COMPUTER ?? "").toLowerCase();
+  return getState().bots.some((b) => workspaceOf(b) === wsId && b.runsOn !== "mac" && (workBot(b, getState().bots).computerId ?? "").toLowerCase() === here && !!b.keys?.includes(GITHUB_KEY));
+};
+
+/**
+ * An app's GitHub job (cloud/turns.ts takeAppJob: Link, or Bring in GitHub's changes), asked by `by` from a shared
+ * workspace's Your Apps and checked by Bops Cloud, done on the app's own computer by its runner (lib/server/runner-chat.ts),
+ * with the owner's Mac on or off: Ingot with this computer's token, GitHub with its own sign in through Orgo's broker
+ * (the key never here). Only an app whose home is this computer (onThisComputer), with a bot of the workspace on it given
+ * the GitHub key (else said, before anything is read). How it went in words, for Your Apps and the bot's chat; never
+ * throws. It reads nothing more of the app after (appNow: some of Orgo's reads take no computer's sign in).
+ */
+export async function githubJob(botId: string, job: { act: "githubLink" | "githubPull"; app: string }, by: string): Promise<{ ok: boolean; said: string }> {
+  const b = bot(botId);
+  if (!b) return { ok: false, said: "That bot is gone." };
+  const wsId = workspaceOf(b);
+  const name = job.app;
+  try {
+    if (!isRepoName(name) || !hostingOf(wsId, name)) throw new HostedAppError(NO_APP, 404);
+    onThisComputer(wsId, name);
+    if (onRunner() && !githubKeyHere(wsId)) return { ok: false, said: `${b.name} has no GitHub key on this computer, so nothing was read from GitHub. Give it the GitHub key in Keys, then try again.` };
+    const said = await withApp(wsId, name, "deploy", () => githubNow(wsId, name, job.act, personAuthor(by)));
+    return { ok: true, said };
+  } catch (e) {
+    if (e instanceof HostedAppError || e instanceof MirrorError || e instanceof IngotError) return { ok: false, said: /[.!?]$/.test(e.message) ? e.message : `${e.message}.` };
+    console.warn(`[hosted-apps] github job ${name}: ${(e as Error).message}`);
+    return { ok: false, said: "That didn't go. Try again." };
+  }
 }
 
 /** A site's Published address: https://<the first active domain on its port>, or null. */

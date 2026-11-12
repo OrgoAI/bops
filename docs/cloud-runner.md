@@ -531,6 +531,17 @@ waits for the owner's Mac (routines, watches, skills, new bots, pages, pictures,
 teammate) and is told so. A runner from before this loop never hears a turn: its computer is woken, and the
 turn ends with "didn't wake up in time" until the owner's Mac has put the new runner on it.
 
+**GitHub jobs on the runner.** An Admin, or a Member with App secrets, links an app to GitHub or brings
+GitHub's changes in from a shared workspace's Your Apps with every Mac closed (`cloud/members.ts` githubAct).
+Bops Cloud checks who asked, writes where the app publishes itself (a new repo, branch, folder or workflow
+only while the workspace has a GitHub key of its own in Keys), and owes the Link or Bring in to the app's own
+computer as a turn that carries the job (`cloud/turns.ts` takeAppJob, `TurnMember.job`), in any workspace,
+whichever answers its chat. The runner does it (`runner-chat.ts` runJob, `hosted-apps.ts` githubJob) with its
+Ingot token and its own sign in for the GitHub key, says it in the bot's chat as Bops' own, and its result is
+kept on the app. It goes to the computer only when its runner is at `GITHUB_ACTS_MIN_VERSION` and a bot on it
+was given GITHUB_TOKEN in Keys; otherwise the owner's Mac does it when it opens, or, when only the key is
+missing and that Mac is off, the person is told to give the bot the key.
+
 **The owner's Mac must open a Bops with this change once.** Runners are set up and upgraded only by an
 owner's Mac (this is a Mac loop, and the runner ships inside the Mac app), so no computer of a shared
 workspace gets its runner, and no runner gets a newer build, until the owner opens the updated Bops on one
