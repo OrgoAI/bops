@@ -556,6 +556,17 @@ function chatsOf(blob: Record<string, unknown>): Map<string, string> {
 }
 
 /**
+ * What else hears of each write of an account's state, with the blob as written, before anything below: the bot's
+ * browser asks again who may use it (browser.ts), as a per-bot level or a bot's computer lives only in the owner's
+ * state and orgo-web sends no notice for it. Kept here, not imported, so nothing that writes the state imports browser.ts.
+ */
+const writeHooks = new Set<(account: string, blob: Record<string, unknown>) => void>();
+export function onStateWritten(f: (account: string, blob: Record<string, unknown>) => void): () => void {
+  writeHooks.add(f);
+  return () => void writeHooks.delete(f);
+}
+
+/**
  * The user's state was written (`by` the device that wrote it): every watched workspace whose part of it
  * changed hears "state", with the fingerprint of what it shows (sliceHash, and each member's stream its
  * member's own; one whose copy has it already needn't read it again). Whether it changed is told from the
@@ -564,6 +575,13 @@ function chatsOf(blob: Record<string, unknown>): Map<string, string> {
  */
 export function stateWritten(account: string, blob: Record<string, unknown>, by: string | null, h: LiveHub = hub) {
   h.written++;
+  for (const f of writeHooks) {
+    try {
+      f(account, blob);
+    } catch (e) {
+      console.warn(`[live] after a state write: ${(e as Error)?.message ?? e}`);
+    }
+  }
   const watched = h.watched(account);
   if (!watched.length) return void h.seen.delete(account);
   const prev = h.seen.get(account);

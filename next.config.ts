@@ -6,7 +6,7 @@ import type { NextConfig } from "next";
 const { version } = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version: string };
 
 const nextConfig: NextConfig = {
-  env: { BOPS_APP_VERSION: version },
+  env: { BOPS_APP_VERSION: version, BOPS_BROWSER_PROBE: process.env.BOPS_BROWSER_PROBE === "1" ? "1" : "" },
   // A second app from this folder at once (the local two-person stack, scripts/dev-two-person.mjs) builds into a
   // folder of its own, as next dev locks its own. Unset, as everywhere else, it's Next's .next.
   ...(process.env.BOPS_NEXT_DIST_DIR ? { distDir: process.env.BOPS_NEXT_DIST_DIR } : {}),

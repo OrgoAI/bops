@@ -1,5 +1,6 @@
 import "server-only";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { id, userDir } from "./store";
 
@@ -27,6 +28,40 @@ export function saveUpload(dataUrl: string) {
   const upId = id("img");
   writeFileSync(join(/*turbopackIgnore: true*/ DIR, `${upId}.${TYPES[m[1].toLowerCase()]}`), buf);
   return { id: upId, type: m[1].toLowerCase() };
+}
+
+/** A change card's copy of a picture someone linked (keepCopy): named by its bytes, so the same picture is one file. */
+export const COPY_ID = /^img_c[0-9a-f]{32}$/;
+
+/**
+ * Keep a copy of a picture a change card shows (lib/server/repo-change.ts: one someone linked in a chat), for its
+ * thumbnail and the yes. The same picture asked for again is the same copy, made fresh. Copies older than `olderMs` that
+ * nothing uses (`kept`: what messages show, and waiting cards) go first: a card that never got an answer leaves none
+ * behind for long. Returns its id.
+ */
+export function keepCopy(type: string, bytes: Buffer, sweep: { kept: Set<string>; olderMs: number }): string {
+  const ext = TYPES[type];
+  if (!ext) throw new Error("only PNG, JPEG, WebP or GIF images");
+  if (bytes.length > MAX_BYTES) throw new Error("that image is too big (12 MB at most)");
+  const DIR = uploadsDir();
+  if (!DIR) throw new Error("sign in to Bops first");
+  mkdirSync(DIR, { recursive: true });
+  const now = Date.now();
+  for (const name of readdirSync(/*turbopackIgnore: true*/ DIR)) {
+    const upId = name.replace(/\.[a-z]+$/, "");
+    if (!COPY_ID.test(upId) || sweep.kept.has(upId)) continue;
+    const at = join(/*turbopackIgnore: true*/ DIR, name);
+    try {
+      if (now - statSync(/*turbopackIgnore: true*/ at).mtimeMs > sweep.olderMs) rmSync(/*turbopackIgnore: true*/ at, { force: true });
+    } catch {
+      // Gone meanwhile: nothing to do.
+    }
+  }
+  const upId = `img_c${createHash("sha256").update(bytes).digest("hex").slice(0, 32)}`;
+  const at = join(/*turbopackIgnore: true*/ DIR, `${upId}.${ext}`);
+  if (existsSync(/*turbopackIgnore: true*/ at)) utimesSync(/*turbopackIgnore: true*/ at, new Date(now), new Date(now));
+  else writeFileSync(/*turbopackIgnore: true*/ at, bytes);
+  return upId;
 }
 
 /** An upload's file on disk, if it exists (ids are only letters, digits and _). */

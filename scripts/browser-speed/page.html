@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Browser speed probe</title>
+<style>
+body {margin:0;background:#ddd;font:20px system-ui;color:#222} #click,#hover {position:fixed;top:80px;width:400px;height:280px;display:grid;place-items:center;z-index:1} #click {left:60px;background:rgb(40,80,220)} #hover {left:540px;background:rgb(220,180,40)} .band {height:140px;padding-left:30px;border-bottom:8px solid #444} .band:nth-child(odd) {background:#aac} .band:nth-child(even) {background:#cba}
+</style></head><body><div id="click">Click target</div><div id="hover">Hover target</div><main id="scroll"></main>
+<script>
+window.__probe = {events:[], click:0, hover:0};
+const record = (e, kind, value) => window.__probe.events.push({kind,value,at:performance.timeOrigin + e.timeStamp, trusted:e.isTrusted,x:e.clientX,y:e.clientY});
+const click = document.getElementById('click');
+const hover = document.getElementById('hover');
+click.addEventListener('click', e => { const v = window.__probe.click ^= 1; click.style.background = v ? 'rgb(220,40,40)' : 'rgb(40,80,220)'; record(e,'click',v); });
+hover.addEventListener('mouseenter', e => {window.__probe.hover=1;hover.style.background='rgb(40,180,70)';record(e,'hover',1)});
+hover.addEventListener('mouseleave', e => {window.__probe.hover=0;hover.style.background='rgb(220,180,40)';record(e,'hover',0)});
+window.addEventListener('scroll', e => record(e,'scroll',scrollY));
+document.getElementById('scroll').innerHTML = Array.from({length:300},(_,i)=>'<div class="band">Scroll row '+i+'</div>').join('');
+</script></body></html>
