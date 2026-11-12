@@ -6,7 +6,7 @@
 // and done through the ways in the owner's own
 // taps use, with the member named: chat.ts handleMessage (once per key; without Use its computer their words and a note,
 // no turn), chat.ts answerMessage for a message Bops Cloud wrote already (once), sessions.ts replyToSession (never a
-// watch), stopSession and dismissWaiting, permission.ts replyToAsk.
+// watch; hosted-apps.ts askDeployAgain first, for an app's), stopSession and dismissWaiting, permission.ts replyToAsk.
 //
 // The store, the chat, the threads and the asks are stand-ins that record what was asked of them: nothing reaches a
 // real service. The people are made up.
@@ -27,7 +27,7 @@ const FAKES = {
   "chat-summary": forward("chat-summary", ["compactChat"]),
   permission: forward("permission", ["replyToAsk"]),
   persist: forward("persist", ["onRunner"]),
-  "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"]),
+  "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew", "askDeployAgain"]),
   "apps-for-members": forward("apps-for-members", ["noteMemberAct", "actKept", "seeApps"]),
   keys: forward("keys", ["keyName", "keyProvider", "listKeys", "keysOf", "keysProject", "grantKey"]),
 };
@@ -203,6 +203,9 @@ globalThis.__fake = {
     },
   },
 };
+/** A thread asked to put its next commit on its Preview again (hosted-apps.ts askDeployAgain): its id, the words, and how much was done before. */
+const deployAsks = [];
+hosted.askDeployAgain = (id, words) => void deployAsks.push([id, words, did.length]);
 /** The owner's vault as the keys fake reads it (null: Orgo didn't answer). */
 let vault = [];
 /** How many times the state was read, and what a read brings in. */
@@ -406,6 +409,18 @@ await check("a reply in a thread of theirs is their words to it, never made a wa
   await memberEvent(event({ act: "reply", sessionId: "t-max", text: "Window seat please" }, { key: "key_reply_01" }), "e9");
   await memberEvent(event({ act: "reply", sessionId: "t-ivy", text: "x" }, { key: "key_reply_02" }), "e10");
   assert.equal(did.length, 1, "once per key, and never in a Read bot's thread");
+});
+
+await check("a reply in an app's thread (Your Apps at Write) asks that a task that put a change on its Preview put this one there too, before it goes to the task; never one refused", async () => {
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  deployAsks.length = 0;
+  await memberEvent(event({ act: "reply", sessionId: "t-app", text: "Now put the old title back" }, { member: TOM, key: "key_reply_app1" }), "e_app1");
+  assert.deepEqual(did, [["reply", "t-app", "Now put the old title back", undefined, undefined, { ...TOM, ref: "key_reply_app1" }]]);
+  assert.deepEqual(deployAsks, [["t-app", "Now put the old title back", 0]], "asked first, with their words (askDeployAgain reads them)");
+  // Sam (no Your Apps): refused, so nothing is asked.
+  await memberEvent(event({ act: "reply", sessionId: "t-app", text: "Deploy it" }, { key: "key_reply_app2" }), "e_app2");
+  assert.equal(did.length, 1);
+  assert.equal(deployAsks.length, 1);
 });
 
 await check("answers: Allow once, Always allow and Deny with a note, named as theirs; a Read bot's never", async () => {
