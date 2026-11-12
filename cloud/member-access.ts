@@ -244,7 +244,8 @@ export const appsSummary = (access: { apps?: unknown }) => (!isAccessLevel(acces
  * - workspace: rename the workspace, and say where its chat is answered.
  * - wake: wake a bot's computer.
  * - publish: Publish an app, or roll back what's Published, from Your Apps (MemberAppAct env "prod"), with the owner's Bops
- *   at ADMIN_PUBLISH_MIN_VERSION. (An Admin's own words publish it in chat too: lib/server/chat.ts askedForProd.)
+ *   at ADMIN_PUBLISH_MIN_VERSION. (An Admin's own words publish it in chat too: lib/server/chat.ts askedForProd.) Also where
+ *   an app publishes on GitHub, linking it and bringing GitHub's changes in (MemberGithubAct), at GITHUB_ACTS_MIN_VERSION.
  * - instructions: change a bot's "How I work" (the "persona" act), with the owner's Bops at ADMIN_PUBLISH_MIN_VERSION too.
  * An Admin has every one (the owner's 11-03 rule: an Admin may do everything but delete the workspace). A Member has one
  * when its switch in Team is on (POWER_OF, MemberAccess.can), with the owner's Bops new enough to take switches (the
@@ -357,7 +358,7 @@ export const POWER_WORDS: Readonly<Record<Power, { name: string; tip: string }>>
   bots: { name: "Bot settings", tip: "The settings of the bots they have Write on: name, job, model, what it works on, its phone, email and channels, routines." },
   memory: { name: "Memory and skills", tip: "What the bots remember, and the skills they use." },
   workspace: { name: "Workspace settings", tip: "Its name, where its chat is answered, and what each group of bots is called." },
-  appSecrets: { name: "App secrets", tip: "Your Apps' variables and Preview passwords, Publish, going back on Published, and restoring an app." },
+  appSecrets: { name: "App secrets", tip: "Your Apps' variables and Preview passwords, Publish, going back on Published, restoring an app, and where it publishes on GitHub." },
   spend: { name: "Spending", tip: "What costs the plan more: a bot's own computer, a bigger computer, waking one billed by the hour." },
   mac: { name: "The owner's Mac", tip: "Work on the owner's Mac and the owner's own apps and keys: answering what it asks, and telling it more." },
 };

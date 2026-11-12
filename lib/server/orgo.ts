@@ -1250,6 +1250,11 @@ export type OrgoDeployProject = {
   health_path?: string;
   /** Its variables' names (never their values). */
   env_keys?: string[];
+  /**
+   * The variables it gets from Keys at each build (an orgo-web with bops-keys/apps: lib/server/app-keys.ts), names only:
+   * the app's own link or every app's, and `missing` when Keys has no such key now. An older orgo-web leaves it out.
+   */
+  env_from_keys?: { name: string; key: string; from: "app" | "workspace"; missing?: boolean }[];
   current?: OrgoDeployment | null;
   deployments?: OrgoDeployment[];
 };

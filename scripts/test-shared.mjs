@@ -1990,6 +1990,32 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   assert.equal(gone.status, 404);
 });
 
+await check("GitHub in Your Apps: the window has it (SharedOpen.appGithub) only at Write; a Link sent lands once Bops Cloud keeps it on the app as going, by its key; a GitHub act is refused from the copy at Read", async () => {
+  const shop = { name: "shop", github: { repo: "example-org/web", branch: "main", path: "formula" }, sites: [], commits: [], deploys: [] };
+  const withApps = (level, flag, acts) => ({ ...cloudState(), hash: `h-gh-${level}-${flag}-${acts?.length ?? 0}`, state: { ...cloudState().state, ...(flag ? { appGithub: true } : {}), apps: { level, at: 10, list: [{ ...shop, ...(acts ? { acts } : {}) }] } } });
+  let answer = { status: 200, body: withApps("write", true) };
+  const copy = new SharedCopy(async () => answer);
+  await copy.open({ ...listed, owner: "dana@orgo.ai" });
+  const team = () => ({ ...own(), account: { user: { id: "u-sam", name: "Sam", email: "sam@orgo.ai" } } });
+  assert.equal(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appGithub, true);
+  const sent = [];
+  await actWith(copy, { act: "githubLink", app: "shop" }, "key_ghlink_01", sam, async (body) => (sent.push(JSON.parse(body)), { status: 202, body: { ok: true, macOn: true, stored: true, computer: true, turn: "turn_x" } }));
+  assert.deepEqual(sent, [{ key: "key_ghlink_01", act: { act: "githubLink", app: "shop" } }]);
+  assert.deepEqual(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appActs.map((a) => [a.key, a.state]), [["key_ghlink_01", "sending"]]);
+  answer = { status: 200, body: withApps("write", true, [{ key: "key_ghlink_01", userId: "u-sam", name: "Sam", act: "githubLink", ok: true, going: true, at: 11 }]) };
+  await copy.refresh();
+  assert.equal(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appActs, undefined, "landed: its computer's going row shows now");
+  // Without the flag (no power, or the owner's Bops older): none in the window. At Read: none, and the copy refuses one.
+  answer = { status: 200, body: withApps("write", false) };
+  await copy.refresh();
+  assert.equal(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appGithub, undefined);
+  answer = { status: 200, body: withApps("read", true) };
+  await copy.refresh();
+  assert.equal(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appGithub, undefined, "never at Read");
+  const no = await actWith(copy, { act: "githubPull", app: "shop" }, "key_ghpull_02", sam, async () => assert.fail("not sent"));
+  assert.deepEqual([no.status, no.code], [403, "member_apps_read_only"]);
+});
+
 await check("the bot's browser in a shared workspace: a Member with Write and Use its computer has it in place of the computer, an Admin beside it, anyone else one line saying why; its route goes out", async () => {
   const { browserBeside, browsesHere } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
   const at = (levels, computer, role = "member", screens) => ({ shared: { projectId: "p1", name: "Acme", owner: "o@example.com", role, wsId: "shared_p1", levels, computer, ...(screens ? { screens } : {}) } });

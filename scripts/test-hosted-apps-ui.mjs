@@ -2747,6 +2747,118 @@ await test("an Admin keeps Update preview beside Publish, and never gets an Add 
 });
 
 
+await test("Your Apps' GitHub part, for an Admin or a Member with App secrets once the owner's Bops takes it (SharedOpen.appGithub), in Technical details: where it publishes and when it was last the same; Bring in asked first; Link; Save and link sends where with link; a Link or Bring in its computer is doing holds Publish and says so; never without the flag, nor for an app of more sites", async () => {
+  const { SharedAppsPage, actLine } = await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  const site = { name: "shop", url: null, preview: "https://k7p2qxm4wr3d.orgo.dev", previewLive: { id: "dp2", state: "succeeded", when: 10 }, previewServing: "cs22222", serving: "cs11111", live: { id: "d1", state: "succeeded", when: 7 } };
+  const linked = { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts"], dispatch: { workflow: "deploy.yml", inputs: { client: "acme" } }, linked: { sha: "abcdef1234567890abcdef1234567890abcdef12", ingot: "f".repeat(64), when: Date.now() - 3 * 60_000 } };
+  const app = (more = {}) => ({ name: "shop", head: { id: "cs22222", message: "New cart", at: 9 }, sites: [site], ...more });
+  const state = (a, o = {}) => ({
+    account: { user: { id: "u-ada", email: "ada@example.com" } },
+    shared: { projectId: "p", name: "Acme", owner: "Ava", role: o.role ?? "admin", wsId: "shared_p", adminActs: true, adminPublish: true, ...(o.flag === false ? {} : { appGithub: true }), apps: { level: o.level ?? "write", at: Date.now(), list: [a] } },
+    bots: [],
+    workspaces: [],
+  });
+  const buttons = (el, text) => [...el.querySelectorAll("button")].filter((b) => b.textContent === text);
+  const sent = (from) => posts(from, "/api/workspaces/shared").map((c) => c.body.act);
+  // The app opened, and its Technical details, where the GitHub part is (as the owner's GitHub menu is on Published's line there).
+  const opened = async (st) => {
+    const x = await mount(h(SharedAppsPage, { state: st }));
+    await click(button(x.box, "Open shop"));
+    await click(button(x.box, "Technical details"));
+    return x;
+  };
+  routes["/api/workspaces/shared"] = { body: { ok: true } };
+  try {
+    // Linked: where, when last the same, and Bring in, asked first.
+    const m = await opened(state(app({ github: linked })));
+    const part = m.box.querySelector("[data-shared-github]");
+    assert.ok(part, "the GitHub part, at Write with the flag");
+    assert.match(part.textContent, /Publishes to GitHub example-org\/web, main, folder formula\.Last the same as GitHub at abcdef1 \(([A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d\d [AP]M\)\./);
+    let from = calls.length;
+    await click(buttons(part, "Bring in GitHub's changes")[0]);
+    assert.deepEqual(sent(from), [], "asked first");
+    assert.match(part.querySelector("[data-gh-pull-ask]").textContent, /GitHub's version wins where both changed a file\. Bring them in\?/);
+    await click(buttons(part, "Bring them in")[0]);
+    assert.deepEqual(sent(from), [{ act: "githubPull", app: "shop" }]);
+    // Change where it publishes: the form as it is now, sent with link.
+    await click(buttons(part, "Change where it publishes")[0]);
+    const f = part.querySelector("[data-gh-form]");
+    assert.deepEqual([...f.querySelectorAll("[data-gh-field]")].map((x) => [x.dataset.ghField, x.value]), [["repo", "example-org/web"], ["branch", "main"], ["path", "formula"], ["keep", "proxy.ts"], ["workflow", "deploy.yml"], ["inputs", "client=acme"]]);
+    assert.match(part.textContent, /A new repo, branch, folder or workflow needs a GitHub key of this workspace's own in Keys\./);
+    await type(f.querySelector('[data-gh-field="keep"]'), "proxy.ts, clients/acme/");
+    from = calls.length;
+    await click(buttons(f, "Save and link")[0]);
+    assert.deepEqual(sent(from), [{ act: "github", app: "shop", github: { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts", "clients/acme/"], dispatch: { workflow: "deploy.yml", inputs: { client: "acme" } } }, link: true }]);
+    // Back on Orgo, from the form.
+    await click(buttons(part, "Change where it publishes")[0]);
+    from = calls.length;
+    await click(part.querySelector("[data-gh-orgo]"));
+    assert.deepEqual(sent(from), [{ act: "github", app: "shop", github: null }]);
+    await m.done();
+    // Set, not linked: Link, and Publish waits for it (said why), as it does once Bops Cloud says `at` (null).
+    for (const unlinked of [{ ...linked, linked: undefined }, { ...linked, linked: undefined, at: null }]) {
+      const n = await opened(state(app({ github: unlinked })));
+      const publish = n.box.querySelector("[data-review-publish]");
+      assert.deepEqual([publish.textContent, publish.disabled, publish.parentElement.dataset.tip], ["Publish changes", true, "Link it to GitHub first."]);
+      assert.match(n.box.querySelector("[data-shared-github]").textContent, /It isn't linked yet\. Link it before you publish\./);
+      from = calls.length;
+      await click(buttons(n.box, "Link to GitHub")[0]);
+      assert.deepEqual(sent(from), [{ act: "githubLink", app: "shop" }]);
+      await n.done();
+    }
+    // Not on GitHub: Publish to GitHub instead opens an empty form.
+    const o = await opened(state(app()));
+    assert.match(o.box.querySelector("[data-shared-github]").textContent, /It publishes on Orgo\./);
+    await click(buttons(o.box, "Publish to GitHub instead")[0]);
+    assert.equal(o.box.querySelector('[data-gh-field="repo"]').value, "");
+    assert.equal(buttons(o.box, "Save and link")[0].disabled, true, "which repo first");
+    assert.equal(o.box.querySelector("[data-gh-orgo]"), null, "on Orgo already");
+    await o.done();
+    // Its computer doing a Bring in: said, and Publish and GitHub's buttons wait meanwhile; then how it went, its words under it.
+    const going = app({ github: linked, acts: [{ key: "k1", userId: "u-ada", name: "Ada", act: "githubPull", ok: true, going: true, at: Date.now() }] });
+    const g = await opened(state(going));
+    assert.match(g.box.querySelector("[data-act-line]").textContent, /^Ada asked its computer to bring in GitHub's changes… · /);
+    assert.equal(g.box.querySelector("[data-review-update]").disabled, false, "(a Preview deploy isn't the mirror's)");
+    const held = g.box.querySelector("[data-review-publish]");
+    assert.deepEqual([held.disabled, held.parentElement.dataset.tip], [true, "Its computer is busy with GitHub. Publish once it's done."]);
+    assert.equal(buttons(g.box, "Bring in GitHub's changes")[0].disabled, true);
+    await g.done();
+    const done = app({ github: linked, acts: [{ key: "k1", userId: "u-ada", name: "Ada", act: "githubPull", ok: true, said: "Brought 2 changes from GitHub into Ingot.", at: Date.now() }] });
+    const d = await mount(h(SharedAppsPage, { state: state(done) }));
+    assert.match(d.box.querySelector("[data-act-line]").textContent, /^Ada brought in GitHub's changes · /);
+    assert.equal(d.box.querySelector("[data-act-said]").textContent, "Brought 2 changes from GitHub into Ingot.");
+    await d.done();
+    assert.match(actLine({ key: "k", userId: "u", name: "Sam", act: "githubLink", ok: false, said: "Ingot and GitHub differ in lib/look.ts.", at: 1 }), /^Sam tried to link it to GitHub: Ingot and GitHub differ in lib\/look\.ts\. · /);
+    assert.match(actLine({ key: "k", userId: "u", name: "Sam", act: "github", ok: true, at: 1 }), /^Sam changed where it publishes · /);
+    // No flag (a Member without App secrets, the owner's Bops older), or Read: no GitHub part. An app of more sites: one line why.
+    for (const [why, st] of [["no flag", state(app({ github: linked }), { flag: false })], ["at Read", state(app({ github: linked }), { level: "read" })]]) {
+      const x = await opened(st);
+      assert.equal(x.box.querySelector("[data-shared-github]"), null, why);
+      assert.equal(buttons(x.box, "Link to GitHub").length + buttons(x.box, "Bring in GitHub's changes").length, 0, why);
+      await x.done();
+    }
+    const many = await opened(state(app({ siteNames: ["admin"] })));
+    assert.match(many.box.textContent, /It runs more than one site, and one GitHub folder is one app, so it publishes on Orgo\./);
+    assert.equal(buttons(many.box, "Publish to GitHub instead").length, 0);
+    await many.done();
+  } finally {
+    delete routes["/api/workspaces/shared"];
+  }
+});
+
+await test("every word of the shared Your Apps plain (its GitHub form's too): no dashes, never Orbit; what members did, said as it was", async () => {
+  const { SHARED_APPS_WORDS, SHARED_GITHUB_FORM_WORDS, actLine } = await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  for (const v of [...Object.values(SHARED_APPS_WORDS), ...Object.values(SHARED_GITHUB_FORM_WORDS)]) {
+    const text = typeof v === "function" ? (v.length === 2 ? v("Juno", { act: "settings", site: "shop" }) : v.length === 3 ? v("Juno", "deploy", "No.") : v("Acme")) : v;
+    assert.doesNotMatch(text, /[‐-―−]|[A-Za-z]-[A-Za-z]| - /, `no dash: ${text}`);
+    assert.doesNotMatch(text, /orbit/i);
+  }
+  assert.equal(actLine({ key: "k", userId: "u", name: "Juno", act: "domain", domain: "shop.acme.example", ok: true, at: new Date().setHours(15, 4, 0, 0) }), "Juno pointed shop.acme.example at it · 3:04 PM");
+  assert.match(actLine({ key: "k", userId: "u", name: "Juno", act: "deploy", ok: false, said: "That domain isn't this workspace's.", at: 1 }), /^Juno tried to deploy it: That domain isn't this workspace's\. · /);
+  const owner = list({ enabled: true, apps: [app("shop")] }, { actOf: () => ({ key: "k", userId: "u", name: "Juno", act: "rollback", ok: true, at: Date.now() }) });
+  assert.match(owner, /data-member-act[^>]*>Juno went back to an earlier deploy · /);
+});
+
 /* ---------------- Local, Staging and Prod, all on the app's computer ---------------- */
 
 const E = await import(pathToFileURL(`${root}/components/app/app-envs.tsx`).href);
@@ -3121,5 +3233,52 @@ await test("the final publishing decision quiets review without creating an edit
     await click(button(m.box,'About preview and live')); assert.match(m.box.querySelector('[data-view-help]').textContent,/keep editing if you’re improving this one/);
   } finally { await m.done(); }
 });
+await test("apps that use a key from Keys (app-key-links.tsx): an app's keys from Keys by name, its own with Remove and every app's, the picker for who may; the Keys row's Every app switch for This workspace's own keys; a line for an older Orgo; plain words", async () => {
+  const K = await import(pathToFileURL(`${root}/components/app/app-key-links.tsx`).href);
+  const can = { every: true, app: true };
+  /** What it says, its HTML entities read back. */
+  const said = (html) => text(html).replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+  const links = [
+    { app: "*", name: "ANTHROPIC_API_KEY", key: "ANTHROPIC_API_KEY" },
+    { app: "*", name: "OPENAI_API_KEY", key: "OPENAI_API_KEY" },
+    { app: "notes", name: "OPENAI_API_KEY", key: "OPENAI_PROJECT_KEY", missing: true },
+    { app: "other", name: "GITHUB_TOKEN", key: "GITHUB_TOKEN" },
+  ];
+  const vars = (answer) => renderToStaticMarkup(h(K.KeyVariablesList, { app: "notes", answer }));
+  let html = vars({ links, can });
+  assert.match(said(html), /ANTHROPIC_API_KEY\s*from Keys \(ANTHROPIC_API_KEY\), every app/);
+  assert.match(said(html), /OPENAI_API_KEY\s*from Keys \(OPENAI_PROJECT_KEY\), Keys has none now/, "its own link over every app's of that name");
+  assert.ok(!/from Keys \(OPENAI_API_KEY\)/.test(said(html)), "every app's link of the name its own link sets isn't shown");
+  assert.ok(!html.includes("GITHUB_TOKEN"), "another app's isn't");
+  assert.ok(html.includes('aria-label="Stop OPENAI_API_KEY using OPENAI_PROJECT_KEY"'), "its own link has Remove");
+  assert.ok(!html.includes("Stop ANTHROPIC_API_KEY"), "every app's is changed in Keys, not here");
+  for (const w of [K.APP_KEYS_WORDS.use, K.APP_KEYS_WORDS.readable, K.APP_KEYS_WORDS.reach]) assert.ok(said(html).includes(w), w);
+  // Someone who may see them but not change this app's: the rows alone.
+  html = vars({ links, can: { every: true, app: false } });
+  assert.ok(html.includes("ANTHROPIC_API_KEY") && !said(html).includes(K.APP_KEYS_WORDS.use) && !html.includes("aria-label=\"Stop "));
+  assert.equal(vars({ links: [], can: { every: true, app: false } }), "", "nothing to show, nothing to change");
+  assert.equal(vars(null), "", "not read yet, or no Keys");
+  assert.ok(said(vars({ links: [], can })).includes(K.APP_KEYS_WORDS.use), "none yet: the picker");
+  assert.equal(said(vars({ links: [], can: { every: false, app: false }, old: true, said: "Orgo can't link keys to apps yet." })), "Orgo can't link keys to apps yet.");
+  // The Keys row's switch.
+  const row = (k, answer = { links, can }) => renderToStaticMarkup(h(K.EveryAppRow, { k, answer }));
+  html = row({ name: "ANTHROPIC_API_KEY", scope: "workspace" });
+  assert.ok(html.includes('role="switch"') && html.includes('aria-checked="true"') && said(html).includes(K.APP_KEYS_WORDS.every) && said(html).includes(K.APP_KEYS_WORDS.everyOn));
+  assert.ok(row({ name: "STRIPE_SECRET_KEY", scope: "workspace" }).includes('aria-checked="false"'));
+  for (const k of [{ name: "ANTHROPIC_API_KEY", scope: "all" }, { name: "ANTHROPIC_API_KEY", scope: "workspace", owner: true }, { name: "ANTHROPIC_API_KEY", scope: "workspace", from: "ws_other" }]) {
+    assert.equal(row(k), "", `never for ${JSON.stringify(k)}: the owner's for all their workspaces stay theirs`);
+  }
+  assert.equal(row({ name: "ANTHROPIC_API_KEY", scope: "workspace" }, null), "");
+  assert.equal(said(row({ name: "ANTHROPIC_API_KEY", scope: "workspace" }, { links: [], can: { every: false, app: false }, old: true, said: "Orgo can't link keys to apps yet." })), "Orgo can't link keys to apps yet.");
+  for (const w of Object.values(K.APP_KEYS_WORDS)) {
+    assert.ok(!NO_DASHES.test(w), `no dashes: ${w}`);
+    assert.ok(!/orbit/i.test(w), `Knowledge, never Orbit: ${w}`);
+  }
+  // Each mount is one line where #186 rewrites Your Apps, and keeps working there.
+  for (const [file, mount] of [["app-settings.tsx", "<KeyVariables app={name} />"], ["shared-apps.tsx", "<KeyVariables app={a.name} />"], ["keys.tsx", "<EveryAppSwitch k={k} />"]]) {
+    assert.ok(readFileSync(`${root}/components/app/${file}`, "utf8").includes(mount), `${file} mounts it`);
+  }
+});
+
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
 process.exit(failed ? 1 : 0);

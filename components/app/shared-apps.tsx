@@ -11,9 +11,11 @@ import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
 import { DOMAIN_WORDS } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
+import { GithubForm, ghFormOf, ghMirrorOf, NO_GH_FORM, type GhForm } from "./github-form";
 import { PasswordShown } from "./preview-password";
 import { memberAct } from "./shared-act";
 import { ago } from "./ui";
+import { KeyVariables } from "./app-key-links";
 
 /*
  * Your Apps in a workspace someone shared with the user, when its owner gave them Your Apps (lib/shared.ts SharedOpen.apps,
@@ -22,8 +24,10 @@ import { ago } from "./ui";
  * history, and domains; Write also sees a Preview's password, deploys, goes back to an earlier Preview deploy, changes
  * a site's settings and uses one of the workspace's own domains, each sent to the owner's Bops (memberAct), which does
  * it and keeps it on the app under their name. An Admin, once the owner's Bops takes it (SharedOpen.adminPublish), also
- * publishes (what its Preview serves goes on Published) and goes back on Published. Never its variables, logs or a domain
- * to buy: the owner's.
+ * publishes (what its Preview serves goes on Published) and goes back on Published. An Admin, or a Member with App
+ * secrets, once the owner's Bops takes it (SharedOpen.appGithub), also sets where an app publishes on GitHub, links it,
+ * and brings GitHub's changes in (GithubPart): Bops Cloud keeps the setting, and the app's own computer does the rest,
+ * with the owner's Mac on or off. Never its variables, logs or a domain to buy: the owner's.
  */
 
 /** Every word the shared page says (the tests read them for dashes and the old name). */
@@ -66,9 +70,67 @@ export const SHARED_APPS_WORDS = {
   /** As an Admin confirms Publish: its domains aren't pointed at Orgo yet, so a published change isn't what their visitors see. */
   publishWaiting: (domains: string, many = false) => `Visitors to ${domains} won't see a publish until ${many ? "their" : "its"} DNS points at Orgo.`,
   acted: (who: string, a: Pick<MemberAppAct, "act" | "site"> & { domain?: string; env?: "prod" }) =>
-    a.act === "deploy" ? (a.env === "prod" ? `${who} published it` : `${who} deployed it`) : a.act === "rollback" ? `${who} went back to an earlier deploy` : a.act === "settings" ? `${who} changed ${a.site ? `${a.site}'s` : "its"} settings` : `${who} pointed ${a.domain ?? "a domain"} at it`,
+    a.act === "deploy"
+      ? a.env === "prod"
+        ? `${who} published it`
+        : `${who} deployed it`
+      : a.act === "rollback"
+        ? `${who} went back to an earlier deploy`
+        : a.act === "settings"
+          ? `${who} changed ${a.site ? `${a.site}'s` : "its"} settings`
+          : a.act === "github"
+            ? `${who} changed where it publishes`
+            : a.act === "githubLink"
+              ? `${who} linked it to GitHub`
+              : a.act === "githubPull"
+                ? `${who} brought in GitHub's changes`
+                : `${who} pointed ${a.domain ?? "a domain"} at it`,
   tried: (who: string, act: MemberAppAct["act"] | "publish", said: string) =>
-    `${who} tried to ${act === "publish" ? "publish it" : act === "deploy" ? "deploy it" : act === "rollback" ? "go back to an earlier deploy" : act === "settings" ? "change its settings" : "use a domain"}: ${said}`,
+    `${who} tried to ${
+      act === "publish"
+        ? "publish it"
+        : act === "deploy"
+          ? "deploy it"
+          : act === "rollback"
+            ? "go back to an earlier deploy"
+            : act === "settings"
+              ? "change its settings"
+              : act === "github"
+                ? "change where it publishes"
+                : act === "githubLink"
+                  ? "link it to GitHub"
+                  : act === "githubPull"
+                    ? "bring in GitHub's changes"
+                    : "use a domain"
+    }: ${said}`,
+  /** A Link or Bring in its computer is doing now (SharedApp.acts `going`). */
+  asked: (who: string, act: MemberAppAct["act"]) => (act === "githubLink" ? `${who} asked its computer to link it to GitHub…` : `${who} asked its computer to bring in GitHub's changes…`),
+  /** Its GitHub production (GithubPart), at Write, for whoever may change it (SharedOpen.appGithub). */
+  github: "GitHub",
+  githubWhere: (g: { repo: string; branch: string; path?: string }) => `Publishes to GitHub ${g.repo}, ${g.branch}, ${g.path ? `folder ${g.path}` : "the whole repo"}.`,
+  githubLinked: (sha: string, when: string) => `Last the same as GitHub at ${sha} (${when}).`,
+  githubNotLinked: "It isn't linked yet. Link it before you publish.",
+  githubOnOrgo: "It publishes on Orgo.",
+  githubStart: "Publish to GitHub instead",
+  githubChange: "Change where it publishes",
+  githubLink: "Link to GitHub",
+  githubPull: "Bring in GitHub's changes",
+  githubPullAsk: "GitHub's version wins where both changed a file. Bring them in?",
+  githubPullYes: "Bring them in",
+  githubOrgo: "Publish on Orgo instead",
+  cancel: "Cancel",
+  githubOneFolder: "It runs more than one site, and one GitHub folder is one app, so it publishes on Orgo.",
+  githubKeyNote: "A new repo, branch, folder or workflow needs a GitHub key of this workspace's own in Keys.",
+  linkFirst: "Link it to GitHub first.",
+  /** Publish, while its computer links it to GitHub or brings GitHub's changes in. */
+  githubWait: "Its computer is busy with GitHub. Publish once it's done.",
+};
+/** The GitHub form's words here (github-form.tsx GithubForm): Save links it too. */
+export const SHARED_GITHUB_FORM_WORDS = {
+  title: "Publish to GitHub",
+  blurb: "Ingot stays where it's worked on and previewed. Publish pushes what the Preview serves into this folder, and that repo's own workflow deploys it. Its computer links it as you save.",
+  save: "Save and link",
+  saving: "Saving…",
 };
 const W = SHARED_APPS_WORDS;
 
@@ -83,10 +145,13 @@ export function asOf(at: number, now = Date.now()) {
   return new Date(now).toDateString() === d.toDateString() ? time : `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${time}`;
 }
 
-/** What a member's act on an app says, done or not, with when (the owner's rows and the member's own). */
+/** What a member's act on an app says, done or not (or still being done on its computer), with when (the owner's rows and the member's own). */
 export function actLine(a: NonNullable<SharedApp["acts"]>[number]) {
+  if (a.going) return `${W.asked(a.name, a.act)} · ${asOf(a.at)}`;
   return `${a.ok ? W.acted(a.name, a) : W.tried(a.name, a.act === "deploy" && a.env === "prod" ? "publish" : a.act, a.said ?? W.failed)} · ${asOf(a.at)}`;
 }
+/** What a GitHub act that went says of itself (how many changes came in, files that go up with the next Publish), under its line. */
+const isGithubKind = (act: string) => act === "github" || act === "githubLink" || act === "githubPull";
 
 const BUTTON = "rounded-full px-3 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
 
@@ -96,6 +161,8 @@ export function SharedAppsPage({ state }: { state: AppState }) {
   const write = apps.level === "write";
   // An Admin whose owner's Bops publishes for them (Bops Cloud says so only then: ADMIN_PUBLISH_MIN_VERSION).
   const publish = write && state.shared?.role === "admin" && state.shared.adminPublish === true;
+  // Where apps publish on GitHub, their Link and Bring in: an Admin's, or a Member's with App secrets (GITHUB_ACTS_MIN_VERSION).
+  const github = write && state.shared?.appGithub === true;
   return (
     <div data-shared-apps className="@container flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
       <header className="flex flex-wrap items-baseline justify-between gap-3"><h1 className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">{W.title}</h1>{apps.at > 0 && <span data-apps-asof className="text-[12px] leading-4 text-pencil">{W.asOf(asOf(apps.at))}</span>}</header>
@@ -104,7 +171,7 @@ export function SharedAppsPage({ state }: { state: AppState }) {
       ) : (
         <div className={appList}>
           {apps.list.map((a) => (
-            <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
+            <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} github={github} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
           ))}
         </div>
       )}
@@ -115,7 +182,7 @@ export function SharedAppsPage({ state }: { state: AppState }) {
 type Pending = NonNullable<NonNullable<AppState["shared"]>["appActs"]>[number];
 
 /** One app: its state, address and Deploy (and an Admin's Publish); its sites, history, deploys, settings and domains open below. */
-function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean }) {
+function SharedAppCard({ app: a, apps, acts, publish, github = false }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean; github?: boolean }) {
   const [open, setOpen] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const [env, setEnv] = useState<"preview" | "prod">("preview");
@@ -134,13 +201,17 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
     return r.ok;
   };
   const newest = a.acts?.[0];
+  // A Link or Bring in its computer is doing now: nothing else on the app until it's said how it went (a Preview deploy isn't the mirror's).
+  const ghGoing = !!a.acts?.some((x) => x.going);
+  const busy = !!going || ghGoing;
   const deployState = (s: string | null | undefined): DeployState | null => s === "queued" || s === "running" || s === "succeeded" || s === "failed" || s === "cancelled" || s === "superseded" ? s : null;
-  // Production on GitHub: Live is the changeset last sent there (Bops Cloud's github.at; null: not linked yet), as the
-  // owner's own Your Apps reads it (lib/app-review.ts statusForApp), never Orgo's Published, which a push doesn't move.
-  // From a Bops Cloud that doesn't say (no `at`): Published's, and linked as far as this page knows (the owner's Bops
-  // says so if it isn't, and Publish stays pressable as before).
+  // Production on GitHub: Live is the changeset last sent there, as the owner's own Your Apps reads it (lib/app-review.ts
+  // statusForApp), never Orgo's Published, which a push doesn't move. Bops Cloud says it as `at` (null: not linked yet); one
+  // from before says it at Write only (`linked`, with its folder `path`), and one before that not at all: Published's then,
+  // and linked as far as this page knows (the owner's Bops says so if it isn't, and Publish stays pressable as before).
   const gh = a.github;
-  const liveAt = gh && gh.at !== undefined ? gh.at : site?.serving ?? null;
+  const ghAt = !gh ? undefined : gh.at !== undefined ? gh.at : gh.linked ? gh.linked.ingot : gh.path !== undefined ? null : undefined;
+  const liveAt = ghAt !== undefined ? ghAt : site?.serving ?? null;
   const status = appStatus({
     head: a.head?.id ?? null,
     preview: pv ? { serving: serving ?? null, state: deployState(live?.state) } : null,
@@ -148,9 +219,11 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
     domain: !!site?.domains?.some(d => d.status !== "failed" && d.status !== "disabled"),
     wasLive: !!site?.serving,
     lost: a.lost,
-    ...(gh ? { github: { linked: gh.at !== null } } : {}),
+    ...(gh ? { github: { linked: ghAt !== null } } : {}),
     changes: changesBetween(a.commits ?? [], liveAt, serving ?? null),
   });
+  // Publish waits while its computer works on GitHub, and until it's linked there (it would be refused).
+  const whyPublish = ghGoing ? W.githubWait : ghAt === null ? W.linkFirst : undefined;
   // Where an Admin's Publish goes, said where they confirm it: GitHub, or Published on domains that don't point at Orgo
   // yet (its visitors don't see a publish until they do), else its domain.
   const waitingOn = site?.domains?.length && site.domains.every((d) => d.status !== "active") && !site.url ? site.domains.map((d) => d.domain) : [];
@@ -181,12 +254,17 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
               {said}
             </span>
           )}
-          {newest && <span data-act-line className={newest.ok ? "text-[#6B6B6B]" : "text-[#B42318]"}>{actLine(newest)}</span>}
+          {newest && <span data-act-line className={newest.ok || newest.going ? "text-[#6B6B6B]" : "text-[#B42318]"}>{actLine(newest)}</span>}
+          {newest?.ok && !newest.going && newest.said && isGithubKind(newest.act) && (
+            <span data-act-said className="text-[#6B6B6B]">
+              {newest.said}
+            </span>
+          )}
         </div>
       )}
       <Fold lazy open={open}><div className="flex min-w-0 flex-col gap-5 border-b border-rule px-4 py-4">
         {!write && <span className="text-[13px] text-pencil">{W.readOnly}</span>}
-        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? W.publishLine} busy={!!going} updateAlso
+        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? W.publishLine} busy={!!going} whyPublish={whyPublish} updateAlso
           password={site?.previewProtected ? <AppPassword password={write ? site.previewPassword ?? null : null}/> : undefined}
           onUpdate={write ? () => void send({ act: "deploy", app: a.name }) : undefined}
           onPublish={publish ? at => send({ act: "deploy", app: a.name, env: "prod", ...(pv && !a.siteNames?.length ? { at } : {}) }) : undefined}
@@ -229,6 +307,7 @@ function SharedAppCard({ app: a, apps, acts, publish }: { app: SharedApp; apps: 
               ))}
             </Part>
           )}
+          {write && github && <GithubPart app={a} busy={busy} onSend={(act) => void send(act)} />}
           {write && a.settings && <AppDisclosure title="Settings"><SettingsPart app={a} disabled={!!going} onSave={(act) => void send(act)}/></AppDisclosure>}
           {write && !!apps.owned?.length && <DomainPart app={a} owned={apps.owned} disabled={!!going} onUse={(act) => void send(act)} />}
             <span className="text-[12px] text-pencil">{[W.noVariables, W.noLogs, W.noBuying].join(" ")}</span>
@@ -261,6 +340,82 @@ function Part({ title, children }: { title: string; children: React.ReactNode })
       <span className="text-[12px] font-semibold leading-4 text-[#9A9A97]">{title}</span>
       {children}
     </div>
+  );
+}
+
+/**
+ * Its production on GitHub, for an Admin or a Member with App secrets (SharedOpen.appGithub): where it publishes and where
+ * it was last the same as GitHub; Bring in GitHub's changes (asked first: GitHub's version wins where both changed a file)
+ * and Link, which its own computer does; and where it publishes, set or changed (Save and link) or back on Orgo, which
+ * Bops Cloud keeps (a new repo, branch, folder or workflow only with a GitHub key of the workspace's own). One folder is
+ * one app: an app of more sites stays on Orgo.
+ */
+function GithubPart({ app: a, busy, onSend }: { app: SharedApp; busy: boolean; onSend: (act: MemberAppAct) => void }) {
+  const [form, setForm] = useState<GhForm | null>(null);
+  const [asking, setAsking] = useState(false);
+  const g = a.github;
+  const btn = `${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`;
+  if (a.siteNames?.length)
+    return (
+      <Part title={W.github}>
+        <span className="text-[12.5px] text-[#6B6B6B]">{W.githubOneFolder}</span>
+      </Part>
+    );
+  return (
+    <Part title={W.github}>
+      <div data-shared-github className="flex flex-col gap-1.5 text-[12.5px] leading-[18px]">
+        <span className="text-[#3A3A38]">{g ? W.githubWhere(g) : W.githubOnOrgo}</span>
+        {g && <span className="text-[#6B6B6B]">{g.linked ? W.githubLinked(shortId(g.linked.sha), asOf(g.linked.when)) : W.githubNotLinked}</span>}
+        {!form &&
+          (asking ? (
+            <span data-gh-pull-ask className="flex flex-wrap items-center gap-2">
+              <span className="text-[#3A3A38]">{W.githubPullAsk}</span>
+              <button type="button" disabled={busy} onClick={() => (setAsking(false), onSend({ act: "githubPull", app: a.name }))} className={`${BUTTON} bg-ink text-white`}>
+                {W.githubPullYes}
+              </button>
+              <button type="button" onClick={() => setAsking(false)} className="text-[12px] text-[#6B6B6B] hover:text-ink">
+                {W.cancel}
+              </button>
+            </span>
+          ) : (
+            <span className="flex flex-wrap items-center gap-2">
+              {g?.linked && (
+                <button type="button" data-gh-pull disabled={busy} onClick={() => setAsking(true)} className={btn}>
+                  {W.githubPull}
+                </button>
+              )}
+              {g && !g.linked && (
+                <button type="button" data-gh-link disabled={busy} onClick={() => onSend({ act: "githubLink", app: a.name })} className={`${BUTTON} bg-ink text-white`}>
+                  {W.githubLink}
+                </button>
+              )}
+              <button type="button" data-gh-change disabled={busy} onClick={() => setForm(g ? ghFormOf(g) : { ...NO_GH_FORM })} className={btn}>
+                {g ? W.githubChange : W.githubStart}
+              </button>
+            </span>
+          ))}
+        {form && (
+          <>
+            <GithubForm
+              form={form}
+              onChange={setForm}
+              busy={busy}
+              words={SHARED_GITHUB_FORM_WORDS}
+              onSave={() => (setForm(null), onSend({ act: "github", app: a.name, github: ghMirrorOf(form), link: true }))}
+              onCancel={() => setForm(null)}
+            />
+            <span className="flex flex-wrap items-center gap-2 text-[12px] text-[#9A9A98]">
+              {W.githubKeyNote}
+              {g && (
+                <button type="button" data-gh-orgo disabled={busy} onClick={() => (setForm(null), onSend({ act: "github", app: a.name, github: null }))} className="text-[#6B6B6B] underline-offset-2 hover:text-ink hover:underline">
+                  {W.githubOrgo}
+                </button>
+              )}
+            </span>
+          </>
+        )}
+      </div>
+    </Part>
   );
 }
 
@@ -301,6 +456,7 @@ function SettingsPart({ app: a, disabled, onSave }: { app: SharedApp; disabled: 
         </button>
         <span className="text-[12px] text-[#9A9A98]">{W.noVariables}</span>
       </span>
+      <KeyVariables app={a.name} />
     </Part>
   );
 }

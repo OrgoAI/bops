@@ -79,9 +79,12 @@ function publish(a) {
 }
 
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+/** Which of the sample's apps use keys from Keys (app-key-links.tsx reads it in Settings): none, nothing to change. The stack's own server has no apps open to answer it. */
+const noKeyLinks = (page) => page.route((u) => u.pathname === "/api/keys/apps", (route) => json(route, { links: [], can: { every: false, app: false } }));
 
 /** The owner's window: its state as Orgo's team with the sample apps in it, and every Your Apps route answered from the sample. */
 async function ownerRoutes(page) {
+  await noKeyLinks(page);
   await page.route((u) => u.pathname === "/api/state", async (route) => {
     // (A read still in flight as the window closes: let it go, don't fail the run on it.)
     const r = await route.fetch().catch(() => null);
@@ -148,6 +151,7 @@ async function ownerRoutes(page) {
 
 /** Sam's window: the shared workspace's apps, as the owner's Mac would have written them, and an Admin's acts taken here. */
 async function samRoutes(page) {
+  await noKeyLinks(page);
   await page.route((u) => u.pathname === "/api/state", async (route) => {
     const r = await route.fetch().catch(() => null);
     const j = r ? await r.json().catch(() => null) : null;

@@ -26,7 +26,8 @@ import { userDir } from "./store";
  * Never touched: anything outside the folder (a repo's secrets and workflows), the app's `keep` paths (either way),
  * GitHub's symbolic links and submodules (Ingot has none), .ingotignore. The push is one commit on top of the branch,
  * never forced. A folder gone from GitHub (FOLDER_GONE), or most of it deleted on either side (MASS_DELETE), stops it.
- * Link (linkMirror) sets the point, only when both sides have the same files.
+ * Link (linkMirror) sets the point, only when GitHub has no file Ingot lacks or has otherwise: files only Ingot has
+ * (a new client's own folder in a shared repo) are Ingot's changes, and go up with the first Publish.
  *
  * Every GitHub call goes through Orgo's broker with the owner's GITHUB_TOKEN (keys.ts callKey): the token is in no
  * command, file, log or message. The broker takes 1 MB a request (a file up to BLOB_MAX goes up), answers 512 KB (a
@@ -296,24 +297,43 @@ async function atOrAfter(wsId: string, name: string, at: string, mark: string): 
 /* ---------------- Link, Publish, Bring in ---------------- */
 
 /**
- * Link an app to its GitHub folder: Ingot's newest changeset and the branch's newest commit, when they have the same
- * files (but `keep` paths and GitHub's links). Else LINK_DIFFERS, with the paths that differ: make them the same (or
- * keep them), then link. A folder not on GitHub yet links to an empty one: the first Publish puts it all there.
+ * Link an app to its GitHub folder: Ingot's newest changeset and the branch's newest commit, when GitHub has no file
+ * (but `keep` paths and GitHub's links) that Ingot lacks or has otherwise. Else LINK_DIFFERS, with those paths: make them
+ * the same (or keep them), then link. Files only Ingot has are Ingot's changes from the point on: the first Publish puts
+ * them there (`ingotOnly`), as it puts all of a folder not on GitHub yet, which links to an empty one.
  */
 export async function linkMirror(wsId: string, name: string, cfg: GithubMirror): Promise<NonNullable<GithubMirror["last"]>> {
+  return (await linkAndSay(wsId, name, cfg)).last;
+}
+
+/** Link (linkMirror), and what it found in words: where, and the files only Ingot has, which go up with the next Publish. */
+export async function linkAndSay(wsId: string, name: string, cfg: GithubMirror): Promise<{ last: NonNullable<GithubMirror["last"]>; ingotOnly: string[]; said: string }> {
   const head = await ingot.head(wsId, name);
   if (!head) throw new MirrorError(head === undefined ? `Ingot has no repo ${name}.` : `${name} has nothing committed yet.`, 409);
   const gh = github(wsId);
   const sha = await ghHead(gh, cfg.repo, cfg.branch);
   const theirs = await ghSide(gh, cfg.repo, sha, cfg.path);
+  let ingotOnly: string[] = [];
   if (theirs.present) {
     const skip = (p: string) => keptPath(p, cfg.keep) || theirs.links.has(p);
     const ours = await ingotSide(wsId, name, head, skip);
-    const differ = [...changes(new Map([...theirs.files].filter(([p]) => !skip(p))), ours.files).keys()].sort();
+    const base = new Map([...theirs.files].filter(([p]) => !skip(p)));
+    const d = changes(base, ours.files);
+    // Only Ingot has it: Ingot's change, for the first Publish. GitHub has it (alone, or otherwise): it stops.
+    ingotOnly = [...d.keys()].filter((p) => !base.has(p)).sort();
+    const differ = [...d.keys()].filter((p) => base.has(p)).sort();
     if (differ.length)
       throw new MirrorError(`Ingot and GitHub differ in ${list(differ)}. Make them the same first (or add them to the files left alone), then link.`, 409, { code: "LINK_DIFFERS", paths: differ.slice(0, 50), count: differ.length });
   }
-  return { sha, ingot: head, keep: cfg.keep ?? [], when: Date.now() };
+  const where = `${cfg.repo} ${cfg.branch}${cfg.path ? `, folder ${cfg.path}` : ""}`;
+  const said = [
+    `Linked ${name} to GitHub ${where} at ${short(sha)}.`,
+    ingotOnly.length ? `${ingotOnly.length === 1 ? "1 file only Ingot has" : `${ingotOnly.length} files only Ingot has`} (${list(ingotOnly)}) ${ingotOnly.length === 1 ? "goes" : "go"} to GitHub with the next Publish.` : "",
+    !theirs.present ? `GitHub has no ${cfg.path ? `${cfg.path}/ ` : ""}folder yet, so the next Publish puts all of it there.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return { last: { sha, ingot: head, keep: cfg.keep ?? [], when: Date.now() }, ingotOnly, said };
 }
 
 export type MirrorDone = {
@@ -418,7 +438,7 @@ async function readGithub(gh: GitHub, cfg: GithubMirror) {
  */
 export async function mirrorPublish(wsId: string, name: string, at: string, cfg: GithubMirror, author: string): Promise<MirrorDone> {
   const last = cfg.last;
-  if (!last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first: in Your Apps, open Technical details, then the menu on the Published line.`, 409, { code: "NOT_LINKED" });
+  if (!last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first, from Technical details in Your Apps.`, 409, { code: "NOT_LINKED" });
   if (!(await atOrAfter(wsId, name, at, last.ingot)))
     throw new MirrorError("The preview is older than what GitHub has (its changes came into Ingot since). Deploy the newest to the preview first, then publish.", 409, { code: "PREVIEW_BEHIND" });
   const gh = github(wsId);
@@ -448,7 +468,7 @@ export async function mirrorPublish(wsId: string, name: string, at: string, cfg:
   const newer = (headFiles: Files) => {
     for (const [p, f] of theirs) if (!unlinked.has(p) && !same(headFiles.get(p), baseFiles.get(p)) && !same(headFiles.get(p), f) && !both.includes(p)) both.push(p);
     if (both.length)
-      throw new MirrorError(`Both Ingot and GitHub changed ${list(both)} since they were last the same. Bring in GitHub's changes (Your Apps, Technical details, the menu on the Published line) to take GitHub's version, then make Ingot's change again. Nothing was published.`, 409, { code: "BOTH_CHANGED", paths: both });
+      throw new MirrorError(`Both Ingot and GitHub changed ${list(both)} since they were last the same. Bring in GitHub's changes (from Technical details in Your Apps) to take GitHub's version, then make Ingot's change again. Nothing was published.`, 409, { code: "BOTH_CHANGED", paths: both });
   };
   const ingotHead = await ingot.head(wsId, name);
   newer(theirs.size && ingotHead && ingotHead !== at ? (await ingotSide(wsId, name, ingotHead, (p) => !theirs.has(p))).files : oursNow.files);
@@ -540,7 +560,7 @@ async function pushUp(
  * history), and the point moves to the branch's newest. What only Ingot changed stays, for the next Publish.
  */
 export async function mirrorPull(wsId: string, name: string, cfg: GithubMirror, author: string): Promise<MirrorDone> {
-  if (!cfg.last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first: in Your Apps, open Technical details, then the menu on the Published line.`, 409, { code: "NOT_LINKED" });
+  if (!cfg.last) throw new MirrorError(`${name} isn't linked to GitHub yet. Link it first, from Technical details in Your Apps.`, 409, { code: "NOT_LINKED" });
   const gh = github(wsId);
   const { head, baseFiles, theirs, unlinked } = await readGithub(gh, cfg);
   massDelete(baseFiles, theirs, "GitHub");
