@@ -4,7 +4,7 @@ The home has one list for websites and tools. A changed website opens review rat
 
 | Acceptance | Proof |
 |---|---|
-| Equal rows at both widths; no Local controls or direct publish on home | Browser checks and [pictures](proof/your-apps-v4/README.md) |
+| Equal rows at both widths; no Local controls or direct publish on home | Browser checks (the before and after pictures are in the PR description's history, not in the repo) |
 | Review preview, reveal/copy password, Escape, Live, and Ask Boppy do what they say | Browser checks at 1440px and 1180px |
 | Pending previews and review entries use the existing highlighter; quiet/working/failed states do not borrow it | Rendered UI regression and browser color checks |
 | Final confirmation quiets the earlier review action; cancellation restores it; editing remains available | Mounted UI, browser checks and Ask Boppy's unsent draft |
@@ -13,11 +13,14 @@ The home has one list for websites and tools. A changed website opens review rat
 | Restore changes Preview and preserves a separate Publish action | Browser checks and test-app-status.mjs |
 | Settings, domains, rollback, GitHub tools, multi-site actions, Local and copies retain their request bodies | test-hosted-apps-ui.mjs; representative owner/Admin browser requests |
 | Members keep Read/Write/Admin boundaries; owner-only tools stay private | test-hosted-apps-ui.mjs and test-shared.mjs |
+| An Admin keeps Update preview beside Publish, and never gets an Add a domain they can't use | test-hosted-apps-ui.mjs |
+| An Admin's review of an app on GitHub reads Live from the last push (SharedApp.github.at), and Publish's confirmation says where it goes: the repo and branch, or a domain not pointed at Orgo yet | test-hosted-apps-ui.mjs and cloud/test/core-members.test.ts |
+| A failed preview update still lets what the preview serves be published | test-app-status.mjs |
 | Existing Bops controls, shared CRM picker, lucide icons, reduced motion | Source audit, types/lint, browser pictures |
 
-Run `scripts/verify your-apps --ui`. The browser uses the local sample stack and answers publishing requests locally. It proves the UI and requests, not real GitHub or production deployment. No domain feature, dependency, auth contract, server handler, or installed Bops change is included. Revert the feature commit to roll back the UI.
+Run `scripts/verify your-apps --ui`. The browser uses the local sample stack and answers publishing requests locally. It proves the UI and requests, not real GitHub or production deployment. No domain feature, dependency, auth contract or server handler changes. Bops Cloud adds one field to what members see of an app on GitHub (SharedApp.github.at, the changeset last sent there); from a Bops Cloud without it, an Admin's review reads Live from Published as before and Publish stays pressable. Revert the feature commit to roll back the UI.
 
-This fresh pass replaces the rejected mock in Draft #184. Related #179 carries a separate server/cloud explanation of publishing destinations; this UI keeps those contracts untouched and uses an honest confirmation for the destination currently available to it.
+This fresh pass replaces the rejected mock in Draft #184. #179's words for where Publish goes (GitHub, or a domain not pointed at Orgo yet) are said in an Admin's Publish confirmation, as its line and destination.
 
 The approved [Paper color pass](https://app.paper.design/file/01M7177KTDR3NA8P96W6S1GT14/p-1-0/7B-0) emphasizes a pending decision with Bops' highlighter and a named Review preview action. “Unpublished” retains its preview/release meaning; review approval is not tracked and editing stays available. Info recommends reviewing the batch before unrelated work, while allowing refinement of the same change. The final publish confirmation keeps the preceding review action quiet.
 
