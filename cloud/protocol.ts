@@ -1323,9 +1323,10 @@ export type BrowserAct = { bot: string; project?: string; act: "take" | "release
  * WS /v1/browser/input?bot=<id>[&project=<Orgo workspace>]: the acts of one viewer's Bops for one bot, in order, on one
  * socket (lib/server/browser-view.ts), each message a BrowserAct without `bot` and `project` (the address says them), at
  * most 64 KiB. Checked as the watch stream is: at the upgrade (refused with mayUseBrowser's status), every ROLE_MS while
- * open, and ended by orgo-web's notice; each act checked as POST /v1/browser/act checks it, then sent to the runner of
- * that computer at that moment. Bops Cloud answers only what didn't go (BrowserInputReply). Its refusals of the upgrade
- * carry BROWSER_INPUT_HEADER, so a 404 without it is a Bops Cloud from before this socket.
+ * open and at each write of the owner's state, and ended by orgo-web's notice; each act checked as POST /v1/browser/act
+ * checks it, then sent to the runner of that computer at that moment. Bops Cloud answers only what didn't go
+ * (BrowserInputReply), and pings it; each end pings the other, and one that doesn't answer by the next ping is taken for
+ * gone. Its refusals of the upgrade carry BROWSER_INPUT_HEADER, so a 404 without it is a Bops Cloud from before this socket.
  */
 export const BROWSER_INPUT_PATH = "/v1/browser/input";
 export const BROWSER_INPUT_HEADER = "x-bops-browser-input";

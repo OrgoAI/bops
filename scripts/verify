@@ -13,7 +13,7 @@ const steps = feature === 'browser-input' ? [
     [process.execPath, ['--test', 'cloud/test/core-browser.test.ts', 'cloud/test/edge-browser.test.ts']],
     ['npx', ['tsc', '--noEmit']],
     ['npx', ['tsc', '--noEmit', '-p', 'cloud']],
-    ['npx', ['eslint', 'cloud/browser.ts', 'cloud/http.ts', 'cloud/protocol.ts', 'cloud/test/edge-browser.test.ts', 'lib/server/browser-view.ts', 'scripts/test-browser-view.mjs', 'components/app/bot-browser.tsx', 'components/app/browser-cursor.tsx', 'scripts/browser-speed/link.mjs', 'scripts/test-browser-probe.mjs']],
+    ['npx', ['eslint', 'cloud/browser.ts', 'cloud/http.ts', 'cloud/live.ts', 'cloud/protocol.ts', 'cloud/test/edge-browser.test.ts', 'lib/server/browser-view.ts', 'scripts/test-browser-view.mjs', 'components/app/bot-browser.tsx', 'components/app/browser-cursor.tsx', 'scripts/browser-speed/link.mjs', 'scripts/test-browser-probe.mjs']],
 ] : [
     [process.execPath, ['--test', 'scripts/test-browser-probe.mjs']],
     [process.execPath, ['--check', 'scripts/verify']],
