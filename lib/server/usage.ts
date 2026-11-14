@@ -40,6 +40,18 @@ export function recordUsage(kind: UsageKind, detail: Omit<UsageEvent, "kind" | "
 
 export const usageSince = (since: number) => (getState().usage ?? []).filter((e) => e.at >= since);
 
+/** Recorded tokens for one task in the retained ledger; older records without a task ID stay unassigned. */
+export function sessionUsage(sessionId: string) {
+  let inputTokens = 0, outputTokens = 0, records = 0;
+  for (const event of getState().usage ?? []) {
+    if (event.kind !== "model.tokens" || event.sessionId !== sessionId) continue;
+    inputTokens += event.inputTokens ?? 0;
+    outputTokens += event.outputTokens ?? 0;
+    records++;
+  }
+  return { sessionId, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, records };
+}
+
 /** Token counts as OpenAI reports them: a Responses API response's `usage`, or an agent turn's. */
 type Tokens = { input_tokens: number; output_tokens: number } | null | undefined;
 
@@ -47,12 +59,12 @@ type Tokens = { input_tokens: number; output_tokens: number } | null | undefined
  * One model call's tokens, from what the API reported (nothing is recorded when it reported none).
  * Call it once per response: each response's usage covers only that call.
  */
-export function recordTokens(source: NonNullable<UsageEvent["source"]>, model: string | undefined, usage: Tokens, botId?: string, epoch?: number) {
+export function recordTokens(source: NonNullable<UsageEvent["source"]>, model: string | undefined, usage: Tokens, botId?: string, epoch?: number, sessionId?: string) {
   // Work started on a state that has since been swapped out (another user signed in): not this state's to count.
   if (!usage || (epoch !== undefined && epoch !== stateEpoch())) return;
   const inputTokens = usage.input_tokens ?? 0;
   const outputTokens = usage.output_tokens ?? 0;
-  recordUsage("model.tokens", { source, model, botId, qty: inputTokens + outputTokens, inputTokens, outputTokens });
+  recordUsage("model.tokens", { source, model, botId, ...(sessionId ? { sessionId } : {}), qty: inputTokens + outputTokens, inputTokens, outputTokens });
 }
 
 /**
