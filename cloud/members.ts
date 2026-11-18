@@ -35,6 +35,10 @@ import {
   ADMIN_HAS_ALL,
   ADMIN_ONLY,
   CHAT_AUTO_OFF,
+  CLOUD_ALL_MIN_VERSION,
+  CLOUD_CHAT_MIN_VERSION,
+  CLOUD_NOT_YET,
+  COMPUTER_NOT_READY,
   PEOPLE_GONE,
   ADMIN_POWERS_MIN_VERSION,
   ADMIN_PUBLISH_MIN_VERSION,
@@ -104,7 +108,10 @@ import {
   routedWorkspaces,
   routingOf,
   setRouting,
+  runnerOn,
+  runnerVersionOf,
   takeAppJob,
+  takeChatJob,
   takeMessage,
   wakeComputer,
   withAppAct,
@@ -114,6 +121,8 @@ import {
 } from "./turns.ts";
 import { cleanGithubMirror, GITHUB_KEY_NAME, keepsPoint, sameDestination, type GithubMirror } from "./github-config.ts";
 import { appVersionOf, olderThan } from "./app-version.ts";
+import { afterWake, answerIn, compactIn, dismissIn, noRunnerWords, oldRunnerWords, replyIn, stopIn, whereIn, type ActDone, type ActEnv, type ComputerFacts, type Wake } from "./thread-acts.ts";
+import { applyChange, renameRefused, WS_NAME_MAX, type Renamed } from "./change-apply.ts";
 
 /**
  * Shared workspaces (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -123,12 +132,22 @@ import { appVersionOf, olderThan } from "./app-version.ts";
  * given), its threads with their notes and results, its routines and watches, what Needs you, the moods
  * as they happen. Never another bot's, nor the owner's vault, logins, keys, Macs or settings
  * (ws-slice.ts). Members never publish (POST /v1/live only ever goes into the caller's own account), and
- * Bops Cloud edits the owner's state for an Admin in three places only: the bots a Member has (peopleWrite), entry by
- * entry as the owner's Mac keeps them, which the owner's Macs merge in; a bot's How I work while the owner's Mac is
- * away, in a workspace whose chat goes through Bops Cloud, with the owner's Bops new enough to keep it (personaHere); and
- * an app's GitHub production from Your Apps (an Admin's, or a Member's with App secrets), where it publishes (githubHere)
- * and how a Link or Bring in its computer did went (turns.ts takeAppJob, finish), with the owner's Bops new enough to
- * keep both (GITHUB_ACTS_MIN_VERSION).
+ * Bops Cloud edits the owner's state for someone else only here, each under the owner's lock, checked again on the state
+ * as it is then, written once (turns.ts writeOwnerState) and stamped as theirs:
+ * - the bots a Member has (peopleWrite), entry by entry as the owner's Mac keeps them, which the owner's Macs merge in;
+ * - a bot's How I work while the owner's Mac is away, in a workspace whose chat goes through Bops Cloud, with the owner's
+ *   Bops new enough to keep it (personaHere);
+ * - an answer to a computer's runner's ask while the owner's Mac is away (answerOnComputer);
+ * - an app's GitHub production from Your Apps (an Admin's, or a Member's with App secrets), where it publishes (githubHere)
+ *   and how a Link or Bring in its computer did went (turns.ts takeAppJob, finish), with the owner's Bops new enough to
+ *   keep both (GITHUB_ACTS_MIN_VERSION);
+ * - in a workspace where everything goes through the cloud (turns.ts allCloud: CLOUD_ALL_MIN_VERSION), every act but an
+ *   app's and a chat message (cloudAct), the owner's Mac on or off: a reply, Stop, Nothing to add, Compact and where a
+ *   thread runs (thread-acts.ts: Session replies, stopAsked, status, by, dismissed, compact, askWhere, runsOn; a step line),
+ *   an answer, Always allow too (AppApproval.reply, Bot.permissions), a bot's How I work (Bot.persona, personaBy), its
+ *   keys (Bot.keys, after or before orgo-web's grant with the member's own key), a change (change-apply.ts: Bot fields,
+ *   Workspace.botSettings, chain, computerNames, name and orgoName, changesDone), and a chat's Compact, whose line its
+ *   job's end writes (turns.ts takeChatJob, finish). The notes it says in the chats are its own (state.ts writeMessages).
  *
  * - **Who may**: orgo-web says, with the caller's own Orgo key (GET /api/projects/<id>/bops-role: the
  *   owner, an admin or a member; 404 for anyone else; and, from an orgo-web that sends it, when their
@@ -159,7 +178,9 @@ import { appVersionOf, olderThan } from "./app-version.ts";
  *   retry a no-op. Counted, MEMBER_ACTS_A_MINUTE a minute each. In a workspace whose chat goes through Bops Cloud
  *   (turns.ts), a chat act is written here at once instead, and its answer owed to the bot's computer (cloudChat); so is
  *   an Admin's How I work while the owner's Mac is away (personaHere: CLOUD_PERSONA_MIN_VERSION), and an answer to a computer's runner's ask
- *   (answerOnComputer).
+ *   (answerOnComputer). In a workspace where everything goes through the cloud (turns.ts allCloud), nothing waits for the
+ *   owner's Mac: every act but an app's is done here and by the bots' own computers (cloudAct), and what can't be done
+ *   from here yet is said (409 COMPUTER_NOT_READY, CLOUD_NOT_YET), never left for that Mac.
  *
  * The caller's key is held in memory while their stream is open, to ask again with it; never stored.
  */
@@ -981,6 +1002,10 @@ let wake: typeof wakeComputer = (...a) => wakeComputer(...a);
 let answerHere: (o: Parameters<typeof answerOnComputer>[0]) => Promise<boolean> = (o) => answerOnComputer(o);
 /** An app's GitHub job owed to its computer, or why it can't be (turns.ts takeAppJob). */
 let takeJob: typeof takeAppJob = (...a) => takeAppJob(...a);
+/** A chat's Compact owed to one of its bots' computers as a job (turns.ts takeChatJob). */
+type TakeChat = (o: Parameters<typeof takeChatJob>[0]) => Promise<{ turn: { id: string }; fresh: boolean }>;
+const realTakeChat: TakeChat = (o) => takeChatJob(o);
+let takeChat: TakeChat = realTakeChat;
 
 /** Whether a caller's Bops knows the GitHub acts (protocol.ts GITHUB_ACTS_MIN_VERSION): it says its version, at that or newer. */
 const knowsGithubActs = (req: IncomingMessage) => {
@@ -1054,6 +1079,8 @@ const actIn: Route = {
     const slice = sliceOf(blob, target.ws, viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
+    // Everything through the cloud: an answer sent again (a lost 202) whose ask holds this very person's reply is done.
+    if (body.act.act === "answer" && answeredBy(blob, body.act.askId, user!.id) && (await cloudAll(target.account, target.ws))) return sendJson(res, 202, CLOUD_DONE);
     if (isAppAct(body.act)) {
       appsTouched(slice, viewer, access, body.act);
       // Done here (the setting) and by the app's own computer (Link, Bring in), the owner's Mac on or off (githubAct).
@@ -1103,6 +1130,12 @@ const actIn: Route = {
       if (slice.chats.some((c) => c.id === chatAct.chatId)) return cloudChat(res, { user: user!, role, target, viewer, projectId, key: body.key, act: chatAct, asked });
       // Where everything goes through the cloud, never the owner's Mac's: a chat not theirs to see is none.
       if (await cloudAll(target.account, target.ws)) throw new HttpError(404, "No such chat.");
+    }
+    // A workspace where everything goes through the cloud (turns.ts allCloud): every other act but an app's is done here, by
+    // Bops Cloud and the bots' own computers, the owner's Mac on or off, and never queued for that Mac (cloudAct). Its
+    // switch moved back under the owner's lock meanwhile: as before, below.
+    if (!isAppAct(body.act) && body.act.act !== "chat" && (await cloudAll(target.account, target.ws))) {
+      if (await cloudAct(res, { user: user!, role, target, viewer, actor, projectId, key: body.key, act: body.act, bearer: bearer(req), blob, asked })) return;
     }
     // An Admin's How I work in a workspace whose chat goes through Bops Cloud, while the owner's Mac is away: kept here now,
     // so the bot's next turn there has it (personaHere), once the owner's Bops keeps it through its own later writes
@@ -1214,35 +1247,48 @@ async function answerOnComputer(o: { target: LiveTarget; viewer: SliceViewer; ac
  * Mac, and said in the bot's chat. The same act again (its key) changes nothing.
  */
 async function personaHere(o: { target: LiveTarget; viewer: SliceViewer; actor: Actor; act: Extract<MemberAct, { act: "persona" }>; who: MemberWho; key: string; still: () => boolean }) {
-  const { target, act, who } = o;
-  // (cleanAct trimmed it; empty clears it, as lib/types.ts keptPersona.)
-  const text = act.text || undefined;
+  const { target } = o;
   const out = await tx(async (c) => {
     await lockUser(c, target.account);
     const blob = await lockedState(c, target.account);
     const slice = sliceOf(blob, target.ws, o.viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
-    botsTouched(blob, slice, act, o.actor);
-    const all = list(blob.bots);
-    const b = all.find((x) => x.id === act.botId);
-    if (!b) throw new HttpError(404, "No such bot");
-    if ((typeof b.persona === "string" ? b.persona : undefined) === text) return null;
-    const by = b.personaBy && typeof b.personaBy === "object" ? (b.personaBy as Record<string, unknown>) : null;
-    const ownerText = by ? by.ownerText : b.persona;
-    const changed: Record<string, unknown> = { ...b, personaBy: { name: who.name, ...(typeof ownerText === "string" && ownerText ? { ownerText } : {}) } };
-    if (text) changed.persona = text;
-    else delete changed.persona;
-    const written = { ...blob, bots: all.map((x) => (x === b ? changed : x)) };
-    await writeOwnerState(c, target.account, written);
+    botsTouched(blob, slice, o.act, o.actor);
+    const done = personaIn(blob, o.act, o.who, o.key);
+    if (!done) return null;
+    await writeOwnerState(c, target.account, done.written);
     // After the write, before it's kept: an orgo-web notice for them that landed meanwhile (even during it) takes it back.
     if (!o.still()) throw new HttpError(404, "No such workspace");
-    return { written, bot: typeof b.name === "string" && b.name.trim() ? b.name.trim() : "the bot" };
+    return done;
   });
   if (!out) return;
   announce(target.account);
   stateWritten(target.account, out.written, "cloud");
-  // As the owner's Mac says it (lib/server/member-acts.ts), by the act's key: sent again, the same note.
-  await writeMessages(target.account, [{ id: `msg_persona_${who.userId}_${o.key}`, chatId: `bot:${act.botId}`, role: "system", botId: act.botId, text: `${who.name} changed how ${out.bot} works`, at: now() }]);
+  await writeMessages(target.account, [out.note]);
+}
+
+/**
+ * A bot's How I work on the owner's state, as the owner's Mac keeps an Admin's (lib/server/member-acts.ts "persona"): named
+ * as theirs (Bot.personaBy) with the owner's own last words kept, and said in the bot's chat by the act's key (sent again,
+ * the same note). Null when it says that already.
+ */
+function personaIn(blob: Record<string, unknown>, act: Extract<MemberAct, { act: "persona" }>, who: MemberWho, key: string): { written: Record<string, unknown>; note: Record<string, unknown> } | null {
+  // (cleanAct trimmed it; empty clears it, as lib/types.ts keptPersona.)
+  const text = act.text || undefined;
+  const all = list(blob.bots);
+  const b = all.find((x) => x.id === act.botId);
+  if (!b) throw new HttpError(404, "No such bot");
+  if ((typeof b.persona === "string" ? b.persona : undefined) === text) return null;
+  const by = b.personaBy && typeof b.personaBy === "object" ? (b.personaBy as Record<string, unknown>) : null;
+  const ownerText = by ? by.ownerText : b.persona;
+  const changed: Record<string, unknown> = { ...b, personaBy: { name: who.name, ...(typeof ownerText === "string" && ownerText ? { ownerText } : {}) } };
+  if (text) changed.persona = text;
+  else delete changed.persona;
+  const bot = typeof b.name === "string" && b.name.trim() ? b.name.trim() : "the bot";
+  return {
+    written: { ...blob, bots: all.map((x) => (x === b ? changed : x)) },
+    note: { id: `msg_persona_${who.userId}_${key}`, chatId: `bot:${act.botId}`, role: "system", botId: act.botId, text: `${who.name} changed how ${bot} works`, at: now() },
+  };
 }
 
 /** Wake the computer of a run Bops Cloud answered (answerOnComputer); when it can't be, a note in the ask's chat saying why. */
@@ -1343,6 +1389,440 @@ async function cloudChat(
     await queue(target.account, "member", payload, `member:${user.id}:${key}`, new Date(Date.now() + STORED_ACT_MS));
   }
   sendJson(res, 202, { ok: true, macOn: true, stored: true, messageId: String(taken.message.id), ...(taken.turn ? { turn: taken.turn.id } : {}) } satisfies MemberActAnswer);
+}
+
+/* ---------------- A workspace where everything goes through the cloud ---------------- */
+
+/** The answer to an act Bops Cloud did itself (MemberActAnswer.cloud): their window shows it pending as "cloud", never as waiting for the Mac. */
+const CLOUD_DONE: MemberActAnswer = { ok: true, macOn: true, stored: true, cloud: true };
+/** How recent a runner's presence row must be for it to count as listening: one whose stream another process holds (turns.ts sweepTurns keeps the row fresh). */
+const PRESENCE_MS = 45_000;
+/** The runner a teammate's thread needs on the bot's computer: one that runs a member's words as theirs (CLOUD_CHAT_MIN_VERSION). */
+export const THREAD_RUNNER_MIN = CLOUD_CHAT_MIN_VERSION;
+
+type Db = Parameters<Parameters<typeof tx>[0]>[0];
+
+/** Whether ask `askId` of the owner's holds a reply from this very person (a retry of their answer). */
+const answeredBy = (blob: Record<string, unknown>, askId: string, userId: string) => {
+  const a = list(blob.appApprovals).find((x) => x.id === askId);
+  const r = a?.reply && typeof a.reply === "object" ? (a.reply as Record<string, unknown>) : null;
+  return !!r && !!r.member && typeof r.member === "object" && (r.member as Record<string, unknown>).userId === userId;
+};
+
+/** A bot's own computer as thread-acts.ts takes it (ComputerFacts), read in the act's transaction; null for a bot with none. */
+async function computerFacts(c: Db, account: string, blob: Record<string, unknown>, botId: string): Promise<ComputerFacts | null> {
+  const desktop = computerFor(blob, botId, true);
+  if (!desktop) return null;
+  const all = list(blob.bots);
+  const raw = workBotOf(all.find((b) => b.id === botId) ?? {}, all).computerId;
+  const devices = [...new Set([deviceIdOf(account, desktop), ...(typeof raw === "string" && raw ? [deviceIdOf(account, raw)] : [])])];
+  const version = await runnerVersionOf(c, account, blob, desktop);
+  const listening =
+    devices.some((d) => runnerOn(account, d)) ||
+    !!(await c.query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1 AND device_id = ANY($2::text[]) AND seen_at > now() - make_interval(secs => $3) LIMIT 1", [account, devices, PRESENCE_MS / 1000])).rowCount;
+  return { desktop, devices, listening, runner: !version ? "none" : olderThan(version, THREAD_RUNNER_MIN) ? "old" : "ok" };
+}
+
+/** The bots of these threads and of their parts (Stop ends those too), each once: the computers an act may need. */
+function threadBots(blob: Record<string, unknown>, ids: readonly string[]): string[] {
+  const sessions = list(blob.sessions);
+  const bots = new Set<string>();
+  const seen = new Set<string>();
+  const walk = (id: string, depth: number) => {
+    if (seen.has(id) || depth > 20) return;
+    seen.add(id);
+    const s = sessions.find((x) => x.id === id);
+    if (typeof s?.botId === "string") bots.add(s.botId);
+    for (const p of sessions) if (p.partOf === id && typeof p.id === "string") walk(p.id, depth + 1);
+  };
+  for (const id of ids) walk(id, 0);
+  return [...bots];
+}
+
+/** What thread-acts.ts goes by (ActEnv), for these bots, read in the act's transaction. */
+async function envOf(c: Db, account: string, blob: Record<string, unknown>, botIds: readonly string[]): Promise<ActEnv> {
+  const facts = new Map<string, ComputerFacts | null>();
+  for (const id of botIds) facts.set(id, await computerFacts(c, account, blob, id));
+  return { now: now(), macOn: isOn(account), owner: ownerOf(blob), computerOf: (id) => facts.get(id) ?? null };
+}
+
+/**
+ * The computer whose runner asked `a` (AppApproval.askedBy), as the owner's state knows its runners (AppState.runners, by
+ * Orgo computer id: device.ts deviceIdOf of it), else the bot's own; "mac" for one of the owner's Macs or an ask from
+ * before askedBy; null for a device it doesn't know.
+ */
+function askerOf(account: string, blob: Record<string, unknown>, a: Record<string, unknown>): { desktop: string } | "mac" | null {
+  const by = a.askedBy;
+  if (typeof by !== "string" || !by) return "mac";
+  if (blob.macs && typeof blob.macs === "object" && Object.hasOwn(blob.macs, by)) return "mac";
+  const runners = blob.runners && typeof blob.runners === "object" ? Object.keys(blob.runners) : [];
+  const own = typeof a.botId === "string" ? computerFor(blob, a.botId, true) : null;
+  for (const k of [...(own ? [own] : []), ...runners]) if (deviceIdOf(account, k) === by || deviceIdOf(account, k.toLowerCase()) === by) return { desktop: k.toLowerCase() };
+  const all = list(blob.bots);
+  const raw = typeof a.botId === "string" ? workBotOf(all.find((b) => b.id === a.botId) ?? {}, all).computerId : undefined;
+  if (typeof raw === "string" && raw && deviceIdOf(account, raw) === by) return { desktop: raw.toLowerCase() };
+  return null;
+}
+
+/** orgo-web's word on a bot's key (PUT /api/projects/<id>/bops-keys/bots, with the member's own Orgo key): done, its route not there yet, or why not. */
+type KeyGrant = { ok: true } | { missing: true } | { down: true } | { status: number; code?: string; error?: string };
+
+/** Let a bot use a key in orgo-web, or stop it (W3: the runner's broker reads that grant), with the member's own key; never stored. */
+async function keyGrant(key: string, projectId: string, botId: string, name: string, on: boolean): Promise<KeyGrant> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${config.orgoOrigin()}/api/projects/${encodeURIComponent(projectId)}/bops-keys/bots`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${key}`, "content-type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ name, bot: botId, on }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return { down: true };
+  }
+  if (res.ok) {
+    void res.body?.cancel().catch(() => {});
+    return { ok: true };
+  }
+  const j = (await res.json().catch(() => null)) as { error?: unknown; code?: unknown } | null;
+  const code = typeof j?.code === "string" ? j.code : undefined;
+  // The route itself isn't on orgo-web yet (a 404 that isn't one of its own, or a 405).
+  if (res.status === 405 || (res.status === 404 && code !== "BOT_NOT_FOUND" && code !== "KEY_NOT_FOUND")) return { missing: true };
+  if (res.status >= 500) return { down: true };
+  return { status: res.status, ...(code ? { code } : {}), ...(typeof j?.error === "string" ? { error: j.error.slice(0, 300) } : {}) };
+}
+
+/** What someone is told when keys can't change from the cloud (§4). */
+export const KEYS_NOT_YET = "Keys can't be changed from the cloud yet. Try again later.";
+export const keysUnknownBot = (bot: string) => `Orgo doesn't know ${bot} yet, so it can't be given keys from here. Try again in a few minutes.`;
+export const keysStillOn = (bot: string, name: string) => `Orgo still lets ${bot} use ${name}. Try again.`;
+
+/** A refusal from orgo-web for a "key" act turning a key on, in words (no state was written). */
+function keyRefused(g: Exclude<KeyGrant, { ok: true }>, bot: string): HttpError {
+  if ("missing" in g) return new HttpError(409, KEYS_NOT_YET, { code: CLOUD_NOT_YET });
+  if ("down" in g) return new HttpError(503, "Can't reach Orgo to change keys. Try again.");
+  if (g.code === "BOT_NOT_FOUND") return new HttpError(409, keysUnknownBot(bot), { code: CLOUD_NOT_YET });
+  return new HttpError(g.status === 404 || g.status === 403 || g.status === 400 ? g.status : 409, g.error ?? "Orgo didn't change that key.");
+}
+
+/** Bot `botId`'s keys on the owner's state, with key `name` on or off (keys.ts grantKey), and the note that says so as theirs; null when it already is. */
+function keyIn(blob: Record<string, unknown>, botId: string, name: string, on: boolean, who: MemberWho, key: string): { written: Record<string, unknown>; note: Record<string, unknown> } | null {
+  const all = list(blob.bots);
+  const b = all.find((x) => x.id === botId);
+  if (!b) throw new HttpError(404, "No such bot");
+  const had = Array.isArray(b.keys) ? b.keys.filter((k): k is string => typeof k === "string") : [];
+  if (had.includes(name) === on) return null;
+  const rest = had.filter((k) => k !== name);
+  const next: Record<string, unknown> = { ...b };
+  if (on) next.keys = [...rest, name];
+  else if (rest.length) next.keys = rest;
+  else delete next.keys;
+  const bot = typeof b.name === "string" && b.name.trim() ? b.name.trim() : "The bot";
+  return {
+    written: { ...blob, bots: all.map((x) => (x === b ? next : x)) },
+    note: { id: `msg_key_${who.userId}_${key}`, chatId: `bot:${botId}`, role: "system", botId, text: on ? `${who.name} let ${bot} use ${name}` : `${who.name} stopped ${bot} using ${name}`, at: now() },
+  };
+}
+
+/** A workspace renamed on orgo-web with the member's own Orgo key (PATCH /api/projects/<id>, which lets anyone with full access in a Bops workspace), before the owner's lock. */
+async function renameOnOrgo(key: string, projectId: string, name: string): Promise<Renamed> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${config.orgoOrigin()}/api/projects/${encodeURIComponent(projectId)}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${key}`, "content-type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new HttpError(503, "Couldn't reach Orgo to rename it. Try again.");
+  }
+  const j = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!res.ok) {
+    if (j?.code === "WORKSPACE_NAME_TAKEN") throw new HttpError(409, `The owner already has an Orgo workspace named ${name}. Pick another name.`, { code: NOT_WAITING });
+    if (res.status >= 500) throw new HttpError(503, "Couldn't reach Orgo to rename it. Try again.");
+    throw new HttpError(res.status === 403 || res.status === 400 || res.status === 404 ? res.status : 409, typeof j?.error === "string" ? j.error.slice(0, 300) : "Orgo didn't rename it.");
+  }
+  const p = j && typeof j.project === "object" && j.project ? (j.project as Record<string, unknown>) : j;
+  return { name, orgoName: typeof p?.name === "string" ? p.name : name, ...(typeof p?.updated_at === "string" ? { updatedAt: p.updated_at } : {}) };
+}
+
+/** A teammate's act Bops Cloud does itself (cloudAct): who, where, and the checks actIn made, to make again under the owner's lock. */
+type CloudActOpts = {
+  user: CloudUser;
+  role: WsAccess;
+  target: LiveTarget;
+  viewer: SliceViewer;
+  actor: Actor;
+  projectId: string;
+  key: string;
+  act: Exclude<MemberAct, MemberAppAct | { act: "chat" }>;
+  bearer: string;
+  blob: Record<string, unknown>;
+  asked: number;
+};
+
+/**
+ * actIn's checks again, on the owner's state under their lock (as it was read before, it may have moved): what's in the
+ * caller's view, Write on every bot it touches (a chat's every bot for a chat's Compact), the owner's app work at Your
+ * Apps Write, the power a change needs, and Use its computer for what acts on a bot's computer.
+ */
+function recheck(blob: Record<string, unknown>, o: CloudActOpts) {
+  const { act } = o;
+  const slice = sliceOf(blob, o.target.ws, o.viewer);
+  if (!slice.workspace) throw new HttpError(404, "No such workspace");
+  const access = viewerAccess(slice.workspace, o.viewer);
+  if (act.act === "change") changeTouched(blob, o.target.ws, slice, o.viewer, access, act);
+  else if (act.act === "key") botsTouched(blob, slice, act, o.actor);
+  else {
+    const bots = botsTouched(blob, slice, act, o.actor);
+    const may = act.act === "compact" && "chatId" in act ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
+    if (!may) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
+    if (appWorkRefused(blob, o.viewer, access, threadsOfAct(slice, act))) throw new HttpError(403, APP_WORK, { code: MEMBER_APPS_READ_ONLY });
+  }
+  if (!computerUseOf(slice.workspace, o.viewer) && computerAct(blob, slice, act)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
+}
+
+/** What an act did under the lock: the state written (null: nothing), the chats' notes, the computers to wake, and a run's asks to wake for. */
+type CloudDone = ActDone & { asks?: { askId: string; desktop: string; chatId: string | null; botId: string; threadId?: string; bot: string }[] };
+
+/**
+ * A teammate's act other than an app's or a chat message, in a workspace where everything goes through the cloud (turns.ts
+ * allCloud): done by Bops Cloud and the bots' own computers, the owner's Mac on or off, and never queued for that Mac. A
+ * reply, Stop, Nothing to add, Compact on a thread, where a thread runs (thread-acts.ts), an answer (Always allow too: a
+ * rule on the bot), a bot's How I work (personaIn), a bot's key (orgo-web with their own key, then Bot.keys), and a change
+ * (change-apply.ts); a chat's Compact is a job for the computer of one of its bots (turns.ts takeChatJob). actIn checked
+ * it all; under the owner's lock it's checked again on their state as it is then, done, and written once by Bops Cloud;
+ * a notice from orgo-web for them since they were asked takes it back. Then every viewer hears it, the chats get their
+ * notes, and the computers that must carry it on are woken (a thread whose computer won't wake says why, one asked to stop
+ * ends). False when the workspace's switch moved back to the Mac under the lock: the act goes as before.
+ */
+async function cloudAct(res: ServerResponse, o: CloudActOpts): Promise<boolean> {
+  const { target, act } = o;
+  const account = target.account;
+  const who = whoOf(o.user);
+  const still = () => (noticed.get(keyOf(o.user.id, o.projectId))?.n ?? 0) <= o.asked;
+  if (act.act === "compact" && "chatId" in act) return compactChatIn(res, o, who, still);
+  const botName = (blob: Record<string, unknown>, id: string) => {
+    const n = list(blob.bots).find((b) => b.id === id)?.name;
+    return typeof n === "string" && n.trim() ? n.trim() : "The bot";
+  };
+  // Asked of others first, never under the owner's lock: orgo-web for a key turned on (it's the grant the computer goes by)
+  // and a workspace's new name; the switch for where its chat is answered (setRouting takes the owner's lock itself).
+  let renamed: Renamed | undefined;
+  let chatDone = false;
+  if (act.act === "key" && act.on) {
+    const g = await keyGrant(o.bearer, o.projectId, act.botId, act.name, true);
+    if (!("ok" in g)) throw keyRefused(g, botName(o.blob, act.botId));
+  }
+  if (act.act === "change" && act.path === "/api/workspaces") {
+    const b = act.body;
+    if (b.chat !== undefined) {
+      if (b.chat !== "mac" && b.chat !== "auto") throw new HttpError(400, 'Say which workspace, and "mac" or "auto".');
+      await setRouting(account, target.ws, { mode: b.chat }, "admin").catch((e: unknown) => {
+        if (e instanceof HttpError && e.extra?.code === CHAT_AUTO_OFF) throw new HttpError(e.status, "Bops Cloud can't answer this workspace by itself yet, so the owner's Mac keeps answering it.", e.extra);
+        throw e;
+      });
+      chatDone = true;
+    } else if (b.chat === undefined && b.computerName === undefined && b.chain === undefined && typeof b.name === "string" && b.name.trim()) {
+      const clean = b.name.trim().slice(0, WS_NAME_MAX);
+      const refused = renameRefused(o.blob, target.ws, clean);
+      if (refused) throw new HttpError(409, refused, { code: CLOUD_NOT_YET });
+      const ws = list(o.blob.workspaces).find((w) => w.id === target.ws);
+      renamed = ws?.name === clean && ws?.orgoName === clean ? { name: clean, orgoName: clean } : await renameOnOrgo(o.bearer, o.projectId, clean);
+    }
+  }
+  let out: (CloudDone & { reason: string; env: ActEnv }) | null;
+  try {
+    out = await tx(async (c) => {
+      await lockUser(c, account);
+      // The switch, read again under the lock (a move to the Mac a moment ago goes as before). Not after a change of it.
+      if (!chatDone && !(await allCloud(account, target.ws, c))) return null;
+      const blob = await lockedState(c, account);
+      // An answer sent again whose ask holds their own reply: done.
+      if (act.act === "answer" && answeredBy(blob, act.askId, o.user.id)) return { blob: null, notes: [], wakes: [], reason: "", env: await envOf(c, account, blob, []) };
+      recheck(blob, o);
+      const ids = act.act === "stop" ? act.sessionIds : "sessionId" in act ? [act.sessionId] : [];
+      const env = await envOf(c, account, blob, threadBots(blob, ids));
+      let reason = `Stopped by ${who.name}`;
+      let done: CloudDone;
+      switch (act.act) {
+        case "reply":
+          done = replyIn(blob, act.sessionId, act.text, who, o.key, env);
+          break;
+        case "stop":
+          done = stopIn(blob, act.sessionIds, reason, env);
+          break;
+        case "dismiss":
+          reason = `Dismissed by ${who.name}`;
+          done = dismissIn(blob, act.sessionId, who, env);
+          break;
+        case "compact":
+          done = compactIn(blob, act.sessionId, who, o.key, env);
+          break;
+        case "where":
+          done = whereIn(blob, act.sessionId, who, o.key, env);
+          break;
+        case "answer":
+          done = await answerInCloud(c, account, blob, act, who);
+          break;
+        case "persona": {
+          const p = personaIn(blob, act, who, o.key);
+          done = { blob: p?.written ?? null, notes: p ? [p.note] : [], wakes: [] };
+          break;
+        }
+        case "key": {
+          const k = keyIn(blob, act.botId, act.name, act.on, who, o.key);
+          done = { blob: k?.written ?? null, notes: k ? [k.note] : [], wakes: [] };
+          break;
+        }
+        case "change": {
+          const ch = applyChange(blob, target.ws, act, who, o.key, now(), { ...(renamed ? { renamed } : {}), chatDone });
+          done = { blob: ch?.blob ?? null, notes: ch?.said ? [ch.said] : [], wakes: [] };
+          break;
+        }
+      }
+      if (done.blob) await writeOwnerState(c, account, done.blob);
+      // After the write, before it's kept: an orgo-web notice for them that landed meanwhile (even during it) takes it back.
+      if (!still()) throw new HttpError(404, "No such workspace");
+      return { ...done, reason, env };
+    });
+  } catch (e) {
+    // orgo-web lets the bot use the key, and the owner's state couldn't say so: taken back there, as best it can be.
+    if (act.act === "key" && act.on) void keyGrant(o.bearer, o.projectId, act.botId, act.name, false).catch(() => {});
+    throw e;
+  }
+  if (!out) {
+    if (act.act === "key" && act.on) void keyGrant(o.bearer, o.projectId, act.botId, act.name, false).catch(() => {});
+    return false;
+  }
+  const done = out;
+  if (done.blob) {
+    announce(account);
+    stateWritten(account, done.blob, "cloud");
+  }
+  // A key turned off: orgo-web too, after the owner's state (so the owner's Mac never sends it back on), tried three times;
+  // also when the state had it off already (orgo-web may still have it on from before).
+  if (act.act === "key" && !act.on) {
+    let g: KeyGrant = { down: true };
+    for (let i = 0; i < 3 && !("ok" in g); i++) {
+      g = await keyGrant(o.bearer, o.projectId, act.botId, act.name, false);
+      if ("missing" in g) break;
+    }
+    if ("missing" in g) {
+      // orgo-web can't take it from here yet: the owner's state goes back as it was, and nothing is said.
+      if (done.blob) await keyBack(account, act.botId, act.name);
+      throw new HttpError(409, KEYS_NOT_YET, { code: CLOUD_NOT_YET });
+    }
+    if (done.notes.length) await writeMessages(account, done.notes);
+    // Off in the owner's state; the owner's Mac sends orgo-web the whole set as it next looks (lib/server/access-sync.ts).
+    if (!("ok" in g)) throw new HttpError(502, keysStillOn(botName(done.blob ?? o.blob, act.botId), act.name));
+    sendJson(res, 202, CLOUD_DONE);
+    return true;
+  }
+  if (done.notes.length) await writeMessages(account, done.notes);
+  for (const w of done.wakes) void wakeForThread(account, target.ws, w, done.reason, done.env).catch((e: Error) => console.warn(`[members] waking for an act: ${e.message}`));
+  for (const a of done.asks ?? [])
+    void answerWake(account, target.ws, a.askId, { desktop: a.desktop, chatId: a.chatId, botId: a.botId, ...(a.threadId ? { threadId: a.threadId } : {}), owner: done.env.owner, bot: a.bot }).catch((e: Error) =>
+      console.warn(`[members] waking for an answer: ${e.message}`),
+    );
+  sendJson(res, 202, CLOUD_DONE);
+  return true;
+}
+
+/** A key a "key" act turned off in the owner's state, put back on (orgo-web couldn't take it off from here: KEYS_NOT_YET). */
+async function keyBack(account: string, botId: string, name: string) {
+  const written = await tx(async (c) => {
+    await lockUser(c, account);
+    const blob = await lockedState(c, account);
+    const all = list(blob.bots);
+    const b = all.find((x) => x.id === botId);
+    if (!b || (Array.isArray(b.keys) && b.keys.includes(name))) return null;
+    const next = { ...blob, bots: all.map((x) => (x === b ? { ...b, keys: [...(Array.isArray(b.keys) ? b.keys : []), name] } : x)) };
+    await writeOwnerState(c, account, next);
+    return next;
+  });
+  if (!written) return;
+  announce(account);
+  stateWritten(account, written, "cloud");
+}
+
+/**
+ * An answer to a request for the owner's OK (thread-acts.ts answerIn: Allow once, Deny, Always allow), wherever the request
+ * came from: a computer's runner, or the owner's Mac (it reads the reply as it opens). A routine's run waits on a runner
+ * new enough to send Orgo the routine's next time once it reads it (CLOUD_ALL_MIN_VERSION: lib/server/permission.ts
+ * settleAsks), else 409 COMPUTER_NOT_READY. Each runner that asked is woken after (answerWake).
+ */
+async function answerInCloud(c: Db, account: string, blob: Record<string, unknown>, act: Extract<MemberAct, { act: "answer" }>, who: MemberWho): Promise<CloudDone> {
+  const a = list(blob.appApprovals).find((x) => x.id === act.askId);
+  if (!a) throw new HttpError(404, "No such ask");
+  const bot = typeof a.botId === "string" ? (list(blob.bots).find((b) => b.id === a.botId)?.name as string | undefined)?.trim() || "The bot" : "The bot";
+  if (typeof a.routineId === "string" && a.routineId) {
+    const asker = askerOf(account, blob, a);
+    if (asker !== "mac") {
+      const v = asker ? await runnerVersionOf(c, account, blob, asker.desktop) : null;
+      if (!v) throw new HttpError(409, noRunnerWords(bot, ownerOf(blob)), { code: COMPUTER_NOT_READY });
+      if (olderThan(v, CLOUD_ALL_MIN_VERSION)) throw new HttpError(409, oldRunnerWords(bot, ownerOf(blob)), { code: COMPUTER_NOT_READY });
+    }
+  }
+  const { blob: written, answered } = answerIn(blob, act.askId, act.reply, act.message?.slice(0, MEMBER_MAX_NOTE), who, now());
+  const sessions = list(blob.sessions);
+  const asks: NonNullable<CloudDone["asks"]> = [];
+  for (const x of answered) {
+    const asker = askerOf(account, blob, x);
+    if (!asker || asker === "mac" || typeof x.botId !== "string") continue;
+    const thread = typeof x.threadId === "string" ? sessions.find((s) => s.id === x.threadId) : undefined;
+    const chatId = typeof x.chatId === "string" ? x.chatId : typeof thread?.chatId === "string" ? thread.chatId : null;
+    const name = list(blob.bots).find((b) => b.id === x.botId)?.name;
+    asks.push({ askId: String(x.id), desktop: asker.desktop, chatId, botId: x.botId, ...(typeof x.threadId === "string" ? { threadId: x.threadId } : {}), bot: typeof name === "string" && name.trim() ? name.trim() : "The bot" });
+  }
+  return { blob: written, notes: [], wakes: [], asks };
+}
+
+/** Wake a computer for a thread an act left with it (thread-acts.ts Wake); one that won't wake: the thread says why, or ends (afterWake). */
+async function wakeForThread(account: string, ws: string, w: Wake, reason: string, env: ActEnv) {
+  const n = list((await ownerState(account)).bots).find((b) => b.id === w.botId)?.name;
+  const r = await wake(account, w.desktop, ws, { owner: env.owner, bot: typeof n === "string" && n.trim() ? n.trim() : "The bot" });
+  // (Waking not set up on this Bops Cloud at all is no reason to give anyone.)
+  if (r.ok || r.state === "unset" || !r.why) return;
+  const why = r.why;
+  const written = await tx(async (c) => {
+    await lockUser(c, account);
+    const blob = await lockedState(c, account);
+    const next = afterWake(blob, w, why, reason, { now: now(), computerOf: env.computerOf });
+    if (!next) return null;
+    await writeOwnerState(c, account, next);
+    return next;
+  });
+  if (!written) return;
+  announce(account);
+  stateWritten(account, written, "cloud");
+}
+
+/**
+ * Compact on a chat, in a workspace where everything goes through the cloud: a job for the computer of the first of its
+ * bots with a runner new enough (turns.ts takeChatJob), which folds the chat into its summary; Bops Cloud writes the line
+ * that says it's compacted, as theirs, once it's done (or why not). Checked again under the owner's lock (recheck).
+ */
+async function compactChatIn(res: ServerResponse, o: CloudActOpts, who: MemberWho, still: () => boolean): Promise<boolean> {
+  const act = o.act as Extract<MemberAct, { act: "compact"; chatId: string }>;
+  const taken = await takeChat({
+    account: o.target.account,
+    wsId: o.target.ws,
+    chatId: act.chatId,
+    id: `msg_job_${o.user.id}_${o.key}`,
+    member: {
+      ...who,
+      ref: o.key,
+      ...(o.role.joinedAt !== undefined ? { joinedAt: o.role.joinedAt } : {}),
+      projectId: o.projectId,
+      ...(o.role.role === "admin" ? { role: "admin" as const } : {}),
+    },
+    check: (locked) => recheck(locked, o),
+    still,
+  });
+  sendJson(res, 202, { ...CLOUD_DONE, turn: taken.turn.id } satisfies MemberActAnswer);
+  return true;
 }
 
 /* ---------------- An app's GitHub production, from Your Apps ---------------- */
@@ -1853,6 +2333,8 @@ export function resetMembers(
     wake?: typeof wakeComputer;
     /** An app's GitHub job (unset: turns.ts takeAppJob, on the owner's state in Postgres). */
     takeJob?: typeof takeAppJob;
+    /** A chat's Compact as a job (unset: turns.ts takeChatJob). */
+    takeChat?: TakeChat;
   } = {},
 ) {
   kept.clear();
@@ -1867,6 +2349,7 @@ export function resetMembers(
   answerHere = opts.answerHere ?? (opts.state ? async () => false : (o) => answerOnComputer(o));
   wake = opts.wake ?? ((...a) => wakeComputer(...a));
   takeJob = opts.takeJob ?? ((...a) => takeAppJob(...a));
+  takeChat = opts.takeChat ?? realTakeChat;
   queue = opts.queue ?? realQueue;
   isOn = opts.isOn ?? realIsOn;
   drop = opts.drop ?? dropActs;
