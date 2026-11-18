@@ -46,6 +46,17 @@ export type AppsReaders = {
   room?: (wsId: string, computerId: string) => Promise<(AppsRoom & { bot?: string }) | null>;
 };
 
+/**
+ * A computer's room for more apps (hosted-apps.ts roomOn: with the owner's key, or on a runner the computer's own), with
+ * the id of the bot it's named for (roomHost); null: no line.
+ */
+export const readRoom: NonNullable<AppsReaders["room"]> = async (ws, c) => {
+  const h = await import("./hosted-apps");
+  const r = await h.roomOn(ws, c);
+  const b = h.roomHost(ws, c);
+  return r && { ...r, ...(b ? { bot: b.id } : {}) };
+};
+
 const realReaders = async (): Promise<AppsReaders> => {
   const h = await import("./hosted-apps");
   return {
@@ -54,11 +65,7 @@ const realReaders = async (): Promise<AppsReaders> => {
     settings: (ws, name, site, env) => h.appSettings(ws, name, site, env),
     owned: (ws, name) => h.domainOptions(ws, name),
     password: (ws, name, site) => h.previewPassword(ws, name, site),
-    room: async (ws, c) => {
-      const r = await h.roomOn(ws, c);
-      const b = h.roomHost(ws, c);
-      return r && { ...r, ...(b ? { bot: b.id } : {}) };
-    },
+    room: readRoom,
   };
 };
 
@@ -248,21 +255,32 @@ async function roomsFor(wsId: string, list: HostedApp[], r: AppsReaders): Promis
   const on = new Map<string, string[]>();
   for (const a of list) if (a.hosting?.computerId && !a.hosting.lost) on.set(a.hosting.computerId, [...(on.get(a.hosting.computerId) ?? []), a.name]);
   for (const [c, names] of on) {
-    const got = await r.room(wsId, c).catch(() => null);
-    if (!got) continue;
-    // (Field by field, the names in order: a page read in another order is the same room, never a write.)
-    out[roomKeyOf(wsId, c)] = {
-      used: got.used,
-      limit: got.limit,
-      urlsUsed: got.urlsUsed,
-      urlsLimit: got.urlsLimit,
-      apps: got.apps,
-      ...(got.urlsFirst ? { urlsFirst: true as const } : {}),
-      appNames: [...names].sort().slice(0, MEMBER_APPS),
-      ...(got.bot ? { bot: got.bot } : {}),
-    };
+    const got = await memberRoomOf(wsId, c, names, r.room);
+    if (got) out[roomKeyOf(wsId, c)] = got;
   }
   return out;
+}
+
+/**
+ * One computer's room as members see it (MemberRoom; by its room key roomKeyOf, never its id, wherever it's sent): the
+ * numbers alone, the apps on it by name (`names`, in order, MEMBER_APPS at most), and the id of the bot it's named for.
+ * Null: no line, or a read that failed (never a number from before). The owner's Mac's (roomsFor) and a computer's own,
+ * for its apps' view (apps-view-share.ts), read the same way.
+ */
+export async function memberRoomOf(wsId: string, computerId: string, names: readonly string[], read: NonNullable<AppsReaders["room"]>): Promise<MemberRoom | null> {
+  const got = await read(wsId, computerId).catch(() => null);
+  if (!got) return null;
+  // (Field by field, the names in order: a page read in another order is the same room, never a write.)
+  return {
+    used: got.used,
+    limit: got.limit,
+    urlsUsed: got.urlsUsed,
+    urlsLimit: got.urlsLimit,
+    apps: got.apps,
+    ...(got.urlsFirst ? { urlsFirst: true as const } : {}),
+    appNames: [...names].sort().slice(0, MEMBER_APPS),
+    ...(got.bot ? { bot: got.bot } : {}),
+  };
 }
 
 const running = new Map<string, Promise<void>>();

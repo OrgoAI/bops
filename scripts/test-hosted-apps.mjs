@@ -5249,6 +5249,9 @@ await check("Settings before a site's first deploy: kept on its record, no proje
     ["POST", "/api/computers/c_boppy/deploy-projects"],
     ["POST", `/api/computers/c_boppy/deploy-projects/${pv.id}/deployments`],
   ]);
+  // What a first deploy makes is what each new app takes of its computer's room (NEW_APP_TAKES): no empty Published.
+  const made = writesSince(n).filter((c) => c.method === "POST");
+  assert.deepEqual({ projects: made.filter((c) => c.path === "/api/computers/c_boppy/deploy-projects").length, urls: made.filter((c) => c.path === "/api/computers/c_boppy/public-urls").length }, H.NEW_APP_TAKES);
   assert.deepEqual([pv.start_cmd, pv.health_path], ["npm run admin", "/up"], "built as Published would be");
   const link = web.urls.find((u) => u.label === pv.name);
   assert.ok(link, "its link");
@@ -6924,22 +6927,25 @@ await check("Cleanups: a bot whose Works on moves off the app has its copy's Loc
 
 /* ---------------- How many more apps each computer has room for ---------------- */
 
-await check("A computer's room for more apps (roomOf): its deploy projects and public URLs against their caps, each new app taking what a first deploy makes (2 projects, 1 public URL); the URLs said when they run out first; no line with no cap or a cap orgo-web doesn't say", () => {
-  assert.deepEqual(H.NEW_APP_TAKES, { projects: 2, urls: 1 }, "an empty Published, then the Preview's link and project");
+await check("A computer's room for more apps (roomOf): its deploy projects and public URLs against their caps, each new app taking what a first deploy makes (1 project, 1 public URL: its Preview, Published made only when first needed); the URLs said when they run out first; no line with no cap or a cap orgo-web doesn't say", () => {
+  assert.deepEqual(H.NEW_APP_TAKES, { projects: 1, urls: 1 }, "the Preview's link and project, no empty Published");
   const urls = (n, limit = 10) => ({ enabled: true, limit, public_urls: Array.from({ length: n }, (_, i) => ({ id: `u${i}` })) });
   const projects = (n, limit = 10) => ({ limit, projects: Array.from({ length: n }, (_, i) => ({ id: `p${i}` })) });
-  assert.deepEqual(H.roomOf(projects(6), urls(3)), { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2 });
-  assert.deepEqual(H.roomOf(projects(8), urls(3)), { used: 8, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 1 });
-  assert.deepEqual(H.roomOf(projects(9), urls(3)).apps, 0, "one project left, a new app takes two: full");
+  assert.deepEqual(H.roomOf(projects(6), urls(3)), { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 4 });
+  assert.deepEqual(H.roomOf(projects(8), urls(3)), { used: 8, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2 });
+  assert.deepEqual(H.roomOf(projects(9), urls(3)).apps, 1, "one project left: room for one more");
   assert.deepEqual(H.roomOf(projects(10), urls(3)).apps, 0);
   assert.deepEqual(H.roomOf(projects(8, 5), urls(0)), { used: 8, limit: 5, urlsUsed: 0, urlsLimit: 10, apps: 0 }, "past its cap (a cap lowered since): full, never less than none");
   assert.deepEqual(H.roomOf(projects(2), urls(8)), { used: 2, limit: 10, urlsUsed: 8, urlsLimit: 10, apps: 2, urlsFirst: true }, "the public URLs run out first");
   assert.deepEqual(H.roomOf(projects(2), urls(10)), { used: 2, limit: 10, urlsUsed: 10, urlsLimit: 10, apps: 0, urlsFirst: true });
-  assert.deepEqual(H.roomOf(projects(4), { enabled: false, public_urls: [] }), { used: 4, limit: 10, urlsUsed: 0, urlsLimit: -1, apps: 3 }, "public URLs not open there: no cap of theirs");
+  assert.deepEqual(H.roomOf(projects(4), { enabled: false, public_urls: [] }), { used: 4, limit: 10, urlsUsed: 0, urlsLimit: -1, apps: 6 }, "public URLs not open there: no cap of theirs");
   assert.deepEqual(H.roomOf(projects(40, -1), urls(9)), { used: 40, limit: -1, urlsUsed: 9, urlsLimit: 10, apps: 1, urlsFirst: true }, "projects with no cap: the URLs alone");
   assert.equal(H.roomOf(projects(4, -1), urls(9, -1)), null, "no cap at all: no line");
   assert.equal(H.roomOf({ projects: [] }, urls(0)), null, "an orgo-web that doesn't say the projects' cap (or a computer that can't host): no line");
   assert.deepEqual(H.roomOf(projects(0, 0), urls(0)).apps, 0, "a cap of none: full");
+  // What each new app takes is what's counted (a first deploy making two projects would leave room for half as many).
+  assert.deepEqual(H.roomOf(projects(6), urls(3), { projects: 2, urls: 1 }).apps, 2);
+  assert.deepEqual(H.roomOf(projects(9), urls(3), { projects: 2, urls: 1 }).apps, 0, "one project left, two taken: full");
 });
 
 await check("roomOn reads each list once (kept a while), the room is in the Apps page's answer for every computer the apps are on and the main bot's (named for its bot), read again once a left over is removed; a failed read is no line and isn't kept; none with no cap or hosting closed", async () => {
@@ -7187,11 +7193,13 @@ await check("A member's job on the app's own computer (appJob), each kind on its
     assert.deepEqual(await H.appJob("boppy", { act: "deploy", app: "ivy-page" }, "Sam"), { ok: false, said: "ivy-page lives on another computer, not this one, so nothing of it was changed here." });
     assert.deepEqual(writesSince(n), [], "nothing done");
 
-    // Update preview: its Preview alone, no Published project.
+    // Update preview: its Preview alone, no Published project: what a new app takes of its computer's room (NEW_APP_TAKES).
     n = web.calls.length;
     assert.deepEqual(await job({ act: "deploy" }), { ok: true, said: "Deploying demo-app to its preview." });
     const pv = previewProject(DEMO);
     assert.ok(pv && !prodProject(DEMO) && demoProjects().length === 1, "its Preview alone");
+    const made = writesSince(n).filter((c) => c.method === "POST");
+    assert.deepEqual({ projects: made.filter((c) => c.path === "/api/computers/c_boppy/deploy-projects").length, urls: made.filter((c) => c.path === "/api/computers/c_boppy/public-urls").length }, H.NEW_APP_TAKES);
     assert.equal(demo().preview, pv.name, "its label kept, as a runner may");
     // Settings: on its Preview.
     n = web.calls.length;
@@ -7326,9 +7334,61 @@ await check("On a bot's computer, what members see of its apps (appsViewHere): o
     assert.deepEqual(all.apps.map((a) => a.name).sort(), here);
     assert.ok(here.includes("recipe-box") && !here.includes("ivy-site"));
     assert.deepEqual(all.owned, web.bought.filter((b) => b.project === PROJECT && b.status === "active").map(({ id, domain }) => ({ id, domain })));
-    assert.deepEqual((await H.appsViewHere(WS, ["recipe-box", "nope"])).apps.map((a) => a.name), ["recipe-box"]);
+    // Its computer and every app whose home it is, for its room: asked for one app by name, still all of them.
+    assert.deepEqual({ ...all.home, names: all.home.names.sort() }, { computerId: "c_boppy", names: here });
+    const one = await H.appsViewHere(WS, ["recipe-box", "nope"]);
+    assert.deepEqual(one.apps.map((a) => a.name), ["recipe-box"]);
+    assert.deepEqual(one.home.names.sort(), here);
   } finally {
     asMac();
+  }
+});
+
+await check("A computer's apps view carries its room as the owner's Mac reads it for members, read from its two lists with its own sign in: by its room key (never its id), every app whose home it is by name, the bot it's named for; null (no line now) with no cap or a read that failed", async () => {
+  const AV = await import(`${root}/lib/server/apps-view-share.ts`);
+  const { roomKeyOf } = await import(`${root}/cloud/group-key.ts`);
+  const posts = [];
+  const on = (c) => [web.projects.filter((p) => p.computerId === c).length, web.urls.filter((u) => u.computerId === c).length];
+  const here = Object.entries(hostedApps()).filter(([, h]) => !h.lost && h.computerId === "c_boppy").map(([n]) => n).sort();
+  asRunner();
+  web.projectLimit = 10;
+  globalThis.bopsRooms.clear();
+  try {
+    AV.appsViewShareForTests({ send: async (body) => (posts.push(structuredClone(body)), 204), runner: () => true, user: () => "u_alex", retryMs: [1, 1] });
+    let n = web.calls.length;
+    await AV.shareAppsView(WS, ["recipe-box"]);
+    assert.equal(posts.length, 1, "shared");
+    assert.deepEqual(Object.keys(posts[0].apps), ["recipe-box"]);
+    const want = H.roomOf({ limit: 10, projects: Array(on("c_boppy")[0]).fill(0) }, { enabled: true, limit: web.urlLimit, public_urls: Array(on("c_boppy")[1]).fill(0) });
+    assert.ok(want && want.apps >= 0, "a cap, so a line");
+    assert.deepEqual(posts[0].room, { [roomKeyOf(WS, "c_boppy")]: { ...want, appNames: here, bot: "boppy" } }, "every app whose home it is, named for Boppy");
+    assert.ok(callsSince(n, "GET", /\/c_boppy\/deploy-projects$/).length >= 1 && callsSince(n, "GET", /\/c_boppy\/public-urls$/).length >= 1, "both lists read on its computer");
+    const text = JSON.stringify(posts[0].room);
+    for (const hidden of ["c_boppy", ...web.projects.map((p) => p.id)]) assert.ok(!text.includes(hidden), `"${hidden}" never in it`);
+    // No cap: no line now (null), so Bops Cloud drops the one from before.
+    web.projectLimit = undefined;
+    globalThis.bopsRooms.clear();
+    await AV.shareAppsView(WS, ["recipe-box"]);
+    assert.equal(posts.length, 2);
+    assert.equal(posts[1].room, null);
+    // A read that failed: the same, never a number from before.
+    web.projectLimit = 10;
+    web.projectsDown = true;
+    globalThis.bopsRooms.clear();
+    await AV.shareAppsView(WS, ["recipe-box"]);
+    assert.equal(posts[2].room, null);
+    // A read with no home said (no app of it here): nothing said of a room.
+    web.projectsDown = false;
+    AV.appsViewShareForTests({ read: async () => ({ apps: (await H.appsViewHere(WS, ["recipe-box"])).apps, owned: null }), send: async (body) => (posts.push(structuredClone(body)), 204), runner: () => true, user: () => "u_alex", retryMs: [1, 1] });
+    await AV.shareAppsView(WS, ["recipe-box"]);
+    assert.equal(posts.length, 4);
+    assert.equal(Object.hasOwn(posts[3], "room"), false);
+  } finally {
+    AV.appsViewShareForTests();
+    asMac();
+    web.projectLimit = undefined;
+    web.projectsDown = false;
+    globalThis.bopsRooms.clear();
   }
 });
 

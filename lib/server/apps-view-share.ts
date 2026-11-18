@@ -1,7 +1,8 @@
 import "server-only";
+import { roomKeyOf } from "@/cloud/group-key";
 import { APPS_VIEW_PATH, BOPS_USER_HEADER, type AppsViewPost } from "@/cloud/protocol";
 import type { AppView, HostedApp } from "@/lib/hosted-apps";
-import { appViewOf, DEPLOYING_MS } from "./apps-for-members";
+import { appViewOf, DEPLOYING_MS, memberRoomOf, readRoom, type AppsReaders } from "./apps-for-members";
 import { cloudFetch, cloudOn } from "./cloud";
 import { onRunner } from "./persist";
 import { stateUser } from "./store";
@@ -12,8 +13,10 @@ import { stateUser } from "./store";
  * (hosted-apps.ts appsViewHere; Bops Cloud holds a post to the same rule, computer-scope.ts appHomeHere): each as
  * apps-for-members.ts appViewOf reads it for members, never with a Preview password (a computer can't read one back,
  * and Bops Cloud keeps the ones it set) nor members' acts (Bops Cloud keeps those), with the workspace's domains this
- * computer may point at its apps (`owned`). Bops Cloud keeps it beside the owner's state (bops.app_views), so a share
- * never changes the state here or there.
+ * computer may point at its apps (`owned`), and with this computer's room for more apps as the owner's Mac reads it for
+ * members (`room`: apps-for-members.ts memberRoomOf, read with this computer's own sign in, by its room key, never its
+ * id; null, no line now). Bops Cloud keeps it beside the owner's state (bops.app_views), so a share never changes the
+ * state here or there.
  *
  * Shared after each job a member asked of this computer (runner-chat.ts), after a bot's own deploy here (hosted-apps.ts
  * deployForBot), and when Bops Cloud asks for it (the runner stream's "apps-view": a member is looking, and what it has
@@ -28,7 +31,7 @@ const RETRY_MS = [2_000, 8_000];
 /** How long a deploy on its way keeps its app's view shared again (from when it was first seen on its way). */
 export const DEPLOYING_FOR_MS = 15 * 60_000;
 
-type Read = (wsId: string, names?: readonly string[]) => Promise<{ apps: HostedApp[]; owned: { id: string; domain: string }[] | null }>;
+type Read = (wsId: string, names?: readonly string[]) => Promise<{ apps: HostedApp[]; owned: { id: string; domain: string }[] | null; home?: { computerId: string; names: string[] } }>;
 type Box = {
   /** What's asked of each workspace that isn't being read yet ("all": every app here), and the share going now. */
   pending: Map<string, Set<string> | "all">;
@@ -38,6 +41,8 @@ type Box = {
   /** Tests: what reads this computer's apps (hosted-apps.ts appsViewHere), sends a post (its status, 0: no answer, null: nowhere to send), and the waits. */
   read?: Read;
   send?: (body: AppsViewPost, user: string | null) => Promise<number | null>;
+  /** Tests: what reads this computer's room (apps-for-members.ts readRoom). */
+  room?: AppsReaders["room"];
   retryMs?: number[];
   deployingMs?: number;
   user?: () => string | null;
@@ -110,7 +115,9 @@ async function shareNow(wsId: string, names: Set<string> | "all") {
     if (v) apps[a.name] = viewOf(v, read.owned);
   }
   if (!Object.keys(apps).length) return;
-  await post({ ws: wsId, apps });
+  // Its room, by its room key alone (Bops Cloud checks it's this computer's): null, no line now.
+  const room = read.home ? await memberRoomOf(wsId, read.home.computerId, read.home.names, box.room ?? readRoom) : null;
+  await post({ ws: wsId, apps, ...(read.home ? { room: room ? { [roomKeyOf(wsId, read.home.computerId)]: room } : null } : {}) });
   const on = Object.entries(apps).filter(([, v]) => going(v)).map(([n]) => n);
   const was = box.again.get(wsId);
   if (was) clearTimeout(was.timer);
@@ -147,10 +154,11 @@ export function shareAppsView(wsId: string, names?: readonly string[]): Promise<
   return p;
 }
 
-/** For tests: what reads, what sends, the waits and whose state is here (unset: the real ones); every share forgotten. */
-export function appsViewShareForTests(o: { read?: Read; send?: Box["send"]; retryMs?: number[]; deployingMs?: number; user?: () => string | null; runner?: () => boolean } = {}) {
+/** For tests: what reads, what sends, its room, the waits and whose state is here (unset: the real ones); every share forgotten. */
+export function appsViewShareForTests(o: { read?: Read; send?: Box["send"]; room?: Box["room"]; retryMs?: number[]; deployingMs?: number; user?: () => string | null; runner?: () => boolean } = {}) {
   box.read = o.read;
   box.send = o.send;
+  box.room = o.room;
   box.retryMs = o.retryMs;
   box.deployingMs = o.deployingMs;
   box.user = o.user;

@@ -792,24 +792,33 @@ export async function listApps(wsId: string): Promise<HostedAppsAnswer> {
  * On a computer's runner: the apps of workspace `wsId` whose home is this computer (not lost, on it), as the Apps page
  * reads them (appView, each of the computer's lists read once for all of them), only `names` when given, MEMBER_APPS
  * at most; and the workspace's domains bought through Orgo that this computer may use, as its own list says them
- * (owned_domains: null when Orgo didn't say). What lib/server/apps-view-share.ts tells Bops Cloud members see, with the
- * owner's Mac on or off. Nothing anywhere else.
+ * (owned_domains: null when Orgo didn't say); and `home`, this computer and every app whose home it is, for its room
+ * (apps-for-members.ts memberRoomOf: its own two lists, with its own sign in). What lib/server/apps-view-share.ts tells
+ * Bops Cloud members see, with the owner's Mac on or off. Nothing anywhere else.
  */
-export async function appsViewHere(wsId: string, names?: readonly string[]): Promise<{ apps: HostedApp[]; owned: { id: string; domain: string }[] | null }> {
+export async function appsViewHere(
+  wsId: string,
+  names?: readonly string[],
+): Promise<{ apps: HostedApp[]; owned: { id: string; domain: string }[] | null; home?: { computerId: string; names: string[] } }> {
   const here = (process.env.BOPS_RUNNER_COMPUTER ?? "").toLowerCase();
   const ws = workspace(wsId);
   if (!onRunner() || !here || !ws) return { apps: [], owned: null };
   const ours = sameState();
-  const kept = Object.entries(ws.hostedApps ?? {})
-    .filter(([name, h]) => isRepoName(name) && !h.lost && h.computerId.toLowerCase() === here && (!names || names.includes(name)))
-    .slice(0, MEMBER_APPS);
+  const homeHere = Object.entries(ws.hostedApps ?? {}).filter(([name, h]) => isRepoName(name) && !h.lost && h.computerId.toLowerCase() === here);
+  const kept = homeHere.filter(([name]) => !names || names.includes(name)).slice(0, MEMBER_APPS);
   if (!kept.length) return { apps: [], owned: null };
   const why = await closedHere();
   const on = await reposOf(wsId);
   const [domainsOn, projectsOn, urlsOn] = [domainsReader(), projectsReader(), urlsReader()];
   const apps = await Promise.all(kept.map(([name, h]) => appView(wsId, name, h, on, why, ours, () => {}, domainsOn, projectsOn, urlsOn).catch(() => null)));
-  const list = await domains.ofComputer(kept[0][1].computerId).catch(() => null);
-  return { apps: apps.filter((a): a is HostedApp => !!a), owned: list?.owned_domains?.map(({ id, domain }) => ({ id, domain })) ?? null };
+  const computerId = kept[0][1].computerId;
+  const list = await domains.ofComputer(computerId).catch(() => null);
+  return {
+    apps: apps.filter((a): a is HostedApp => !!a),
+    owned: list?.owned_domains?.map(({ id, domain }) => ({ id, domain })) ?? null,
+    // Its computer and every app whose home it is (its room is told with the view: apps-view-share.ts), never sent as they are.
+    home: { computerId, names: homeHere.map(([name]) => name) },
+  };
 }
 
 /** One app as it is now, as the Apps page lists it (after a change to its sites). */
@@ -973,11 +982,12 @@ async function urlsNow(computerId: string, ours: () => boolean): Promise<{ urls:
 }
 
 /**
- * What Bops makes on a computer for a new app's first deploy (or a new site's): its Published project, empty
- * (ensureProd, no public URL of its own), then its Preview, a public URL and a project on it (ensurePreview). How many
- * more new apps a computer has room for is counted with it (roomOn): change it here when a first deploy makes less.
+ * What Bops makes on a computer for a new app's first deploy (or a new site's): its Preview, a public URL and a project
+ * on it (sendPreview, ensurePreview). Its Published project isn't made then (prodIfAny): only when it's first needed, a
+ * Publish or a domain (ensureProd), counted then as what that deploy makes (lib/hosted-apps.ts roomTakes). How many more
+ * new apps a computer has room for is counted with it (roomOn): change it here when a first deploy makes more or less.
  */
-export const NEW_APP_TAKES = { projects: 2, urls: 1 } as const;
+export const NEW_APP_TAKES = { projects: 1, urls: 1 } as const;
 
 /**
  * A site's Published project on the app's computer (prodIn), found without making one (prodIfAny's): its record

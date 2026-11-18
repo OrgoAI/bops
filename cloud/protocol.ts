@@ -976,10 +976,13 @@ export type SharedApp = {
  * so Your Apps stays fresh with the owner's Mac shut: each app as lib/hosted-apps.ts AppView has it (AppForMembers
  * without members' acts or Preview passwords, with the workspace's bought domains as `owned`). Bops Cloud keeps only its
  * own apps' (cloud/computer-scope.ts appHomeHere), cleaned (cloud/apps-view.ts cleanAppView), in bops.app_views, never in
- * the owner's state, and answers 204.
+ * the owner's state, and answers 204. `room`: the computer's room for more apps as members see it (lib/hosted-apps.ts
+ * MemberRoom, SharedRoom here), by its room key (cloud/group-key.ts roomKeyOf, never its id), as the owner's Mac reads
+ * it for members (Workspace.appsForMembers.room); null: no line now (no cap, or the read failed). Bops Cloud keeps it
+ * on each of the post's apps only by that computer's own room key (cloud/apps-view.ts roomKept).
  */
 export const APPS_VIEW_PATH = "/v1/apps/view";
-export type AppsViewPost = { ws: string; apps: Record<string, unknown> };
+export type AppsViewPost = { ws: string; apps: Record<string, unknown>; room?: Record<string, unknown> | null };
 /** A runner stream's "apps-view" event (cloud/turns.ts nudgeAppViews): share these apps' view now (none: all of this computer's). */
 export type RunnerAppsViewEvent = { ws: string; apps?: string[] };
 export type SharedWsState = {

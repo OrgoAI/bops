@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { after, before, test } from "node:test";
-import { cleanAppView, readAppViews } from "../apps-view.ts";
+import { cleanAppView, readAppViews, roomKept } from "../apps-view.ts";
 import { clearAuthCache } from "../auth.ts";
 import { closeDb, query } from "../db.ts";
+import { roomKeyOf } from "../group-key.ts";
 import { hub } from "../live.ts";
 import { APPS_VIEW_PATH } from "../protocol.ts";
 import { sharedSlice, type SliceViewer } from "../ws-slice.ts";
@@ -278,4 +279,70 @@ test("a computer's view shows only the links the app's record vouches for: a sit
   (later.workspaces[0].hostedApps as Record<string, Record<string, unknown>>).shop.preview = "q9q9q9q9q9q9";
   const now = sharedSlice(later as unknown as Record<string, unknown>, "ws_main", SAM, views).apps!.list.find((a) => a.name === "shop")!.sites!;
   assert.deepEqual([now[0].preview, now[0].previewProtected], [null, undefined]);
+});
+
+test("a computer's room for more apps goes with its view only by its own room key (never its id, another computer's key, a bot not on it, an app not its own); Your Apps shows the newer of it and the owner's Mac's, none when the newer says no line", T, async () => {
+  clearAuthCache();
+  const u = newUserId("room");
+  users.push(u);
+  const K1 = roomKeyOf("ws_main", D1);
+  const K2 = roomKeyOf("ws_main", D2);
+  const st = stateOf();
+  // The owner's Mac read both computers' rooms at 10.
+  (st.workspaces[0].appsForMembers as Record<string, unknown>).room = {
+    [K1]: { used: 2, limit: 10, urlsUsed: 1, urlsLimit: 10, apps: 8, appNames: ["shop"], bot: "main" },
+    [K2]: { used: 4, limit: 10, urlsUsed: 4, urlsLimit: 10, apps: 6, appNames: ["notes"], bot: "iris" },
+  };
+  assert.equal((await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: 0, state: st } })).status, 200);
+  const send = (room: unknown, key = vm(u), apps: Record<string, unknown> = { shop: viewOf("c-new") }) => call(cloud.url, "POST", APPS_VIEW_PATH, { key, json: { ws: "ws_main", apps, room } });
+  const keptRoom = async () => (await rows(u)).find((x) => x.app === "shop")!.view.room;
+  // Its own: kept by its key, its numbers, only its own apps (notes is D2's), and its bot only when that bot is on it.
+  const ROOM = { used: 9, limit: 10, urlsUsed: 9, urlsLimit: 10, apps: 1 };
+  assert.equal((await send({ [K1]: { ...ROOM, appNames: ["shop", "notes"], bot: "main", computerId: D1, projectId: "proj-secret" } })).status, 204);
+  assert.deepEqual(await keptRoom(), { [K1]: { ...ROOM, appNames: ["shop"], bot: "main" } });
+  assert.equal((await send({ [K1]: { ...ROOM, appNames: ["shop"], bot: "iris" } })).status, 204);
+  assert.deepEqual(await keptRoom(), { [K1]: { ...ROOM, appNames: ["shop"] } }, "Iris works on D2: no bot named");
+  // Never a key that isn't its own: its id, another computer's, a group's shape, or two; nor numbers that aren't whole: no line.
+  for (const bad of [{ [D1]: ROOM }, { [K2]: ROOM }, { c0123456789abcdef: ROOM }, { [K1]: ROOM, [K2]: ROOM }, { [K1]: { ...ROOM, used: "9" } }, { [K1]: { ...ROOM, apps: -1 } }, "full", null]) {
+    assert.equal((await send(bad)).status, 204);
+    assert.deepEqual(await keptRoom(), { [K1]: null }, JSON.stringify(bad));
+  }
+  // A view with no room sent keeps none.
+  assert.equal((await send(undefined)).status, 204);
+  assert.equal(await keptRoom(), undefined);
+  for (const r of await rows(u)) assert.ok(!JSON.stringify(r.view).includes(D1) && !JSON.stringify(r.view).includes("proj-"), "no ids kept");
+
+  const blob = (await query<{ state: Record<string, unknown> }>("SELECT state FROM bops.app_state WHERE user_id = $1", [u])).rows[0].state;
+  const SAM: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam", ownerEmail: "owner@orgo.ai", appActsSeen: true };
+  const RAE: SliceViewer = { role: "member", email: "rae@example.com", id: "u-rae", ownerEmail: "owner@orgo.ai", appActsSeen: true };
+  const roomFor = async (viewer: SliceViewer) => sharedSlice(blob, "ws_main", viewer, await readAppViews(null, u, "ws_main")).apps!.room;
+  // No room in the newest view: the owner's Mac's read of both stands (Sam sees Boppy, not Iris: none named for D2).
+  assert.deepEqual(await roomFor(SAM), {
+    [K1]: { used: 2, limit: 10, urlsUsed: 1, urlsLimit: 10, apps: 8, appNames: ["shop"], bot: "main" },
+    [K2]: { used: 4, limit: 10, urlsUsed: 4, urlsLimit: 10, apps: 6, appNames: ["notes"] },
+  });
+  // D1 tells its room, newer than the Mac's read: D1's line is its own, at Read and Write alike; D2's stays the Mac's.
+  assert.equal((await send({ [K1]: { ...ROOM, appNames: ["shop"], bot: "main" } })).status, 204);
+  const both = { [K1]: { ...ROOM, appNames: ["shop"], bot: "main" }, [K2]: { used: 4, limit: 10, urlsUsed: 4, urlsLimit: 10, apps: 6, appNames: ["notes"] } };
+  assert.deepEqual(await roomFor(SAM), both);
+  assert.deepEqual(await roomFor(RAE), both, "Rae sees Boppy at Read");
+  // D1 says no line now (no cap, or its read failed): none for D1, never the Mac's number from before.
+  assert.equal((await send(null)).status, 204);
+  assert.deepEqual(Object.keys((await roomFor(SAM)) ?? {}), [K2]);
+  // The owner's Mac reads again after it: its read is the newer one.
+  const later = JSON.parse(JSON.stringify(blob)) as ReturnType<typeof stateOf>;
+  const seen = later.workspaces[0].appsForMembers as { at: number; room: Record<string, unknown> };
+  seen.at = (await readAppViews(null, u, "ws_main")).shop.at + 1;
+  assert.deepEqual(Object.keys(sharedSlice(later as unknown as Record<string, unknown>, "ws_main", SAM, await readAppViews(null, u, "ws_main")).apps!.room ?? {}).sort(), [K1, K2].sort());
+  assert.ok(!JSON.stringify(await roomFor(SAM)).includes(D1) && !JSON.stringify(await roomFor(SAM)).includes(D2), "never a computer's id");
+});
+
+test("roomKept: one room, by the computer's own room key worked out here, whole or null", () => {
+  const scope = { bots: new Set(["main", "elsewhere"]), workspaceOf: (b: string) => (b === "main" ? "ws_main" : "ws_other") };
+  const K = roomKeyOf("ws_main", D1);
+  const r = { used: 1, limit: 10, urlsUsed: 1, urlsLimit: -1, apps: 9, urlsFirst: true, appNames: ["shop", "x"], bot: "main" };
+  assert.deepEqual(roomKept({ [K]: r }, "ws_main", D1, new Set(["shop"]), scope), { [K]: { ...r, appNames: ["shop"] } });
+  assert.deepEqual(roomKept({ [K]: { ...r, bot: "elsewhere" } }, "ws_main", D1, new Set(["shop"]), scope), { [K]: { used: 1, limit: 10, urlsUsed: 1, urlsLimit: -1, apps: 9, urlsFirst: true, appNames: ["shop"] } }, "a bot of another workspace: none named");
+  assert.deepEqual(roomKept({ [roomKeyOf("ws_other", D1)]: r }, "ws_main", D1, new Set(["shop"]), scope), { [K]: null }, "another workspace's key");
+  assert.match(Object.keys(roomKept(null, "ws_main", D1, new Set(), scope))[0], /^r[0-9a-f]{16}$/);
 });

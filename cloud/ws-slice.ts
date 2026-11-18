@@ -503,34 +503,46 @@ const actSeenBy = (viewer: SliceViewer) => (x: unknown) => {
   return !REMOVE_ACT.has(act) && x.going !== true;
 };
 export const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
-/** A computer's room for more apps (lib/hosted-apps.ts MemberRoom): its numbers and the apps on it; its bot only as roomsOf says. */
+/** A computer's room for more apps (lib/hosted-apps.ts MemberRoom): its numbers and the apps on it; its bot only as roomEntry says. */
 const ROOM_SEEN: Spec = { used: true, limit: true, urlsUsed: true, urlsLimit: true, apps: true, urlsFirst: true, appNames: true };
 const count = (v: unknown) => typeof v === "number" && Number.isInteger(v) && Math.abs(v) < 1e6;
+/** A computer's room key (group-key.ts roomKeyOf): never its id, nor shaped as a group's key. */
+export const ROOM_KEY = /^r[0-9a-f]{16}$/;
 
 /**
- * Each computer's room as the owner's Mac read it for members (appsForMembers.room), at Read and Write: by its room key
- * (group-key.ts roomKeyOf: never its id, nor its group's key, which would let a member rename a group of bots they don't
- * see; one shaped as a group's is dropped), its numbers whole or not at all, the apps on it by name, and the bot it's
- * named for only when the viewer sees that bot (`botsSeen`). Undefined: none.
+ * One computer's room whole, or null: its numbers whole or not at all, the apps on it by name, and the bot it's named
+ * for only when `bots` has it (the viewer sees that bot; for a computer's own post, a bot that works on it).
  */
-function roomsOf(seen: Record<string, unknown>, botsSeen: ReadonlySet<unknown>): Record<string, SharedRoom> | undefined {
-  if (!isObject(seen.room)) return undefined;
+export function roomEntry(v: unknown, bots: ReadonlySet<unknown>): SharedRoom | null {
+  if (!isObject(v)) return null;
+  const r = keep(v, ROOM_SEEN) as Record<string, unknown>;
+  if (![r.used, r.limit, r.urlsUsed, r.urlsLimit, r.apps].every(count) || (r.apps as number) < 0) return null;
+  const names = Array.isArray(r.appNames) ? r.appNames.filter((n): n is string => typeof n === "string" && /^[a-z0-9-]{1,64}$/.test(n)).slice(0, MAX_SHARED_APPS) : [];
+  return {
+    used: r.used as number,
+    limit: r.limit as number,
+    urlsUsed: r.urlsUsed as number,
+    urlsLimit: r.urlsLimit as number,
+    apps: r.apps as number,
+    ...(r.urlsFirst === true ? { urlsFirst: true as const } : {}),
+    appNames: names,
+    ...(typeof v.bot === "string" && bots.has(v.bot) ? { bot: v.bot } : {}),
+  };
+}
+
+/**
+ * Each computer's room for members (SharedApps.room), at Read and Write: by its room key (ROOM_KEY, group-key.ts
+ * roomKeyOf: never its id, nor its group's key, which would let a member rename a group of bots they don't see; one
+ * shaped as a group's is dropped), each whole or not at all (roomEntry), its bot only when the viewer sees it
+ * (`botsSeen`). Undefined: none.
+ */
+function roomsOf(rooms: unknown, botsSeen: ReadonlySet<unknown>): Record<string, SharedRoom> | undefined {
+  if (!isObject(rooms)) return undefined;
   const out: Record<string, SharedRoom> = {};
-  for (const [key, v] of Object.entries(seen.room).slice(0, MAX_SHARED_APPS)) {
-    if (!/^r[0-9a-f]{16}$/.test(key) || !isObject(v)) continue;
-    const r = keep(v, ROOM_SEEN) as Record<string, unknown>;
-    if (![r.used, r.limit, r.urlsUsed, r.urlsLimit, r.apps].every(count) || (r.apps as number) < 0) continue;
-    const names = Array.isArray(r.appNames) ? r.appNames.filter((n): n is string => typeof n === "string" && /^[a-z0-9-]{1,64}$/.test(n)).slice(0, MAX_SHARED_APPS) : [];
-    out[key] = {
-      used: r.used as number,
-      limit: r.limit as number,
-      urlsUsed: r.urlsUsed as number,
-      urlsLimit: r.urlsLimit as number,
-      apps: r.apps as number,
-      ...(r.urlsFirst === true ? { urlsFirst: true as const } : {}),
-      appNames: names,
-      ...(typeof v.bot === "string" && botsSeen.has(v.bot) ? { bot: v.bot } : {}),
-    };
+  for (const [key, v] of Object.entries(rooms).slice(0, MAX_SHARED_APPS)) {
+    if (!ROOM_KEY.test(key)) continue;
+    const r = roomEntry(v, botsSeen);
+    if (r) out[key] = r;
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -584,7 +596,8 @@ export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer
  * Admin always has Write: viewerAccess). A workspace with no apps yet gives an empty list. Allow lists only: of each app's record its name, its
  * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
  * members (Workspace.appsForMembers) its head, sites (each with its Preview's link and state), history, deploys and
- * members' acts, and each computer's room for more apps (roomsOf: by its room key, never its id or its group's key);
+ * members' acts, and each computer's room for more apps (roomsOf: by its room key, never its id or its group's key; a
+ * computer's own, from its apps' view, where that's newer than the Mac's read);
  * each site's settings, its Preview's password and the workspace's own domains only at Write. A site's
  * Preview link the owner's Mac hasn't read (a new app a bot made on its computer while the Mac was off) is the one its
  * password was shared for, when the app's record names it (sitesFilled), at Read too: that it asks for a password, never
@@ -623,6 +636,9 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   // domains as the newest of those read them (bare hostnames alone from a computer's).
   let oldest = Infinity;
   let ownedFrom: { at: number; owned: unknown } = { at: macAt, owned: seen.owned };
+  // Each computer's room as the newest read of it says (its room key's: ROOM_KEY), where an app's computer's view is newer
+  // than the owner's Mac's read: its room then, or null for no line now (never the number from before).
+  const roomFrom = new Map<string, { at: number; room: unknown }>();
   const viewOf = (name: string, host: Record<string, unknown>): Record<string, unknown> | null => {
     const v = Object.hasOwn(views, name) ? views[name] : undefined;
     if (!v || !isObject(v.view) || !(v.at > macAt)) {
@@ -631,6 +647,8 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
     }
     oldest = Math.min(oldest, v.at);
     if (Array.isArray(v.view.owned) && v.at > ownedFrom.at) ownedFrom = { at: v.at, owned: v.view.owned.filter((d) => isObject(d) && typeof d.domain === "string" && HOSTNAME.test(d.domain)) };
+    if (isObject(v.view.room))
+      for (const [key, room] of Object.entries(v.view.room).slice(0, 1)) if (ROOM_KEY.test(key) && !((roomFrom.get(key)?.at ?? 0) >= v.at)) roomFrom.set(key, { at: v.at, room });
     return { ...v.view, ...(Array.isArray(v.view.sites) ? { sites: vouchedSites(name, host, v.view.sites) } : {}) };
   };
   // Each Preview's password as whoever set it last told Bops Cloud, with the link it's for: that link at every level, where
@@ -668,8 +686,14 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
       return app as SharedApp;
     });
   const owned = write && Array.isArray(ownedFrom.owned) ? (keep(ownedFrom.owned, [{ id: true, domain: true }]) as { id: string; domain: string }[]) : undefined;
-  // How many more apps each computer has room for: Read and Write alike.
-  const room = roomsOf(seen, botsSeen);
+  // How many more apps each computer has room for, Read and Write alike: the owner's Mac's read, each computer's own where
+  // its view is newer (none from it: no line now).
+  const rooms: Record<string, unknown> = isObject(seen.room) ? { ...seen.room } : {};
+  for (const [key, r] of roomFrom) {
+    if (r.room === null || r.room === undefined) delete rooms[key];
+    else rooms[key] = r.room;
+  }
+  const room = roomsOf(rooms, botsSeen);
   return { level: write ? "write" : "read", at: list.length ? oldest : macAt, list, ...(owned?.length ? { owned } : {}), ...(room ? { room } : {}), ...removed };
 }
 

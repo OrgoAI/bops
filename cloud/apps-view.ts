@@ -1,12 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
-import { appHomeHere, hostingScope } from "./computer-scope.ts";
+import { appHomeHere, hostingScope, type HostingScope } from "./computer-scope.ts";
 import { query, tx } from "./db.ts";
+import { roomKeyOf } from "./group-key.ts";
 import { HttpError, readJson, type Route } from "./http.ts";
 import { viewsWritten } from "./live.ts";
 import { APPS_VIEW_PATH, type AppsViewPost } from "./protocol.ts";
 import { checkUser, lockedState, lockUser } from "./state.ts";
-import { canonical, COMMIT_SEEN, DEPLOY_SEEN, HOSTNAME, keep, LEFT_OVER_SEEN, SETTINGS_SEEN, SITE_SEEN, vouchedSites, type AppViews } from "./ws-slice.ts";
+import { canonical, COMMIT_SEEN, DEPLOY_SEEN, HOSTNAME, keep, LEFT_OVER_SEEN, roomEntry, SETTINGS_SEEN, SITE_SEEN, vouchedSites, type AppViews } from "./ws-slice.ts";
 
 /**
  * What each app's own computer sees of its apps for the workspace's members (bops.app_views), so Your Apps stays fresh
@@ -19,7 +20,9 @@ import { canonical, COMMIT_SEEN, DEPLOY_SEEN, HOSTNAME, keep, LEFT_OVER_SEEN, SE
  * the rule its writes of the app's record are held to); every field is an allow list (cleanAppView: no Preview
  * passwords, members' acts, ids of projects or computers, variables, logs or error text), and every link one the app's
  * record vouches for (ws-slice.ts vouchedSites: a Preview link of the site's own sealed label, an address and domains
- * that are bare hostnames; appsFor holds it to the record again as it is when shown). Kept in its own table, never in
+ * that are bare hostnames; appsFor holds it to the record again as it is when shown), and the computer's room for more
+ * apps only by its own room key (roomKept: never its id, another computer's key, a bot that isn't on it, or an app that
+ * isn't its own). Kept in its own table, never in
  * the owner's state, so a look never bumps its version: `view` and `view_at` only when it changed, `seen_at` each time.
  * ws-slice.ts appsFor shows, per app, the newer of this and the owner's Mac's read. The answer is 204 with nothing in
  * it; every refusal has fixed words.
@@ -93,7 +96,24 @@ export function cleanAppView(v: unknown, name?: string, host?: Record<string, un
 function postOf(body: unknown): AppsViewPost {
   if (!isObject(body) || typeof body.ws !== "string" || !WS_ID.test(body.ws) || !isObject(body.apps)) throw new HttpError(400, BAD);
   if (Object.keys(body.apps).some((name) => !APP_NAME.test(name))) throw new HttpError(400, BAD);
-  return { ws: body.ws, apps: body.apps };
+  // Its room, when it says one (anything but an object: no line now); none said, none kept (a runner from before).
+  return { ws: body.ws, apps: body.apps, ...(Object.hasOwn(body, "room") ? { room: isObject(body.room) ? body.room : null } : {}) };
+}
+
+/**
+ * The room a computer posted (AppsViewPost.room) as Bops Cloud keeps it on each of its apps' views: `{ [key]: room }`,
+ * where `key` is the room key of the computer the apps live on (group-key.ts roomKeyOf of the workspace and their
+ * record's computer, worked out here: the computer's own word for it is taken only when it's the same), never its id.
+ * The room whole or not at all (ws-slice.ts roomEntry), the apps on it by name only those whose home is this computer
+ * (`mine`), and the bot it's named for only when that bot of the workspace works on it. Null in place of the room: no
+ * line now (it said none, a key that isn't its own, or one it can't back), so the Mac's line from before goes too.
+ */
+export function roomKept(posted: unknown, wsId: string, computerId: string, mine: ReadonlySet<string>, scope: Pick<HostingScope, "bots" | "workspaceOf">): Record<string, unknown> {
+  const key = roomKeyOf(wsId, computerId);
+  const v = isObject(posted) && Object.keys(posted).length === 1 && Object.hasOwn(posted, key) ? posted[key] : null;
+  const bots = new Set([...scope.bots].filter((b) => scope.workspaceOf(b) === wsId));
+  const r = roomEntry(v, bots);
+  return { [key]: r ? { ...r, appNames: r.appNames.filter((n) => mine.has(n)) } : null };
 }
 
 /** What every app's own computer last said of workspace `ws`'s apps (bops.app_views): ws-slice.ts AppViews, by app. `c`: the transaction to read in, if any. */
@@ -132,9 +152,13 @@ const post: Route = {
       const mine = Object.keys(p.apps).filter((name) => Object.hasOwn(hosted, name) && appHomeHere(p.ws, hosted[name], scope)).slice(0, MAX_APPS);
       if (!mine.length) return null;
       const was = await readAppViews(c, user!.id, p.ws);
+      // Its room, by its own room key, as each of its apps' views keeps it (none sent: none kept, as from before).
+      const home = new Set(Object.keys(hosted).filter((name) => appHomeHere(p.ws, hosted[name], scope)));
       for (const name of mine) {
-        const view = cleanAppView(p.apps[name], name, isObject(hosted[name]) ? hosted[name] : undefined);
-        if (!view) continue;
+        const rec = isObject(hosted[name]) ? hosted[name] : undefined;
+        const clean = cleanAppView(p.apps[name], name, rec);
+        if (!clean) continue;
+        const view = p.room !== undefined && typeof rec?.computerId === "string" ? { ...clean, room: roomKept(p.room, p.ws, rec.computerId, home, scope) } : clean;
         if (Object.hasOwn(was, name) && canonical(was[name].view) === canonical(view))
           await c.query("UPDATE bops.app_views SET seen_at = now() WHERE user_id = $1 AND ws_id = $2 AND app = $3", [user!.id, p.ws, name]);
         else
