@@ -371,7 +371,7 @@ async function claimAndAnswer(ev: RunnerTurnEvent) {
 }
 
 /** How a job went, as its end tells Bops Cloud (RunnerDone.job): `removed` when a remove took the app or its site off the web. */
-export type JobResult = { ok: boolean; said: string; removed?: "app" | "site" };
+export type JobResult = { ok: boolean; said: string; removed?: "app" | "site"; domain?: string };
 /** What a job of a kind this runner doesn't do yet says (a newer Bops Cloud owes it): nothing was done. */
 export const JOB_UNKNOWN = "This computer's Bops doesn't know how to do that yet.";
 
@@ -462,7 +462,7 @@ async function runJob(ctx: TurnContext, job: TurnJob, by: string) {
       return null;
     },
     undefined,
-    () => ({ ok: result.ok, said: result.said, ...(result.removed === "app" || result.removed === "site" ? { removed: result.removed } : {}) }),
+    () => ({ ok: result.ok, said: result.said, ...(result.removed === "app" || result.removed === "site" ? { removed: result.removed } : {}), ...(result.ok && typeof result.domain === "string" ? { domain: result.domain } : {}) }),
   );
   // What members see of the app, told afresh: never after taking the app or a site off (Bops Cloud drops that from the
   // record as it hears the end, which this runner reads only later); after a left over goes, so it's gone there too.

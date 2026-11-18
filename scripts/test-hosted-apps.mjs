@@ -5270,6 +5270,33 @@ await check("Settings before a site's first deploy: kept on its record, no proje
   assert.deepEqual(writesSince(n), []);
 });
 
+await check("Published's port saved before it has a project: refused at once when something on its computer serves it already; taken by the time Published is made, said and nothing made, never another port in silence", async () => {
+  suiteAgain();
+  assert.equal((await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" })).status, 200);
+  // A port another project on its computer uses: refused as Orgo refuses one for a project, nothing kept.
+  const theirs = { id: randomUUID(), computerId: "c_boppy", name: "another-app", port: 4910, source: "ingot", ingot_repo: `${PROJECT}/another-app`, ingot_at: null, url: null, deployments: [] };
+  web.projects.push(theirs);
+  forgetListed();
+  let n = web.calls.length;
+  const taken = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/shop-suite/settings", SUITE, { ws: WS, site: "shop-suite-admin", port: 4910 });
+  assert.deepEqual([taken.status, taken.body.error], [409, "Another app on this computer uses that port. Pick another."]);
+  assert.deepEqual(writesSince(n), []);
+  assert.equal(suite().sites[0].settings, undefined, "nothing kept");
+  // A free one: kept on the record. Something else on its computer takes it before Published is made.
+  const r = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/shop-suite/settings", SUITE, { ws: WS, site: "shop-suite-admin", port: 4920 });
+  assert.deepEqual([r.status, r.body.settings?.port], [200, 4920]);
+  theirs.port = 4920;
+  forgetListed();
+  n = web.calls.length;
+  const made = await ask(EnvRoute, "PATCH", "/api/hosted-apps/shop-suite/env", SUITE, { ws: WS, site: "shop-suite-admin", env: { MODE: "live" } });
+  assert.deepEqual([made.status, made.body.error], [409, "Port 4920 is in use on its computer. Change Published's port in Settings."]);
+  assert.equal(siteProject("shop-suite-admin"), undefined, "no Published made on another port");
+  assert.deepEqual(writesSince(n), [], "nothing made");
+  assert.deepEqual(suite().sites[0].settings, { port: 4920 }, "the saved port stays, said");
+  web.projects = web.projects.filter((p) => p !== theirs);
+  forgetListed();
+});
+
 await check("One thing at a time on an app: Remove app and Remove site refused while a deploy of it is being sent (nothing left on the web that Bops doesn't keep); Published's variables saved before a first deploy wait for the deploy, then make that site's Published with them; a deploy or a new site refused while it's being removed", async () => {
   suiteAgain();
   for (const site of ["shop-suite-admin", "shop-suite-api"]) assert.equal((await post("shop-suite", { ws: WS, action: "addSite", site })).status, 200);
@@ -7172,16 +7199,26 @@ await check("A member's job on the app's own computer (appJob), each kind on its
     assert.deepEqual(writesSince(n).map((c) => [c.method, c.path, c.body]), [["PATCH", `/api/computers/c_boppy/deploy-projects/${pv.id}`, { build_cmd: "npm run build" }]]);
     // Go back: a deploy that isn't one of the Preview's is said as the owner's Mac says it.
     assert.deepEqual(await job({ act: "rollback", deployment: "d_not_its" }), { ok: false, said: "Members roll back its preview only. Ask Alex to roll back what's published." });
+    // An orgo-web that doesn't say the workspace's domains to this computer yet (before W2): said plainly, before
+    // anything is made for it (no empty Published left behind).
+    web.ownedHidden = true;
+    n = web.calls.length;
+    assert.deepEqual(await job({ act: "domain", zone: ZONE, subdomain: "demo" }), { ok: false, said: "Orgo doesn't let this computer do this yet." });
+    assert.ok(!prodProject(DEMO), "no Published made for it");
+    assert.deepEqual(writesSince(n), [], "nothing written");
+    web.ownedHidden = false;
     // A domain of the workspace's own: from this computer's own list (owned_domains), never the workspace's (a computer
-    // may not read that one); Published is made for it, its first need.
+    // may not read that one); Published is made for it, its first need. The domain it pointed, by name, for its act row.
     n = web.calls.length;
     const pointed = await job({ act: "domain", zone: ZONE, subdomain: "demo" });
-    assert.deepEqual(pointed, { ok: true, said: "Pointed demo.acme.example at demo-app." });
+    assert.deepEqual(pointed, { ok: true, said: "Pointed demo.acme.example at demo-app.", domain: "demo.acme.example" });
     assert.ok(prodProject(DEMO), "Published made for its domain");
     assert.ok(!web.calls.slice(n).some((c) => /^\/api\/projects\/[^/]+\/domains/.test(c.path)), "the workspace's bought domains never asked for");
     assert.ok(web.domains.some((d) => d.domain === "demo.acme.example" && d.target_port === prodProject(DEMO).port), "on Published's port");
     // A zone this computer's list doesn't have: Orgo's list is what it goes by.
+    n = web.calls.length;
     assert.deepEqual(await job({ act: "domain", zone: "00000000-0000-4000-8000-000000000000" }), { ok: false, said: "That isn't one of this workspace's domains." });
+    assert.deepEqual(writesSince(n), [], "nothing written");
     // Publish: what its Preview serves goes on Published (its domain is there, pending).
     n = web.calls.length;
     assert.deepEqual(await job({ act: "deploy", env: "prod" }), { ok: true, said: "Publishing demo-app, what its preview serves." });

@@ -21,7 +21,7 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const forward = (mod, names) => names.map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(mod)}].${n}(...a);`).join("\n");
 const FAKES = {
-  store: forward("store", ["bot", "chat", "getState", "ownerName", "session", "addMessage", "pullState", "update"]),
+  store: forward("store", ["bot", "chat", "getState", "ownerName", "session", "addMessage", "pullState", "update", "stateReady"]),
   chat: forward("chat", ["handleMessage", "answerMessage"]),
   sessions: forward("sessions", ["replyToSession", "stopSession", "dismissWaiting", "compactThread", "setWhere"]),
   "chat-summary": forward("chat-summary", ["compactChat"]),
@@ -125,6 +125,7 @@ globalThis.__fake = {
   store: {
     ownerName: () => "Alex",
     getState: () => state,
+    stateReady: () => true,
     bot: (id) => state.bots.find((b) => b.id === id),
     chat: (id) => state.chats.find((c) => c.id === id),
     session: (id) => state.sessions.find((s) => s.id === id),
@@ -1151,12 +1152,15 @@ await check("Remove from Your Apps (the owner's Mac): an Admin's takes the app o
   assert.ok(warned.some((w) => /e9: not a member's act/.test(w)));
 });
 
-await check("The owner's own press on an app a teammate's change to is still going (a workspace whose chat goes through Bops Cloud): refused in words; never in a workspace on the Mac, nor once it's done", async () => {
+await check("The owner's own press on an app a teammate's change to is still going on its computer: refused in words, whichever way the workspace's chat goes now (a job owed before it went back to the Mac still runs there); never once it's done", async () => {
   fresh({ ownerEmail: "owner@orgo.ai" });
   const { teammateGoing, teammateGoingLine } = await import(`${root}/lib/server/teammate-going.ts`);
   const ws = state.workspaces.find((w) => w.id === "ws_acme");
   ws.appsForMembers = { at: 1, apps: { shop: { head: null, sites: [], commits: [], deploys: [], acts: [{ key: "k", userId: "user_tom", name: "Tom", act: "deploy", ok: true, going: true, at: 1 }] } } };
-  assert.equal(teammateGoing("ws_acme", "shop"), null, "chat on the Mac: as before");
+  // Chat on the Mac (switched back, or Bops Cloud moved it back): the teammate's job still runs on the app's computer.
+  const mac = teammateGoing("ws_acme", "shop");
+  assert.equal(mac?.status, 409, "chat on the Mac: still waits");
+  assert.deepEqual(await mac.json(), { error: "A teammate's change to shop is still going. Try again once it's done." });
   ws.chatOn = "cloud";
   const r = teammateGoing("ws_acme", "shop");
   assert.equal(r.status, 409);
@@ -1168,9 +1172,27 @@ await check("The owner's own press on an app a teammate's change to is still goi
   // Every way the owner deploys, changes settings or a domain, or removes it, asks first.
   const { readFileSync } = await import("node:fs");
   const src = (f) => readFileSync(`${root}/app/api/hosted-apps/[name]/${f}`, "utf8");
-  assert.match(src("route.ts"), /\["deploy", "promote", "reapply", "rollback", "removeSite", "removeLeftOver"\]\.includes\(b\.action as string\) \? teammateGoing\(wsId, name\)/);
+  // Make preview and Add site make projects too.
+  assert.match(src("route.ts"), /\["deploy", "promote", "reapply", "rollback", "preview", "addSite", "removeSite", "removeLeftOver"\]\.includes\(b\.action as string\) \? teammateGoing\(wsId, name\)/);
   assert.equal((src("route.ts").match(/teammateGoing\(wsId, name\)/g) ?? []).length, 2, "and Remove app");
-  for (const f of ["settings/route.ts", "domains/route.ts", "domains/[domainId]/route.ts"]) assert.match(src(f), /teammateGoing\(/, f);
+  for (const f of ["settings/route.ts", "domains/route.ts", "domains/[domainId]/route.ts", "env/route.ts"]) assert.match(src(f), /teammateGoing\(/, f);
+  // Saving Preview's or Published's variables (which can make that project first) waits, before anything is changed; Local's doesn't.
+  ws.appsForMembers.apps.shop.acts[0] = { ...ws.appsForMembers.apps.shop.acts[0], going: true };
+  const { PATCH } = await import(`${root}/app/api/hosted-apps/[name]/env/route.ts`);
+  const saves = [];
+  const changeEnv = hosted.changeEnv;
+  hosted.changeEnv = async (...a) => (saves.push(a), { env: ["API_URL"] });
+  const save = (where) => PATCH(new Request("http://localhost/api/hosted-apps/shop/env", { method: "PATCH", body: JSON.stringify({ ws: "ws_acme", where, env: { API_URL: "https://api.example.com" } }) }), { params: Promise.resolve({ name: "shop" }) });
+  for (const where of ["preview", "prod", undefined]) {
+    const w = await save(where);
+    assert.deepEqual([w.status, await w.json()], [409, { error: "A teammate's change to shop is still going. Try again once it's done." }], String(where));
+  }
+  assert.equal(saves.length, 0, "nothing saved");
+  assert.equal((await save("local")).status, 200, "Local's live on its computer alone");
+  ws.appsForMembers.apps.shop.acts[0] = { ...ws.appsForMembers.apps.shop.acts[0], going: undefined };
+  assert.equal((await save("preview")).status, 200, "once it's done");
+  assert.equal(saves.length, 2);
+  hosted.changeEnv = changeEnv;
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

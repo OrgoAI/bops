@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
 import { groupKeyOf } from "./group-key.ts";
 import { accessOf, adminAccess, appsLevelOf, cleanPowers, currentFor, holdsKeys, isAccessLevel, levelOf, permits, powersOf, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import { GITHUB_ACT_KINDS, KEY_NAME, PREVIEW_PASSWORD, type AppJobKind, type SharedApp, type SharedAppRemoval, type SharedApps, type SharedGroup, type SharedKey, type SharedRoom, type SharedWsSlice, type WsRole } from "./protocol.ts";
+import { DELETE_CODE_MS, GITHUB_ACT_KINDS, KEY_NAME, PREVIEW_PASSWORD, type AppJobKind, type SharedApp, type SharedAppRemoval, type SharedApps, type SharedGroup, type SharedKey, type SharedRoom, type SharedWsSlice, type WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -439,6 +439,36 @@ function sitesFilled(name: string, host: Record<string, unknown>, mac: unknown[]
   return [...filled, ...more.slice(0, Math.max(0, MAX_SITES - filled.length))];
 }
 
+/** A domain's labels (letters, digits and hyphens, none starting or ending with a hyphen), dot separated, the last a name. */
+const LABELS = "(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?";
+/** A bare hostname (shop.example.com): no scheme, port, path, query or sign in. */
+export const HOSTNAME = new RegExp(`^(?=.{1,253}$)${LABELS}$`, "i");
+/** A site's Published address as Your Apps shows it (lib/hosted-apps.ts AppForMembers: https://<its first active domain>), and nothing more. */
+const SITE_URL = new RegExp(`^https://(?=.{1,253}/?$)${LABELS}/?$`, "i");
+
+/**
+ * An app's sites as its own computer said them (its view: bops.app_views, cloud/apps-view.ts), with only what the app's
+ * record vouches for, as previewLinkOf holds a shared link to: a site the record has (recordSites); its Preview link only
+ * when it's the link of that site's own label copy (else none, and no password asked for it, so sitesFilled may fill in
+ * the one Bops Cloud knows); its address https://<a bare hostname> alone, else none; its domains, bare hostnames alone.
+ * So no computer puts a link of its choosing in Your Apps. What it says of deploys stays as it said it (its runner does
+ * them, and checks every id a member's act names again). The owner's Mac's read stands as it is.
+ */
+export function vouchedSites(name: string, host: Record<string, unknown>, sites: unknown[]): Record<string, unknown>[] {
+  const labels = new Map(recordSites(name, host).map((s) => [s.site, s.label]));
+  return sites.flatMap((r) => {
+    if (!isObject(r) || typeof r.name !== "string" || !labels.has(r.name)) return [];
+    const { previewProtected: _p, ...out } = r;
+    void _p;
+    const link = typeof r.preview === "string" ? previewLinkOf(labels.get(r.name), { url: r.preview }) : undefined;
+    if (link) Object.assign(out, { preview: link, ...(r.previewProtected === true ? { previewProtected: true } : {}) });
+    else if (r.preview !== undefined) out.preview = null;
+    if (r.url !== undefined) out.url = typeof r.url === "string" && SITE_URL.test(r.url) ? r.url : null;
+    if (r.domains !== undefined) out.domains = Array.isArray(r.domains) ? r.domains.filter((d) => isObject(d) && typeof d.domain === "string" && HOSTNAME.test(d.domain)) : [];
+    return [out];
+  });
+}
+
 export const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
 /** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
 export const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
@@ -562,7 +592,7 @@ export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer
  * withCloudPasswords), else the owner's Mac's copy; it changes their slice, so a Write viewer watching gets a new
  * fingerprint and reads it. Never its variables, tokens, keys, logs, error text, computer or project ids.
  */
-export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>, views: AppViews = {}): SharedApps | undefined {
+export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>, views: AppViews = {}, now = Date.now()): SharedApps | undefined {
   const open = appsOpenFor(viewer);
   if (viewer.role === "owner" || !workspace || !open) return undefined;
   const kept = appsLevelOf(access);
@@ -570,8 +600,17 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   const level = open === "read" && kept === "write" ? "read" : kept;
   if (!permits(level, "read")) return undefined;
   const write = level === "write";
-  // Apps someone removed lately, at Read and Write, to a Bops that knows them.
-  const removals = viewer.appActsSeen && Array.isArray(workspace.appsRemoved) ? (keep(workspace.appsRemoved.filter(isObject).slice(0, MAX_REMOVALS), [REMOVAL_SEEN]) as SharedAppRemoval[]) : [];
+  // Apps someone removed lately, at Read and Write, to a Bops that knows them: its code said left only while Delete its
+  // code can still take it (members.ts deleteCodeHere: within DELETE_CODE_MS, and no app of that name made again).
+  const again = (app: unknown) => isObject(workspace.hostedApps) && typeof app === "string" && Object.hasOwn(workspace.hostedApps, app);
+  const removals = viewer.appActsSeen && Array.isArray(workspace.appsRemoved)
+    ? (keep(workspace.appsRemoved.filter(isObject).slice(0, MAX_REMOVALS), [REMOVAL_SEEN]) as SharedAppRemoval[]).map((r) => {
+        if (!r.codeLeft || (typeof r.at === "number" && now - r.at <= DELETE_CODE_MS && !again(r.app))) return r;
+        const { codeLeft: _c, ...rest } = r;
+        void _c;
+        return rest;
+      })
+    : [];
   const removed = removals.length ? { removed: removals } : {};
   // A workspace with no apps on the web yet still has Your Apps: an empty page, never a hidden one.
   if (!isObject(workspace.hostedApps)) return { level: write ? "write" : "read", at: 0, list: [], ...removed };
@@ -579,15 +618,20 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   const seenApps = isObject(seen.apps) ? seen.apps : {};
   const macAt = typeof seen.at === "number" ? seen.at : 0;
   // Each app's own computer's view where it's newer than the owner's Mac's read (members' acts stay the Mac's copy's, as
-  // Bops Cloud keeps them there); the newest time of what's shown, and the domains as the newest of those read them.
-  let at = macAt;
+  // Bops Cloud keeps them there), its sites as the app's record vouches for them (vouchedSites); the oldest time of what's
+  // shown (each app's view's, else the Mac's read's), so one fresh computer never makes the rest look fresh; and the
+  // domains as the newest of those read them (bare hostnames alone from a computer's).
+  let oldest = Infinity;
   let ownedFrom: { at: number; owned: unknown } = { at: macAt, owned: seen.owned };
-  const viewOf = (name: string): Record<string, unknown> | null => {
+  const viewOf = (name: string, host: Record<string, unknown>): Record<string, unknown> | null => {
     const v = Object.hasOwn(views, name) ? views[name] : undefined;
-    if (!v || !isObject(v.view) || !(v.at > macAt)) return null;
-    if (v.at > at) at = v.at;
-    if (Array.isArray(v.view.owned) && v.at > ownedFrom.at) ownedFrom = { at: v.at, owned: v.view.owned };
-    return v.view;
+    if (!v || !isObject(v.view) || !(v.at > macAt)) {
+      oldest = Math.min(oldest, macAt);
+      return null;
+    }
+    oldest = Math.min(oldest, v.at);
+    if (Array.isArray(v.view.owned) && v.at > ownedFrom.at) ownedFrom = { at: v.at, owned: v.view.owned.filter((d) => isObject(d) && typeof d.domain === "string" && HOSTNAME.test(d.domain)) };
+    return { ...v.view, ...(Array.isArray(v.view.sites) ? { sites: vouchedSites(name, host, v.view.sites) } : {}) };
   };
   // Each Preview's password as whoever set it last told Bops Cloud, with the link it's for: that link at every level, where
   // the owner's Mac read none (sitesFilled reads its url alone); the password at Write only, over the owner's Mac's copy.
@@ -599,7 +643,7 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
     .map(([name, h]) => {
       const host = h as Record<string, unknown>;
       const mac = isObject(seenApps[name]) ? (seenApps[name] as Record<string, unknown>) : {};
-      const got = viewOf(name) ?? mac;
+      const got = viewOf(name, host) ?? mac;
       const settings = write && isObject(got.settings) ? Object.fromEntries(Object.entries(got.settings).filter(([site, v]) => /^[a-z0-9-]{1,64}$/.test(site) && isObject(v)).map(([site, v]) => [site, keep(v, SETTINGS_SEEN)])) : undefined;
       const sites = Array.isArray(host.sites) ? host.sites.flatMap((x) => (isObject(x) && typeof x.name === "string" ? [x.name] : [])) : [];
       const rows = sitesFilled(name, host, Array.isArray(got.sites) ? got.sites : undefined, links);
@@ -626,7 +670,7 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   const owned = write && Array.isArray(ownedFrom.owned) ? (keep(ownedFrom.owned, [{ id: true, domain: true }]) as { id: string; domain: string }[]) : undefined;
   // How many more apps each computer has room for: Read and Write alike.
   const room = roomsOf(seen, botsSeen);
-  return { level: write ? "write" : "read", at, list, ...(owned?.length ? { owned } : {}), ...(room ? { room } : {}), ...removed };
+  return { level: write ? "write" : "read", at: list.length ? oldest : macAt, list, ...(owned?.length ? { owned } : {}), ...(room ? { room } : {}), ...removed };
 }
 
 /** Whether a bot works on another bot's computer (lib/types.ts sharesComputer, on the owner's state as it is). */

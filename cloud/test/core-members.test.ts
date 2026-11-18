@@ -11,7 +11,7 @@ import type { WakeRefusal } from "../turns.ts";
 import { closeDb, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { prepareDb } from "./core-fakes.ts";
-import { ADMIN_POWERS_MIN_VERSION, CLOUD_ALL_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type MemberAppAct, type WsAccess } from "../protocol.ts";
+import { ADMIN_POWERS_MIN_VERSION, CLOUD_ALL_MIN_VERSION, DELETE_CODE_MS, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type MemberAppAct, type WsAccess } from "../protocol.ts";
 import { groupKeyOf, roomKeyOf } from "../group-key.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, sliceOf, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
@@ -2572,9 +2572,13 @@ test("over HTTP: the GitHub acts are the power of Publish (an Admin, a Member wi
   await refused("gh-ada", { act: "githubPull", app: "site" }, 409, "owner_bops_old");
   await refused("gh-sam", { act: "githubLink", app: "site" }, 409, "owner_bops_old");
   ghNew = true;
-  // No runner on the app's computer that can: the owner's Mac does it, as a member's other app acts.
+  // No runner on the app's computer that can: the owner's Mac would do it, but never beside Sam's Bring in still going there.
   jobSays = "runner";
   fakes();
+  await refused("gh-ada", { act: "githubLink", app: "site" }, 409, "not_waiting", /Its computer is still on the last one/);
+  // Once that one ended: the owner's Mac does it, as a member's other app acts.
+  const siteActs = ((blob.workspaces as Record<string, unknown>[])[0].appsForMembers as { apps: Record<string, { acts: Record<string, unknown>[] }> }).apps.site.acts;
+  siteActs[0] = { ...siteActs[0], going: undefined };
   const m = await go("gh-sam", { act: "githubPull", app: "site" }, "k_gh_mac_001");
   assert.deepEqual([m.status, m.json.macOn, m.json.computer], [202, true, undefined]);
   assert.deepEqual([queued.at(-1)?.payload.act, queued.at(-1)?.dedupe], [{ act: "githubPull", app: "site" }, "member:gh-sam:k_gh_mac_001"]);
@@ -3343,7 +3347,52 @@ test("over HTTP: a remove is an Admin's, or a Member's with Remove apps; its cod
   blob = rmBlob();
 });
 
-test("over HTTP, everything through the cloud: an app act is a job for the app's own computer, never queued, from a window of any version; refusals are said at once", async () => {
+test("over HTTP, a workspace on the owner's Mac: an app act for that Mac while another on the app is still going on its computer is said at once, never queued beside it (an owner's Mac from before CLOUD_ALL_MIN_VERSION as before)", async () => {
+  // App "site" has Sam's Bring in still going on its computer (ghBlob), owed before the workspace went back to the Mac.
+  const blob = rmBlob();
+  let macNew = true;
+  let jobSays: "computer" | "runner" = "runner";
+  const fakes = () =>
+    resetMembers({
+      state: async () => blob,
+      queue: async (owner, kind, payload, dedupe, expires) => void queued.push({ owner, kind, payload: payload as MemberActPayload, dedupe, expires }),
+      isOn: () => true,
+      drop: async () => {},
+      count: async () => {},
+      adminGate: async (_o: string, min: string = ADMIN_POWERS_MIN_VERSION) => (min === CLOUD_ALL_MIN_VERSION ? macNew : true),
+      allCloud: async () => false,
+      takeJob: async (o) => (o.check(blob), jobSays === "computer" ? { where: "computer", fresh: true, turn: { id: `turn_${o.id}` } as never } : { where: "refused", why: jobSays, bot: "Max" }),
+    });
+  fakes();
+  queued.length = 0;
+  for (const [u, role] of [["mg-ada", "admin"], ["mg-sam", "member"]] as const) {
+    roles[`${u} proj-mg`] = { role, ownerUserId: "mg-owner", bopsWsId: "ws_gh", name: "Gh", ownerEmail: STAFF_OWNER };
+    emails[u] = `${u.slice(3)}@example.com`;
+  }
+  const go = (user: string, a: unknown, key = `k_mg_${String(Math.random()).slice(2, 10)}`) => act(user, { key, act: a }, "proj-mg");
+  const busy = async (user: string, a: unknown) => {
+    const r = await go(user, a);
+    assert.deepEqual([r.status, r.json.code, r.json.error], [409, "not_waiting", "Its computer is still on the last one. Try again once it's done."], JSON.stringify(a));
+  };
+  await busy("mg-sam", { act: "deploy", app: "site" });
+  await busy("mg-ada", { act: "settings", app: "site", port: 3001 });
+  // A Link its computer can't take now would go to the owner's Mac: said the same.
+  await busy("mg-ada", { act: "githubLink", app: "site" });
+  assert.equal(queued.length, 0, "nothing for the Mac");
+  // One its computer takes is owed there, after the one going (one at a time in the bot's chat).
+  jobSays = "computer";
+  assert.equal((await go("mg-ada", { act: "githubLink", app: "site" })).status, 202);
+  // Another app: as before.
+  assert.equal((await go("mg-sam", { act: "deploy", app: "shop" })).status, 202);
+  assert.equal(queued.length, 1);
+  // An owner whose last Mac is older: as before, queued.
+  macNew = false;
+  fakes();
+  assert.equal((await go("mg-sam", { act: "deploy", app: "site" })).status, 202);
+  assert.equal(queued.length, 2);
+});
+
+test("over HTTP, everything through the cloud: an app act is a job for the app's own computer, never queued, from a window at CLOUD_ALL_MIN_VERSION (one from before is refused in words, nothing owed); refusals are said at once", async () => {
   const blob = rmBlob();
   const jobs: Parameters<NonNullable<Parameters<typeof resetMembers>[0]>["takeJob"] & {}>[0][] = [];
   let says: "computer" | "old" | "busy" = "computer";
@@ -3365,8 +3414,17 @@ test("over HTTP, everything through the cloud: an app act is a job for the app's
     roles[`${u} proj-cl`] = { role, ownerUserId: "cl-owner", bopsWsId: "ws_gh", name: "Gh", ownerEmail: STAFF_OWNER };
     emails[u] = `${u.slice(3)}@example.com`;
   }
-  const go = (user: string, a: unknown, key = `k_cl_${String(Math.random()).slice(2, 10)}`) => act(user, { key, act: a }, "proj-cl");
-  // An old window's deploy (it doesn't say its version): owed as a job all the same, marked cloud.
+  const from = (version: string | null) => (user: string, a: unknown, key = `k_cl_${String(Math.random()).slice(2, 10)}`) =>
+    fetch(`${base}/v1/ws/proj-cl/act`, { method: "POST", headers: { authorization: `Bearer key-${user}`, "content-type": "application/json", ...(version ? { "x-bops-version": version } : {}) }, body: JSON.stringify({ key, act: a }) }).then(async (r) => ({ status: r.status, json: (await r.json().catch(() => ({}))) as Record<string, unknown> }));
+  const go = from(CLOUD_ALL_MIN_VERSION);
+  // A window from before CLOUD_ALL_MIN_VERSION (0.0.53, or one that doesn't say) can't show a job going on its computer: said
+  // at once, in plain words, nothing owed. Its GitHub acts are its own (githubAct).
+  for (const old of [from(null), from("0.0.53")]) {
+    const no = await old("cl-ivy", { act: "deploy", app: "shop" });
+    assert.deepEqual([no.status, no.json.code, no.json.error], [409, "viewer_bops_old", "Update Bops to change apps in this workspace."]);
+  }
+  assert.equal(jobs.length, 0, "nothing owed");
+  // A deploy from a window at CLOUD_ALL_MIN_VERSION: owed as a job, marked cloud.
   const r = await go("cl-ivy", { act: "deploy", app: "shop", site: "admin" }, "k_cl_dep_001");
   assert.deepEqual([r.status, r.json], [202, { ok: true, macOn: true, stored: true, cloud: true, turn: "turn_msg_job_cl-ivy_k_cl_dep_001" }]);
   const j = jobs.at(-1)!;
@@ -3417,7 +3475,14 @@ test("the slice: appJobs and appRemove at Your Apps Write, to a Bops at CLOUD_AL
     { key: "k_b", userId: "u-sam", name: "Sam", act: "deploy", ok: true, going: true, at: 4 },
     { key: "k_c", userId: "u-sam", name: "Sam", act: "deploy", ok: true, at: 3 },
   ];
-  ws.appsRemoved = [{ key: "k_r", userId: "u-ada", name: "Ada", app: "old-app", ok: true, said: "Took it off the web.", codeLeft: true, at: 2, extra: "x" }];
+  const at = Date.now() - 60_000;
+  const dayAgo = Date.now() - DELETE_CODE_MS - 1000;
+  ws.appsRemoved = [
+    { key: "k_r", userId: "u-ada", name: "Ada", app: "old-app", ok: true, said: "Took it off the web.", codeLeft: true, at, extra: "x" },
+    // Its code can't be deleted from here any more: removed over a day ago, or an app of its name made again.
+    { key: "k_old", userId: "u-ada", name: "Ada", app: "older-app", ok: true, codeLeft: true, at: dayAgo },
+    { key: "k_again", userId: "u-ada", name: "Ada", app: "shop", ok: true, codeLeft: true, at },
+  ];
   const jobs = ["deploy", "remove"] as const;
   const viewer = (role: "admin" | "member", email: string, seen: boolean, more: Partial<SliceViewer> = {}) => ghViewer(role, email, { githubSeen: true, ...(seen ? { appActsSeen: true } : {}), ...more });
   const ada = sharedSlice(blob, "ws_gh", viewer("admin", "ada@example.com", true, { appJobs: [...jobs], appRemove: true }));
@@ -3425,7 +3490,11 @@ test("the slice: appJobs and appRemove at Your Apps Write, to a Bops at CLOUD_AL
   const shop = ada.apps!.list.find((a) => a.name === "shop")!;
   assert.deepEqual(shop.acts?.map((a) => a.key), ["k_a", "k_b", "k_c"]);
   assert.deepEqual(shop.leftOver, [{ name: "shop-old", port: 3100 }, { name: "shop-www", port: null, link: true }]);
-  assert.deepEqual(ada.apps!.removed, [{ key: "k_r", userId: "u-ada", name: "Ada", app: "old-app", ok: true, said: "Took it off the web.", codeLeft: true, at: 2 }]);
+  assert.deepEqual(ada.apps!.removed, [
+    { key: "k_r", userId: "u-ada", name: "Ada", app: "old-app", ok: true, said: "Took it off the web.", codeLeft: true, at },
+    { key: "k_old", userId: "u-ada", name: "Ada", app: "older-app", ok: true, at: dayAgo },
+    { key: "k_again", userId: "u-ada", name: "Ada", app: "shop", ok: true, at },
+  ]);
   // Ivy: no Remove apps; Sam has it.
   assert.equal(sharedSlice(blob, "ws_gh", viewer("member", "ivy@example.com", true, { appJobs: [...jobs], appRemove: true })).appRemove, undefined);
   assert.equal(sharedSlice(blob, "ws_gh", viewer("member", "sam@example.com", true, { appJobs: [...jobs], appRemove: true })).appRemove, true);
@@ -3435,5 +3504,5 @@ test("the slice: appJobs and appRemove at Your Apps Write, to a Bops at CLOUD_AL
   assert.deepEqual(old.apps!.list.find((a) => a.name === "shop")!.acts?.map((a) => a.key), ["k_c"]);
   // At Read: removals yes, left overs and the flags no.
   const rob = sharedSlice(blob, "ws_gh", viewer("member", "rob@example.com", true, { appJobs: [...jobs], appRemove: true }));
-  assert.deepEqual([rob.appJobs, rob.appRemove, rob.apps!.list.find((a) => a.name === "shop")!.leftOver, rob.apps!.removed?.length], [undefined, undefined, undefined, 1]);
+  assert.deepEqual([rob.appJobs, rob.appRemove, rob.apps!.list.find((a) => a.name === "shop")!.leftOver, rob.apps!.removed?.length], [undefined, undefined, undefined, 3]);
 });

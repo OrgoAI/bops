@@ -6,7 +6,7 @@ import { HttpError, readJson, type Route } from "./http.ts";
 import { viewsWritten } from "./live.ts";
 import { APPS_VIEW_PATH, type AppsViewPost } from "./protocol.ts";
 import { checkUser, lockedState, lockUser } from "./state.ts";
-import { canonical, COMMIT_SEEN, DEPLOY_SEEN, keep, LEFT_OVER_SEEN, SETTINGS_SEEN, SITE_SEEN, type AppViews } from "./ws-slice.ts";
+import { canonical, COMMIT_SEEN, DEPLOY_SEEN, HOSTNAME, keep, LEFT_OVER_SEEN, SETTINGS_SEEN, SITE_SEEN, vouchedSites, type AppViews } from "./ws-slice.ts";
 
 /**
  * What each app's own computer sees of its apps for the workspace's members (bops.app_views), so Your Apps stays fresh
@@ -17,7 +17,9 @@ import { canonical, COMMIT_SEEN, DEPLOY_SEEN, keep, LEFT_OVER_SEEN, SETTINGS_SEE
  * after a bot's deploy there, while a deploy runs, and when Bops Cloud nudges it (turns.ts nudgeAppViews). Only a
  * computer on its own identity may post, and only for apps whose home is that computer (computer-scope.ts appHomeHere,
  * the rule its writes of the app's record are held to); every field is an allow list (cleanAppView: no Preview
- * passwords, members' acts, ids of projects or computers, variables, logs or error text). Kept in its own table, never in
+ * passwords, members' acts, ids of projects or computers, variables, logs or error text), and every link one the app's
+ * record vouches for (ws-slice.ts vouchedSites: a Preview link of the site's own sealed label, an address and domains
+ * that are bare hostnames; appsFor holds it to the record again as it is when shown). Kept in its own table, never in
  * the owner's state, so a look never bumps its version: `view` and `view_at` only when it changed, `seen_at` each time.
  * ws-slice.ts appsFor shows, per app, the newer of this and the owner's Mac's read. The answer is 204 with nothing in
  * it; every refusal has fixed words.
@@ -48,14 +50,16 @@ const port = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v 
  * One app's view as members may be shown it, from what a computer posted (lib/hosted-apps.ts AppView), or null for none:
  * its head; at most MAX_SITES sites (ws-slice.ts SITE_SEEN, never a password); MAX_COMMITS commits (messages to 200
  * characters, authors to 80); MAX_DEPLOYS deploys; each site's settings; MAX_LEFT_OVERS left overs (name to 80, port,
- * whether it's a web address alone); MAX_OWNED of the workspace's bought domains (id and name).
+ * whether it's a web address alone); MAX_OWNED of the workspace's bought domains (id and name, a bare hostname). `host`:
+ * the app's record, which its sites are held to (vouchedSites); none, its sites as kept.
  */
-export function cleanAppView(v: unknown): Record<string, unknown> | null {
+export function cleanAppView(v: unknown, name?: string, host?: Record<string, unknown>): Record<string, unknown> | null {
   if (!isObject(v)) return null;
   const out: Record<string, unknown> = {};
   if (v.head === null) out.head = null;
   else if (isObject(v.head)) out.head = { ...(keep(v.head, { id: true, message: true, at: true }) as Record<string, unknown>), ...(typeof v.head.message === "string" ? { message: v.head.message.slice(0, 200) } : {}) };
-  out.sites = Array.isArray(v.sites) ? keep(v.sites.slice(0, MAX_SITES), [SITE_SEEN]) : [];
+  const sites = Array.isArray(v.sites) ? (keep(v.sites.slice(0, MAX_SITES), [SITE_SEEN]) as unknown[]) : [];
+  out.sites = name && host ? vouchedSites(name, host, sites) : sites;
   out.commits = Array.isArray(v.commits)
     ? (keep(v.commits.slice(0, MAX_COMMITS), [COMMIT_SEEN]) as Record<string, unknown>[]).map((c) => ({ ...c, ...(c.message !== undefined ? { message: cut(c.message, 200) } : {}), ...(c.author !== undefined ? { author: cut(c.author, 80) } : {}) }))
     : [];
@@ -77,7 +81,7 @@ export function cleanAppView(v: unknown): Record<string, unknown> | null {
   }
   if (Array.isArray(v.owned)) {
     const owned = v.owned
-      .filter((d): d is Record<string, unknown> => isObject(d) && typeof d.id === "string" && OPAQUE.test(d.id) && typeof d.domain === "string" && d.domain.length <= 253)
+      .filter((d): d is Record<string, unknown> => isObject(d) && typeof d.id === "string" && OPAQUE.test(d.id) && typeof d.domain === "string" && HOSTNAME.test(d.domain))
       .slice(0, MAX_OWNED)
       .map((d) => ({ id: d.id as string, domain: d.domain as string }));
     out.owned = owned;
@@ -129,7 +133,7 @@ const post: Route = {
       if (!mine.length) return null;
       const was = await readAppViews(c, user!.id, p.ws);
       for (const name of mine) {
-        const view = cleanAppView(p.apps[name]);
+        const view = cleanAppView(p.apps[name], name, isObject(hosted[name]) ? hosted[name] : undefined);
         if (!view) continue;
         if (Object.hasOwn(was, name) && canonical(was[name].view) === canonical(view))
           await c.query("UPDATE bops.app_views SET seen_at = now() WHERE user_id = $1 AND ws_id = $2 AND app = $3", [user!.id, p.ws, name]);

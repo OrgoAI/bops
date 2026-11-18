@@ -687,7 +687,8 @@ await check("every kind of an app's job goes to appJob in the member's name, nev
     [{ act: "deploy", app: "site", env: "prod" }, { ok: true, said: "Publishing site, what its preview serves." }, false, true],
     [{ act: "rollback", app: "site", deployment: "d1" }, { ok: false, said: "That one is live now." }, false, true],
     [{ act: "settings", app: "site", port: 3000 }, { ok: true, said: "Changed the settings of site's preview." }, false, true],
-    [{ act: "domain", app: "site", zone: "z1", subdomain: "www" }, { ok: true, said: "Pointed www.example.com at site." }, false, true],
+    // (The domain it pointed, by name, with its end: Bops Cloud keeps it on the act row.)
+    [{ act: "domain", app: "site", zone: "z1", subdomain: "www" }, { ok: true, said: "Pointed www.example.com at site.", domain: "www.example.com" }, false, true],
     [{ act: "remove", app: "site" }, { ok: true, said: "site is off the web.", removed: "app" }, true, false],
     [{ act: "removeSite", app: "site", site: "docs" }, { ok: true, said: "docs is off the web.", removed: "site" }, true, false],
     [{ act: "removeLeftOver", app: "site", leftOver: "site-old" }, { ok: true, said: "Removed the left over site-old." }, true, true],

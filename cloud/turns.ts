@@ -44,7 +44,7 @@ import {
 import { announce, checkUser, loadState, lockedState, lockUser, toJson, writeMessages } from "./state.ts";
 import { noRunnerWords, oldRunnerWords } from "./thread-acts.ts";
 import { deliverWaitingTo, isConnected } from "./tunnel.ts";
-import { computerUseOf, list, viewerAccess, wsOfBot, type SliceViewer } from "./ws-slice.ts";
+import { computerUseOf, HOSTNAME, list, viewerAccess, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 
 /**
  * Chat through Bops Cloud (protocol.ts "Chat through Bops Cloud"). Owner: edge builder.
@@ -1035,6 +1035,8 @@ const actsOf = (blob: Record<string, unknown>, ws: string, app: string): Record<
 };
 /** Whether an act with this key is kept on the app already (done, refused, or going). */
 export const appActKept = (blob: Record<string, unknown>, ws: string, app: string, key: string) => actsOf(blob, ws, app).some((x) => x.key === key);
+/** Whether an act on the app other than the one by `key` is still going on its computer (its "going" row: takeAppJob), whichever way the workspace goes now. */
+export const appGoing = (blob: Record<string, unknown>, ws: string, app: string, key?: string) => actsOf(blob, ws, app).some((x) => x.going === true && x.key !== key);
 
 /**
  * `blob` with a member's act kept on an app, newest first, in place of one by the same key (as the owner's Mac keeps one:
@@ -1059,13 +1061,13 @@ export function withAppAct(blob: Record<string, unknown>, ws: string, app: strin
  * `blob` with an app job's act (its "going" row) said done or not, with words; null when it isn't going any more (said
  * already, or gone), or for a job with no app (jobApp: compactChat), which has no row on an app to say it on.
  */
-function jobEnded(blob: Record<string, unknown>, t: TurnRow, ok: boolean, said: string): Record<string, unknown> | null {
+function jobEnded(blob: Record<string, unknown>, t: TurnRow, ok: boolean, said: string, more: { domain?: string } = {}): Record<string, unknown> | null {
   const m = t.member;
   const app = m?.job ? jobApp(m.job) : null;
   if (!m?.job || !app) return null;
   const row = actsOf(blob, t.wsId, app).find((x) => x.key === m.ref);
   if (!row || row.going !== true) return null;
-  return withAppAct(blob, t.wsId, app, { key: m.ref, userId: m.userId, name: m.name, act: m.job.act, ...jobRowOf(m.job), ok, said, at: Date.now() });
+  return withAppAct(blob, t.wsId, app, { key: m.ref, userId: m.userId, name: m.name, act: m.job.act, ...jobRowOf(m.job), ...(more.domain ? { domain: more.domain } : {}), ok, said, at: Date.now() });
 }
 
 /** What an app job's act row says of it besides its kind (SharedApp.acts): its site, the left over by name, Published. */
@@ -1263,22 +1265,24 @@ export const APP_JOB_DEADLINE_MS = 30 * 60_000;
 export const jobDeadline = (job: TurnJob): number => (isGithubJob(job) || isRemoveJob(job) || ("env" in job && job.env === "prod") ? TURN_DEADLINE_MS : APP_JOB_DEADLINE_MS);
 
 /**
- * Why an app job can't be owed to the app's computer: its home (lost, or not on its bot's computer), its bot has no
- * computer, no runner there, one too old, no bot there given the GitHub key, another job still going on the app, or (a
- * remove) a copy left on another computer.
+ * Why an app job can't be owed to the app's computer: it lost its computer ("lost"), no bot works on it ("noBot"), its bot
+ * works on another computer now while it still runs on its old one ("moved"), its bot has no computer, no runner there,
+ * one too old, no bot there given the GitHub key, another job still going on the app, or (a remove) a copy left on
+ * another computer ("behind", said before "lost": the copy is what keeps it from going).
  */
-export type AppJobRefusal = "home" | "noComputer" | "runner" | "old" | "key" | "busy" | "behind";
+export type AppJobRefusal = "lost" | "noBot" | "moved" | "noComputer" | "runner" | "old" | "key" | "busy" | "behind";
 export type AppJobTaken = { where: "computer"; turn: TurnRow; fresh: boolean } | { where: "refused"; why: AppJobRefusal; bot: string };
 
 /**
  * An app's job (protocol.ts AppJob) owed to the app's own computer, which has what it needs there: Ingot (its runner's
  * token for the workspace), its own Orgo sign in for its deploys, and for a GitHub kind the GitHub key (Orgo's broker
  * lets it call only the keys given to a bot on it). Under the owner's lock, on their state as it is then: `check`
- * (throwing to refuse: still theirs to do), then the app's home (not lost, on the computer its bot works on: computerFor,
- * with `cloud` a bot set to the owner's Mac too), a runner there at `min` (a GitHub job: one the owner's Mac's record
- * says is running, as before; else runnerVersionOf, the Mac's record or its own word), with `needsKey` a bot of the
- * workspace on it given the GitHub key; with `cloud`, no other job of the app
- * going (its act row), and for a remove no copy of it left on another computer (AppHosting.behind). Any missing:
+ * (throwing to refuse: still theirs to do), then with `cloud` for a remove no copy of it left on another computer
+ * (AppHosting.behind), the app's home (not lost, on the computer its bot works on: computerFor, with `cloud` a bot set to
+ * the owner's Mac too), a runner there at `min` (a GitHub job: one the owner's Mac's record says is running, as before;
+ * else runnerVersionOf, the Mac's record or its own word), with `needsKey` a bot of the workspace working on it given the
+ * GitHub key (never one set to the owner's Mac: its runner counts none such); with `cloud`, no other job of the app
+ * going (its act row). Any missing:
  * "refused", and why; the owner's Mac does it instead only outside `cloud` (members.ts). A computer the owner's Mac found
  * down is refused outside `cloud` (as before), but with `cloud` the job is owed and its wake says why it can't run
  * (JOB_NOTES). Else, once by its id (a retry finds it and changes nothing): a note in the app's bot's chat (Bops', with
@@ -1317,9 +1321,14 @@ export async function takeAppJob(o: {
     const botId = typeof h.botId === "string" ? h.botId : null;
     const bot = botId ? nameOf(blob, botId) : "The bot";
     const desktop = botId ? computerFor(blob, botId, cloud) : null;
-    if (h.lost !== undefined || !botId) return { where: "refused", why: "home", bot };
-    if (!desktop) return { where: "refused", why: cloud ? "noComputer" : "home", bot };
-    if (typeof h.computerId !== "string" || h.computerId.toLowerCase() !== desktop) return { where: "refused", why: "home", bot };
+    // A copy left on another computer (a remove): this computer's runner can't reach it, so the app can't go from here
+    // yet, whether or not the app lost its own computer since.
+    if (cloud && (o.job.act === "remove" || o.job.act === "removeSite") && list(h.behind).some((x) => typeof x.computerId === "string" && x.computerId.toLowerCase() !== desktop && (o.job.act === "remove" || ("site" in o.job && x.site === o.job.site))))
+      return { where: "refused", why: "behind", bot };
+    if (h.lost !== undefined) return { where: "refused", why: "lost", bot };
+    if (!botId) return { where: "refused", why: "noBot", bot };
+    if (!desktop) return { where: "refused", why: cloud ? "noComputer" : "moved", bot };
+    if (typeof h.computerId !== "string" || h.computerId.toLowerCase() !== desktop) return { where: "refused", why: "moved", bot };
     // Its runner at the version its kind needs; a computer the Mac found down is left to the Mac outside the cloud, as
     // before, and woken for it inside. A GitHub job keeps the rule from before: the owner's Mac's record says it's running
     // (never one being set up again, failed or being stopped, whatever the runner said before), its version the newer of
@@ -1330,15 +1339,14 @@ export async function takeAppJob(o: {
     if (!v) return { where: "refused", why: "runner", bot };
     if (olderThan(v, min)) return { where: "refused", why: cloud ? "old" : "runner", bot };
     if (needsKey) {
-      const keyed = list(blob.bots).some((b) => typeof b.id === "string" && wsOfBot(b) === o.wsId && computerFor(blob, b.id, cloud) === desktop && Array.isArray(b.keys) && b.keys.includes(GITHUB_KEY_NAME));
+      // A bot that works on this computer itself (never one set to work on the owner's Mac, even with `cloud`): the only
+      // bot Orgo's broker lets this computer call GitHub for, as its runner checks it (lib/server/hosted-apps.ts githubKeyHere).
+      const keyed = list(blob.bots).some((b) => typeof b.id === "string" && wsOfBot(b) === o.wsId && computerFor(blob, b.id) === desktop && Array.isArray(b.keys) && b.keys.includes(GITHUB_KEY_NAME));
       if (!keyed) return { where: "refused", why: "key", bot };
     }
     if (cloud) {
       // One job at a time on an app: another still going (its act row) is said, never queued behind it.
-      if (actsOf(blob, o.wsId, o.job.app).some((x) => x.going === true && x.key !== o.member.ref)) return { where: "refused", why: "busy", bot };
-      // A copy left on another computer: this computer's runner can't reach it, so the app can't go from here yet.
-      if ((o.job.act === "remove" || o.job.act === "removeSite") && list(h.behind).some((x) => typeof x.computerId === "string" && x.computerId.toLowerCase() !== desktop && (o.job.act === "remove" || ("site" in o.job && x.site === o.job.site))))
-        return { where: "refused", why: "behind", bot };
+      if (appGoing(blob, o.wsId, o.job.app, o.member.ref)) return { where: "refused", why: "busy", bot };
     }
     const at = Date.now();
     const chatId = `bot:${botId}`;
@@ -2031,7 +2039,7 @@ async function resume(user: CloudUser, id: string, body: unknown): Promise<Runne
 }
 
 /** A job's end as its computer said it (RunnerDone.job, cleaned: `said` one line, `removed` only when it went). */
-export type JobResult = { ok: boolean; said: string; removed?: "app" | "site" };
+export type JobResult = { ok: boolean; said: string; removed?: "app" | "site"; domain?: string };
 
 /**
  * A job's end (finish), on the owner's state under their lock, by its kind: the state to write, or null for nothing to
@@ -2048,9 +2056,11 @@ function jobFinished(blob: Record<string, unknown>, t: TurnRow, res: JobResult, 
     case "deploy":
     case "rollback":
     case "settings":
-    case "domain":
     case "removeLeftOver":
       return jobEnded(blob, t, res.ok, res.said);
+    // The domain its computer pointed, by name (Sam pointed shop.example.com at it), as Mac mode keeps it.
+    case "domain":
+      return jobEnded(blob, t, res.ok, res.said, res.ok && res.domain ? { domain: res.domain } : {});
     // Off the web: the app (or its site) goes from the state too, which only Bops Cloud may write (a runner never drops a
     // record or a site: computer-scope.ts hostingChangeAllowed), and only while its home is still the computer that did it.
     case "remove": {
@@ -2142,7 +2152,9 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
       const said = cleanSaid(res?.said) ?? (note ? note : state === "done" ? old : JOB_STOPPED);
       const removed = ok && (res?.removed === "app" || res?.removed === "site") ? res.removed : undefined;
       const job = raw.member.job;
-      const next = jobFinished(blob, turn, { ok, said, ...(removed ? { removed } : {}) }, user.computer!.desktopId);
+      // A domain's name as its computer pointed it: a bare hostname alone (words, never a link), lowercased.
+      const domain = ok && job.act === "domain" && typeof res?.domain === "string" && HOSTNAME.test(res.domain) ? res.domain.toLowerCase() : undefined;
+      const next = jobFinished(blob, turn, { ok, said, ...(removed ? { removed } : {}), ...(domain ? { domain } : {}) }, user.computer!.desktopId);
       if (next) {
         await writeOwnerState(db, user.id, next);
         jobWritten = next;

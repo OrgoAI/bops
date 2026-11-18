@@ -75,7 +75,11 @@ import {
   isAppAct,
   isGithubAct,
   isRemoveAct,
+  DELETE_CODE_MS,
+  INGOT_DOWN,
   REMOVE_APPS_LINE,
+  UPDATE_FOR_APPS,
+  VIEWER_BOPS_OLD,
   type AppJob,
   type AppJobKind,
   type MemberRemoveAct,
@@ -105,6 +109,7 @@ import { CHANGES_MIN_VERSION, checkChange, cleanChange } from "./change-routes.t
 import {
   allCloud,
   appActKept,
+  appGoing,
   cancelMember,
   chatAutoFor,
   computerFor,
@@ -1200,9 +1205,13 @@ const actIn: Route = {
       appsTouched(slice, viewer, access, body.act, { cloud, views });
       // Done here (the setting) and by the app's own computer (Link, Bring in), the owner's Mac on or off (githubAct).
       if (isGithubAct(body.act)) return githubAct(res, { user: user!, role, target, viewer, projectId, key: body.key, act: body.act, blob, bearer: bearer(req), still, cloud });
+      // A window from before CLOUD_ALL_MIN_VERSION can't show an act going on its computer (ws-slice.ts actSeenBy), so it
+      // would say the owner's Mac didn't open in time while the job still runs: said now instead, in plain words.
+      if (cloud && !knowsAppActs(req)) throw new HttpError(409, UPDATE_FOR_APPS, { code: VIEWER_BOPS_OLD });
       if (cloud) return appJobAct(res, { user: user!, role, target, viewer, projectId, key: body.key, act: body.act, blob, views, still });
       // The owner's Mac takes a remove from CLOUD_ALL_MIN_VERSION on (an older one drops it).
       if (isRemoveAct(body.act) && !(await adminGate(target.account, CLOUD_ALL_MIN_VERSION))) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
+      await notWhileGoing(blob, target, body.act.app, body.key);
     }
     // A change as the owner's window makes it: the power it needs (an Admin has every one), and only this workspace's
     // bots (at Write) and apps (Your Apps at Write), once the owner's Bops takes it (changeTouched).
@@ -2050,8 +2059,12 @@ export const noGithubKey = (bot: string, saved: boolean, cloud = false) =>
 /** Why an app's computer can't take a job now, in a workspace where everything goes through the cloud (appJobAct), and its code. */
 export function jobRefusal(why: AppJobRefusal, o: { app: string; bot: string; owner: string; saved?: boolean }): HttpError {
   switch (why) {
-    case "home":
+    case "lost":
       return new HttpError(409, `${o.app} lost its computer, so nothing can run it from here.`, { code: COMPUTER_NOT_READY });
+    case "noBot":
+      return new HttpError(409, `No bot works on ${o.app}, so nothing can run it from here.`, { code: COMPUTER_NOT_READY });
+    case "moved":
+      return new HttpError(409, `${o.bot} works on another computer now, so ${o.app} can't change from here until it's deployed there.`, { code: COMPUTER_NOT_READY });
     case "noComputer":
       return new HttpError(409, `${o.bot} has no computer of its own, so ${o.app} can't change from here. Give ${o.bot} a computer in ${o.bot}'s settings.`, { code: COMPUTER_NOT_READY });
     case "runner":
@@ -2066,6 +2079,16 @@ export function jobRefusal(why: AppJobRefusal, o: { app: string; bot: string; ow
       return new HttpError(409, `${o.app} still runs an old copy on another computer, so it can't be removed from here yet.`, { code: NOT_WAITING });
   }
 }
+/**
+ * A member's app act for the owner's Mac (a workspace on the Mac) while another act on the app is still going on its
+ * computer (a job owed before the workspace went back to the Mac stays there: turns.ts handBack): refused now
+ * (jobRefusal "busy"), so the Mac never does the same app beside it. An owner's Mac from before CLOUD_ALL_MIN_VERSION,
+ * as before.
+ */
+async function notWhileGoing(blob: Record<string, unknown>, target: LiveTarget, app: string, key: string) {
+  if (appGoing(blob, target.ws, app, key) && (await adminGate(target.account, CLOUD_ALL_MIN_VERSION))) throw jobRefusal("busy", { app, bot: "", owner: "" });
+}
+
 /** 409 CLOUD_NOT_YET: a kind its computer isn't given now (config.ts appJobs, the kill switch). */
 const JOB_OFF = (bot: string) => `${bot}'s computer can't do this from the cloud yet.`;
 
@@ -2089,7 +2112,8 @@ async function githubAct(
     const ownKey = act.github && !sameDestination(was, act.github) ? await githubKeyFor(list(o.blob.workspaces).find((w) => w.id === target.ws) ?? null, o.bearer, projectId) : true;
     if (!ownKey) throw new HttpError(403, GITHUB_KEY_LINE, { code: MEMBER_OWNER_ONLY });
     await githubHere({ target, viewer, act, who, key, ownKey, still: o.still });
-    if (!act.link) return sendJson(res, 202, { ok: true, macOn: true, stored: true } satisfies MemberActAnswer);
+    // (Written here: in a workspace where everything goes through the cloud, said as the cloud's, never as sent to the owner's Bops.)
+    if (!act.link) return sendJson(res, 202, { ok: true, macOn: true, stored: true, ...(o.cloud ? { cloud: true as const } : {}) } satisfies MemberActAnswer);
   }
   const job: GithubJob = { act: act.act === "github" ? "githubLink" : act.act, app: act.app };
   const taken = await takeJob({
@@ -2123,6 +2147,7 @@ async function githubAct(
   // The app's computer can't do it now: the owner's Mac, which has the owner's own key, as a member's other app acts. Only
   // the key missing, and that Mac off: said now, as it would wait for nothing.
   if (taken.why === "key" && !isOn(target.account)) throw new HttpError(409, noGithubKey(taken.bot, act.act === "github"), { code: GITHUB_NO_KEY });
+  await notWhileGoing(o.blob, target, job.app, key);
   const payload: MemberActPayload = {
     projectId,
     wsId: target.ws,
@@ -2258,31 +2283,47 @@ async function removeLostHere(o: { target: LiveTarget; viewer: SliceViewer; act:
   stateWritten(target.account, written, "cloud");
 }
 
-/** How long after an app was removed its code can still be deleted from Your Apps (deleteCodeHere). */
-export const DELETE_CODE_MS = 24 * 3600_000;
 /** Ingot's words, made one plain line. */
 const ingotWords = (v: unknown) => (typeof v === "string" && v.trim() ? v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 200) : null);
 /** A removal's words without what an earlier Delete its code added (deleteCodeHere adds it again). */
 const baseSaid = (v: unknown) => (typeof v === "string" ? v.replace(/\s*Its code (?:was deleted too|wasn't deleted:).*$/, "").trim() : "");
+/**
+ * Why Ingot didn't delete an app's code, by how it answered, when it gave no words of its own (never its status, or its
+ * code for it), as every member reads it on the removal row.
+ */
+const ingotRefused = (status: number) => (status === 401 || status === 403 ? "Ingot didn't allow it." : status === 409 ? "Ingot couldn't delete it now." : "Ingot didn't delete it.");
+/** Delete its code, Ingot not answering (down, or too slow): 502 INGOT_DOWN, so the window says these words, never Orgo's (503 is "can't check your access"). */
+const ingotDown = () => new HttpError(502, "Ingot isn't answering. Try again.", { code: INGOT_DOWN });
 
 /**
  * An Admin's Delete its code (a "deleteCode" act) for an app removed with its code left (Workspace.appsRemoved codeLeft,
  * at most DELETE_CODE_MS ago, the app gone from the workspace): Bops Cloud asks Ingot to delete its repo at once, with the
  * Admin's own Orgo key from this request (Ingot takes the workspace's owner or an Admin, never a computer's token), used
  * once and never kept or logged. Their role was asked of orgo-web afresh (actIn). Done (200, 204, or 404: there's none),
- * the removal row says so and its code isn't left; refused, the row keeps Ingot's words and its code stays left. The
- * same in either kind of workspace: the owner's Mac never does it.
+ * the removal row says so and its code isn't left; refused, the row keeps Ingot's words (its message, else plain words by
+ * how it answered: ingotRefused) and its code stays left. A removal over DELETE_CODE_MS old, or an app of that name made
+ * again (its code in Ingot is the new one's), is 409 in plain words; Ingot not answering 502 INGOT_DOWN. The same in
+ * either kind of workspace: the owner's Mac never does it.
  */
 async function deleteCodeHere(res: ServerResponse, o: { user: CloudUser; role: WsAccess; target: LiveTarget; viewer: SliceViewer; projectId: string; act: Extract<MemberRemoveAct, { act: "deleteCode" }>; bearer: string; still: () => boolean }) {
   const { target, act } = o;
   if (o.role.role !== "admin") throw new HttpError(403, ADMIN_LINE, { code: ADMIN_ONLY });
   if (appsOpenFor(o.viewer) !== "write") throw new HttpError(403, "You can see these apps. Ask the owner for Write to change them.", { code: MEMBER_APPS_READ_ONLY });
-  const rowOf = (blob: Record<string, unknown>) => {
+  // Its removal with its code left (any age, the app gone or not), and the one Delete its code may still take.
+  const leftOf = (blob: Record<string, unknown>) => {
     const w = list(blob.workspaces).find((x) => x.id === target.ws);
-    if (!w || hostingIn(blob, target.ws, act.app)) return null;
-    return list(w.appsRemoved).find((r) => r.app === act.app && r.ok === true && r.codeLeft === true && typeof r.at === "number" && now() - r.at <= DELETE_CODE_MS && typeof r.key === "string") ?? null;
+    return w ? (list(w.appsRemoved).find((r) => r.app === act.app && r.ok === true && r.codeLeft === true && typeof r.at === "number" && typeof r.key === "string") ?? null) : null;
   };
-  if (!rowOf(await ownerState(target.account))) throw new HttpError(404, "No such app.");
+  const rowOf = (blob: Record<string, unknown>) => {
+    const r = leftOf(blob);
+    return r && !hostingIn(blob, target.ws, act.app) && now() - (r.at as number) <= DELETE_CODE_MS ? r : null;
+  };
+  const was = await ownerState(target.account);
+  if (!rowOf(was)) {
+    if (!leftOf(was)) throw new HttpError(404, "No such app.");
+    if (hostingIn(was, target.ws, act.app)) throw new HttpError(409, `${act.app} is in this workspace again, so the old one's code can't be deleted from here.`, { code: NOT_WAITING });
+    throw new HttpError(409, "It was removed more than a day ago, so its code can't be deleted from here.", { code: NOT_WAITING });
+  }
   let answer: { status: number; why: string | null };
   try {
     const r = await fetchImpl(`${config.ingotUrl()}/api/v1/w/${encodeURIComponent(o.projectId.toLowerCase())}/repos/${act.app}`, {
@@ -2290,14 +2331,15 @@ async function deleteCodeHere(res: ServerResponse, o: { user: CloudUser; role: W
       headers: { Authorization: `Bearer ${o.bearer}`, Accept: "application/json" },
       signal: AbortSignal.timeout(15_000),
     });
-    const j = (await r.json().catch(() => null)) as { message?: unknown; error?: unknown } | null;
-    answer = { status: r.status, why: ingotWords(j?.message) ?? ingotWords(j?.error) };
+    const j = (await r.json().catch(() => null)) as { message?: unknown } | null;
+    // Its message alone: its `error` is a short code ("forbidden"), never plain words.
+    answer = { status: r.status, why: ingotWords(j?.message) };
   } catch {
-    throw new HttpError(503, "Ingot isn't answering. Try again.");
+    throw ingotDown();
   }
-  if ([502, 503, 504].includes(answer.status)) throw new HttpError(503, "Ingot isn't answering. Try again.");
+  if ([502, 503, 504].includes(answer.status)) throw ingotDown();
   const deleted = answer.status === 200 || answer.status === 204 || answer.status === 404;
-  const why = answer.why ?? `Ingot answered ${answer.status}`;
+  const why = answer.why ?? ingotRefused(answer.status);
   const written = await tx(async (c) => {
     await lockUser(c, target.account);
     const blob = await lockedState(c, target.account);

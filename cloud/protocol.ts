@@ -881,7 +881,11 @@ export const PREVIEW_PASSWORD = /^(?=.*[A-Za-z])(?=.*[2-9])[ABCDEFGHJKLMNPQRSTUV
 export const PREVIEW_PASSWORD_PATH = "/v1/apps/preview-password";
 export type PreviewPasswordPost = { ws: string; app: string; site: string; url: string; password: string | null; seen?: number };
 
-/** What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` when the owner's Mac last read them. */
+/**
+ * What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` the oldest read of what's shown (each
+ * app as the owner's Mac or its own computer last read it, cloud/ws-slice.ts appsFor), so the page is never fresher than
+ * its stalest app.
+ */
 export type SharedApps = {
   level: "read" | "write";
   at: number;
@@ -896,7 +900,8 @@ export type SharedApps = {
   /**
    * Apps someone other than the owner removed lately (lib/types.ts Workspace.appsRemoved), newest first, at most 10, at Read
    * and Write, to a viewer at CLOUD_ALL_MIN_VERSION: who, which app, and how it went. `codeLeft`: its code is still in Ingot
-   * (an Admin's window offers Delete its code, a "deleteCode" act).
+   * and Delete its code can still take it (an Admin's window offers it, a "deleteCode" act): within DELETE_CODE_MS of the
+   * remove, with no app of that name made again.
    */
   removed?: SharedAppRemoval[];
 };
@@ -1355,6 +1360,7 @@ export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
  * | Owing a runner job (app kinds, compactChat), replying to a routine's ask, a group turn | turns.ts runnerVersionOf: the newer of bops.runner_seen and the Mac's record | 409 COMPUTER_NOT_READY, or the note "old". Never the Mac. |
  * | Claiming a non-GitHub job | the claiming runner's own version header | 410, note "oldRunner" |
  * | Remove buttons, removal rows, the "cloud" pending state | the viewer's window version | not shown |
+ * | A member's app act (not GitHub) where everything goes through the cloud | the viewer's window version | 409 VIEWER_BOPS_OLD |
  * | Remove kinds in mac mode | the owner's last Mac | 409 OWNER_BOPS_OLD |
  * | GitHub acts | GITHUB_ACTS_MIN_VERSION | as today |
  * | Setting chat to "cloud" | CLOUD_CHAT_MIN_VERSION | as today |
@@ -1364,10 +1370,24 @@ export const CLOUD_ALL_MIN_VERSION = "0.0.54";
 export const COMPUTER_NOT_READY = "computer_not_ready";
 /** 409: this can't be done from the cloud yet (a workspace where everything goes through the cloud), and the owner's Mac never does it instead. */
 export const CLOUD_NOT_YET = "cloud_not_yet";
+/**
+ * 409: a member's app act (not a GitHub one) from a window older than CLOUD_ALL_MIN_VERSION, in a workspace where
+ * everything goes through the cloud: its job would go to the app's own computer, and that window can't show it going
+ * there (it would say the owner's Mac didn't open in time), so it's refused at once, in UPDATE_FOR_APPS.
+ */
+export const VIEWER_BOPS_OLD = "viewer_bops_old";
+export const UPDATE_FOR_APPS = "Update Bops to change apps in this workspace.";
 /** Who did it, on what Bops Cloud wrote itself (Session.by of a thread it ended): a stale copy never brings it back. */
 export const CLOUD_BY = "cloud";
 /** How long the viewer's window shows an act pending as "cloud" (MemberActAnswer.cloud) before it says it didn't go: a job's longest wait, and some. */
 export const CLOUD_ACT_MS = 35 * 60_000;
+/**
+ * How long after an app was removed its code can still be deleted from Your Apps (cloud/members.ts deleteCodeHere): its
+ * removal row says its code is left (SharedAppRemoval.codeLeft) only that long (cloud/ws-slice.ts appsFor).
+ */
+export const DELETE_CODE_MS = 24 * 3600_000;
+/** 502: Ingot didn't answer Delete its code (down, or too slow): said in Bops Cloud's own words, never as Orgo's. */
+export const INGOT_DOWN = "ingot_down";
 /**
  * The first Bops with the owner's switch in Settings, General (components/app/chat-switch.tsx): Bops Cloud moves a
  * workspace to it by itself (cloud/turns.ts autoRoute) only for an owner whose last Mac is at this or newer, so an
@@ -1442,6 +1462,7 @@ export type RunnerBeat = { phase: "model" | "tools" };
  * words, which Bops Cloud keeps on the app (SharedApp.acts); a job turn done without it went to a runner from before.
  * `removed`: a remove job took the app ("app") or its site ("site") off the web, for Bops Cloud to drop from the state.
  * `reacts`: a group's turn's tapbacks on the message, one per bot (at most 8), each a bot of the chat on this computer.
+ * `domain`: the domain a domain job pointed, by name, which Bops Cloud keeps on the act row when it's a bare hostname.
  */
 export type RunnerDone = {
   state: "done" | "paused" | "failed";
@@ -1449,7 +1470,7 @@ export type RunnerDone = {
   note?: string;
   react?: string;
   reacts?: { botId: string; type: string }[];
-  job?: { ok: boolean; said: string; removed?: "app" | "site" };
+  job?: { ok: boolean; said: string; removed?: "app" | "site"; domain?: string };
 };
 /**
  * POST /v1/runner/turns/<id>/resume {approvalId}: a turn paused for an OK goes on once the OK is answered, only for that

@@ -7,7 +7,7 @@ import { closeDb, db, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import { CLOUD_ALL_MIN_VERSION, COMPUTER_NOT_READY, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
+import { CLOUD_ALL_MIN_VERSION, COMPUTER_NOT_READY, DELETE_CODE_MS, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
 import { howIWork } from "../style.ts";
 import { APP_JOB_DEADLINE_MS, closeRunners, JOB_OLD_RUNNER, jobDeadline, NO_CHAT_COMPUTER, noteTrouble, resetTurns, runnerVersionOf, sweepTurns, takeAppJob, takeChatJob, turnById, TURN_DEADLINE_MS, turnTiming } from "../turns.ts";
 import { connectMac, dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
@@ -1821,6 +1821,8 @@ const appActs = async (owner: string, app = "site") => (await acmeAll(owner)).ap
 /** A member's act from a window that says its version (none: one from before it said). */
 const actFrom = (member: string, project: string, key: string, a: Record<string, unknown>, version?: string) =>
   fetch(`${cloud.url}/v1/ws/${project}/act`, { method: "POST", headers: { Authorization: `Bearer ${keyOf(member)}`, "content-type": "application/json", ...(version ? { "x-bops-version": version } : {}) }, body: JSON.stringify({ key, act: a }) });
+/** A member's act from a window at CLOUD_ALL_MIN_VERSION, which shows a job going on its computer. */
+const cact = (member: string, project: string, key: string, a: Record<string, unknown>) => actFrom(member, project, key, a, CLOUD_ALL_MIN_VERSION);
 const viewsOf = async (owner: string) => (await query<{ app: string }>("SELECT app FROM bops.app_views WHERE user_id = $1 ORDER BY app", [owner])).rows.map((r) => r.app);
 
 /**
@@ -1892,8 +1894,14 @@ test("A Member's Update preview in a cloud workspace with the owner's Mac shut i
   const s = await setupCloudApps();
   const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
   t.after(() => box.close());
-  // From a window before CLOUD_ALL_MIN_VERSION (it doesn't say): owed all the same, never left to the owner's Mac.
-  const r = await act(s.ivy, s.project, "key-cdep-0001", { act: "deploy", app: "site" });
+  // From a window before CLOUD_ALL_MIN_VERSION (0.0.53, or one that doesn't say): it can't show a job going on its
+  // computer, so it's said at once in plain words, nothing owed and nothing left to the owner's Mac.
+  for (const v of [undefined, "0.0.53"]) {
+    const old = await actFrom(s.ivy, s.project, "key-cdep-0000", { act: "deploy", app: "site" }, v);
+    assert.deepEqual([old.status, await old.json()], [409, { error: "Update Bops to change apps in this workspace.", code: "viewer_bops_old" }]);
+  }
+  assert.deepEqual([await pendingFor(s.owner), (await turnsOf(s.owner)).length], [[], 0]);
+  const r = await cact(s.ivy, s.project, "key-cdep-0001", { act: "deploy", app: "site" });
   assert.equal(r.status, 202, await r.clone().text());
   const a = (await r.json()) as { turn: string };
   assert.deepEqual(a, { ok: true, macOn: true, stored: true, cloud: true, turn: `turn_msg_job_${s.ivy}_key-cdep-0001` });
@@ -1929,7 +1937,7 @@ test("A Member's Update preview in a cloud workspace with the owner's Mac shut i
 
 test("in a cloud workspace no home, no computer, no runner or an old runner gives 409 at once, nothing queued; a second job on the app waits for the first; a kind turned off is said", async () => {
   const words = async (s: { project: string; ivy: string; owner: string }, key: string, a: Record<string, unknown> = { act: "deploy", app: "site" }) => {
-    const r = await act(s.ivy, s.project, key, a);
+    const r = await cact(s.ivy, s.project, key, a);
     const b = (await r.json()) as { code?: string; error?: string };
     assert.deepEqual(await pendingFor(s.owner), [], `${key}: nothing waits for the owner's Mac`);
     return [r.status, b.code, b.error];
@@ -1946,11 +1954,11 @@ test("in a cloud workspace no home, no computer, no runner or an old runner give
   // A computer the owner's Mac last found down: owed all the same (its wake says why it can't run).
   const down = await setupCloudApps();
   await ownerChanges(down.owner, (st) => void ((st as unknown as { runners: Record<string, Record<string, unknown>> }).runners[down.desktop.toUpperCase()].down = true), cloudOwn(down.owner));
-  const first = await act(down.ivy, down.project, "key-cref-0005", { act: "deploy", app: "site" });
+  const first = await cact(down.ivy, down.project, "key-cref-0005", { act: "deploy", app: "site" });
   assert.equal(first.status, 202, await first.clone().text());
   // Its computer still on that one: a second job on the same app is said at once, never queued behind it.
   assert.deepEqual(await words(down, "key-cref-0006", { act: "settings", app: "site", port: 3001 }), [409, "not_waiting", "Its computer is still on the last one. Try again once it's done."]);
-  assert.equal((await act(down.ivy, down.project, "key-cref-0005", { act: "deploy", app: "site" })).status, 202, "the same act again finds its job");
+  assert.equal((await cact(down.ivy, down.project, "key-cref-0005", { act: "deploy", app: "site" })).status, 202, "the same act again finds its job");
   assert.equal((await turnsOf(down.owner)).length, 1);
   // The kill switch: a kind left out of BOPS_APP_JOBS is refused, and its button hidden.
   const off = await setupCloudApps();
@@ -1964,29 +1972,91 @@ test("in a cloud workspace no home, no computer, no runner or an old runner give
   }
   // A remove of an app with a copy left on another computer: its computer's runner can't reach that one.
   const behind = await setupCloudApps({ app: { behind: [{ site: "site", computerId: "OTHER-COMPUTER", projectId: "proj-9" }] } });
-  const b = await act(behind.admin, behind.project, "key-cref-0008", { act: "remove", app: "site" });
+  const b = await cact(behind.admin, behind.project, "key-cref-0008", { act: "remove", app: "site" });
   assert.deepEqual([b.status, ((await b.json()) as { error: string }).error], [409, "site still runs an old copy on another computer, so it can't be removed from here yet."]);
+});
+
+test("in a cloud workspace each refusal says its own reason: the app lost its computer, no bot works on it, its bot moved to another computer, or (a remove) a copy is left on another computer even once it lost its own", async () => {
+  const words = async (s: { project: string; admin: string; owner: string }, key: string, a: Record<string, unknown> = { act: "deploy", app: "site" }) => {
+    const r = await cact(s.admin, s.project, key, a);
+    const b = (await r.json()) as { code?: string; error?: string };
+    assert.deepEqual([await pendingFor(s.owner), (await turnsOf(s.owner)).length], [[], 0], `${key}: nothing owed or queued`);
+    return [r.status, b.code, b.error];
+  };
+  const lost = await setupCloudApps({ app: { lost: 5 } });
+  assert.deepEqual(await words(lost, "key-cwhy-0001"), [409, "computer_not_ready", "site lost its computer, so nothing can run it from here."]);
+  const noBot = await setupCloudApps({ app: { botId: undefined } });
+  assert.deepEqual(await words(noBot, "key-cwhy-0002"), [409, "computer_not_ready", "No bot works on site, so nothing can run it from here."]);
+  // Live on its old computer, its bot on another one now: it didn't lose its computer.
+  const moved = await setupCloudApps({ app: { computerId: "OLD-COMPUTER" } });
+  assert.deepEqual(await words(moved, "key-cwhy-0003"), [409, "computer_not_ready", "Max works on another computer now, so site can't change from here until it's deployed there."]);
+  // Lost, with a copy still serving on another computer: that copy is what keeps it from going.
+  const behind = await setupCloudApps({ app: { lost: 5, behind: [{ site: "site", computerId: "OTHER-COMPUTER", projectId: "proj-9" }] } });
+  assert.deepEqual(await words(behind, "key-cwhy-0004", { act: "remove", app: "site" }), [409, "not_waiting", "site still runs an old copy on another computer, so it can't be removed from here yet."]);
+});
+
+test("in a cloud workspace an app of a bot set to work on the owner's Mac is done on that bot's computer: owed, claimed and run there (never refused as moved); a GitHub key only that bot holds isn't one its computer can use", async (t) => {
+  const s = await setupCloudApps({ bot: { runsOn: "mac" } });
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  const r = await cact(s.ivy, s.project, "key-cmac-b001", { act: "deploy", app: "site" });
+  assert.equal(r.status, 202, await r.clone().text());
+  const a = (await r.json()) as { turn: string };
+  assert.equal((await turnById(s.owner, a.turn))?.desktopId, s.desktop.toLowerCase(), "owed to its bot's computer");
+  await runJob(s, a.turn, { ok: true, said: "Deployed site to its Preview." });
+  assert.equal((await turnById(s.owner, a.turn))?.state, "done");
+  const kept = (await appActs(s.owner))[0];
+  assert.deepEqual([kept.key, kept.ok, kept.going, kept.said], ["key-cmac-b001", true, undefined, "Deployed site to its Preview."]);
+  // Publish of the app on GitHub: the only bot with the GitHub key works on the Mac, so its computer's runner has none
+  // (lib/server/hosted-apps.ts githubKeyHere). Said at once, nothing owed.
+  const github = { repo: "example-org/web", branch: "main", path: "", last: { sha: SHA, ingot: INGOT, keep: [], when: 7 } };
+  const k = await setupCloudApps({ app: { github, sites: undefined }, bot: { runsOn: "mac" } });
+  const p = await cact(k.admin, k.project, "key-cmac-b002", { act: "deploy", app: "site", env: "prod" });
+  const pb = (await p.json()) as { code: string; error: string };
+  assert.deepEqual([p.status, pb.code, pb.error], [409, "github_no_key", "Max's computer has no GitHub key, so it can't do this. Give Max the GitHub key in Keys, then try again."]);
+  const l = await cact(k.admin, k.project, "key-cmac-b003", { act: "githubLink", app: "site" });
+  assert.deepEqual([l.status, ((await l.json()) as { code: string }).code], [409, "github_no_key"]);
+  assert.deepEqual([await pendingFor(k.owner), (await turnsOf(k.owner)).length], [[], 0]);
+});
+
+test("a domain job's end keeps the domain its computer pointed, by name, when it's a bare hostname (never a link of its choosing)", async (t) => {
+  const s = await setupCloudApps();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  const one = (await (await cact(s.ivy, s.project, "key-cdom-0001", { act: "domain", app: "site", zone: "zone-1", subdomain: "shop" })).json()) as { turn: string };
+  await runJob(s, one.turn, { ok: true, said: "Pointed shop.example.com at site.", domain: "Shop.Example.com" });
+  const kept = (await appActs(s.owner))[0];
+  assert.deepEqual([kept.key, kept.act, kept.domain, kept.ok], ["key-cdom-0001", "domain", "shop.example.com", true]);
+  assert.equal((await readFrom(s.ivy, s.project)).state.apps!.list[0].acts?.[0].domain, "shop.example.com", "shown: Ivy pointed shop.example.com at it");
+  // Anything but a bare hostname: the row says a domain, unnamed.
+  const two = (await (await cact(s.ivy, s.project, "key-cdom-0002", { act: "domain", app: "site", zone: "zone-1" })).json()) as { turn: string };
+  await runJob(s, two.turn, { ok: true, said: "Pointed a domain at site.", domain: "https://evil.example/login" });
+  const plain = (await appActs(s.owner))[0];
+  assert.deepEqual([plain.key, plain.domain, plain.ok], ["key-cdom-0002", undefined, true]);
 });
 
 test("in a cloud workspace a GitHub Link never queues for the owner's Mac, and a Publish of a GitHub app with no key there is said at once", async () => {
   const github = { repo: "example-org/web", branch: "main", path: "", last: { sha: SHA, ingot: INGOT, keep: [], when: 7 } };
   const s = await setupCloudApps({ app: { github, sites: undefined }, runner: "0.0.51" });
   // Save and link, the runner older than the GitHub acts: the setting is kept, the Link said, nothing waits for the Mac.
-  const r = await act(s.admin, s.project, "key-cgh-00001", { act: "github", app: "site", github: { repo: "example-org/web", branch: "main", path: "" }, link: true });
+  const r = await cact(s.admin, s.project, "key-cgh-00001", { act: "github", app: "site", github: { repo: "example-org/web", branch: "main", path: "" }, link: true });
   const body = (await r.json()) as { code: string; error: string };
   assert.deepEqual([r.status, body.code], [409, "computer_not_ready"]);
   assert.deepEqual(await pendingFor(s.owner), [], "never queued");
   assert.equal((await turnsOf(s.owner)).length, 0);
-  const l = await act(s.admin, s.project, "key-cgh-00002", { act: "githubLink", app: "site" });
+  const l = await cact(s.admin, s.project, "key-cgh-00002", { act: "githubLink", app: "site" });
   assert.equal(l.status, 409);
   assert.deepEqual(await pendingFor(s.owner), []);
+  // Where it publishes alone, kept here: said as the cloud's (the window never says it went to the owner's Bops).
+  const set = await cact(s.admin, s.project, "key-cgh-00005", { act: "github", app: "site", github: { repo: "example-org/web", branch: "main", path: "" } });
+  assert.deepEqual([set.status, await set.json()], [202, { ok: true, macOn: true, stored: true, cloud: true }]);
   // Publish of an app on GitHub, no bot on its computer given the GitHub key: said, without the owner's Mac in it.
   const k = await setupCloudApps({ app: { github, sites: undefined }, bot: { keys: [] } });
-  const p = await act(k.admin, k.project, "key-cgh-00003", { act: "deploy", app: "site", env: "prod" });
+  const p = await cact(k.admin, k.project, "key-cgh-00003", { act: "deploy", app: "site", env: "prod" });
   const pb = (await p.json()) as { code: string; error: string };
   assert.deepEqual([p.status, pb.code, pb.error], [409, "github_no_key", "Max's computer has no GitHub key, so it can't do this. Give Max the GitHub key in Keys, then try again."]);
   // A Preview deploy of it needs no key.
-  assert.equal((await act(k.ivy, k.project, "key-cgh-00004", { act: "deploy", app: "site" })).status, 202);
+  assert.equal((await cact(k.ivy, k.project, "key-cgh-00004", { act: "deploy", app: "site" })).status, 202);
   assert.deepEqual(await pendingFor(k.owner), []);
 });
 
@@ -1996,9 +2066,9 @@ test("a finished remove drops the app's record, what members saw, its passwords 
   t.after(() => box.close());
   await query("INSERT INTO bops.app_views (user_id, ws_id, app, view, view_at) VALUES ($1, 'ws_acme', 'site', '{}'::jsonb, now())", [s.owner]);
   // Who may: Ivy hasn't Remove apps; Sam has it, but its code too is an Admin's.
-  const ivy = await act(s.ivy, s.project, "key-crm-00001", { act: "remove", app: "site" });
+  const ivy = await cact(s.ivy, s.project, "key-crm-00001", { act: "remove", app: "site" });
   assert.deepEqual([ivy.status, ((await ivy.json()) as { error: string }).error], [403, "The owner or an Admin can let you remove apps in Team."]);
-  const samCode = await act(s.sam, s.project, "key-crm-00002", { act: "remove", app: "site", repo: true });
+  const samCode = await cact(s.sam, s.project, "key-crm-00002", { act: "remove", app: "site", repo: true });
   assert.equal(samCode.status, 403);
   const r = await actFrom(s.admin, s.project, "key-crm-00003", { act: "remove", app: "site", repo: true }, CLOUD_ALL_MIN_VERSION);
   assert.equal(r.status, 202, await r.clone().text());
@@ -2026,27 +2096,62 @@ test("a finished remove drops the app's record, what members saw, its passwords 
   const put = await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: { Authorization: `Bearer ${vm(s.owner, s.desktop)}`, "x-bops-user": s.owner, "x-bops-protocol": "2", "content-type": "application/json" }, body: JSON.stringify({ base: back.version, state: back.state }) });
   assert.equal(put.status, 403, "a removed app isn't made again from a stale copy");
   // Its code: a Member never; an Admin with their own key, once.
-  assert.equal((await act(s.sam, s.project, "key-crm-00004", { act: "deleteCode", app: "site" })).status, 403);
+  assert.equal((await cact(s.sam, s.project, "key-crm-00004", { act: "deleteCode", app: "site" })).status, 403);
   ingotAnswer.status = 409;
   ingotAnswer.body = { message: "the repo is locked" };
-  const no = await act(s.admin, s.project, "key-crm-00005", { act: "deleteCode", app: "site" });
+  const no = await cact(s.admin, s.project, "key-crm-00005", { act: "deleteCode", app: "site" });
   assert.deepEqual([no.status, await no.json()], [202, { ok: true, macOn: true, stored: true }]);
   assert.deepEqual((await acmeAll(s.owner)).appsRemoved?.map((x) => [x.said, x.codeLeft]), [["Took site off the web. Its code wasn't deleted: the repo is locked", true]]);
+  // Ingot refusing with no words of its own (or only its code for it): plain words, never its status or code.
+  for (const [status, body, line] of [
+    [403, {}, "Ingot didn't allow it."],
+    [401, { error: "forbidden" }, "Ingot didn't allow it."],
+    [409, {}, "Ingot couldn't delete it now."],
+    [400, { error: "bad_request" }, "Ingot didn't delete it."],
+  ] as const) {
+    ingotAnswer.status = status;
+    ingotAnswer.body = body;
+    assert.equal((await cact(s.admin, s.project, `key-crm-0${status}`, { act: "deleteCode", app: "site" })).status, 202);
+    assert.deepEqual((await acmeAll(s.owner)).appsRemoved?.map((x) => [x.said, x.codeLeft]), [[`Took site off the web. Its code wasn't deleted: ${line}`, true]], `${status}`);
+  }
+  // Ingot not answering: 502 in Bops Cloud's own words (a 503 would read as Orgo not checking their access), nothing kept.
+  ingotAnswer.status = 503;
+  const down = await cact(s.admin, s.project, "key-crm-00503", { act: "deleteCode", app: "site" });
+  assert.deepEqual([down.status, await down.json()], [502, { error: "Ingot isn't answering. Try again.", code: "ingot_down" }]);
   ingotAnswer.status = 204;
   delete ingotAnswer.body;
-  const yes = await act(s.admin, s.project, "key-crm-00006", { act: "deleteCode", app: "site" });
+  const yes = await cact(s.admin, s.project, "key-crm-00006", { act: "deleteCode", app: "site" });
   assert.equal(yes.status, 202);
   assert.deepEqual((await acmeAll(s.owner)).appsRemoved?.map((x) => [x.said, x.codeLeft]), [["Took site off the web. Its code was deleted too.", undefined]]);
+  // Each time with the Admin's own key: the lock, the four refusals, Ingot down, then deleted.
   assert.deepEqual(
     ingotDeletes.filter((d) => d.project === s.project.toLowerCase()).map((d) => [d.app, d.key]),
-    [
-      ["site", `key-${s.admin}`],
-      ["site", `key-${s.admin}`],
-    ],
+    Array.from({ length: 7 }, () => ["site", `key-${s.admin}`]),
     "with the Admin's own key",
   );
   // Nothing left to delete: no such app.
-  assert.equal((await act(s.admin, s.project, "key-crm-00007", { act: "deleteCode", app: "site" })).status, 404);
+  assert.equal((await cact(s.admin, s.project, "key-crm-00007", { act: "deleteCode", app: "site" })).status, 404);
+  // Its code left, but removed over a day ago: not offered any more, and said plainly if asked; the same once an app of
+  // that name is made again (its code in Ingot is the new one's). Ingot is never asked.
+  const asked = ingotDeletes.length;
+  const row = (at: number) => ({ key: "key-crm-00003", userId: s.admin, name: s.admin, app: "site", ok: true, said: "Took site off the web.", codeLeft: true, at });
+  await ownerChanges(s.owner, (st) => void ((st.workspaces.find((w) => w.id === "ws_acme") as Record<string, unknown>).appsRemoved = [row(Date.now() - DELETE_CODE_MS - 60_000)]), cloudOwn(s.owner));
+  assert.deepEqual((await readFrom(s.admin, s.project)).state.apps!.removed?.map((x) => [x.key, x.codeLeft]), [["key-crm-00003", undefined]], "no Delete its code");
+  const late = await cact(s.admin, s.project, "key-crm-00008", { act: "deleteCode", app: "site" });
+  assert.deepEqual([late.status, ((await late.json()) as { error: string }).error], [409, "It was removed more than a day ago, so its code can't be deleted from here."]);
+  await ownerChanges(
+    s.owner,
+    (st) => {
+      const w = st.workspaces.find((x) => x.id === "ws_acme") as Record<string, unknown>;
+      w.appsRemoved = [row(Date.now() - 60_000)];
+      w.hostedApps = { site: { botId: "max", computerId: s.desktop.toUpperCase() } };
+    },
+    cloudOwn(s.owner),
+  );
+  assert.deepEqual((await readFrom(s.admin, s.project)).state.apps!.removed?.map((x) => [x.key, x.codeLeft]), [["key-crm-00003", undefined]], "made again: no Delete its code");
+  const again = await cact(s.admin, s.project, "key-crm-00009", { act: "deleteCode", app: "site" });
+  assert.deepEqual([again.status, ((await again.json()) as { error: string }).error], [409, "site is in this workspace again, so the old one's code can't be deleted from here."]);
+  assert.equal(ingotDeletes.length, asked, "Ingot never asked");
 });
 
 test("a finished removeSite drops the site and its password; a remove of an app that lost its computer is done by Bops Cloud itself; a demoted Admin's remove ends", async (t) => {
@@ -2054,9 +2159,9 @@ test("a finished removeSite drops the site and its password; a remove of an app 
   const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
   t.after(() => box.close());
   // Its own site is never removed this way; another of its sites is, by a Member with Remove apps.
-  assert.equal((await act(s.sam, s.project, "key-crs-00001", { act: "removeSite", app: "site", site: "site" })).status, 400);
-  assert.equal((await act(s.sam, s.project, "key-crs-00002", { act: "removeSite", app: "site", site: "nope" })).status, 404);
-  const r = (await (await act(s.sam, s.project, "key-crs-00003", { act: "removeSite", app: "site", site: "docs" })).json()) as { turn: string };
+  assert.equal((await cact(s.sam, s.project, "key-crs-00001", { act: "removeSite", app: "site", site: "site" })).status, 400);
+  assert.equal((await cact(s.sam, s.project, "key-crs-00002", { act: "removeSite", app: "site", site: "nope" })).status, 404);
+  const r = (await (await cact(s.sam, s.project, "key-crs-00003", { act: "removeSite", app: "site", site: "docs" })).json()) as { turn: string };
   assert.equal(await noteOf(s.owner, `msg_job_${s.sam}_key-crs-00003`), `${s.sam} asked Max's computer to remove docs from site.`);
   await runJob(s, r.turn, { ok: true, said: "Took docs off the web.", removed: "site" });
   const ws = await acmeAll(s.owner);
@@ -2064,21 +2169,21 @@ test("a finished removeSite drops the site and its password; a remove of an app 
   assert.deepEqual(Object.keys(ws.previewPasswords ?? {}), ["site/site"]);
   assert.deepEqual((await appActs(s.owner)).map((x) => [x.act, x.site, x.ok, x.said]), [["removeSite", "docs", true, "Took docs off the web."]]);
   // A left over, by the name its view shows: a name it hasn't is no such one.
-  assert.equal((await act(s.sam, s.project, "key-crs-00004", { act: "removeLeftOver", app: "site", leftOver: "nope" })).status, 404);
-  const lo = (await (await act(s.sam, s.project, "key-crs-00005", { act: "removeLeftOver", app: "site", leftOver: "site-old" })).json()) as { turn: string };
+  assert.equal((await cact(s.sam, s.project, "key-crs-00004", { act: "removeLeftOver", app: "site", leftOver: "nope" })).status, 404);
+  const lo = (await (await cact(s.sam, s.project, "key-crs-00005", { act: "removeLeftOver", app: "site", leftOver: "site-old" })).json()) as { turn: string };
   assert.equal(await noteOf(s.owner, `msg_job_${s.sam}_key-crs-00005`), `${s.sam} asked Max's computer to remove the left over site-old.`);
   await runJob(s, lo.turn, { ok: true, said: "Removed site-old." });
   assert.deepEqual((await appActs(s.owner)).map((x) => [x.act, x.leftOver, x.ok]).slice(0, 1), [["removeLeftOver", "site-old", true]]);
   // An app whose computer is gone, nothing left elsewhere: Bops Cloud takes it out itself, no job.
   const lost = await setupCloudApps({ app: { lost: 5 } });
-  const l = await act(lost.sam, lost.project, "key-crs-00006", { act: "remove", app: "site" });
+  const l = await cact(lost.sam, lost.project, "key-crs-00006", { act: "remove", app: "site" });
   assert.deepEqual([l.status, await l.json()], [202, { ok: true, macOn: true, stored: true, cloud: true }]);
   assert.equal((await acmeAll(lost.owner)).hostedApps?.site, undefined);
   assert.deepEqual((await acmeAll(lost.owner)).appsRemoved?.map((x) => [x.key, x.ok, x.codeLeft]), [["key-crs-00006", true, undefined]]);
   assert.equal((await turnsOf(lost.owner)).length, 0);
   // An Admin's remove owed, then they're made a Member: orgo-web's notice ends it, and the runner's claim is refused.
   const d = await setupCloudApps();
-  const owed = (await (await act(d.admin, d.project, "key-crs-00007", { act: "remove", app: "site" })).json()) as { turn: string };
+  const owed = (await (await cact(d.admin, d.project, "key-crs-00007", { act: "remove", app: "site" })).json()) as { turn: string };
   roles[`${d.admin} ${d.project}`] = { role: "member", ownerUserId: d.owner, bopsWsId: "ws_acme", name: "Acme", ownerEmail: "owner@orgo.ai" };
   assert.equal((await membersChanged(d.project, d.admin)).status, 204);
   await until(async () => (await turnById(d.owner, owed.turn))?.state !== "owed", "ended on the notice");

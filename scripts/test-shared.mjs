@@ -2125,6 +2125,16 @@ await check("Remove in Your Apps (everything through the cloud): the window has 
   assert.equal(r.ok, true);
   assert.deepEqual(asked, [{ key: "key_code_0003", act: { act: "deleteCode", app: "shop" } }]);
   assert.equal(admin.acts().length, 0, "done as Bops Cloud answered: nothing pending");
+  // Ingot not answering: Bops Cloud's own words (502 INGOT_DOWN), never "Can't reach Orgo to check your access" (a 503's).
+  await settle();
+  admin["copy"].open.role = "admin";
+  const down = await actWith(admin, { act: "deleteCode", app: "shop" }, "key_code_0004", sam, async () => ({ status: 502, body: { error: "Ingot isn't answering. Try again.", code: "ingot_down" } }));
+  assert.deepEqual([down.ok, down.status, down.error, down.code], [false, 502, "Ingot isn't answering. Try again.", "ingot_down"]);
+  // Removed over a day ago: Bops Cloud's plain words for it.
+  await settle();
+  admin["copy"].open.role = "admin";
+  const late = await actWith(admin, { act: "deleteCode", app: "shop" }, "key_code_0005", sam, async () => ({ status: 409, body: { error: "It was removed more than a day ago, so its code can't be deleted from here.", code: "not_waiting" } }));
+  assert.equal(late.error, "It was removed more than a day ago, so its code can't be deleted from here.");
   // At Read, or without the flags: none in the window.
   answer = { status: 200, body: slice("read", { removed: [row] }) };
   await copy.refresh();

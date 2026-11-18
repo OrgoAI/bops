@@ -998,6 +998,9 @@ async function prodIfAny(wsId: string, name: string, s: SiteHosting, ours: () =>
 }
 
 /** A site's settings saved before it had a Published project (AppHosting.settings), as a create takes them: its port apart. */
+/** Published's port saved for it in Settings (AppHosting.settings), taken on its computer by the time it's made. */
+const savedPortTaken = (port: number) => new HostedAppError(`Port ${port} is in use on its computer. Change Published's port in Settings.`, 409, { field: "port" });
+
 const keptSettings = (s: SiteHosting): { port?: number; settings?: DeploySettings } => {
   const { port, ...rest } = s.settings ?? {};
   return { ...(typeof port === "number" ? { port } : {}), ...(Object.keys(rest).length ? { settings: rest } : {}) };
@@ -1045,13 +1048,17 @@ async function ensureProd(
   const saved = keptSettings(siteIn(all, name, s.site));
   const settings = saved.settings || opts.settings ? { ...saved.settings, ...opts.settings } : undefined;
   const portFree = (p: number) => !ports.includes(p) && !projects.some((x) => x.port === p) && !urls.some((u) => u.port === p);
+  // The port saved for it (Settings, before it had a project) is the one it's made on, never another one in silence: one
+  // something else on its computer took meanwhile is said, and nothing is made.
+  if (saved.port !== undefined && !portFree(saved.port)) throw savedPortTaken(saved.port);
   for (let tries = 0; ; tries++) {
     let label = newLabel("prod", repo, s.site);
     while (names.has(label)) label = newLabel("prod", repo, s.site);
-    const port = saved.port !== undefined && tries === 0 && portFree(saved.port) ? saved.port : freePort(projects, urls, ports);
+    const port = saved.port ?? freePort(projects, urls, ports);
     const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(env && Object.keys(env).length ? { env } : {}), ...(settings ? { settings } : {}) }).catch((e: unknown) => e as Error);
     held(ours);
     if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(label);
+    else if (made instanceof OrgoError && made.code === "PORT_TAKEN" && saved.port !== undefined) throw savedPortTaken(saved.port);
     else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.push(port);
     else if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT"))
       throw new HostedAppError(`${bot(s.botId)?.name ?? "That bot"}'s computer already runs as many apps as one computer can. Remove a site or a left over first.`, 409);
@@ -2484,9 +2491,9 @@ const went = (line: string, more?: string) => (more ? `${line} ${jobSaid(more)}`
  * the removes: the app (removeHere), one of its sites (removeSiteHere), or a left over (by the name members see, never an
  * id). A GitHub job is githubJob's. Only an app whose home is this computer (onThisComputer). A kind this Bops doesn't
  * know does nothing, said. How it went in words, for Your Apps and the bot's chat, with what a remove took off the web
- * (`removed`) for Bops Cloud to drop from the state; never throws.
+ * (`removed`) for Bops Cloud to drop from the state, and the domain a domain job pointed (`domain`), by name; never throws.
  */
-export async function appJob(botId: string, job: AppJob, by: string): Promise<{ ok: boolean; said: string; removed?: "app" | "site" }> {
+export async function appJob(botId: string, job: AppJob, by: string): Promise<{ ok: boolean; said: string; removed?: "app" | "site"; domain?: string }> {
   if (!job || !(APP_JOB_KINDS as readonly string[]).includes(job.act)) return { ok: false, said: APP_JOB_UNKNOWN };
   if (job.act === "githubLink" || job.act === "githubPull") return githubJob(botId, job, by);
   const b = bot(botId);
@@ -2526,7 +2533,7 @@ export async function appJob(botId: string, job: AppJob, by: string): Promise<{ 
       case "domain": {
         const got = await connectDomain(wsId, name, { zone: job.zone, ...(job.subdomain ? { subdomain: job.subdomain } : {}) }, site);
         const d = got.domain?.domain;
-        return { ok: true, said: went(d ? `Pointed ${d} at ${which}.` : `Pointed a domain at ${which}.`, got.error) };
+        return { ok: true, said: went(d ? `Pointed ${d} at ${which}.` : `Pointed a domain at ${which}.`, got.error), ...(d ? { domain: d } : {}) };
       }
       case "remove": {
         const r = await removeHere(wsId, name);
@@ -2910,6 +2917,14 @@ async function firstSettings(wsId: string, name: string, site: unknown, patch: P
     held(ours);
     if (!r.enabled) throw new HostedAppError(r.why, 403);
     return settingsOf(r.value, null);
+  }
+  // A port something on its computer serves already (a project, a public URL or a custom domain's), as Orgo refuses one
+  // for a project: said now, as it would be with Published made, never found only as Published is made (ensureProd).
+  if (typeof patch.port === "number" && patch.port !== h.settings?.port) {
+    const [projects, { urls }, taken] = await Promise.all([projectsNow(h.computerId, ours), urlsNow(h.computerId, ours), domainPorts(h.computerId)]);
+    held(ours);
+    const port = patch.port;
+    if (taken.includes(port) || projects.some((x) => x.port === port) || urls.some((u) => u.port === port)) throw new HostedAppError("Another app on this computer uses that port. Pick another.", 409, { field: "port" });
   }
   const was = hostingAt(wsId, name, site)?.settings ?? {};
   const next: SiteSettings = { ...was, ...patch };
@@ -3827,6 +3842,18 @@ export async function connectDomain(wsId: string, name: string, ask: { domain?: 
   if (zone === null) throw new HostedAppError("That isn't one of this workspace's domains.", 404);
   const sub = ask.subdomain === undefined || ask.subdomain === null ? "" : subdomainTyped(ask.subdomain);
   if (sub === null) throw new HostedAppError(BAD_NAME, 400, { field: "subdomain" });
+  // On a computer's runner, the workspace's domains as its computer's own list says them, before anything is made for it
+  // (appTarget makes Published first): an orgo-web that doesn't say them yet can't let this computer point one, so that's
+  // said and nothing is left behind; one that does, without this zone, is no domain of the workspace's.
+  if (zone && onRunner()) {
+    const at = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
+    if (at && !at.lost) {
+      const its = await domains.ofComputer(at.computerId).catch((e: unknown) => Promise.reject(dnsRefused(e)));
+      held(ours);
+      if (!Array.isArray(its.owned_domains)) throw new HostedAppError(NOT_FOR_COMPUTER_YET, 403);
+      if (!its.owned_domains.some((d) => typeof d?.id === "string" && d.id.toLowerCase() === zone)) throw new HostedAppError("That isn't one of this workspace's domains.", 404);
+    }
+  }
   const t = await appTarget(wsId, name, ours, site, true);
   held(ours);
   if (!t) throw new HostedAppError(LOST, 409);

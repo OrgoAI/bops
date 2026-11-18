@@ -2823,6 +2823,12 @@ await test("Your Apps' GitHub part, for an Admin or a Member with App secrets on
     assert.deepEqual([held.disabled, held.parentElement.dataset.tip], [true, "Its computer is busy with GitHub. Publish once it's done."]);
     assert.equal(buttons(g.box, "Bring in GitHub's changes")[0].disabled, true);
     await g.done();
+    // A teammate's other change going on its computer (everything through the cloud): Publish waits, never said as GitHub's.
+    const other = app({ github: linked, acts: [{ key: "k2", userId: "u-sam", name: "Sam", act: "deploy", ok: true, going: true, at: Date.now() }] });
+    const t = await opened(state(other));
+    const wait = t.box.querySelector("[data-review-publish]");
+    assert.deepEqual([wait.disabled, wait.parentElement.dataset.tip], [true, "Its computer is busy with a teammate's change. Publish once it's done."]);
+    await t.done();
     const done = app({ github: linked, acts: [{ key: "k1", userId: "u-ada", name: "Ada", act: "githubPull", ok: true, said: "Brought 2 changes from GitHub into Ingot.", at: Date.now() }] });
     const d = await mount(h(SharedAppsPage, { state: state(done) }));
     assert.match(d.box.querySelector("[data-act-line]").textContent, /^Ada brought in GitHub's changes · /);

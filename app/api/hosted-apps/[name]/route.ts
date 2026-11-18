@@ -68,8 +68,8 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
   const { name } = await ctx.params;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = str(b.ws) ?? getState().workspace ?? MAIN_WORKSPACE;
-  // A teammate's change to it still going on its computer (a workspace whose chat goes through Bops Cloud): this waits.
-  const theirs = ["deploy", "promote", "reapply", "rollback", "removeSite", "removeLeftOver"].includes(b.action as string) ? teammateGoing(wsId, name) : null;
+  // A teammate's change to it still going on its computer: this waits (each of these can make a project, or take one down).
+  const theirs = ["deploy", "promote", "reapply", "rollback", "preview", "addSite", "removeSite", "removeLeftOver"].includes(b.action as string) ? teammateGoing(wsId, name) : null;
   if (theirs) return theirs;
   try {
     const env = appEnvOf(b.env) === "preview" ? ("preview" as const) : undefined;

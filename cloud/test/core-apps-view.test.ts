@@ -195,7 +195,7 @@ test("an unchanged view writes no view and no state version, only when it was se
   assert.deepEqual((await rows(u)).map((x) => x.app), ["notes"]);
 });
 
-test("appsFor: per app the newer of the owner's Mac's read and its computer's view, the members' acts always the Mac's copy's; the newest time and domains of what's shown", T, async () => {
+test("appsFor: per app the newer of the owner's Mac's read and its computer's view, the members' acts always the Mac's copy's; the oldest time of what's shown, the newest domains", T, async () => {
   clearAuthCache();
   const u = await seeded("newer");
   assert.equal((await post(vm(u), { shop: viewOf("c-new") })).status, 204);
@@ -208,16 +208,74 @@ test("appsFor: per app the newer of the owner's Mac's read and its computer's vi
   assert.deepEqual(shop.acts?.map((a) => a.key), ["k_1"], "the acts the Mac's copy keeps, never the computer's");
   assert.deepEqual(shop.leftOver, [{ name: "shop-old", port: 3100 }]);
   assert.equal(apps.list.find((a) => a.name === "notes")!.head?.id, "n-old", "no view of notes: the Mac's");
-  assert.equal(apps.at, views.shop.at, "as of the newest view shown");
+  // As of the oldest of what's shown: notes is still the owner's Mac's read at 10, however fresh shop's view is.
+  assert.equal(apps.at, 10, "as of the oldest read shown");
   assert.deepEqual(apps.owned, [{ id: "dom-1", domain: "example.com" }]);
   // A Read member: no left overs or domains.
   const RAE: SliceViewer = { role: "member", email: "rae@example.com", id: "u-rae", ownerEmail: "owner@orgo.ai", appActsSeen: true };
   const read = sharedSlice(blob, "ws_main", RAE, views).apps!;
   assert.deepEqual([read.list.find((a) => a.name === "shop")!.head?.id, read.list.find((a) => a.name === "shop")!.leftOver, read.owned], ["c-new", undefined, undefined]);
+  // notes' computer tells it too: as of the older of the two views.
+  assert.equal((await post(vm(u, D2), { notes: viewOf("n-new") })).status, 204);
+  const both = await readAppViews(null, u, "ws_main");
+  assert.equal(sharedSlice(blob, "ws_main", SAM, both).apps!.at, Math.min(both.shop.at, both.notes.at));
   // The owner's Mac reads again after it: its read is the newer one.
   const later = JSON.parse(JSON.stringify(blob)) as ReturnType<typeof stateOf>;
   const seen = later.workspaces[0].appsForMembers as { at: number; apps: Record<string, { head: unknown }> };
   seen.at = views.shop.at + 1;
   seen.apps.shop.head = { id: "c-mac", message: "from the Mac", at: 30 };
   assert.equal(sharedSlice(later as unknown as Record<string, unknown>, "ws_main", SAM, views).apps!.list.find((a) => a.name === "shop")!.head?.id, "c-mac");
+});
+
+test("a computer's view shows only the links the app's record vouches for: a site's Preview link only for its own label (else none, and no password asked), an address and domains that are bare hostnames, a site the record has", T, async () => {
+  clearAuthCache();
+  const u = newUserId("vouch");
+  users.push(u);
+  const st = stateOf();
+  // shop's own Preview is LINK's label; its site admin has a label of its own.
+  (st.workspaces[0].hostedApps as Record<string, Record<string, unknown>>).shop = { botId: "main", computerId: D1, preview: "k7p2qxm4wr3d", sites: [{ name: "admin", preview: "a1b2c3d4e5f6" }] };
+  assert.equal((await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: 0, state: st } })).status, 200);
+  // What a prompt-injected bot on shop's computer might post: another Preview's link for admin, a login page, a site the record hasn't.
+  const sites = [
+    {
+      name: "shop",
+      url: "https://shop.example.com",
+      preview: LINK,
+      previewProtected: true,
+      serving: "c-new",
+      live: null,
+      domains: [
+        { domain: "shop.example.com", status: "active" },
+        { domain: "evil.example/login", status: "active" },
+        { domain: "https://evil.example", status: "active" },
+      ],
+    },
+    { name: "admin", url: "https://evil.example/login", preview: "https://zz9zz9zz9zz9.orgo.dev", previewProtected: true, serving: null, live: null },
+    { name: "ghost", url: "https://user:pw@evil.example", preview: "https://foo-login.evil.example/", previewProtected: true, serving: null, live: null },
+  ];
+  const owned = [
+    { id: "dom-1", domain: "example.com" },
+    { id: "dom-2", domain: "evil.example/x" },
+  ];
+  assert.equal((await post(vm(u), { shop: viewOf("c-new", { sites, owned }) })).status, 204);
+  const SHOP = { name: "shop", url: "https://shop.example.com", preview: LINK, previewProtected: true, serving: "c-new", domains: [{ domain: "shop.example.com", status: "active" }] };
+  const ADMIN = { name: "admin", url: null, preview: null, serving: null };
+  // Kept so (cleanAppView with the record).
+  const [kept] = await rows(u);
+  assert.deepEqual(kept.view.sites, [SHOP, ADMIN]);
+  assert.deepEqual(kept.view.owned, [{ id: "dom-1", domain: "example.com" }]);
+  // Shown so, at Write and at Read.
+  const blob = (await query<{ state: Record<string, unknown> }>("SELECT state FROM bops.app_state WHERE user_id = $1", [u])).rows[0].state;
+  const views = await readAppViews(null, u, "ws_main");
+  const SAM: SliceViewer = { role: "member", email: "sam@example.com", id: "u-sam", ownerEmail: "owner@orgo.ai", appActsSeen: true };
+  const RAE: SliceViewer = { role: "member", email: "rae@example.com", id: "u-rae", ownerEmail: "owner@orgo.ai", appActsSeen: true };
+  const shown = sharedSlice(blob, "ws_main", SAM, views).apps!;
+  assert.deepEqual(shown.list.find((a) => a.name === "shop")!.sites, [SHOP, ADMIN]);
+  assert.deepEqual(shown.owned, [{ id: "dom-1", domain: "example.com" }]);
+  assert.deepEqual(sharedSlice(blob, "ws_main", RAE, views).apps!.list.find((a) => a.name === "shop")!.sites, [SHOP, ADMIN]);
+  // Its record names another label now (a new Preview): the link the view kept isn't vouched for any more, and isn't shown.
+  const later = JSON.parse(JSON.stringify(blob)) as ReturnType<typeof stateOf>;
+  (later.workspaces[0].hostedApps as Record<string, Record<string, unknown>>).shop.preview = "q9q9q9q9q9q9";
+  const now = sharedSlice(later as unknown as Record<string, unknown>, "ws_main", SAM, views).apps!.list.find((a) => a.name === "shop")!.sites!;
+  assert.deepEqual([now[0].preview, now[0].previewProtected], [null, undefined]);
 });

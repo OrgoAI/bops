@@ -7,7 +7,7 @@ import { AppDisclosure, appAttention, appIcon, appList, appOutline, appRow } fro
 import { AppPassword, AppReview, AppVersions } from "./app-review";
 import { Fold } from "./fold";
 import { useEffect, useState } from "react";
-import type { AppJobKind, MemberAppAct, SharedApp, SharedAppRemoval, SharedApps, SharedRoom } from "@/cloud/protocol";
+import { GITHUB_ACT_KINDS, type AppJobKind, type MemberAppAct, type SharedApp, type SharedAppRemoval, type SharedApps, type SharedRoom } from "@/cloud/protocol";
 import { DOMAIN_WORDS } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
@@ -175,6 +175,8 @@ export const SHARED_APPS_WORDS = {
   githubWait: "Its computer is busy with GitHub. Publish once it's done.",
   /** How many more apps a computer has room for (lib/hosted-apps.ts roomLine), as the owner's Your Apps says it. */
   ...ROOM_WORDS,
+  /** Publish, while its computer does a teammate's other change to it (a workspace where everything goes through the cloud). */
+  teammateWait: "Its computer is busy with a teammate's change. Publish once it's done.",
 };
 /** The GitHub form's words here (github-form.tsx GithubForm): Save links it too. */
 export const SHARED_GITHUB_FORM_WORDS = {
@@ -391,9 +393,10 @@ function SharedAppCard({
   // Whether a kind of act goes through now: always where the owner's Mac does them (no `jobs`), else only the kinds its computer does.
   const can = (kind: AppJobKind) => !jobs || jobs.includes(kind);
   const newest = a.acts?.[0];
-  // A Link or Bring in its computer is doing now: nothing else on the app until it's said how it went (a Preview deploy isn't the mirror's).
-  const ghGoing = !!a.acts?.some((x) => x.going);
-  const busy = !!going || ghGoing;
+  // An act its computer is doing now (a Link or Bring in, or where everything goes through the cloud any teammate's change):
+  // nothing else on the app until it's said how it went (a Preview deploy isn't the mirror's).
+  const onIt = a.acts?.find((x) => x.going);
+  const busy = !!going || !!onIt;
   const deployState = (s: string | null | undefined): DeployState | null => s === "queued" || s === "running" || s === "succeeded" || s === "failed" || s === "cancelled" || s === "superseded" ? s : null;
   // Production on GitHub: Live is the changeset last sent there, as the owner's own Your Apps reads it (lib/app-review.ts
   // statusForApp), never Orgo's Published, which a push doesn't move. Bops Cloud says it as `at` (null: not linked yet); one
@@ -412,8 +415,8 @@ function SharedAppCard({
     ...(gh ? { github: { linked: ghAt !== null } } : {}),
     changes: changesBetween(a.commits ?? [], liveAt, serving ?? null),
   });
-  // Publish waits while its computer works on GitHub, and until it's linked there (it would be refused).
-  const whyPublish = ghGoing ? W.githubWait : ghAt === null ? W.linkFirst : undefined;
+  // Publish waits while its computer works on the app (said as GitHub only for a GitHub act), and until it's linked there (it would be refused).
+  const whyPublish = onIt ? ((GITHUB_ACT_KINDS as readonly string[]).includes(onIt.act) ? W.githubWait : W.teammateWait) : ghAt === null ? W.linkFirst : undefined;
   // Where an Admin's Publish goes, said where they confirm it: GitHub, or Published on domains that don't point at Orgo
   // yet (its visitors don't see a publish until they do), else its domain.
   const waitingOn = site?.domains?.length && site.domains.every((d) => d.status !== "active") && !site.url ? site.domains.map((d) => d.domain) : [];
