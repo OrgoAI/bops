@@ -2,6 +2,7 @@ import { appsOpen } from "@/lib/apps-access";
 import { checkDomain, HostedAppError, removeDomain } from "@/lib/server/hosted-apps";
 import { notReady } from "@/lib/server/ready";
 import { getState } from "@/lib/server/store";
+import { teammateGoing } from "@/lib/server/teammate-going";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { MAIN_WORKSPACE } from "@/lib/types";
 
@@ -36,6 +37,8 @@ export async function DELETE(request: Request, ctx: { params: Promise<{ name: st
   if (!appsOpen(getState())) return Response.json({ error: "Not found" }, { status: 404 });
   const { name, domainId } = await ctx.params;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const theirs = teammateGoing(wsOf(b), name);
+  if (theirs) return theirs;
   try {
     return Response.json(await removeDomain(wsOf(b), name, domainId, b.site));
   } catch (e) {

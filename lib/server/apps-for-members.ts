@@ -2,13 +2,16 @@ import "server-only";
 import { roomKeyOf } from "@/cloud/group-key";
 import { appsLevelOf, permits } from "@/lib/member-access";
 import {
+  APPS_REMOVED_KEPT,
   MEMBER_ACTS_KEPT,
   MEMBER_APPS,
   MEMBER_COMMITS,
   MEMBER_DEPLOYS,
+  MEMBER_LEFT_OVERS,
   type AppCommitsAnswer,
   type AppDomainOptions,
   type AppForMembers,
+  type AppRemoval,
   type AppsForMembers,
   type AppSettingsAnswer,
   type AppsRoom,
@@ -43,6 +46,17 @@ export type AppsReaders = {
   room?: (wsId: string, computerId: string) => Promise<(AppsRoom & { bot?: string }) | null>;
 };
 
+/**
+ * A computer's room for more apps (hosted-apps.ts roomOn: with the owner's key, or on a runner the computer's own), with
+ * the id of the bot it's named for (roomHost); null: no line.
+ */
+export const readRoom: NonNullable<AppsReaders["room"]> = async (ws, c) => {
+  const h = await import("./hosted-apps");
+  const r = await h.roomOn(ws, c);
+  const b = h.roomHost(ws, c);
+  return r && { ...r, ...(b ? { bot: b.id } : {}) };
+};
+
 const realReaders = async (): Promise<AppsReaders> => {
   const h = await import("./hosted-apps");
   return {
@@ -51,11 +65,7 @@ const realReaders = async (): Promise<AppsReaders> => {
     settings: (ws, name, site, env) => h.appSettings(ws, name, site, env),
     owned: (ws, name) => h.domainOptions(ws, name),
     password: (ws, name, site) => h.previewPassword(ws, name, site),
-    room: async (ws, c) => {
-      const r = await h.roomOn(ws, c);
-      const b = h.roomHost(ws, c);
-      return r && { ...r, ...(b ? { bot: b.id } : {}) };
-    },
+    room: readRoom,
   };
 };
 
@@ -146,7 +156,7 @@ function fixCloudCopy(wsId: string, name: string, site: string | undefined, url:
  * (This copy is what members get only where Bops Cloud has none: whoever sets a password shares it there,
  * preview-password-share.ts, and that one is shown over this one: cloud/ws-slice.ts appsFor.)
  */
-async function passwordFor(wsId: string, name: string, site: string | undefined, url: string, at: number | undefined, r: AppsReaders): Promise<string | null> {
+async function passwordFor(wsId: string, name: string, site: string | undefined, url: string, at: number | undefined, r: Pick<AppsReaders, "password">): Promise<string | null> {
   const key = `${wsId}\n${name}\n${site ?? name}`;
   const was = passwordsRead.get(key);
   const kept = cloudCopy(wsId, name, site, url);
@@ -171,8 +181,24 @@ async function passwordFor(wsId: string, name: string, site: string | undefined,
   return password;
 }
 
-/** One app as members see it, from what the page read (`readAt`: when, by this Mac's clock): the allow list, field by field. */
+/** One app as members see it, from what the page read (`readAt`: when, by this Mac's clock), with their acts kept on it. */
 async function appFor(wsId: string, a: HostedApp, r: AppsReaders, acts: MemberAppAct[] | undefined, readAt: number): Promise<AppForMembers> {
+  const view: AppForMembers = await appViewOf(wsId, a, r, { passwords: true, readAt });
+  return { ...view, ...(acts?.length ? { acts: acts.slice(0, MEMBER_ACTS_KEPT) } : {}) };
+}
+
+/** A left over as members see it (AppForMembers.leftOver): its name and port, `link` for a web address alone, never its id. */
+const leftOverSeen = (l: { id: string; name: string; port: number | null }) => ({ name: l.name, port: typeof l.port === "number" ? l.port : null, ...(l.id.startsWith("url:") ? { link: true as const } : {}) });
+
+/**
+ * One app as members see it, from what the Apps page read of it (`a`; `readAt`: when, by this Bops' clock), without
+ * their acts (Bops Cloud and the owner's Mac keep those): the allow list, field by field, with its left overs by name.
+ * `passwords`: each Preview's password too, while someone has Your Apps at Write (the owner's Mac, which reads them;
+ * one turned off where its share never got to Bops Cloud has its copy there put right). A runner's view never has one
+ * (lib/server/apps-view-share.ts): a computer can't read one back, and Bops Cloud keeps what it set.
+ */
+export async function appViewOf(wsId: string, a: HostedApp, r: Pick<AppsReaders, "commits" | "settings" | "password">, o: { passwords: boolean; readAt: number }): Promise<AppForMembers> {
+  const readAt = o.readAt;
   // (Its address is Published's first active domain, never an orgo.dev name; its Preview's link beside it.)
   const sites = a.sites ?? [{ name: a.name, projectId: null, url: null, serving: a.serving, live: a.live, domain: a.domain ?? null, preview: a.preview, ...(a.domains ? { domains: a.domains } : {}) }];
   const log = await r.commits(wsId, a.name).catch(() => null);
@@ -181,7 +207,7 @@ async function appFor(wsId: string, a: HostedApp, r: AppsReaders, acts: MemberAp
   const deploys: AppForMembers["deploys"] = [];
   const settings: Record<string, NonNullable<AppSettingsAnswer["settings"]>> = {};
   const passwords: Record<string, string> = {};
-  const writers = anyoneSeesApps(wsId, "write");
+  const writers = o.passwords && anyoneSeesApps(wsId, "write");
   for (const s of sites.slice(0, 5)) {
     const site = s.name === a.name ? undefined : s.name;
     // Published's deploys, and the Preview's (members deploy, roll back and change settings there only).
@@ -212,7 +238,7 @@ async function appFor(wsId: string, a: HostedApp, r: AppsReaders, acts: MemberAp
     commits,
     deploys,
     ...(Object.keys(settings).length ? { settings } : {}),
-    ...(acts?.length ? { acts: acts.slice(0, MEMBER_ACTS_KEPT) } : {}),
+    ...(a.leftOver?.length ? { leftOver: a.leftOver.slice(0, MEMBER_LEFT_OVERS).map(leftOverSeen) } : {}),
   };
 }
 
@@ -229,21 +255,32 @@ async function roomsFor(wsId: string, list: HostedApp[], r: AppsReaders): Promis
   const on = new Map<string, string[]>();
   for (const a of list) if (a.hosting?.computerId && !a.hosting.lost) on.set(a.hosting.computerId, [...(on.get(a.hosting.computerId) ?? []), a.name]);
   for (const [c, names] of on) {
-    const got = await r.room(wsId, c).catch(() => null);
-    if (!got) continue;
-    // (Field by field, the names in order: a page read in another order is the same room, never a write.)
-    out[roomKeyOf(wsId, c)] = {
-      used: got.used,
-      limit: got.limit,
-      urlsUsed: got.urlsUsed,
-      urlsLimit: got.urlsLimit,
-      apps: got.apps,
-      ...(got.urlsFirst ? { urlsFirst: true as const } : {}),
-      appNames: [...names].sort().slice(0, MEMBER_APPS),
-      ...(got.bot ? { bot: got.bot } : {}),
-    };
+    const got = await memberRoomOf(wsId, c, names, r.room);
+    if (got) out[roomKeyOf(wsId, c)] = got;
   }
   return out;
+}
+
+/**
+ * One computer's room as members see it (MemberRoom; by its room key roomKeyOf, never its id, wherever it's sent): the
+ * numbers alone, the apps on it by name (`names`, in order, MEMBER_APPS at most), and the id of the bot it's named for.
+ * Null: no line, or a read that failed (never a number from before). The owner's Mac's (roomsFor) and a computer's own,
+ * for its apps' view (apps-view-share.ts), read the same way.
+ */
+export async function memberRoomOf(wsId: string, computerId: string, names: readonly string[], read: NonNullable<AppsReaders["room"]>): Promise<MemberRoom | null> {
+  const got = await read(wsId, computerId).catch(() => null);
+  if (!got) return null;
+  // (Field by field, the names in order: a page read in another order is the same room, never a write.)
+  return {
+    used: got.used,
+    limit: got.limit,
+    urlsUsed: got.urlsUsed,
+    urlsLimit: got.urlsLimit,
+    apps: got.apps,
+    ...(got.urlsFirst ? { urlsFirst: true as const } : {}),
+    appNames: [...names].sort().slice(0, MEMBER_APPS),
+    ...(got.bot ? { bot: got.bot } : {}),
+  };
 }
 
 const running = new Map<string, Promise<void>>();
@@ -330,6 +367,24 @@ export function noteMemberAct(wsId: string, app: string, act: MemberAppAct) {
     const all = w.appsForMembers ?? { at: 0, apps: {} };
     const a = all.apps[app] ?? { head: null, sites: [], commits: [], deploys: [] };
     w.appsForMembers = { ...all, apps: { ...all.apps, [app]: { ...a, acts: [act, ...(a.acts ?? []).filter((x) => x.key !== act.key)].slice(0, MEMBER_ACTS_KEPT) } } };
+  });
+}
+
+/**
+ * An app a member removed (lib/hosted-apps.ts AppRemoval), kept on the workspace (Workspace.appsRemoved: newest first, in
+ * place of one by the same key, APPS_REMOVED_KEPT at most) in place of their act on the app, which goes with the app's
+ * entry in what members see. Their window counts the act done by its key there (lib/server/shared-core.ts).
+ */
+export function noteRemoval(wsId: string, row: AppRemoval) {
+  update((s) => {
+    const w = s.workspaces?.find((x) => x.id === wsId);
+    if (!w) return;
+    w.appsRemoved = [row, ...(w.appsRemoved ?? []).filter((x) => x.key !== row.key)].slice(0, APPS_REMOVED_KEPT);
+    if (row.ok && w.appsForMembers?.apps[row.app]) {
+      const { [row.app]: _gone, ...rest } = w.appsForMembers.apps;
+      void _gone;
+      w.appsForMembers = { ...w.appsForMembers, apps: rest };
+    }
   });
 }
 

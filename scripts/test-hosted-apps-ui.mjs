@@ -2823,6 +2823,12 @@ await test("Your Apps' GitHub part, for an Admin or a Member with App secrets on
     assert.deepEqual([held.disabled, held.parentElement.dataset.tip], [true, "Its computer is busy with GitHub. Publish once it's done."]);
     assert.equal(buttons(g.box, "Bring in GitHub's changes")[0].disabled, true);
     await g.done();
+    // A teammate's other change going on its computer (everything through the cloud): Publish waits, never said as GitHub's.
+    const other = app({ github: linked, acts: [{ key: "k2", userId: "u-sam", name: "Sam", act: "deploy", ok: true, going: true, at: Date.now() }] });
+    const t = await opened(state(other));
+    const wait = t.box.querySelector("[data-review-publish]");
+    assert.deepEqual([wait.disabled, wait.parentElement.dataset.tip], [true, "Its computer is busy with a teammate's change. Publish once it's done."]);
+    await t.done();
     const done = app({ github: linked, acts: [{ key: "k1", userId: "u-ada", name: "Ada", act: "githubPull", ok: true, said: "Brought 2 changes from GitHub into Ingot.", at: Date.now() }] });
     const d = await mount(h(SharedAppsPage, { state: state(done) }));
     assert.match(d.box.querySelector("[data-act-line]").textContent, /^Ada brought in GitHub's changes · /);
@@ -2857,6 +2863,120 @@ await test("every word of the shared Your Apps plain (its GitHub form's too): no
   assert.match(actLine({ key: "k", userId: "u", name: "Juno", act: "deploy", ok: false, said: "That domain isn't this workspace's.", at: 1 }), /^Juno tried to deploy it: That domain isn't this workspace's\. · /);
   const owner = list({ enabled: true, apps: [app("shop")] }, { actOf: () => ({ key: "k", userId: "u", name: "Juno", act: "rollback", ok: true, at: Date.now() }) });
   assert.match(owner, /data-member-act[^>]*>Juno went back to an earlier deploy · /);
+});
+
+await test("Your Apps where everything goes through the cloud: what members did says each kind (asked, done, tried); buttons whose kind its computer doesn't do are hidden; a pending act says it's sent to its computer; Publish says so; Remove only with appRemove (the code an Admin's); removals at the top, with Delete its code for an Admin, sent once by the window that asked for it", async () => {
+  const { SharedAppsPage, actLine, SHARED_APPS_WORDS: W } = await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  const row = (act, o = {}) => ({ key: "k", userId: "u", name: "Sam", act, ok: true, at: new Date().setHours(15, 4, 0, 0), ...o });
+  // Asked of its computer, every kind (the GitHub ones as before).
+  const asked = { deploy: "deploy it", rollback: "go back to an earlier deploy", settings: "change its settings", domain: "point a domain at it", remove: "remove it", removeSite: "remove a site", removeLeftOver: "remove a left over", githubLink: "link it to GitHub", githubPull: "bring in GitHub's changes" };
+  for (const [act, words] of Object.entries(asked)) assert.equal(actLine(row(act, { going: true })), `Sam asked its computer to ${words}… · 3:04 PM`, act);
+  assert.equal(actLine(row("deploy", { going: true, env: "prod" })), "Sam asked its computer to publish it… · 3:04 PM");
+  // Done, and tried.
+  assert.equal(actLine(row("remove")), "Sam removed it · 3:04 PM");
+  assert.equal(actLine(row("removeSite", { site: "admin" })), "Sam removed admin · 3:04 PM");
+  assert.equal(actLine(row("removeLeftOver", { leftOver: "shop-old" })), "Sam removed the left over shop-old · 3:04 PM");
+  const tried = { remove: "remove it", removeSite: "remove a site", removeLeftOver: "remove a left over", deploy: "deploy it", rollback: "go back to an earlier deploy", settings: "change its settings", domain: "use a domain" };
+  for (const [act, words] of Object.entries(tried)) assert.equal(actLine(row(act, { ok: false, said: "No." })), `Sam tried to ${words}: No. · 3:04 PM`, act);
+  assert.equal(W.removed("Sam", "shop"), "Sam removed shop");
+
+  const app = { ...sharedReviewApp, siteNames: ["admin"], leftOver: [{ name: "shop-old", port: 4000 }, { name: "shop-link", port: null, link: true }] };
+  const st = (o = {}) => {
+    const x = sharedReviewState("write", o.role ?? "admin", o.role !== "member", o.app ?? app);
+    Object.assign(x.shared, { adminActs: true, ...(o.jobs ? { appJobs: o.jobs } : {}), ...(o.remove ? { appRemove: true } : {}), ...(o.acts ? { appActs: o.acts } : {}) });
+    if (o.removed) x.shared.apps.removed = o.removed;
+    return x;
+  };
+  const opened = async (x) => {
+    const m = await mount(h(SharedAppsPage, { state: x }));
+    await click(button(m.box, "Open shop"));
+    await click(button(m.box, "Technical details"));
+    return m;
+  };
+  const texts = (el) => [...el.querySelectorAll("button")].map((b) => b.textContent.trim());
+  // The question's own Remove (InlineConfirm's, its first button), not a left over's own Remove.
+  const confirm = (el) => el.querySelector('[tabindex="-1"] button');
+  routes["/api/workspaces/shared"] = { body: { ok: true } };
+  try {
+    // The owner's Mac does them all (no appJobs): every button as before, and no Remove without appRemove.
+    let m = await opened(st());
+    assert.ok(texts(m.box).includes(W.goBack) && !!button(m.box, "Settings") && !!m.box.querySelector("[data-shared-domain]"));
+    assert.equal(m.box.querySelector("[data-shared-remove]"), null, "Remove only with appRemove");
+    await m.done();
+    // Its computer does deploys and removes only: Go back, Settings and a domain are hidden; Update preview stays.
+    m = await opened(st({ jobs: ["deploy", "remove", "removeSite", "removeLeftOver"], remove: true }));
+    assert.ok(!texts(m.box).includes(W.goBack), "no Go back");
+    assert.equal(button(m.box, "Settings"), undefined, "no Settings");
+    assert.equal(m.box.querySelector("[data-shared-domain]"), null, "no domain");
+    assert.ok(button(m.box, "Update preview"), "Update preview stays");
+    // Publish says where it goes: its computer.
+    await click(button(m.box, "Publish changes"));
+    assert.ok(m.box.querySelector("[data-publish-confirmation]").textContent.includes(W.publishLineComputer));
+    await click(button(m.box, "Keep reviewing"));
+    // Remove: its left overs, each site and the app, each asked once more.
+    const part = m.box.querySelector("[data-shared-remove]");
+    assert.ok(part.textContent.includes(W.leftOvers) && part.textContent.includes(W.leftOversLine));
+    assert.deepEqual([...part.querySelectorAll("[data-left-over]")].map((x) => x.dataset.leftOver), ["shop-old", "shop-link"]);
+    let n = calls.length;
+    await click(part.querySelector('[data-left-over="shop-old"] button'));
+    assert.ok(part.textContent.includes(W.removeLeftOverAsk("shop-old")));
+    assert.equal(posts(n, "/api/workspaces/shared").length, 0, "asked first");
+    await click(confirm(part));
+    assert.deepEqual(posts(n, "/api/workspaces/shared").map((c) => c.body.act), [{ act: "removeLeftOver", app: "shop", leftOver: "shop-old" }]);
+    n = calls.length;
+    await click(part.querySelector('[data-remove-site="admin"]'));
+    assert.ok(part.textContent.includes(W.removeSiteAsk("admin")));
+    await click(button(part, "Keep"));
+    assert.equal(posts(n, "/api/workspaces/shared").length, 0, "Keep sends nothing");
+    await click(part.querySelector('[data-remove-site="admin"]'));
+    await click(confirm(part));
+    assert.deepEqual(posts(n, "/api/workspaces/shared").map((c) => c.body.act), [{ act: "removeSite", app: "shop", site: "admin" }]);
+    // The app, with its code (an Admin's checkbox).
+    n = calls.length;
+    await click(part.querySelector("[data-remove-app]"));
+    assert.ok(part.textContent.includes(W.removeAppAsk("shop")) && part.textContent.includes(W.removeCode));
+    await toggle(part.querySelector("[data-remove-code]"));
+    await click(confirm(part));
+    const sent = posts(n, "/api/workspaces/shared");
+    assert.deepEqual(sent.map((c) => c.body.act), [{ act: "remove", app: "shop", repo: true }]);
+    const removeKey = sent[0].body.key;
+    await m.done();
+    // A Member with Remove apps: no code checkbox.
+    m = await opened(st({ role: "member", jobs: ["remove"], remove: true }));
+    await click(m.box.querySelector("[data-remove-app]"));
+    assert.equal(m.box.querySelector("[data-remove-code]"), null, "the code is an Admin's");
+    assert.equal(m.box.querySelectorAll("[data-left-over], [data-remove-site]").length, 0, "kinds its computer doesn't do: hidden");
+    await m.done();
+    // Pending in the cloud: sent to its computer, never the Mac's words.
+    m = await mount(h(SharedAppsPage, { state: st({ jobs: ["deploy"], acts: [{ key: "kp", act: { act: "deploy", app: "shop" }, at: Date.now(), state: "cloud" }] }) }));
+    assert.ok(m.box.textContent.includes(W.sendingComputer));
+    assert.ok(!m.box.textContent.includes(W.sending) && !m.box.textContent.includes(W.waiting));
+    await m.done();
+    // Removed: said at the top; its code left, with Delete its code for an Admin; the window that asked for the code sends it once.
+    const gone = (o = {}) => ({ key: removeKey, userId: "u-ada", name: "Ada", app: "shop", ok: true, codeLeft: true, at: new Date().setHours(15, 4, 0, 0), ...o });
+    n = calls.length;
+    m = await mount(h(SharedAppsPage, { state: st({ app: { ...app, name: "blog" }, removed: [gone()] }) }));
+    const line = m.box.querySelector('[data-app-removed="shop"]');
+    assert.ok(line.textContent.startsWith("Ada removed shop · 3:04 PM"), line.textContent);
+    assert.ok(line.textContent.includes(W.codeLeft));
+    assert.ok(button(line, W.deleteCode), "an Admin's Delete its code");
+    assert.deepEqual(posts(n, "/api/workspaces/shared").map((c) => c.body.act), [{ act: "deleteCode", app: "shop" }], "asked for once, by itself");
+    await m.done();
+    m = await mount(h(SharedAppsPage, { state: st({ app: { ...app, name: "blog" }, removed: [gone()] }) }));
+    assert.equal(posts(n, "/api/workspaces/shared").length, 1, "never twice");
+    await click(button(m.box.querySelector('[data-app-removed="shop"]'), W.deleteCode));
+    assert.deepEqual(posts(n, "/api/workspaces/shared").map((c) => c.body.act).at(-1), { act: "deleteCode", app: "shop" }, "pressed: sent");
+    await m.done();
+    // A Member: no Delete its code; another's removal with its code left: never sent by itself. Code deleted: said.
+    n = calls.length;
+    m = await mount(h(SharedAppsPage, { state: st({ role: "member", app: { ...app, name: "blog" }, removed: [gone({ key: "other_key_01" }), gone({ key: "k2", app: "web", codeLeft: undefined, said: W.codeDeleted })] }) }));
+    assert.equal(button(m.box, W.deleteCode), undefined);
+    assert.equal(posts(n, "/api/workspaces/shared").length, 0);
+    assert.ok(m.box.querySelector('[data-app-removed="web"]').textContent.includes("Its code was deleted too."));
+    await m.done();
+  } finally {
+    delete routes["/api/workspaces/shared"];
+  }
 });
 
 /* ---------------- Local, Staging and Prod, all on the app's computer ---------------- */

@@ -306,8 +306,17 @@ export const sameAccess = (a: MemberAccess, b: MemberAccess) =>
   samePowers(a.can, b.can) &&
   Object.keys(a.bots).length === Object.keys(b.bots).length &&
   Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
-/** Whether two entries let them change the same things (MemberAccess.can): missing and `{}` differ (one an older Bops dropped). */
-const samePowers = (a: MemberAccess["can"], b: MemberAccess["can"]) => (!a || !b ? !a === !b : POWERS.every((p) => !!a[p] === !!b[p]));
+/**
+ * Whether two entries let them change the same things (MemberAccess.can): missing and `{}` differ (one an older Bops
+ * dropped). Every switch kept counts, one a newer Bops added too (cleanPowers keeps it), so a change to only that one is
+ * never taken for no change.
+ */
+const samePowers = (a: MemberAccess["can"], b: MemberAccess["can"]) => {
+  if (!a || !b) return !a === !b;
+  const on = (x: Record<string, unknown>) => Object.keys(x).filter((k) => x[k] === true);
+  const [x, y] = [on(a), on(b)];
+  return x.length === y.length && x.every((k) => (b as Record<string, unknown>)[k] === true);
+};
 /**
  * Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). Your Apps
  * comes with a bot: with none, the person's window has nothing of the workspace to open, and a Bops from before deletes
@@ -349,8 +358,8 @@ export function withEntry(map: MemberAccessMap | undefined, key: string, access:
  * lib/member-access.ts, the window and the Mac server, so it imports nothing.
  */
 
-export type Power = "chart" | "bots" | "memory" | "workspace" | "appSecrets" | "spend" | "mac";
-export const POWERS: readonly Power[] = ["chart", "bots", "memory", "workspace", "appSecrets", "spend", "mac"];
+export type Power = "chart" | "bots" | "memory" | "workspace" | "appSecrets" | "spend" | "mac" | "removeApps";
+export const POWERS: readonly Power[] = ["chart", "bots", "memory", "workspace", "appSecrets", "spend", "mac", "removeApps"];
 
 /** Each switch's name in Team, and what it lets them change (no dashes: the window shows these as they are). */
 export const POWER_WORDS: Readonly<Record<Power, { name: string; tip: string }>> = {
@@ -361,6 +370,8 @@ export const POWER_WORDS: Readonly<Record<Power, { name: string; tip: string }>>
   appSecrets: { name: "App secrets", tip: "Your Apps' variables and Preview passwords, Publish, going back on Published, restoring an app, and where it publishes on GitHub." },
   spend: { name: "Spending", tip: "What costs the plan more: a bot's own computer, a bigger computer, waking one billed by the hour." },
   mac: { name: "The owner's Mac", tip: "Work on the owner's Mac and the owner's own apps and keys: answering what it asks, and telling it more." },
+  // Taking an app, a site or a left over off the web (cloud/protocol.ts MemberRemoveAct). Its code stays the owner's and an Admin's.
+  removeApps: { name: "Remove apps", tip: "Remove an app, one of its sites or a left over in Your Apps. Deleting its code stays with the owner and Admins." },
 };
 
 /** What the owner and an Admin have: every power. */
@@ -368,12 +379,24 @@ export const ALL_POWERS: Readonly<Record<Power, true>> = Object.freeze(Object.fr
 
 export const isPower = (v: unknown): v is Power => typeof v === "string" && (POWERS as readonly string[]).includes(v);
 
-/** The powers kept for someone (MemberAccess.can), made safe: only known ones, only on. */
+/** A switch's name as a newer Bops may add one: a short camelCase word (never "__proto__" or the like). */
+const POWER_NAME = /^[a-z][A-Za-z0-9]{0,31}$/;
+/** The most switches kept for someone, known or not. */
+const MAX_POWERS = 32;
+/**
+ * The powers kept for someone (MemberAccess.can), made safe: only on, and only names a switch can have. A switch this Bops
+ * doesn't know (a newer one's) is kept as it is, so saving the entry here never takes it away; nothing here gives it
+ * (hasPower and powersOf go by the known ones alone).
+ */
 export function cleanPowers(v: unknown): Partial<Record<Power, true>> | undefined {
   if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
-  const out: Partial<Record<Power, true>> = {};
-  for (const [k, on] of Object.entries(v as Record<string, unknown>)) if (isPower(k) && on === true) out[k] = true;
-  return out;
+  const out: Record<string, true> = {};
+  for (const [k, on] of Object.entries(v as Record<string, unknown>)) {
+    if (on !== true || !(isPower(k) || POWER_NAME.test(k)) || Object.hasOwn(out, k)) continue;
+    if (Object.keys(out).length >= MAX_POWERS) break;
+    out[k] = true;
+  }
+  return out as Partial<Record<Power, true>>;
 }
 
 /** Whether someone with `role` and what's kept for them (`can`) may use `power`: the owner and an Admin always; a Member when it's on. */

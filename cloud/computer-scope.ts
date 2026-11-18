@@ -333,9 +333,10 @@ const FREE = new Set(["usage", "credits"]);
 /**
  * What a computer's own deploys, Previews and Locals keep on an app's record (lib/hosted-apps.ts AppHosting, as
  * lib/server/hosted-apps.ts writes it): when it last queued a deploy, a site's deploy project, its Preview label's
- * copy, its Local's port, the Local addresses told for Google sign in, and when its Preview password was last set.
+ * copy, its Local's port, the Local addresses told for Google sign in, when its Preview password was last set, and its
+ * settings kept for a Published made later (lib/hosted-apps.ts SiteSettings: while it has none, its Preview takes them).
  */
-const HOSTING_RUN = new Set(["queuedAt", "projectId", "preview", "localPort", "toldGoogle", "passwordSet"]);
+const HOSTING_RUN = new Set(["queuedAt", "projectId", "preview", "localPort", "toldGoogle", "passwordSet", "settings"]);
 /** An app's record as a new app's first home on a computer keeps it (hosted-apps.ts movedTo, appWork): its bot and computer, and what it runs with. */
 const HOSTING_NEW = new Set(["botId", "computerId", "copies", ...HOSTING_RUN]);
 /** A computer gives a new app its first home only while its workspace has fewer apps than this (the owner's Bops adds more): each is in every bot's prompt there (hostedAppsLine). */
@@ -362,6 +363,12 @@ const RUN_SHAPE: Record<string, (v: unknown) => boolean> = {
   localPort: isPort,
   toldGoogle: (v) => Array.isArray(v) && v.length <= 20 && v.every((x) => typeof x === "string" && LOCAL.test(x)),
   passwordSet: (v) => isObject(v) && onlyKeys(v, ["at", "live"]) && isTime(v.at) && (v.live === null || (typeof v.live === "string" && ORGO_ID.test(v.live))),
+  settings: (v) =>
+    isObject(v) &&
+    onlyKeys(v, ["port", "install_cmd", "build_cmd", "start_cmd", "health_path"]) &&
+    (v.port === undefined || isPort(v.port)) &&
+    ["install_cmd", "build_cmd", "start_cmd"].every((k) => v[k] === undefined || (typeof v[k] === "string" && (v[k] as string).length <= 1000)) &&
+    (v.health_path === undefined || (typeof v.health_path === "string" && v.health_path.length <= 256)),
 };
 
 /**
@@ -387,7 +394,15 @@ export type HostingScope = {
   workspaceOf: (botId: string) => string | undefined;
   projectOf?: (wsId: string) => string | undefined;
   appsIn?: (wsId: string) => number;
+  /** Whether an app of this name was removed from workspace `wsId` within the last `ms` (Workspace.appsRemoved). */
+  removedSince?: (wsId: string, name: string, ms: number) => boolean;
 };
+
+/**
+ * How long a removed app's name can't be given a first home by a computer (Workspace.appsRemoved): a write from a copy
+ * read before the remove (a runner's own, as it cleared what it ran) would otherwise make its record again.
+ */
+export const REMOVED_HOLD_MS = 15 * 60_000;
 
 /** The scope hostingChangeAllowed takes for a computer, from its user's state (botsOn, each bot's workspace, each workspace's Orgo project and apps). */
 export function hostingScope(state: Blob, desktopId: string): HostingScope {
@@ -401,6 +416,11 @@ export function hostingScope(state: Blob, desktopId: string): HostingScope {
     appsIn: (id) => {
       const apps = spaces.get(id)?.hostedApps;
       return isObject(apps) ? Object.keys(apps).length : 0;
+    },
+    removedSince: (id, name, ms) => {
+      const since = Date.now() - ms;
+      const rows = spaces.get(id)?.appsRemoved;
+      return Array.isArray(rows) && rows.some((r) => isObject(r) && r.app === name && r.ok !== false && typeof r.at === "number" && r.at > since);
     },
   };
 }
@@ -464,9 +484,11 @@ export function hostingChangeAllowed(wsId: string, was: unknown, now: unknown, s
   const here = (h: Blob) => appHomeHere(wsId, h, sc);
   if (!here(now)) return false;
   const sealed = (label: string, site: string) => sealedFor(label, sc.projectOf?.(wsId), name, site);
+  // (Never one removed moments ago: a copy from before the remove that still had it.)
   if (was === undefined)
     return (
       (name === undefined || APP_NAME.test(name)) &&
+      !(name !== undefined && sc.removedSince?.(wsId, name, REMOVED_HOLD_MS)) &&
       (sc.appsIn?.(wsId) ?? 0) < MAX_APPS_FROM_COMPUTER &&
       Object.keys(now).every((k) => HOSTING_NEW.has(k)) &&
       copiesGrow(undefined, now.copies, sc, wsId) &&
@@ -781,6 +803,7 @@ export function keepAllowed(base: Blob, mine: Blob, scope: Scope, force: Iterabl
  * A workspace without the Preview passwords kept for its members (null: it keeps none): the copy the owner's Mac read
  * for them (appsForMembers' sites' previewPassword), and the one Bops Cloud keeps from whoever set each last
  * (Workspace.previewPasswords, cloud/preview-passwords.ts), each on its own: either one is left out wherever it is.
+ * Nor who removed which app (Workspace.appsRemoved): Bops Cloud's and the owner's Mac's to keep, never a computer's.
  */
 function withoutPasswords(w: unknown): Blob | null {
   if (!isObject(w)) return null;
@@ -802,9 +825,11 @@ function withoutPasswords(w: unknown): Blob | null {
       )
     : undefined;
   const cloud = "previewPasswords" in w;
-  if (!held && !cloud) return null;
+  const removed = "appsRemoved" in w;
+  if (!held && !cloud && !removed) return null;
   const out: Blob = held ? { ...w, appsForMembers: { ...seen, apps } } : { ...w };
   delete out.previewPasswords;
+  delete out.appsRemoved;
   return out;
 }
 
@@ -887,7 +912,7 @@ export function forComputer(state: Blob, scope?: Scope): Blob {
   return out;
 }
 
-/** Whether a computer's write carries a Preview password: refused, never compared, so a right guess isn't told from a wrong one. */
+/** Whether a computer's write carries a Preview password (or who removed which app): refused, never compared, so a right guess isn't told from a wrong one. */
 export const carriesPasswords = (state: Blob): boolean => Array.isArray(state.workspaces) && state.workspaces.some((w) => withoutPasswords(w) !== null);
 
 /**

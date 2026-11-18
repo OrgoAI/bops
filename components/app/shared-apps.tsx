@@ -6,8 +6,8 @@ import { hasUnpublishedPreview, reviewLabel } from "@/lib/app-review";
 import { AppDisclosure, appAttention, appIcon, appList, appOutline, appRow } from "./app-controls";
 import { AppPassword, AppReview, AppVersions } from "./app-review";
 import { Fold } from "./fold";
-import { useState } from "react";
-import type { MemberAppAct, SharedApp, SharedApps, SharedRoom } from "@/cloud/protocol";
+import { useEffect, useState } from "react";
+import { GITHUB_ACT_KINDS, type AppJobKind, type MemberAppAct, type SharedApp, type SharedAppRemoval, type SharedApps, type SharedRoom } from "@/cloud/protocol";
 import { DOMAIN_WORDS } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
@@ -16,6 +16,7 @@ import { PasswordShown } from "./preview-password";
 import { memberAct } from "./shared-act";
 import { ago } from "./ui";
 import { KeyVariables } from "./app-key-links";
+import { InlineConfirm } from "./side-group";
 
 /*
  * Your Apps in a workspace someone shared with the user, when its owner gave them Your Apps (lib/shared.ts SharedOpen.apps,
@@ -33,6 +34,33 @@ import { KeyVariables } from "./app-key-links";
  * the room is the owner's Mac's last read, so a member's Deploy and Restore are never held on it; orgo-web refuses one
  * that doesn't fit, and that refusal is said as any act's is.
  */
+
+/** What a member tried to do, as "<who> tried to …" says it (SHARED_APPS_WORDS.tried), by act. */
+const TRIED: Partial<Record<MemberAppAct["act"] | "publish", string>> = {
+  publish: "publish it",
+  deploy: "deploy it",
+  rollback: "go back to an earlier deploy",
+  settings: "change its settings",
+  github: "change where it publishes",
+  githubLink: "link it to GitHub",
+  githubPull: "bring in GitHub's changes",
+  remove: "remove it",
+  removeSite: "remove a site",
+  removeLeftOver: "remove a left over",
+  deleteCode: "delete its code",
+};
+/** What a member asked its computer to do, as "<who> asked its computer to …" says it (SHARED_APPS_WORDS.asked), by act. */
+const ASKED: Partial<Record<MemberAppAct["act"], string>> = {
+  deploy: "deploy it",
+  rollback: "go back to an earlier deploy",
+  settings: "change its settings",
+  domain: "point a domain at it",
+  githubLink: "link it to GitHub",
+  githubPull: "bring in GitHub's changes",
+  remove: "remove it",
+  removeSite: "remove a site",
+  removeLeftOver: "remove a left over",
+};
 
 /** Every word the shared page says (the tests read them for dashes and the old name). */
 export const SHARED_APPS_WORDS = {
@@ -73,42 +101,59 @@ export const SHARED_APPS_WORDS = {
   publishGithub: (g: { repo: string; branch: string }) => `Publish sends it to GitHub (${g.repo}, ${g.branch}), where its own deploy puts it live.`,
   /** As an Admin confirms Publish: its domains aren't pointed at Orgo yet, so a published change isn't what their visitors see. */
   publishWaiting: (domains: string, many = false) => `Visitors to ${domains} won't see a publish until ${many ? "their" : "its"} DNS points at Orgo.`,
-  acted: (who: string, a: Pick<MemberAppAct, "act" | "site"> & { domain?: string; env?: "prod" }) =>
-    a.act === "deploy"
-      ? a.env === "prod"
-        ? `${who} published it`
-        : `${who} deployed it`
-      : a.act === "rollback"
-        ? `${who} went back to an earlier deploy`
-        : a.act === "settings"
-          ? `${who} changed ${a.site ? `${a.site}'s` : "its"} settings`
-          : a.act === "github"
-            ? `${who} changed where it publishes`
-            : a.act === "githubLink"
-              ? `${who} linked it to GitHub`
-              : a.act === "githubPull"
-                ? `${who} brought in GitHub's changes`
-                : `${who} pointed ${a.domain ?? "a domain"} at it`,
-  tried: (who: string, act: MemberAppAct["act"] | "publish", said: string) =>
-    `${who} tried to ${
-      act === "publish"
-        ? "publish it"
-        : act === "deploy"
-          ? "deploy it"
-          : act === "rollback"
-            ? "go back to an earlier deploy"
-            : act === "settings"
-              ? "change its settings"
-              : act === "github"
-                ? "change where it publishes"
-                : act === "githubLink"
-                  ? "link it to GitHub"
-                  : act === "githubPull"
-                    ? "bring in GitHub's changes"
-                    : "use a domain"
-    }: ${said}`,
-  /** A Link or Bring in its computer is doing now (SharedApp.acts `going`). */
-  asked: (who: string, act: MemberAppAct["act"]) => (act === "githubLink" ? `${who} asked its computer to link it to GitHub…` : `${who} asked its computer to bring in GitHub's changes…`),
+  acted: (who: string, a: Pick<MemberAppAct, "act" | "site"> & { domain?: string; env?: "prod"; leftOver?: string }) => {
+    switch (a.act) {
+      case "deploy":
+        return a.env === "prod" ? `${who} published it` : `${who} deployed it`;
+      case "rollback":
+        return `${who} went back to an earlier deploy`;
+      case "settings":
+        return `${who} changed ${a.site ? `${a.site}'s` : "its"} settings`;
+      case "github":
+        return `${who} changed where it publishes`;
+      case "githubLink":
+        return `${who} linked it to GitHub`;
+      case "githubPull":
+        return `${who} brought in GitHub's changes`;
+      case "remove":
+        return `${who} removed it`;
+      case "removeSite":
+        return `${who} removed ${a.site ?? "a site"}`;
+      case "removeLeftOver":
+        return `${who} removed the left over ${a.leftOver ?? ""}`.trimEnd();
+      case "deleteCode":
+        return `${who} deleted its code`;
+      default:
+        return `${who} pointed ${a.domain ?? "a domain"} at it`;
+    }
+  },
+  tried: (who: string, act: MemberAppAct["act"] | "publish", said: string) => `${who} tried to ${TRIED[act] ?? "use a domain"}: ${said}`,
+  /**
+   * What its computer is doing now for them (SharedApp.acts `going`): a GitHub Link or Bring in, or, in a workspace where
+   * everything goes through the cloud, any of a member's acts (`env` "prod": Publish).
+   */
+  asked: (who: string, act: MemberAppAct["act"], env?: "prod") => `${who} asked its computer to ${act === "deploy" && env === "prod" ? "publish it" : (ASKED[act] ?? "bring in GitHub's changes")}…`,
+  /** The words for an act Bops Cloud sends to the app's own computer (a pending act "cloud"), and an Admin's Publish there. */
+  sendingComputer: "Sending to its computer…",
+  publishLineComputer: "Sends this reviewed preview to its computer for publishing.",
+  /** Remove (RemovePart), for an Admin or a Member with Remove apps (SharedOpen.appRemove). */
+  removeApp: "Remove app",
+  removeAppAsk: (app: string) => `Remove ${app}? Its sites and their domains come off the web, and it leaves this workspace.`,
+  removeCode: "Delete its code in Ingot too, with all its history. This can't be undone.",
+  removeSite: (site: string) => `Remove ${site}`,
+  removeSiteAsk: (site: string) => `Remove ${site}? It comes off the web with its domains. The code stays the app's.`,
+  leftOvers: "Left over on its computer",
+  leftOversLine: "Made by an older Bops or a test. Bops never deploys to these.",
+  removeLeftOverAsk: (name: string) => `Remove ${name}? It stops serving for good.`,
+  remove: "Remove",
+  keep: "Keep",
+  removing: "Removing…",
+  /** An app someone removed (SharedApps.removed), at the top of the page. */
+  removed: (who: string, app: string) => `${who} removed ${app}`,
+  codeLeft: "Its code is still in Ingot.",
+  deleteCode: "Delete its code",
+  codeDeleted: "Its code was deleted too.",
+  codeNotDeleted: (why: string) => `Its code wasn't deleted: ${why}`,
   /** Its GitHub production (GithubPart), at Write, for whoever may change it (SharedOpen.appGithub). */
   github: "GitHub",
   githubWhere: (g: { repo: string; branch: string; path?: string }) => `Publishes to GitHub ${g.repo}, ${g.branch}, ${g.path ? `folder ${g.path}` : "the whole repo"}.`,
@@ -130,6 +175,8 @@ export const SHARED_APPS_WORDS = {
   githubWait: "Its computer is busy with GitHub. Publish once it's done.",
   /** How many more apps a computer has room for (lib/hosted-apps.ts roomLine), as the owner's Your Apps says it. */
   ...ROOM_WORDS,
+  /** Publish, while its computer does a teammate's other change to it (a workspace where everything goes through the cloud). */
+  teammateWait: "Its computer is busy with a teammate's change. Publish once it's done.",
 };
 /** The GitHub form's words here (github-form.tsx GithubForm): Save links it too. */
 export const SHARED_GITHUB_FORM_WORDS = {
@@ -153,11 +200,14 @@ export function asOf(at: number, now = Date.now()) {
 
 /** What a member's act on an app says, done or not (or still being done on its computer), with when (the owner's rows and the member's own). */
 export function actLine(a: NonNullable<SharedApp["acts"]>[number]) {
-  if (a.going) return `${W.asked(a.name, a.act)} · ${asOf(a.at)}`;
+  if (a.going) return `${W.asked(a.name, a.act, a.env)} · ${asOf(a.at)}`;
   return `${a.ok ? W.acted(a.name, a) : W.tried(a.name, a.act === "deploy" && a.env === "prod" ? "publish" : a.act, a.said ?? W.failed)} · ${asOf(a.at)}`;
 }
-/** What a GitHub act that went says of itself (how many changes came in, files that go up with the next Publish), under its line. */
-const isGithubKind = (act: string) => act === "github" || act === "githubLink" || act === "githubPull";
+/**
+ * What a GitHub act or a remove that went says of itself (how many changes came in, files that go up with the next
+ * Publish, what Orgo kept of a site taken down), under its line.
+ */
+const saysMore = (act: string) => act === "github" || act === "githubLink" || act === "githubPull" || act === "removeSite" || act === "removeLeftOver";
 
 const BUTTON = "rounded-full px-3 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
 
@@ -191,29 +241,58 @@ export function sharedTakes(a: SharedApp) {
   );
 }
 
+/**
+ * The removes this window sent with their code to go too (`repo`, an Admin's), by their key: once the app's computer took
+ * it off the web and Bops Cloud kept its removal with the code still left (SharedAppRemoval.codeLeft), this window asks
+ * Bops Cloud to delete the code, once (codeSent). Only this window's: another Admin's, or one from before, shows Delete its code.
+ */
+const codeAsked = new Set<string>();
+const codeSent = new Set<string>();
+
 export function SharedAppsPage({ state }: { state: AppState }) {
   const apps = state.shared?.apps;
+  const write = apps?.level === "write";
+  const admin = state.shared?.role === "admin";
+  const rows = apps?.removed;
+  // Its code, for a remove this window sent with it: asked for once, as soon as the app is off the web.
+  useEffect(() => {
+    for (const r of rows ?? [])
+      if (r.ok && r.codeLeft && codeAsked.has(r.key) && !codeSent.has(r.key)) {
+        codeSent.add(r.key);
+        void memberAct({ act: "deleteCode", app: r.app });
+      }
+  }, [rows]);
+  const removed = rows ?? [];
   if (!apps) return null;
   // Each computer's room, named for its bot (or its apps): one line each.
   const rooms = Object.entries(apps.room ?? {}).flatMap(([key, r]) => {
     const computer = roomComputer(r, state.bots);
     return computer ? [{ key, r, computer }] : [];
   });
-  const write = apps.level === "write";
   // An Admin whose owner's Bops publishes for them (Bops Cloud says so only then: ADMIN_PUBLISH_MIN_VERSION).
-  const publish = write && state.shared?.role === "admin" && state.shared.adminPublish === true;
+  const publish = write && admin && state.shared?.adminPublish === true;
   // Where apps publish on GitHub, their Link and Bring in: an Admin's, or a Member's with App secrets (GITHUB_ACTS_MIN_VERSION).
   const github = write && state.shared?.appGithub === true;
+  // What the apps' own computers do now, in a workspace where everything goes through the cloud (none: the owner's Mac does it all).
+  const jobs = write ? state.shared?.appJobs : undefined;
+  const remove = write && state.shared?.appRemove === true;
   return (
     <div data-shared-apps className="@container flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
       <header className="flex flex-wrap items-baseline justify-between gap-3"><h1 className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">{W.title}</h1>{apps.at > 0 && <span data-apps-asof className="text-[12px] leading-4 text-pencil">{W.asOf(asOf(apps.at))}</span>}</header>
+      {!!removed.length && (
+        <div data-apps-removed className="flex flex-col gap-1">
+          {removed.map((r) => (
+            <RemovedLine key={r.key} row={r} admin={admin && write} />
+          ))}
+        </div>
+      )}
       {!apps.list.length ? (
         <span className="text-[13px] text-[#6B6B6B]">{W.none}</span>
       ) : (
         <div className={appList}>
           {apps.list.map((a) => {
             const on = rooms.find((x) => x.r.appNames.includes(a.name));
-            return <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} github={github} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} room={on && roomHeld(on.r, on.computer, sharedTakes(a), W)} />;
+            return <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} github={github} jobs={jobs} remove={remove} admin={admin} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} room={on && roomHeld(on.r, on.computer, sharedTakes(a), W)} />;
           })}
         </div>
       )}
@@ -230,15 +309,70 @@ export function SharedAppsPage({ state }: { state: AppState }) {
   );
 }
 
+/**
+ * An app someone removed (SharedApps.removed): who, which and when, or why it didn't go; what Orgo kept or what came of its
+ * code (its `said`); and while its code is still in Ingot, that, with Delete its code for an Admin.
+ */
+function RemovedLine({ row: r, admin }: { row: SharedAppRemoval; admin: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const del = async () => {
+    setBusy(true);
+    setError(null);
+    const got = await memberAct({ act: "deleteCode", app: r.app });
+    setBusy(false);
+    if (!got.ok) setError(got.error ?? W.failed);
+  };
+  return (
+    <span data-app-removed={r.app} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] leading-4">
+      <span className={r.ok ? "text-[#6B6B6B]" : "text-[#B42318]"}>{`${r.ok ? W.removed(r.name, r.app) : W.tried(r.name, "remove", r.said ?? W.failed)} · ${asOf(r.at)}`}</span>
+      {r.ok && r.said && <span data-removed-said className="text-[#6B6B6B]">{r.said}</span>}
+      {r.ok && r.codeLeft && <span data-code-left className="text-[#6B6B6B]">{W.codeLeft}</span>}
+      {r.ok && r.codeLeft && admin && (
+        <button type="button" data-delete-code disabled={busy} onClick={() => void del()} className={`${BUTTON} text-[#B42318] shadow-[0_0_0_1px_#E2E2DF]`}>
+          {busy ? W.removing : W.deleteCode}
+        </button>
+      )}
+      {error && (
+        <span role="alert" className="text-[#B42318]">
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
+
 type Pending = NonNullable<NonNullable<AppState["shared"]>["appActs"]>[number];
 
 /**
  * One app: its state, address and Deploy (and an Admin's Publish); its sites, history, deploys, settings and domains open
  * below. `room`: its computer's full line, where a Deploy would make its first Preview there and there's no room: said
- * beside Deploy at Write as advice, never a hold (the room is the owner's Mac's last read; orgo-web refuses a deploy that
- * doesn't fit, said as any refusal is).
+ * beside Deploy at Write as advice, never a hold (the room is the last read of it; orgo-web refuses a deploy that doesn't
+ * fit, said as any refusal is).
  */
-function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean; github?: boolean; room?: string }) {
+function SharedAppCard({
+  app: a,
+  apps,
+  acts,
+  publish,
+  github = false,
+  jobs,
+  remove = false,
+  admin = false,
+  room,
+}: {
+  app: SharedApp;
+  apps: SharedApps;
+  acts: Pending[];
+  publish: boolean;
+  github?: boolean;
+  /** The kinds its computer does now (SharedOpen.appJobs): a button whose kind isn't one is hidden. None: every one shows (the owner's Mac does them). */
+  jobs?: AppJobKind[];
+  /** Remove app, a site or a left over (SharedOpen.appRemove). */
+  remove?: boolean;
+  admin?: boolean;
+  room?: string;
+}) {
   const [open, setOpen] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const [env, setEnv] = useState<"preview" | "prod">("preview");
@@ -250,16 +384,19 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
   const live = (pv ? site.previewLive : site?.live) ?? null;
   const serving = pv ? site.previewServing : site?.serving;
   const going = acts.find((x) => x.state !== "failed");
-  const send = async (act: MemberAppAct) => {
+  const send = async (act: MemberAppAct, key?: string) => {
     setSaid(null);
-    const r = await memberAct(act);
+    const r = await memberAct(act, key);
     if (!r.ok) setSaid(r.error ?? W.failed);
     return r.ok;
   };
+  // Whether a kind of act goes through now: always where the owner's Mac does them (no `jobs`), else only the kinds its computer does.
+  const can = (kind: AppJobKind) => !jobs || jobs.includes(kind);
   const newest = a.acts?.[0];
-  // A Link or Bring in its computer is doing now: nothing else on the app until it's said how it went (a Preview deploy isn't the mirror's).
-  const ghGoing = !!a.acts?.some((x) => x.going);
-  const busy = !!going || ghGoing;
+  // An act its computer is doing now (a Link or Bring in, or where everything goes through the cloud any teammate's change):
+  // nothing else on the app until it's said how it went (a Preview deploy isn't the mirror's).
+  const onIt = a.acts?.find((x) => x.going);
+  const busy = !!going || !!onIt;
   const deployState = (s: string | null | undefined): DeployState | null => s === "queued" || s === "running" || s === "succeeded" || s === "failed" || s === "cancelled" || s === "superseded" ? s : null;
   // Production on GitHub: Live is the changeset last sent there, as the owner's own Your Apps reads it (lib/app-review.ts
   // statusForApp), never Orgo's Published, which a push doesn't move. Bops Cloud says it as `at` (null: not linked yet); one
@@ -278,8 +415,8 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
     ...(gh ? { github: { linked: ghAt !== null } } : {}),
     changes: changesBetween(a.commits ?? [], liveAt, serving ?? null),
   });
-  // Publish waits while its computer works on GitHub, and until it's linked there (it would be refused).
-  const whyPublish = ghGoing ? W.githubWait : ghAt === null ? W.linkFirst : undefined;
+  // Publish waits while its computer works on the app (said as GitHub only for a GitHub act), and until it's linked there (it would be refused).
+  const whyPublish = onIt ? ((GITHUB_ACT_KINDS as readonly string[]).includes(onIt.act) ? W.githubWait : W.teammateWait) : ghAt === null ? W.linkFirst : undefined;
   // Where an Admin's Publish goes, said where they confirm it: GitHub, or Published on domains that don't point at Orgo
   // yet (its visitors don't see a publish until they do), else its domain.
   const waitingOn = site?.domains?.length && site.domains.every((d) => d.status !== "active") && !site.url ? site.domains.map((d) => d.domain) : [];
@@ -297,7 +434,7 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
       </div>
       {(going || acts.some((x) => x.state === "failed") || said || newest) && (
         <div className="flex flex-col gap-0.5 px-4 pb-2.5 text-[12px] leading-4">
-          {going && <span className="text-[#6B6B6B]">{going.state === "waiting" ? W.waiting : going.state === "cloud" ? "Sending…" : W.sending}</span>}
+          {going && <span className="text-[#6B6B6B]">{going.state === "waiting" ? W.waiting : going.state === "cloud" ? W.sendingComputer : W.sending}</span>}
           {acts
             .filter((x) => x.state === "failed")
             .map((x) => (
@@ -311,7 +448,7 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
             </span>
           )}
           {newest && <span data-act-line className={newest.ok || newest.going ? "text-[#6B6B6B]" : "text-[#B42318]"}>{actLine(newest)}</span>}
-          {newest?.ok && !newest.going && newest.said && isGithubKind(newest.act) && (
+          {newest?.ok && !newest.going && newest.said && saysMore(newest.act) && (
             <span data-act-said className="text-[#6B6B6B]">
               {newest.said}
             </span>
@@ -320,12 +457,12 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
       )}
       <Fold lazy open={open}><div className="flex min-w-0 flex-col gap-5 border-b border-rule px-4 py-4">
         {!write && <span className="text-[13px] text-pencil">{W.readOnly}</span>}
-        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? W.publishLine} busy={!!going} whyPublish={whyPublish} updateAlso
+        <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? (jobs ? W.publishLineComputer : W.publishLine)} busy={!!going} whyPublish={whyPublish} updateAlso
           roomNote={write && room ? { update: room } : undefined}
           password={site?.previewProtected ? <AppPassword password={write ? site.previewPassword ?? null : null}/> : undefined}
-          onUpdate={write ? () => void send({ act: "deploy", app: a.name }) : undefined}
-          onPublish={publish ? at => send({ act: "deploy", app: a.name, env: "prod", ...(pv && !a.siteNames?.length ? { at } : {}) }) : undefined}
-          history={a.commits?.length ? <AppVersions versions={a.commits} preview={serving ?? null} published={liveAt} busy={!!going} allSites={!!a.siteNames?.length} onRestore={write ? id => void send({ act: "deploy", app: a.name, at: id }) : undefined}/> : undefined}
+          onUpdate={write && can("deploy") ? () => void send({ act: "deploy", app: a.name }) : undefined}
+          onPublish={publish && can("deploy") ? at => send({ act: "deploy", app: a.name, env: "prod", ...(pv && !a.siteNames?.length ? { at } : {}) }) : undefined}
+          history={a.commits?.length ? <AppVersions versions={a.commits} preview={serving ?? null} published={liveAt} busy={!!going} allSites={!!a.siteNames?.length} onRestore={write && can("deploy") ? id => void send({ act: "deploy", app: a.name, at: id }) : undefined}/> : undefined}
           technical={<div data-technical-details className="flex flex-col gap-4 rounded-xl bg-desk p-4">
           <Part title={W.sites}>
             {(a.sites ?? []).map((s) => (
@@ -355,7 +492,7 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
                   </span>
                   {d.live && <span className="text-[#1E7A4C]">{W.live}</span>}
                   {/* Members go back on its Preview only (lib/server/member-acts.ts); an Admin who may publish, on Published too. */}
-                  {write && d.canRollback && !d.live && (d.env !== "prod" || publish) && (
+                  {write && can("rollback") && d.canRollback && !d.live && (d.env !== "prod" || publish) && (
                     <button type="button" disabled={!!going} onClick={() => void send({ act: "rollback", app: a.name, deployment: d.id, ...(d.site !== a.name ? { site: d.site } : {}), ...(d.env === "prod" ? { env: "prod" as const } : {}) })} className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}>
                       {W.goBack}
                     </button>
@@ -365,11 +502,99 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
             </Part>
           )}
           {write && github && <GithubPart app={a} busy={busy} onSend={(act) => void send(act)} />}
-          {write && a.settings && <AppDisclosure title="Settings"><SettingsPart app={a} disabled={!!going} onSave={(act) => void send(act)}/></AppDisclosure>}
-          {write && !!apps.owned?.length && <DomainPart app={a} owned={apps.owned} disabled={!!going} onUse={(act) => void send(act)} />}
+          {write && can("settings") && a.settings && <AppDisclosure title="Settings"><SettingsPart app={a} disabled={!!going} onSave={(act) => void send(act)}/></AppDisclosure>}
+          {write && can("domain") && !!apps.owned?.length && <DomainPart app={a} owned={apps.owned} disabled={!!going} onUse={(act) => void send(act)} />}
+          {write && remove && <RemovePart app={a} admin={admin} busy={busy} can={can} onSend={send} />}
             <span className="text-[12px] text-pencil">{[W.noVariables, W.noLogs, W.noBuying].join(" ")}</span>
           </div>}/>
       </div></Fold>
+    </div>
+  );
+}
+
+/**
+ * Taking it off the web, for an Admin or a Member with Remove apps (SharedOpen.appRemove), each asked once more as the
+ * owner's own Remove is (app-settings.tsx AppEnd): the app (its code too, an Admin's), each of its other sites, and its
+ * left overs on its computer (SharedApp.leftOver: by name, never an id). Each kind only where its computer does it now
+ * (`can`). What it's doing shows on the app's line, as every act's does.
+ */
+function RemovePart({ app: a, admin, busy, can, onSend }: { app: SharedApp; admin: boolean; busy: boolean; can: (kind: AppJobKind) => boolean; onSend: (act: MemberAppAct, key?: string) => Promise<boolean> }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const [repo, setRepo] = useState(false);
+  const [sending, setSending] = useState(false);
+  const close = () => {
+    setOpen(null);
+    setRepo(false);
+  };
+  const go = async (act: MemberAppAct, key?: string) => {
+    setSending(true);
+    const ok = await onSend(act, key);
+    setSending(false);
+    if (ok) close();
+  };
+  const dropApp = () => {
+    // Its code too: this window deletes it once the app is off the web (codeAsked).
+    const key = repo ? crypto.randomUUID().replace(/-/g, "") : undefined;
+    if (key) codeAsked.add(key);
+    void go({ act: "remove", app: a.name, ...(repo ? { repo: true as const } : {}) }, key);
+  };
+  const sites = can("removeSite") ? (a.siteNames ?? []) : [];
+  const left = can("removeLeftOver") ? (a.leftOver ?? []) : [];
+  const off = busy || sending;
+  if (!can("remove") && !sites.length && !left.length) return null;
+  return (
+    <div data-shared-remove className="flex flex-col gap-1.5 border-t border-[#F0F0EE] pt-3">
+      {!!left.length && (
+        <Part title={W.leftOvers}>
+          <span className="text-[12px] text-[#9A9A98]">{W.leftOversLine}</span>
+          {left.map((l) => (
+            <span key={l.name} data-left-over={l.name} className="flex flex-col gap-1">
+              <span className="flex items-center gap-2 text-[12.5px] leading-[18px]">
+                <span className="min-w-0 flex-1 truncate">{[l.name, l.port ? `port ${l.port}` : null].filter(Boolean).join(" · ")}</span>
+                <button type="button" disabled={off} onClick={() => setOpen(`left:${l.name}`)} className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}>
+                  {W.remove}
+                </button>
+              </span>
+              {open === `left:${l.name}` && <InlineConfirm text={W.removeLeftOverAsk(l.name)} action={W.remove} cancel={W.keep} doing={W.removing} busy={sending} onConfirm={() => void go({ act: "removeLeftOver", app: a.name, leftOver: l.name })} onCancel={close} />}
+            </span>
+          ))}
+        </Part>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {sites.map((site) => (
+          <button key={site} type="button" data-remove-site={site} disabled={off} onClick={() => setOpen(`site:${site}`)} className={`${BUTTON} shadow-[0_0_0_1px_#E2E2DF]`}>
+            {W.removeSite(site)}
+          </button>
+        ))}
+        <span className="flex-1" />
+        {can("remove") && (
+          <button type="button" data-remove-app disabled={off} onClick={() => setOpen("app")} className={`${BUTTON} text-[#B42318] shadow-[0_0_0_1px_#E2E2DF]`}>
+            {W.removeApp}
+          </button>
+        )}
+      </div>
+      {sites.map((site) =>
+        open === `site:${site}` ? <InlineConfirm key={site} text={W.removeSiteAsk(site)} action={W.remove} cancel={W.keep} doing={W.removing} busy={sending} onConfirm={() => void go({ act: "removeSite", app: a.name, site })} onCancel={close} /> : null,
+      )}
+      {open === "app" && (
+        <InlineConfirm
+          text={W.removeAppAsk(a.name)}
+          action={W.remove}
+          cancel={W.keep}
+          doing={W.removing}
+          busy={sending}
+          onConfirm={dropApp}
+          onCancel={close}
+          extra={
+            admin ? (
+              <label className="flex items-center gap-2 text-[12px] leading-4 text-[#3A3A38]">
+                <input type="checkbox" data-remove-code checked={repo} disabled={sending} onChange={(e) => setRepo(e.target.checked)} className="size-3.5 accent-[#0A0A0A]" />
+                {W.removeCode}
+              </label>
+            ) : undefined
+          }
+        />
+      )}
     </div>
   );
 }

@@ -2,7 +2,7 @@
 
 import type { SharedKey } from "@/cloud/protocol";
 import type { AddedFile } from "./added-files";
-import type { AppHosting, AppsForMembers, IngotToken } from "./hosted-apps";
+import type { AppHosting, AppRemoval, AppsForMembers, IngotToken } from "./hosted-apps";
 import type { Chain } from "./chain";
 import type { ComputerSize } from "./bops-billing";
 import type { MemberAccessMap, MemberWho } from "./member-access";
@@ -379,6 +379,14 @@ export type Workspace = {
    * by a computer (cloud/computer-scope.ts forComputer), and never in a window that doesn't show apps (lib/apps-access.ts).
    */
   previewPasswords?: Record<string, { url: string; password: string; at: number }>;
+  /**
+   * Apps someone other than the owner removed lately (lib/hosted-apps.ts AppRemoval), newest first, at most
+   * APPS_REMOVED_KEPT: written by Bops Cloud as the app's own computer says it's done (cloud/turns.ts withAppRemoved), or
+   * by this Mac for one it did (lib/server/apps-for-members.ts noteRemoval). Shown in Your Apps (cloud/ws-slice.ts
+   * appsFor), never to a computer (cloud/computer-scope.ts forComputer). A name removed here stays removed: a copy from
+   * before that still has the app never brings it back (lib/server/state-merge.ts, computer-scope.ts hostingChangeAllowed).
+   */
+  appsRemoved?: AppRemoval[];
   /**
    * The keys this workspace's bots see (lib/server/keys.ts keysOf), by name and whose, as this Mac last read the vault:
    * what people with Keys are shown (cloud/ws-slice.ts keyNamesOf), so they switch bots on and off for any of them. Only

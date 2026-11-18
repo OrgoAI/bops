@@ -55,6 +55,12 @@ export type AppHosting = {
    */
   passwordSet?: PasswordSet;
   /**
+   * Its own site's settings saved for Published before it has a Published project (made only when it's first
+   * published, or a domain is pointed at it): its Preview is made with them while there's none, and Published with
+   * them once it's made (then they live on its project, and this goes).
+   */
+  settings?: SiteSettings;
+  /**
    * More sites of the same repo on the same computer (one repo holding a few apps, each started its own
    * way), in the order they were added. The app's own site is the one above, named as the app; each of
    * these is a deploy project of its own there, with its own name (which its address takes), port and
@@ -101,7 +107,10 @@ export type AppProjectBehind = { site: string; computerId: string; projectId: st
  * Preview link's label (a copy, as AppHosting.preview); its Local's port and the Local addresses told for Google,
  * as AppHosting.localPort and toldGoogle say of the app's own; its Preview password's, as passwordOff and passwordSet do.
  */
-export type AppSiteHosting = { name: string; projectId?: string; url?: string; preview?: string; localPort?: number; toldGoogle?: string[]; passwordOff?: true; passwordSet?: PasswordSet };
+export type AppSiteHosting = { name: string; projectId?: string; url?: string; preview?: string; localPort?: number; toldGoogle?: string[]; passwordOff?: true; passwordSet?: PasswordSet; settings?: SiteSettings };
+
+/** A site's settings kept before it has a Published project (AppHosting.settings), as Orgo names them: its port, how it's built and started, and its health check's path. */
+export type SiteSettings = { port?: number; install_cmd?: string; build_cmd?: string; start_cmd?: string; health_path?: string };
 
 /** When Bops set a Preview's password (ms), and the id of the Preview deploy live then (null: none yet). */
 export type PasswordSet = { at: number; live: string | null };
@@ -901,7 +910,33 @@ export type AppForMembers = {
   settings?: Record<string, AppProjectSettings>;
   /** What members did to it, newest first, at most MEMBER_ACTS: who, what, and how it went (named as the member). */
   acts?: MemberAppAct[];
+  /**
+   * Its left overs on its computer (HostedApp.leftOver), at most MEMBER_LEFT_OVERS: by name and port, `link` for a web
+   * address alone (an id that starts "url:"). Never their ids: a member's "removeLeftOver" names one by its name. Write only.
+   */
+  leftOver?: { name: string; port: number | null; link?: true }[];
 };
+
+/**
+ * One app as its own computer's runner sees it for members (lib/server/apps-view-share.ts, cloud/apps-view.ts): an
+ * AppForMembers without members' acts (Bops Cloud keeps those) and without any Preview password (Bops Cloud keeps
+ * those too: Workspace.previewPasswords), with the workspace's domains bought through Orgo as that computer may read
+ * them (`owned`). Kept in Bops Cloud's bops.app_views, never in the owner's state.
+ */
+export type AppView = Omit<AppForMembers, "acts" | "sites"> & {
+  sites: Omit<AppForMembers["sites"][number], "previewPassword">[];
+  owned?: { id: string; domain: string }[];
+};
+
+/**
+ * An app someone other than the owner removed (Workspace.appsRemoved), in place of their act on it: who (named as the
+ * member), which app, by their act's key, and how it went. `codeLeft`: they asked for its code to go too, and it's still
+ * in Ingot (a "deleteCode" act, an Admin's, takes it within a day). Written by Bops Cloud when the app's computer says
+ * it's done (cloud/turns.ts withAppRemoved), or by the owner's Mac (lib/server/apps-for-members.ts noteRemoval).
+ */
+export type AppRemoval = { key: string; userId: string; name: string; app: string; ok: boolean; said?: string; codeLeft?: true; at: number };
+/** How many removals a workspace keeps (Workspace.appsRemoved), newest first. */
+export const APPS_REMOVED_KEPT = 10;
 
 /**
  * A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). `env` "prod": an Admin's
@@ -909,13 +944,28 @@ export type AppForMembers = {
  * it publishes ("github"), and a Link or Bring in while the app's computer does it (`going`), then how it went
  * (cloud/turns.ts takeAppJob, finish).
  */
-export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain" | "github" | "githubLink" | "githubPull"; site?: string; domain?: string; env?: "prod"; ok: boolean; going?: true; said?: string; at: number };
+export type MemberAppAct = {
+  key: string;
+  userId: string;
+  name: string;
+  act: "deploy" | "rollback" | "settings" | "domain" | "github" | "githubLink" | "githubPull" | "remove" | "removeSite" | "removeLeftOver" | "deleteCode";
+  site?: string;
+  domain?: string;
+  /** A "removeLeftOver": the left over's name (AppForMembers.leftOver). */
+  leftOver?: string;
+  env?: "prod";
+  ok: boolean;
+  going?: true;
+  said?: string;
+  at: number;
+};
 
 /** How much members are shown: apps, sites of each, changesets, deploys a site, and acts kept. */
 export const MEMBER_APPS = 30;
 export const MEMBER_COMMITS = 20;
 export const MEMBER_DEPLOYS = 10;
 export const MEMBER_ACTS_KEPT = 10;
+export const MEMBER_LEFT_OVERS = 20;
 
 /** An app's sites by name: its own (named as the app), then AppHosting.sites in order. */
 export const sitesOfHosting = (h: Pick<AppHosting, "sites">, name: string): string[] => [name, ...(h.sites ?? []).map((s) => s.name)];

@@ -4,16 +4,16 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
-import { accessSummary, adminMay, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, sameAccess, withEntry, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
-import { accessFor, adminGate, cleanAct, githubWhy, GITHUB_NOT_LINKED, GITHUB_NOT_SET, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
+import { accessSummary, adminMay, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, powersOf, sameAccess, withEntry, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
+import { accessFor, adminGate, appsTouchedFor, cleanAct, githubWhy, GITHUB_NOT_LINKED, GITHUB_NOT_SET, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange, THIS_WS } from "../change-routes.ts";
 import type { WakeRefusal } from "../turns.ts";
 import { closeDb, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { prepareDb } from "./core-fakes.ts";
-import { ADMIN_POWERS_MIN_VERSION, CLOUD_ALL_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
+import { ADMIN_POWERS_MIN_VERSION, CLOUD_ALL_MIN_VERSION, DELETE_CODE_MS, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type MemberAppAct, type WsAccess } from "../protocol.ts";
 import { groupKeyOf, roomKeyOf } from "../group-key.ts";
-import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
+import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, sliceOf, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
 /**
  * Shared workspaces, read only (members.ts, ws-slice.ts): who may watch is what orgo-web's bops-role
@@ -2529,7 +2529,7 @@ test("over HTTP: the GitHub acts are the power of Publish (an Admin, a Member wi
         o.check(blob);
         return jobSays === "computer"
           ? { where: "computer", fresh: true, turn: { id: `turn_${o.id}` } as never }
-          : { where: "mac", why: jobSays, bot: "Max" };
+          : { where: "refused", why: jobSays, bot: "Max" };
       },
     });
   fakes();
@@ -2572,9 +2572,13 @@ test("over HTTP: the GitHub acts are the power of Publish (an Admin, a Member wi
   await refused("gh-ada", { act: "githubPull", app: "site" }, 409, "owner_bops_old");
   await refused("gh-sam", { act: "githubLink", app: "site" }, 409, "owner_bops_old");
   ghNew = true;
-  // No runner on the app's computer that can: the owner's Mac does it, as a member's other app acts.
+  // No runner on the app's computer that can: the owner's Mac would do it, but never beside Sam's Bring in still going there.
   jobSays = "runner";
   fakes();
+  await refused("gh-ada", { act: "githubLink", app: "site" }, 409, "not_waiting", /Its computer is still on the last one/);
+  // Once that one ended: the owner's Mac does it, as a member's other app acts.
+  const siteActs = ((blob.workspaces as Record<string, unknown>[])[0].appsForMembers as { apps: Record<string, { acts: Record<string, unknown>[] }> }).apps.site.acts;
+  siteActs[0] = { ...siteActs[0], going: undefined };
   const m = await go("gh-sam", { act: "githubPull", app: "site" }, "k_gh_mac_001");
   assert.deepEqual([m.status, m.json.macOn, m.json.computer], [202, true, undefined]);
   assert.deepEqual([queued.at(-1)?.payload.act, queued.at(-1)?.dedupe], [{ act: "githubPull", app: "site" }, "member:gh-sam:k_gh_mac_001"]);
@@ -2631,9 +2635,14 @@ test("over HTTP: someone other than the owner points the GitHub key somewhere ne
 
 /* ---------------- What someone may change: Team's switches and the "change" act ---------------- */
 
-test("Team's switches are kept as sent (only known ones, only on), kept through a save of bots alone, and told apart from none", () => {
-  const a = cleanAccess({ others: "read", bots: {}, can: { chart: true, bots: true, nope: true, spend: false } });
-  assert.deepEqual(a?.can, { chart: true, bots: true });
+test("Team's switches are kept as sent (only on; one a newer Bops added kept too, a malformed one never), kept through a save of bots alone, and told apart from none", () => {
+  const a = cleanAccess({ others: "read", bots: {}, can: { chart: true, bots: true, nope: true, spend: false, "__proto__": true, "no way": true } });
+  assert.deepEqual(a?.can, { chart: true, bots: true, nope: true });
+  // A switch this Bops doesn't know gives nothing, and a save that changes only it is a change.
+  assert.deepEqual(powersOf("member", a?.can), ["chart", "bots"], "kept as it is, giving nothing here");
+  assert.equal(sameAccess({ others: "read", bots: {}, can: { chart: true, later: true } as never }, { others: "read", bots: {}, can: { chart: true } }), false);
+  const later = withEntry({ "a@x.com": { others: "read", bots: {}, can: { chart: true, later: true } as never } }, "a@x.com", { others: "write", bots: {} });
+  assert.deepEqual(later?.["a@x.com"].can, { chart: true, later: true }, "a save of bots alone keeps a newer Bops' switch");
   // Every switch off is kept as off ({}), never as never set.
   assert.deepEqual(cleanAccess({ others: "read", bots: {}, can: {} })?.can, {});
   assert.equal(cleanAccess({ others: "read", bots: {} })?.can, undefined);
@@ -2738,7 +2747,7 @@ test("the slice says what someone may change: an Admin every switch, a Member th
     { key: "chg_b", by: "act-sam", ok: false, error: "No.", at: 2 },
   ];
   const admin = sharedSlice(owner, "ws_act", { role: "admin", id: "act-tom", email: "tom@orgo.ai", changes: true });
-  assert.deepEqual(admin.can, ["chart", "bots", "memory", "workspace", "appSecrets", "spend", "mac"]);
+  assert.deepEqual(admin.can, ["chart", "bots", "memory", "workspace", "appSecrets", "spend", "mac", "removeApps"]);
   assert.equal(admin.changes, true);
   assert.deepEqual(admin.chain, { bots: { ivy: { lead: "max" } } });
   assert.deepEqual(admin.changed, [{ key: "chg_a", ok: true }]);
@@ -3240,4 +3249,260 @@ after(async () => {
   await query("DELETE FROM bops.app_state WHERE user_id = ANY($1::text[])", [allOwners]).catch(() => {});
   await query("DELETE FROM bops.cloud_accounts WHERE user_id = ANY($1::text[])", [allOwners]).catch(() => {});
   await closeDb();
+});
+
+/* ---------------- Removing apps, and Your Apps on the app's own computer with everything through the cloud ---------------- */
+
+test("cleanAct: a remove takes an app (`repo` only as true), a site other than its own, a left over by its name, and Delete its code an app", () => {
+  const key = "k_rm_000001";
+  assert.deepEqual(cleanAct({ key, act: { act: "remove", app: "shop", extra: 1 } }), { key, act: { act: "remove", app: "shop" } });
+  assert.deepEqual(cleanAct({ key, act: { act: "remove", app: "shop", repo: true } }), { key, act: { act: "remove", app: "shop", repo: true } });
+  for (const repo of [false, "yes", 1]) assert.equal(cleanAct({ key, act: { act: "remove", app: "shop", repo } }), null, `repo ${String(repo)}`);
+  assert.equal(cleanAct({ key, act: { act: "remove", app: "shop", site: "admin" } }), null, "a site goes with removeSite");
+  assert.deepEqual(cleanAct({ key, act: { act: "removeSite", app: "shop", site: "admin" } }), { key, act: { act: "removeSite", app: "shop", site: "admin" } });
+  assert.equal(cleanAct({ key, act: { act: "removeSite", app: "shop" } }), null, "a site to remove");
+  assert.equal(cleanAct({ key, act: { act: "removeSite", app: "shop", site: "shop" } }), null, "never its own (that's the app)");
+  assert.deepEqual(cleanAct({ key, act: { act: "removeLeftOver", app: "shop", leftOver: "shop-old-2" } }), { key, act: { act: "removeLeftOver", app: "shop", leftOver: "shop-old-2" } });
+  for (const leftOver of [undefined, "", "Shop Old", "x".repeat(81), "proj_1234"]) assert.equal(cleanAct({ key, act: { act: "removeLeftOver", app: "shop", leftOver } }), null, `left over ${String(leftOver)}`);
+  assert.equal(cleanAct({ key, act: { act: "removeLeftOver", app: "shop", leftOver: "x".repeat(80) } })?.act.act, "removeLeftOver", "a name of 80");
+  assert.deepEqual(cleanAct({ key, act: { act: "deleteCode", app: "shop" } }), { key, act: { act: "deleteCode", app: "shop" } });
+  assert.equal(cleanAct({ key, act: { act: "deleteCode", app: "Shop" } }), null);
+});
+
+/** ghBlob's workspace with a left over of "shop" where the owner's Mac read it (AppForMembers.leftOver). */
+const rmBlob = () => {
+  const b = ghBlob({ sam: { can: { removeApps: true } } });
+  const ws = (b.workspaces as Record<string, unknown>[])[0];
+  const seen = ws.appsForMembers as { apps: Record<string, unknown> };
+  seen.apps.shop = { head: null, sites: [], commits: [], deploys: [], leftOver: [{ name: "shop-old", port: 3100 }, { name: "shop-www", port: null, link: true }] };
+  return b;
+};
+
+test("appsTouched for a remove: the app at Write, a site it has (never its own), a left over by the name the view shows", () => {
+  const blob = rmBlob();
+  const at = (act: MemberAppAct, viewer = ghViewer("admin", "ada@example.com")) => {
+    const slice = sliceOf(blob, "ws_gh", viewer);
+    try {
+      appsTouchedFor(slice, viewer, viewerAccess(slice.workspace, viewer), act);
+      return "ok";
+    } catch (e) {
+      return (e as { status?: number }).status;
+    }
+  };
+  assert.equal(at({ act: "remove", app: "shop" }), "ok");
+  assert.equal(at({ act: "remove", app: "nope" }), 404);
+  assert.equal(at({ act: "remove", app: "shop" }, ghViewer("member", "rob@example.com")), 403, "at Read, nothing to remove");
+  assert.equal(at({ act: "removeSite", app: "shop", site: "admin" }), "ok");
+  assert.equal(at({ act: "removeSite", app: "shop", site: "blog" }), 404, "a site it hasn't");
+  assert.equal(at({ act: "removeLeftOver", app: "shop", leftOver: "shop-old" }), "ok");
+  assert.equal(at({ act: "removeLeftOver", app: "shop", leftOver: "shop-gone" }), 404);
+  assert.equal(at({ act: "removeLeftOver", app: "site", leftOver: "shop-old" }), 404, "another app's");
+});
+
+test("over HTTP: a remove is an Admin's, or a Member's with Remove apps; its code an Admin's alone; in a workspace on the owner's Mac it waits for a Mac at CLOUD_ALL_MIN_VERSION", async () => {
+  let blob = rmBlob();
+  let macNew = true;
+  const fakes = () =>
+    resetMembers({
+      state: async () => blob,
+      queue: async (owner, kind, payload, dedupe, expires) => void queued.push({ owner, kind, payload: payload as MemberActPayload, dedupe, expires }),
+      isOn: () => false,
+      drop: async () => {},
+      count: async () => {},
+      adminGate: async (_o: string, min: string = ADMIN_POWERS_MIN_VERSION) => (min === CLOUD_ALL_MIN_VERSION ? macNew : true),
+      takeJob: async () => assert.fail("never a job outside the cloud"),
+    });
+  fakes();
+  queued.length = 0;
+  for (const [u, role] of [["rm-ada", "admin"], ["rm-sam", "member"], ["rm-ivy", "member"]] as const) {
+    roles[`${u} proj-rm`] = { role, ownerUserId: "rm-owner", bopsWsId: "ws_gh", name: "Gh", ownerEmail: STAFF_OWNER };
+    emails[u] = `${u.slice(3)}@example.com`;
+  }
+  const go = (user: string, a: unknown) => act(user, { key: `k_rm_${String(Math.random()).slice(2, 10)}`, act: a }, "proj-rm");
+  const no = async (user: string, a: unknown, status: number, code: string, words?: string) => {
+    const r = await go(user, a);
+    assert.deepEqual([r.status, r.json.code], [status, code], `${user} ${JSON.stringify(a)}`);
+    if (words) assert.equal(r.json.error, words);
+  };
+  await no("rm-ivy", { act: "remove", app: "shop" }, 403, "admin_only", "The owner or an Admin can let you remove apps in Team.");
+  await no("rm-ivy", { act: "removeLeftOver", app: "shop", leftOver: "shop-old" }, 403, "admin_only");
+  await no("rm-sam", { act: "remove", app: "shop", repo: true }, 403, "admin_only", "Only the owner or an Admin can do this.");
+  await no("rm-sam", { act: "deleteCode", app: "shop" }, 403, "admin_only");
+  assert.equal(queued.length, 0);
+  // Sam has Remove apps, an Admin always: for the owner's Mac, as their other acts.
+  const s = await go("rm-sam", { act: "removeSite", app: "shop", site: "admin" });
+  assert.deepEqual([s.status, s.json], [202, { ok: true, macOn: false }]);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "removeSite", app: "shop", site: "admin" });
+  assert.ok(queued.at(-1)!.expires.getTime() - Date.now() <= MEMBER_ACT_MS + 1000, "MEMBER_ACT_MS, as any app act");
+  assert.equal((await go("rm-ada", { act: "remove", app: "shop", repo: true })).status, 202);
+  assert.deepEqual(queued.at(-1)?.payload.act, { act: "remove", app: "shop", repo: true });
+  // The owner's last Mac older than CLOUD_ALL_MIN_VERSION: it would drop a remove, so it's refused here.
+  macNew = false;
+  fakes();
+  await no("rm-ada", { act: "remove", app: "shop" }, 409, "owner_bops_old");
+  await no("rm-sam", { act: "removeLeftOver", app: "shop", leftOver: "shop-old" }, 409, "owner_bops_old");
+  assert.equal((await go("rm-ivy", { act: "deploy", app: "shop" })).status, 202, "a deploy as before");
+  // Delete its code, an Admin's: only for an app removed with its code left, within a day (none here).
+  await no("rm-ada", { act: "deleteCode", app: "shop" }, 404, undefined as never);
+  blob = rmBlob();
+});
+
+test("over HTTP, a workspace on the owner's Mac: an app act for that Mac while another on the app is still going on its computer is said at once, never queued beside it (an owner's Mac from before CLOUD_ALL_MIN_VERSION as before)", async () => {
+  // App "site" has Sam's Bring in still going on its computer (ghBlob), owed before the workspace went back to the Mac.
+  const blob = rmBlob();
+  let macNew = true;
+  let jobSays: "computer" | "runner" = "runner";
+  const fakes = () =>
+    resetMembers({
+      state: async () => blob,
+      queue: async (owner, kind, payload, dedupe, expires) => void queued.push({ owner, kind, payload: payload as MemberActPayload, dedupe, expires }),
+      isOn: () => true,
+      drop: async () => {},
+      count: async () => {},
+      adminGate: async (_o: string, min: string = ADMIN_POWERS_MIN_VERSION) => (min === CLOUD_ALL_MIN_VERSION ? macNew : true),
+      allCloud: async () => false,
+      takeJob: async (o) => (o.check(blob), jobSays === "computer" ? { where: "computer", fresh: true, turn: { id: `turn_${o.id}` } as never } : { where: "refused", why: jobSays, bot: "Max" }),
+    });
+  fakes();
+  queued.length = 0;
+  for (const [u, role] of [["mg-ada", "admin"], ["mg-sam", "member"]] as const) {
+    roles[`${u} proj-mg`] = { role, ownerUserId: "mg-owner", bopsWsId: "ws_gh", name: "Gh", ownerEmail: STAFF_OWNER };
+    emails[u] = `${u.slice(3)}@example.com`;
+  }
+  const go = (user: string, a: unknown, key = `k_mg_${String(Math.random()).slice(2, 10)}`) => act(user, { key, act: a }, "proj-mg");
+  const busy = async (user: string, a: unknown) => {
+    const r = await go(user, a);
+    assert.deepEqual([r.status, r.json.code, r.json.error], [409, "not_waiting", "Its computer is still on the last one. Try again once it's done."], JSON.stringify(a));
+  };
+  await busy("mg-sam", { act: "deploy", app: "site" });
+  await busy("mg-ada", { act: "settings", app: "site", port: 3001 });
+  // A Link its computer can't take now would go to the owner's Mac: said the same.
+  await busy("mg-ada", { act: "githubLink", app: "site" });
+  assert.equal(queued.length, 0, "nothing for the Mac");
+  // One its computer takes is owed there, after the one going (one at a time in the bot's chat).
+  jobSays = "computer";
+  assert.equal((await go("mg-ada", { act: "githubLink", app: "site" })).status, 202);
+  // Another app: as before.
+  assert.equal((await go("mg-sam", { act: "deploy", app: "shop" })).status, 202);
+  assert.equal(queued.length, 1);
+  // An owner whose last Mac is older: as before, queued.
+  macNew = false;
+  fakes();
+  assert.equal((await go("mg-sam", { act: "deploy", app: "site" })).status, 202);
+  assert.equal(queued.length, 2);
+});
+
+test("over HTTP, everything through the cloud: an app act is a job for the app's own computer, never queued, from a window at CLOUD_ALL_MIN_VERSION (one from before is refused in words, nothing owed); refusals are said at once", async () => {
+  const blob = rmBlob();
+  const jobs: Parameters<NonNullable<Parameters<typeof resetMembers>[0]>["takeJob"] & {}>[0][] = [];
+  let says: "computer" | "old" | "busy" = "computer";
+  resetMembers({
+    state: async () => blob,
+    queue: async () => assert.fail("never queued for the owner's Mac"),
+    isOn: () => true,
+    drop: async () => {},
+    count: async () => {},
+    adminGate: async () => true,
+    allCloud: async () => true,
+    takeJob: async (o) => {
+      jobs.push(o);
+      o.check(blob);
+      return says === "computer" ? { where: "computer", fresh: true, turn: { id: `turn_${o.id}` } as never } : { where: "refused", why: says, bot: "Max" };
+    },
+  });
+  for (const [u, role] of [["cl-ada", "admin"], ["cl-sam", "member"], ["cl-ivy", "member"]] as const) {
+    roles[`${u} proj-cl`] = { role, ownerUserId: "cl-owner", bopsWsId: "ws_gh", name: "Gh", ownerEmail: STAFF_OWNER };
+    emails[u] = `${u.slice(3)}@example.com`;
+  }
+  const from = (version: string | null) => (user: string, a: unknown, key = `k_cl_${String(Math.random()).slice(2, 10)}`) =>
+    fetch(`${base}/v1/ws/proj-cl/act`, { method: "POST", headers: { authorization: `Bearer key-${user}`, "content-type": "application/json", ...(version ? { "x-bops-version": version } : {}) }, body: JSON.stringify({ key, act: a }) }).then(async (r) => ({ status: r.status, json: (await r.json().catch(() => ({}))) as Record<string, unknown> }));
+  const go = from(CLOUD_ALL_MIN_VERSION);
+  // A window from before CLOUD_ALL_MIN_VERSION (0.0.53, or one that doesn't say) can't show a job going on its computer: said
+  // at once, in plain words, nothing owed. Its GitHub acts are its own (githubAct).
+  for (const old of [from(null), from("0.0.53")]) {
+    const no = await old("cl-ivy", { act: "deploy", app: "shop" });
+    assert.deepEqual([no.status, no.json.code, no.json.error], [409, "viewer_bops_old", "Update Bops to change apps in this workspace."]);
+  }
+  assert.equal(jobs.length, 0, "nothing owed");
+  // A deploy from a window at CLOUD_ALL_MIN_VERSION: owed as a job, marked cloud.
+  const r = await go("cl-ivy", { act: "deploy", app: "shop", site: "admin" }, "k_cl_dep_001");
+  assert.deepEqual([r.status, r.json], [202, { ok: true, macOn: true, stored: true, cloud: true, turn: "turn_msg_job_cl-ivy_k_cl_dep_001" }]);
+  const j = jobs.at(-1)!;
+  assert.deepEqual([j.job, j.cloud, j.min, j.needsKey, j.member.ref], [{ act: "deploy", app: "shop", site: "admin" }, true, CLOUD_ALL_MIN_VERSION, false, "k_cl_dep_001"]);
+  assert.equal(j.words("Max"), "ivy asked Max's computer to deploy shop.");
+  // Each kind's words in the app's bot's chat.
+  const said: [unknown, string][] = [
+    [{ act: "deploy", app: "site", env: "prod" }, "ada asked Max's computer to publish site."],
+    [{ act: "rollback", app: "shop", deployment: "d1" }, "ada asked Max's computer to go back to an earlier deploy of shop."],
+    [{ act: "settings", app: "shop", port: 3001 }, "ada asked Max's computer to change shop's settings."],
+    [{ act: "domain", app: "shop", zone: "zone-unknown-1" }, "ada asked Max's computer to point a domain at shop."],
+    [{ act: "remove", app: "shop" }, "ada asked Max's computer to remove shop."],
+    [{ act: "removeSite", app: "shop", site: "admin" }, "ada asked Max's computer to remove admin from shop."],
+    [{ act: "removeLeftOver", app: "shop", leftOver: "shop-old" }, "ada asked Max's computer to remove the left over shop-old."],
+  ];
+  for (const [a, words] of said) {
+    const x = await go("cl-ada", a);
+    // (A rollback needs a deploy that can go back: none here.)
+    if ((a as { act: string }).act === "rollback") {
+      assert.equal(x.status, 409);
+      continue;
+    }
+    assert.equal(x.status, 202, `${JSON.stringify(a)} ${JSON.stringify(x.json)}`);
+    assert.equal(jobs.at(-1)!.words("Max"), words);
+  }
+  // A domain's zone is checked for its shape only here: orgo-web holds the computer to the workspace's own.
+  assert.deepEqual(jobs.find((x) => x.job.act === "domain")?.job, { act: "domain", app: "shop", zone: "zone-unknown-1" });
+  // Publish of the app on GitHub needs the key on its computer; a Preview deploy of it doesn't.
+  assert.equal(jobs.find((x) => x.job.act === "deploy" && "env" in x.job)?.needsKey, true);
+  // Refused: in words, at once.
+  says = "old";
+  const old = await go("cl-ivy", { act: "deploy", app: "shop" });
+  assert.deepEqual([old.status, old.json.code, old.json.error], [409, "computer_not_ready", "Max's computer runs an older Bops that can't do this yet. It updates the next time The owner opens Bops."]);
+  says = "busy";
+  const busy = await go("cl-ivy", { act: "settings", app: "shop", port: 3002 });
+  assert.deepEqual([busy.status, busy.json.code], [409, "not_waiting"]);
+  // Who may is the same as on the Mac: Ivy has no Remove apps.
+  says = "computer";
+  assert.equal((await go("cl-ivy", { act: "remove", app: "shop" })).status, 403);
+  assert.equal((await go("cl-sam", { act: "remove", app: "shop" })).status, 202);
+});
+
+test("the slice: appJobs and appRemove at Your Apps Write, to a Bops at CLOUD_ALL_MIN_VERSION; the remove acts, removal rows and an act going on a computer only to such a Bops; left overs at Write only", () => {
+  const blob = rmBlob();
+  const ws = (blob.workspaces as Record<string, unknown>[])[0];
+  (ws.appsForMembers as { apps: Record<string, { acts?: unknown[] }> }).apps.shop.acts = [
+    { key: "k_a", userId: "u-sam", name: "Sam", act: "remove", ok: false, said: "No.", at: 5 },
+    { key: "k_b", userId: "u-sam", name: "Sam", act: "deploy", ok: true, going: true, at: 4 },
+    { key: "k_c", userId: "u-sam", name: "Sam", act: "deploy", ok: true, at: 3 },
+  ];
+  const at = Date.now() - 60_000;
+  const dayAgo = Date.now() - DELETE_CODE_MS - 1000;
+  ws.appsRemoved = [
+    { key: "k_r", userId: "u-ada", name: "Ada", app: "old-app", ok: true, said: "Took it off the web.", codeLeft: true, at, extra: "x" },
+    // Its code can't be deleted from here any more: removed over a day ago, or an app of its name made again.
+    { key: "k_old", userId: "u-ada", name: "Ada", app: "older-app", ok: true, codeLeft: true, at: dayAgo },
+    { key: "k_again", userId: "u-ada", name: "Ada", app: "shop", ok: true, codeLeft: true, at },
+  ];
+  const jobs = ["deploy", "remove"] as const;
+  const viewer = (role: "admin" | "member", email: string, seen: boolean, more: Partial<SliceViewer> = {}) => ghViewer(role, email, { githubSeen: true, ...(seen ? { appActsSeen: true } : {}), ...more });
+  const ada = sharedSlice(blob, "ws_gh", viewer("admin", "ada@example.com", true, { appJobs: [...jobs], appRemove: true }));
+  assert.deepEqual([ada.appJobs, ada.appRemove], [["deploy", "remove"], true]);
+  const shop = ada.apps!.list.find((a) => a.name === "shop")!;
+  assert.deepEqual(shop.acts?.map((a) => a.key), ["k_a", "k_b", "k_c"]);
+  assert.deepEqual(shop.leftOver, [{ name: "shop-old", port: 3100 }, { name: "shop-www", port: null, link: true }]);
+  assert.deepEqual(ada.apps!.removed, [
+    { key: "k_r", userId: "u-ada", name: "Ada", app: "old-app", ok: true, said: "Took it off the web.", codeLeft: true, at },
+    { key: "k_old", userId: "u-ada", name: "Ada", app: "older-app", ok: true, at: dayAgo },
+    { key: "k_again", userId: "u-ada", name: "Ada", app: "shop", ok: true, at },
+  ]);
+  // Ivy: no Remove apps; Sam has it.
+  assert.equal(sharedSlice(blob, "ws_gh", viewer("member", "ivy@example.com", true, { appJobs: [...jobs], appRemove: true })).appRemove, undefined);
+  assert.equal(sharedSlice(blob, "ws_gh", viewer("member", "sam@example.com", true, { appJobs: [...jobs], appRemove: true })).appRemove, true);
+  // A Bops from before: neither flag, no remove act, no row going, no removals.
+  const old = sharedSlice(blob, "ws_gh", viewer("admin", "ada@example.com", false, { appJobs: [...jobs], appRemove: true }));
+  assert.deepEqual([old.appJobs, old.appRemove, old.apps!.removed], [undefined, undefined, undefined]);
+  assert.deepEqual(old.apps!.list.find((a) => a.name === "shop")!.acts?.map((a) => a.key), ["k_c"]);
+  // At Read: removals yes, left overs and the flags no.
+  const rob = sharedSlice(blob, "ws_gh", viewer("member", "rob@example.com", true, { appJobs: [...jobs], appRemove: true }));
+  assert.deepEqual([rob.appJobs, rob.appRemove, rob.apps!.list.find((a) => a.name === "shop")!.leftOver, rob.apps!.removed?.length], [undefined, undefined, undefined, 3]);
 });

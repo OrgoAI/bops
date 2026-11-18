@@ -4,6 +4,7 @@ import { addSite, deployApp, HostedAppError, linkGithubMirror, makePreview, prom
 import { notReady } from "@/lib/server/ready";
 import { sharedOpen } from "@/lib/server/shared";
 import { getState } from "@/lib/server/store";
+import { teammateGoing } from "@/lib/server/teammate-going";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { MAIN_WORKSPACE } from "@/lib/types";
 
@@ -67,6 +68,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
   const { name } = await ctx.params;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = str(b.ws) ?? getState().workspace ?? MAIN_WORKSPACE;
+  // A teammate's change to it still going on its computer: this waits (each of these can make a project, or take one down).
+  const theirs = ["deploy", "promote", "reapply", "rollback", "preview", "addSite", "removeSite", "removeLeftOver"].includes(b.action as string) ? teammateGoing(wsId, name) : null;
+  if (theirs) return theirs;
   try {
     const env = appEnvOf(b.env) === "preview" ? ("preview" as const) : undefined;
     // (A deploy goes to the Preview: Published gets only what Publish or Apply variables put there.)
@@ -110,6 +114,8 @@ export async function DELETE(request: Request, ctx: { params: Promise<{ name: st
   const { name } = await ctx.params;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = str(b.ws) ?? getState().workspace ?? MAIN_WORKSPACE;
+  const theirs = teammateGoing(wsId, name);
+  if (theirs) return theirs;
   try {
     return Response.json(await removeApp(wsId, name, { repo: b.repo }));
   } catch (e) {

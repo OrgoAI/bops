@@ -1,7 +1,9 @@
 import { appsOpen } from "@/lib/apps-access";
+import { appEnvOf } from "@/lib/hosted-apps";
 import { changeEnv, HostedAppError } from "@/lib/server/hosted-apps";
 import { notReady } from "@/lib/server/ready";
 import { getState } from "@/lib/server/store";
+import { teammateGoing } from "@/lib/server/teammate-going";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { MAIN_WORKSPACE } from "@/lib/types";
 
@@ -20,6 +22,10 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ name: str
   const { name } = await ctx.params;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = (typeof b.ws === "string" && b.ws.trim()) || getState().workspace || MAIN_WORKSPACE;
+  // A teammate's change to it still going on its computer: this waits (saving Preview's or Published's variables can make
+  // that project first). Local's live on its computer alone.
+  const theirs = appEnvOf(b.where) === "local" ? null : teammateGoing(wsId, name);
+  if (theirs) return theirs;
   try {
     return Response.json(await changeEnv(wsId, name, b.env, b.site, b.where));
   } catch (e) {

@@ -4,7 +4,9 @@
 // never before the message), beats while it runs (at once, as "tools", the first time it does something that can't be
 // done twice; a 409 stops it and nothing more is said), and says it's done with its tapback, or paused for an OK, from
 // which the turn goes on as itself. A message it can't read fails with a note. Its stream (GET /v1/runner/live) gives it
-// turns, "turn-cancel" stops one, and "state" reads the state now. Nothing on the Mac.
+// turns, "turn-cancel" stops one, "state" reads the state now, and "apps-view" shares what members see of its apps. A
+// job turn goes to appJob by kind (a remove's end once the state is saved; what members see shared after the others).
+// Nothing on the Mac.
 //
 // Bops Cloud, the store and the model are fakes (below): the turn's own run is a stand-in for chat.ts answerMessage
 // (test-chat-tools.mjs runs the real one in a turn's context).
@@ -18,7 +20,7 @@ for (const k of Object.keys(process.env)) if (/^(BOPS|ORGO)_/.test(k)) delete pr
 process.env.BOPS_RUNNER = "1";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const FAKES = { store: ["getState", "pullState", "stateReady", "addMessage"], cloud: ["cloudFetch"], "free-hours": ["sayInUse"] };
+const FAKES = { store: ["getState", "pullState", "stateReady", "addMessage", "flushState"], cloud: ["cloudFetch"], "free-hours": ["sayInUse"], "apps-view-share": ["shareAppsView"] };
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "server-only") return { url: "data:text/javascript,", shortCircuit: true };
@@ -72,9 +74,22 @@ const answers = new Map();
 /** The runner's stream: what Bops Cloud sends down it. */
 let stream = null;
 const enc = new TextEncoder();
+/** What happened, in order, that a job's end waits on or comes before: each save of the state (flushState), each share of what members see (apps-view-share.ts), each call to Bops Cloud. */
+const order = [];
+const shared = [];
 globalThis.__fake = {
   // addMessage as the store's own: its row stamped with the turn it's added in (turn-context.ts stamp).
-  store: { getState: () => state, pullState: async () => (pulls++, onPull()), stateReady: () => true, addMessage: (m) => (state.messages.push(globalThis.__stamp({ id: `msg_${state.messages.length}`, at: Date.now(), ...m })), state.messages.at(-1)) },
+  store: {
+    getState: () => state,
+    pullState: async () => (pulls++, onPull()),
+    stateReady: () => true,
+    addMessage: (m) => (state.messages.push(globalThis.__stamp({ id: `msg_${state.messages.length}`, at: Date.now(), ...m })), state.messages.at(-1)),
+    flushState: async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      order.push("flush");
+    },
+  },
+  "apps-view-share": { shareAppsView: async (ws, apps) => (shared.push({ ws, apps }), order.push("share")) },
   "free-hours": { sayInUse: async () => {} },
   cloud: {
     cloudFetch: async (path, init = {}) => {
@@ -92,6 +107,7 @@ globalThis.__fake = {
       }
       const body = init.body ? JSON.parse(init.body) : undefined;
       sent.push({ path, body });
+      order.push(path.split("/").pop());
       const kind = path.split("/").pop();
       const a = answers.get(path) ?? answers.get(kind) ?? { status: 200, body: { ok: true } };
       const out = typeof a === "function" ? a(body) : a;
@@ -111,9 +127,12 @@ const claimed = (id, messageId, humanAt, ahead = 0, member) => ({
 });
 const reset = () => {
   sent.length = 0;
+  order.length = 0;
+  shared.length = 0;
   answers.clear();
   state.messages = [];
   state.appApprovals = [];
+  delete state.bots;
   pulls = 0;
   onPull = () => {};
 };
@@ -599,10 +618,8 @@ await check("a job that doesn't go says why in the chat and with its end; one ta
 
 /* ---------------- Every kind of job ---------------- */
 
-await check("a job of a kind this runner doesn't do yet is said plainly in the chat and with its end, and nothing runs: an app's, and one from a newer Bops Cloud", async () => {
+await check("a job of a kind this runner doesn't do yet is said plainly in the chat and with its end, and nothing runs: one from a newer Bops Cloud", async () => {
   const kinds = [
-    [{ act: "deploy", app: "site" }, "Couldn't deploy site: This computer's Bops doesn't know how to do that yet.", true],
-    [{ act: "remove", app: "site", repo: true }, "Couldn't remove site: This computer's Bops doesn't know how to do that yet.", true],
     [{ act: "renameApp", app: "site", to: "shop" }, "Couldn't do that: This computer's Bops doesn't know how to do that yet.", true],
   ];
   for (const [job, line, appNote] of kinds) {
@@ -660,6 +677,74 @@ await check("a chat's compact job folds its chat with no line of its own, and is
     assert.deepEqual(sent.at(-1).body, { state: "done", job }, JSON.stringify(job));
   }
   delete state.chats;
+});
+
+await check("every kind of an app's job goes to appJob in the member's name, never the model; a remove's end goes once the state is saved; what members see of the app is shared after any other kind, never before its end", async () => {
+  const kinds = [
+    [{ act: "githubLink", app: "site" }, { ok: true, said: "Linked site to GitHub." }, false, true],
+    [{ act: "deploy", app: "site" }, { ok: true, said: "Deploying site to its preview." }, false, true],
+    [{ act: "deploy", app: "site", at: "c1", site: "docs" }, { ok: true, said: "Putting c1 of docs of site on its preview." }, false, true],
+    [{ act: "deploy", app: "site", env: "prod" }, { ok: true, said: "Publishing site, what its preview serves." }, false, true],
+    [{ act: "rollback", app: "site", deployment: "d1" }, { ok: false, said: "That one is live now." }, false, true],
+    [{ act: "settings", app: "site", port: 3000 }, { ok: true, said: "Changed the settings of site's preview." }, false, true],
+    // (The domain it pointed, by name, with its end: Bops Cloud keeps it on the act row.)
+    [{ act: "domain", app: "site", zone: "z1", subdomain: "www" }, { ok: true, said: "Pointed www.example.com at site.", domain: "www.example.com" }, false, true],
+    [{ act: "remove", app: "site" }, { ok: true, said: "site is off the web.", removed: "app" }, true, false],
+    [{ act: "removeSite", app: "site", site: "docs" }, { ok: true, said: "docs is off the web.", removed: "site" }, true, false],
+    [{ act: "removeLeftOver", app: "site", leftOver: "site-old" }, { ok: true, said: "Removed the left over site-old." }, true, true],
+  ];
+  for (const [job, result, flushed, share] of kinds) {
+    reset();
+    state.bots = [{ id: "max", name: "Max", workspaceId: "ws_team" }];
+    const id = `t_${job.act}_${job.env ?? ""}${job.site ?? ""}`;
+    answers.set("claim", claimed(id, `m_${id}`, Date.now(), 0, { userId: "u-sam", name: "Sam", ref: `k_${id}`, job }));
+    let asked;
+    let answered = 0;
+    R.runnerChatForTests({ identity: async () => "same", answer: async () => (answered++, { text: "never" }), job: async (botId, j, by) => ((asked = { botId, job: j, by }), result) });
+    await R.answerTurn(ev(id, `m_${id}`));
+    const what = `${job.act} ${job.env ?? ""}`;
+    assert.equal(answered, 0, `${what}: no model saw it`);
+    assert.deepEqual(asked, { botId: "max", job, by: "Sam" }, what);
+    const line = state.messages.find((m) => m.role === "bot")?.text;
+    assert.equal(line, result.ok ? result.said : R.jobLine(job, result), what);
+    assert.deepEqual(sent.at(-1).body, { state: "done", job: result }, `${what}: its result with its end`);
+    // (A remove's end comes once the state is saved, so Bops Cloud drops a record this runner wrote last.)
+    assert.equal(order.includes("flush"), flushed, `${what}: saved before its end`);
+    if (flushed) assert.ok(order.indexOf("flush") < order.lastIndexOf("done"), `${what}: saved, then its end`);
+    await until(() => !share || shared.length > 0, `${what}: shared`);
+    assert.deepEqual(shared, share ? [{ ws: "ws_team", apps: ["site"] }] : [], `${what}: what members see of it, told`);
+    if (share) assert.ok(order.lastIndexOf("done") < order.indexOf("share"), `${what}: after its end`);
+  }
+  // Taken back before it starts: nothing done, nothing shared.
+  reset();
+  state.bots = [{ id: "max", name: "Max", workspaceId: "ws_team" }];
+  let ran = 0;
+  answers.set("claim", claimed("t_back", "m_back", Date.now(), 0, { userId: "u-sam", name: "Sam", ref: "k_back", job: { act: "deploy", app: "site" } }));
+  answers.set("beat", { status: 409, body: { code: "over" } });
+  R.runnerChatForTests({ identity: async () => "same", job: async () => (ran++, { ok: true, said: "x" }) });
+  await R.answerTurn(ev("t_back", "m_back"));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual([ran, shared.length, order.includes("flush")], [0, 0, false]);
+});
+
+await check("Bops Cloud's apps-view on the stream shares what members see of the apps it names (all of this computer's when it names none); a body it can't read shares nothing", async () => {
+  reset();
+  R.runnerChatForTests({ identity: async () => "same" });
+  stream = null;
+  R.startRunnerChat();
+  await until(() => stream, "the stream to open");
+  stream.send("apps-view", { ws: "ws_team", apps: ["site", 7, "shop"] });
+  await until(() => shared.length === 1, "a share");
+  assert.deepEqual(shared[0], { ws: "ws_team", apps: ["site", "shop"] });
+  stream.send("apps-view", { ws: "ws_team" });
+  await until(() => shared.length === 2, "a share of every app");
+  assert.deepEqual(shared[1], { ws: "ws_team", apps: undefined });
+  stream.send("apps-view", { apps: ["site"] });
+  stream.send("state", {});
+  await until(() => pulls > 0, "the state read after it");
+  assert.equal(shared.length, 2, "nothing for a body with no workspace");
+  R.stopRunnerChat();
+  stream = null;
 });
 
 await check("what a job removed goes with its end, as it said it; anything else it says there is dropped", async () => {

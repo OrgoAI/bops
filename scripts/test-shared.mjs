@@ -1884,7 +1884,8 @@ await check("Write, with everything through the cloud: an act Bops Cloud does wi
   }
   // Every pending line in the window has a plain one for "cloud" (Your Apps' and the sidebar's too), never the Mac's.
   const apps = readFileSync(`${root}/components/app/shared-apps.tsx`, "utf8");
-  assert.match(apps, /going\.state === "cloud" \? "Sending…"/);
+  assert.match(apps, /going\.state === "cloud" \? W\.sendingComputer/);
+  assert.match(apps, /sendingComputer: "Sending to its computer…"/);
   const chat = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
   assert.equal((chat.match(/state === "sending" \|\| [a-z?.]*state === "cloud" \? "Sending…"/g) ?? []).length, 4, "a message's, a reply's and both answers'");
   const side = readFileSync(`${root}/components/app/sidebar-sections.tsx`, "utf8");
@@ -2080,6 +2081,68 @@ await check("GitHub in Your Apps: the window has it (SharedOpen.appGithub) only 
   assert.equal(viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared.appGithub, undefined, "never at Read");
   const no = await actWith(copy, { act: "githubPull", app: "shop" }, "key_ghpull_02", sam, async () => assert.fail("not sent"));
   assert.deepEqual([no.status, no.code], [403, "member_apps_read_only"]);
+});
+
+await check("Remove in Your Apps (everything through the cloud): the window has appJobs and appRemove only at Write; a remove sent lands once Bops Cloud keeps its removal by its key (the app gone); Delete its code is an Admin's, for an app removed with its code left, and done as Bops Cloud answers", async () => {
+  const shop = { name: "shop", siteNames: ["admin"], leftOver: [{ name: "shop-old", port: 4000 }], sites: [], commits: [], deploys: [] };
+  const slice = (level, o = {}) => ({
+    ...cloudState(),
+    hash: `h-rm-${level}-${o.gone ? 1 : 0}-${o.code ?? "x"}-${o.flags === false ? 0 : 1}`,
+    state: {
+      ...cloudState().state,
+      ...(o.flags === false ? {} : { appJobs: ["deploy", "remove", "removeSite", "removeLeftOver"], appRemove: true }),
+      apps: { level, at: 10, list: o.gone ? [] : [shop], ...(o.removed ? { removed: o.removed } : {}) },
+    },
+  });
+  let answer = { status: 200, body: slice("write") };
+  const copy = new SharedCopy(async () => answer);
+  await copy.open({ ...listed, owner: "dana@orgo.ai" });
+  const team = () => ({ ...own(), account: { user: { id: "u-sam", name: "Sam", email: "sam@orgo.ai" } } });
+  const shared = () => viewState(team(), copy.openNow(), copy.data(), {}, copy.acts()).shared;
+  assert.deepEqual([shared().appJobs, shared().appRemove], [["deploy", "remove", "removeSite", "removeLeftOver"], true]);
+  // A remove: pending as "cloud" (Bops Cloud sends it to the app's computer), until its removal is kept by its key.
+  const sent = [];
+  await actWith(copy, { act: "remove", app: "shop" }, "key_remove_01", sam, async (body) => (sent.push(JSON.parse(body)), { status: 202, body: { ok: true, macOn: true, stored: true, cloud: true } }));
+  assert.deepEqual(sent, [{ key: "key_remove_01", act: { act: "remove", app: "shop" } }]);
+  assert.deepEqual(shared().appActs.map((a) => [a.key, a.state]), [["key_remove_01", "cloud"]]);
+  const row = { key: "key_remove_01", userId: "u-sam", name: "Sam", app: "shop", ok: true, at: 20 };
+  answer = { status: 200, body: slice("write", { gone: true, removed: [row] }) };
+  await copy.refresh();
+  assert.equal(shared().appActs, undefined, "landed: kept on the workspace's removals, the app gone");
+  assert.deepEqual(shared().apps.removed, [row]);
+  // Delete its code: an Admin's, for an app removed with its code left; refused from the copy otherwise, nothing sent.
+  const memberNo = await actWith(copy, { act: "deleteCode", app: "shop" }, "key_code_0001", sam, async () => assert.fail("not sent"));
+  assert.equal(memberNo.status, 404, "no code left: no such app");
+  answer = { status: 200, body: slice("write", { gone: true, removed: [{ ...row, codeLeft: true }], code: "left" }) };
+  await copy.refresh();
+  const member = await actWith(copy, { act: "deleteCode", app: "shop" }, "key_code_0002", sam, async () => assert.fail("not sent"));
+  assert.deepEqual([member.status, member.code], [403, "admin_only"], "a Member's: an Admin's alone");
+  const admin = new SharedCopy(async () => answer);
+  await admin.open({ ...listed, owner: "dana@orgo.ai" });
+  admin["copy"].open.role = "admin";
+  const asked = [];
+  const r = await actWith(admin, { act: "deleteCode", app: "shop" }, "key_code_0003", sam, async (body) => (asked.push(JSON.parse(body)), { status: 202, body: { ok: true, macOn: true, stored: true } }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(asked, [{ key: "key_code_0003", act: { act: "deleteCode", app: "shop" } }]);
+  assert.equal(admin.acts().length, 0, "done as Bops Cloud answered: nothing pending");
+  // Ingot not answering: Bops Cloud's own words (502 INGOT_DOWN), never "Can't reach Orgo to check your access" (a 503's).
+  await settle();
+  admin["copy"].open.role = "admin";
+  const down = await actWith(admin, { act: "deleteCode", app: "shop" }, "key_code_0004", sam, async () => ({ status: 502, body: { error: "Ingot isn't answering. Try again.", code: "ingot_down" } }));
+  assert.deepEqual([down.ok, down.status, down.error, down.code], [false, 502, "Ingot isn't answering. Try again.", "ingot_down"]);
+  // Removed over a day ago: Bops Cloud's plain words for it.
+  await settle();
+  admin["copy"].open.role = "admin";
+  const late = await actWith(admin, { act: "deleteCode", app: "shop" }, "key_code_0005", sam, async () => ({ status: 409, body: { error: "It was removed more than a day ago, so its code can't be deleted from here.", code: "not_waiting" } }));
+  assert.equal(late.error, "It was removed more than a day ago, so its code can't be deleted from here.");
+  // At Read, or without the flags: none in the window.
+  answer = { status: 200, body: slice("read", { removed: [row] }) };
+  await copy.refresh();
+  assert.deepEqual([shared().appJobs, shared().appRemove], [undefined, undefined], "never at Read");
+  assert.deepEqual(shared().apps.removed, [row], "removals are shown at Read too");
+  answer = { status: 200, body: slice("write", { flags: false }) };
+  await copy.refresh();
+  assert.deepEqual([shared().appJobs, shared().appRemove], [undefined, undefined]);
 });
 
 await check("the bot's browser in a shared workspace: a Member with Write and Use its computer has it in place of the computer, an Admin beside it, anyone else one line saying why; its route goes out", async () => {

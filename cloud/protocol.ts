@@ -825,6 +825,18 @@ export type SharedWsSlice = {
    */
   appGithub?: true;
   /**
+   * With `apps` at Write, in a workspace where everything goes through the cloud (cloud/turns.ts allCloud), to a viewer at
+   * CLOUD_ALL_MIN_VERSION: the kinds of job its apps' own computers do now (cloud/config.ts BOPS_APP_JOBS), so Your Apps
+   * shows only the buttons that go through, and says "Sending to its computer". Part of the fingerprint.
+   */
+  appJobs?: AppJobKind[];
+  /**
+   * With `apps` at Write, to a viewer at CLOUD_ALL_MIN_VERSION who may remove apps (an Admin always, a Member with Remove
+   * apps on), once that's done here: by the app's own computer in a workspace where everything goes through the cloud
+   * ("remove" in `appJobs`), or by the owner's Mac at CLOUD_ALL_MIN_VERSION. Part of the fingerprint.
+   */
+  appRemove?: true;
+  /**
    * With `can`: what the owner's Mac did with their last changes (Workspace.changesDone): each by their key, done or why
    * not, so their window says one that didn't go. Only their own.
    */
@@ -869,7 +881,11 @@ export const PREVIEW_PASSWORD = /^(?=.*[A-Za-z])(?=.*[2-9])[ABCDEFGHJKLMNPQRSTUV
 export const PREVIEW_PASSWORD_PATH = "/v1/apps/preview-password";
 export type PreviewPasswordPost = { ws: string; app: string; site: string; url: string; password: string | null; seen?: number };
 
-/** What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` when the owner's Mac last read them. */
+/**
+ * What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` the oldest read of what's shown (each
+ * app as the owner's Mac or its own computer last read it, cloud/ws-slice.ts appsFor), so the page is never fresher than
+ * its stalest app.
+ */
 export type SharedApps = {
   level: "read" | "write";
   at: number;
@@ -881,6 +897,13 @@ export type SharedApps = {
    * computer's id, nor its SharedGroup.key, which names a group to rename): Read and Write. The window tells the lines apart by it alone.
    */
   room?: Record<string, SharedRoom>;
+  /**
+   * Apps someone other than the owner removed lately (lib/types.ts Workspace.appsRemoved), newest first, at most 10, at Read
+   * and Write, to a viewer at CLOUD_ALL_MIN_VERSION: who, which app, and how it went. `codeLeft`: its code is still in Ingot
+   * and Delete its code can still take it (an Admin's window offers it, a "deleteCode" act): within DELETE_CODE_MS of the
+   * remove, with no app of that name made again.
+   */
+  removed?: SharedAppRemoval[];
 };
 /**
  * A computer's room for more apps (lib/hosted-apps.ts MemberRoom, spelled out): its deploy projects and public URLs of
@@ -888,6 +911,8 @@ export type SharedApps = {
  * it by name, and the bot it's named for (`bot`: only one the viewer sees; none, it's named for its apps).
  */
 export type SharedRoom = { used: number; limit: number; urlsUsed: number; urlsLimit: number; apps: number; urlsFirst?: true; appNames: string[]; bot?: string };
+/** An app someone removed (SharedApps.removed; lib/hosted-apps.ts AppRemoval, spelled out). `key`: their act's. */
+export type SharedAppRemoval = { key: string; userId: string; name: string; app: string; ok: boolean; said?: string; codeLeft?: true; at: number };
 /** One app as a member sees it (lib/hosted-apps.ts AppForMembers, spelled out: this file imports nothing). */
 export type SharedApp = {
   name: string;
@@ -934,12 +959,32 @@ export type SharedApp = {
   /** Each site's settings: Write only. */
   settings?: Record<string, { port: number | null; install: string | null; build: string | null; start: string | null; health?: string }>;
   /**
+   * Its left overs on its computer (lib/hosted-apps.ts LeftOver): projects of its repo that are no site's, which Bops never
+   * deploys to, by name and port (`link`: a web address alone), at Write only. Never their ids.
+   */
+  leftOver?: { name: string; port: number | null; link?: true }[];
+  /**
    * `env` "prod": an Admin's Publish (a deploy) or Roll back on Published. The GitHub ones (MemberAppAct "github",
    * "githubLink", "githubPull") only to a viewer whose Bops is at GITHUB_ACTS_MIN_VERSION: `going` while the app's
    * computer works on it (Bops Cloud keeps how it went in its place: cloud/turns.ts finish).
    */
-  acts?: { key: string; userId: string; name: string; act: MemberAppAct["act"]; site?: string; domain?: string; env?: "prod"; ok: boolean; going?: true; said?: string; at: number }[];
+  acts?: { key: string; userId: string; name: string; act: MemberAppAct["act"]; site?: string; domain?: string; leftOver?: string; env?: "prod"; ok: boolean; going?: true; said?: string; at: number }[];
 };
+
+/**
+ * What an app's own computer's runner tells Bops Cloud it sees of its apps (POST APPS_VIEW_PATH, lib/server/apps-view-share.ts),
+ * so Your Apps stays fresh with the owner's Mac shut: each app as lib/hosted-apps.ts AppView has it (AppForMembers
+ * without members' acts or Preview passwords, with the workspace's bought domains as `owned`). Bops Cloud keeps only its
+ * own apps' (cloud/computer-scope.ts appHomeHere), cleaned (cloud/apps-view.ts cleanAppView), in bops.app_views, never in
+ * the owner's state, and answers 204. `room`: the computer's room for more apps as members see it (lib/hosted-apps.ts
+ * MemberRoom, SharedRoom here), by its room key (cloud/group-key.ts roomKeyOf, never its id), as the owner's Mac reads
+ * it for members (Workspace.appsForMembers.room); null: no line now (no cap, or the read failed). Bops Cloud keeps it
+ * on each of the post's apps only by that computer's own room key (cloud/apps-view.ts roomKept).
+ */
+export const APPS_VIEW_PATH = "/v1/apps/view";
+export type AppsViewPost = { ws: string; apps: Record<string, unknown>; room?: Record<string, unknown> | null };
+/** A runner stream's "apps-view" event (cloud/turns.ts nudgeAppViews): share these apps' view now (none: all of this computer's). */
+export type RunnerAppsViewEvent = { ws: string; apps?: string[] };
 export type SharedWsState = {
   projectId: string;
   wsId: string;
@@ -1020,7 +1065,24 @@ export type MemberAppAct =
   | { act: "rollback"; app: string; deployment: string; site?: string; env?: "prod" }
   | { act: "settings"; app: string; site?: string; port?: number; install?: string; build?: string; start?: string; health?: string }
   | { act: "domain"; app: string; site?: string; zone: string; subdomain?: string }
+  | MemberRemoveAct
   | MemberGithubAct;
+/**
+ * Taking an app, or some of it, off the web (SharedWsSlice.appRemove): an Admin's always, a Member's with Remove apps on in
+ * Team (cloud/member-access.ts Power "removeApps"), else ADMIN_ONLY (REMOVE_APPS_LINE). "remove": the app, its sites and
+ * their domains, and it leaves the workspace; `repo` (an Admin's alone): its code in Ingot too, which Bops Cloud deletes
+ * with the Admin's own key once the app is gone (a "deleteCode" act, never on a computer). "removeSite": one of its other
+ * sites (never its own, named as the app). "removeLeftOver": a left over on its computer (SharedApp.leftOver), by the name
+ * it shows, never a project id. In a workspace where everything goes through the cloud (cloud/turns.ts allCloud) the
+ * app's own computer does them as a job (TurnJob); else the owner's Mac, from CLOUD_ALL_MIN_VERSION (OWNER_BOPS_OLD).
+ * "deleteCode": an Admin's alone, done by Bops Cloud at once, only for an app removed in the last day with its code left
+ * (SharedApps.removed codeLeft).
+ */
+export type MemberRemoveAct =
+  | { act: "remove"; app: string; repo?: true; site?: undefined }
+  | { act: "removeSite"; app: string; site: string }
+  | { act: "removeLeftOver"; app: string; leftOver: string; site?: undefined }
+  | { act: "deleteCode"; app: string; site?: undefined };
 /**
  * An app's production on GitHub, from a shared workspace's Your Apps (SharedWsSlice.appGithub): the owner's power of
  * Publish (cloud/member-access.ts POWER_OF.publish), so an Admin always and a Member with App secrets, with the owner's
@@ -1042,8 +1104,16 @@ export type MemberGithubAct =
   | { act: "githubPull"; app: string; site?: undefined };
 /** Where an app publishes on GitHub (lib/hosted-apps.ts GithubMirror without its point, spelled out: this file imports nothing). */
 export type GithubSetting = { repo: string; branch: string; path: string; keep?: string[]; dispatch?: { workflow: string; inputs?: Record<string, string> } };
-export const isAppAct = (a: { act: string }): a is MemberAppAct => a.act === "deploy" || a.act === "rollback" || a.act === "settings" || a.act === "domain" || isGithubAct(a);
+export const isAppAct = (a: { act: string }): a is MemberAppAct =>
+  a.act === "deploy" || a.act === "rollback" || a.act === "settings" || a.act === "domain" || isRemoveAct(a) || a.act === "deleteCode" || isGithubAct(a);
+/** A member's act that takes an app, a site or a left over off the web (not "deleteCode", which is an Admin's alone). */
+export const isRemoveAct = (a: { act: string }): a is Extract<MemberRemoveAct, { act: "remove" | "removeSite" | "removeLeftOver" }> =>
+  a.act === "remove" || a.act === "removeSite" || a.act === "removeLeftOver";
+/** 403 ADMIN_ONLY for a Member's remove without Remove apps on (cloud/member-access.ts POWER_WORDS.removeApps). */
+export const REMOVE_APPS_LINE = "The owner or an Admin can let you remove apps in Team.";
 export const isGithubAct = (a: { act: string }): a is MemberGithubAct => a.act === "github" || a.act === "githubLink" || a.act === "githubPull";
+/** The GitHub acts' kinds (MemberGithubAct). */
+export const GITHUB_ACT_KINDS = ["github", "githubLink", "githubPull"] as const;
 /**
  * The first Bops that takes the GitHub acts (MemberGithubAct): an owner's Mac whose merge keeps an app's GitHub setting Bops
  * Cloud wrote (lib/server/state-merge.ts) and that links or brings GitHub's changes in for someone else (lib/server/
@@ -1293,6 +1363,7 @@ export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
  * | Owing a runner job (app kinds, compactChat), replying to a routine's ask, a group turn | turns.ts runnerVersionOf: the newer of bops.runner_seen and the Mac's record | 409 COMPUTER_NOT_READY, or the note "old". Never the Mac. |
  * | Claiming a non-GitHub job | the claiming runner's own version header | 410, note "oldRunner" |
  * | Remove buttons, removal rows, the "cloud" pending state | the viewer's window version | not shown |
+ * | A member's app act (not GitHub) where everything goes through the cloud | the viewer's window version | 409 VIEWER_BOPS_OLD |
  * | Remove kinds in mac mode | the owner's last Mac | 409 OWNER_BOPS_OLD |
  * | GitHub acts | GITHUB_ACTS_MIN_VERSION | as today |
  * | Setting chat to "cloud" | CLOUD_CHAT_MIN_VERSION | as today |
@@ -1302,10 +1373,24 @@ export const CLOUD_ALL_MIN_VERSION = "0.0.54";
 export const COMPUTER_NOT_READY = "computer_not_ready";
 /** 409: this can't be done from the cloud yet (a workspace where everything goes through the cloud), and the owner's Mac never does it instead. */
 export const CLOUD_NOT_YET = "cloud_not_yet";
+/**
+ * 409: a member's app act (not a GitHub one) from a window older than CLOUD_ALL_MIN_VERSION, in a workspace where
+ * everything goes through the cloud: its job would go to the app's own computer, and that window can't show it going
+ * there (it would say the owner's Mac didn't open in time), so it's refused at once, in UPDATE_FOR_APPS.
+ */
+export const VIEWER_BOPS_OLD = "viewer_bops_old";
+export const UPDATE_FOR_APPS = "Update Bops to change apps in this workspace.";
 /** Who did it, on what Bops Cloud wrote itself (Session.by of a thread it ended): a stale copy never brings it back. */
 export const CLOUD_BY = "cloud";
 /** How long the viewer's window shows an act pending as "cloud" (MemberActAnswer.cloud) before it says it didn't go: a job's longest wait, and some. */
 export const CLOUD_ACT_MS = 35 * 60_000;
+/**
+ * How long after an app was removed its code can still be deleted from Your Apps (cloud/members.ts deleteCodeHere): its
+ * removal row says its code is left (SharedAppRemoval.codeLeft) only that long (cloud/ws-slice.ts appsFor).
+ */
+export const DELETE_CODE_MS = 24 * 3600_000;
+/** 502: Ingot didn't answer Delete its code (down, or too slow): said in Bops Cloud's own words, never as Orgo's. */
+export const INGOT_DOWN = "ingot_down";
 /**
  * The first Bops with the owner's switch in Settings, General (components/app/chat-switch.tsx): Bops Cloud moves a
  * workspace to it by itself (cloud/turns.ts autoRoute) only for an owner whose last Mac is at this or newer, so an
@@ -1352,6 +1437,9 @@ export type AppJob = Exclude<TurnJob, { act: "compactChat" }>;
 export type GithubJob = Extract<TurnJob, { act: "githubLink" | "githubPull" }>;
 /** A job that takes an app, or some of it, off the web (an Admin's, and a Member's with the power to). */
 export type RemoveJob = Extract<TurnJob, { act: "remove" | "removeSite" | "removeLeftOver" }>;
+/** A job an app's own computer does for a member's act in Your Apps (all but the GitHub kinds, which their own gates keep: SharedWsSlice.appJobs). */
+export type AppJobKind = Exclude<AppJob["act"], GithubJob["act"]>;
+export const APP_ACT_JOBS = ["deploy", "rollback", "settings", "domain", "remove", "removeSite", "removeLeftOver"] as const satisfies readonly AppJobKind[];
 /** Every kind of job that's about an app (all but compactChat). */
 export const APP_JOB_KINDS = ["githubLink", "githubPull", "deploy", "rollback", "settings", "domain", "remove", "removeSite", "removeLeftOver"] as const satisfies readonly AppJob["act"][];
 export const isGithubJob = (j: { act: string }): j is GithubJob => j.act === "githubLink" || j.act === "githubPull";
@@ -1377,6 +1465,7 @@ export type RunnerBeat = { phase: "model" | "tools" };
  * words, which Bops Cloud keeps on the app (SharedApp.acts); a job turn done without it went to a runner from before.
  * `removed`: a remove job took the app ("app") or its site ("site") off the web, for Bops Cloud to drop from the state.
  * `reacts`: a group's turn's tapbacks on the message, one per bot (at most 8), each a bot of the chat on this computer.
+ * `domain`: the domain a domain job pointed, by name, which Bops Cloud keeps on the act row when it's a bare hostname.
  */
 export type RunnerDone = {
   state: "done" | "paused" | "failed";
@@ -1384,7 +1473,7 @@ export type RunnerDone = {
   note?: string;
   react?: string;
   reacts?: { botId: string; type: string }[];
-  job?: { ok: boolean; said: string; removed?: "app" | "site" };
+  job?: { ok: boolean; said: string; removed?: "app" | "site"; domain?: string };
 };
 /**
  * POST /v1/runner/turns/<id>/resume {approvalId}: a turn paused for an OK goes on once the OK is answered, only for that
