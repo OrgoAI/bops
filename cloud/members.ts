@@ -93,7 +93,7 @@ import {
   type WsRole,
 } from "./protocol.ts";
 import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, writeMessages, type MessageRow } from "./state.ts";
-import { isConnected, queueForMac } from "./tunnel.ts";
+import { awayFor as tunnelAwayFor, isConnected, queueForMac } from "./tunnel.ts";
 import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, keyNamesOf, list, seesEveryBot, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange } from "./change-routes.ts";
 import {
@@ -121,7 +121,7 @@ import {
 } from "./turns.ts";
 import { cleanGithubMirror, GITHUB_KEY_NAME, keepsPoint, sameDestination, type GithubMirror } from "./github-config.ts";
 import { appVersionOf, olderThan } from "./app-version.ts";
-import { afterWake, answerIn, compactIn, dismissIn, noRunnerWords, oldRunnerWords, replyIn, stopIn, whereIn, type ActDone, type ActEnv, type ComputerFacts, type Wake } from "./thread-acts.ts";
+import { afterWake, answerIn, compactIn, dismissIn, noRunnerWords, NO_COMPUTER, oldRunnerWords, replyIn, stopIn, whereIn, type ActDone, type ActEnv, type ComputerFacts, type Wake } from "./thread-acts.ts";
 import { applyChange, renameRefused, WS_NAME_MAX, type Renamed } from "./change-apply.ts";
 
 /**
@@ -752,8 +752,8 @@ function threadsOfAct(slice: ReturnType<typeof sliceOf>, act: MemberAct): unknow
 
 /** Why a member can't do something only the owner does (MEMBER_OWNER_ONLY), in the words their window shows. */
 const ON_THEIR_MAC = "This runs on the owner's Mac. Only the owner can tell it more.";
-/** What someone without Use its computer is told when what they did would act on a bot's computer (MEMBER_NO_COMPUTER). */
-export const NO_COMPUTER = "This runs on the bot's computer, and the owner hasn't let you use it.";
+/** What someone without Use its computer is told when what they did would act on a bot's computer (MEMBER_NO_COMPUTER): thread-acts.ts's. */
+export { NO_COMPUTER };
 const THEIR_LOGINS = "This uses the owner's apps or keys. Only the owner can answer it.";
 /** What someone without Use its computer is told when they add a file for a bot (MEMBER_NO_COMPUTER): files go on its computer. */
 export const FILES_NO_COMPUTER = "The owner hasn't let you use this bot's computer, so you can't add files for it.";
@@ -975,8 +975,11 @@ type Queue = (owner: string, kind: PendingKind, payload: unknown, dedupeKey: str
 // they aren't there yet when it loads.
 const realQueue: Queue = (...a) => queueForMac(...a);
 const realIsOn = (owner: string) => isConnected(owner);
+const realAwayFor = (owner: string) => tunnelAwayFor(owner);
 let queue: Queue = realQueue;
 let isOn: (owner: string) => boolean = realIsOn;
+/** How long the owner's Mac has been off (tunnel.ts awayFor): 0 while it's on. */
+let awayFor: (owner: string) => number = realAwayFor;
 let drop: (projectId: string, userId: string) => Promise<void> = dropActs;
 let cancel: (projectId: string, userId: string) => Promise<void> = (...a) => cancelMember(...a);
 /** Whether the owner's workspace goes through Bops Cloud (turns.ts routingOf). */
@@ -1439,11 +1442,12 @@ function threadBots(blob: Record<string, unknown>, ids: readonly string[]): stri
   return [...bots];
 }
 
-/** What thread-acts.ts goes by (ActEnv), for these bots, read in the act's transaction. */
-async function envOf(c: Db, account: string, blob: Record<string, unknown>, botIds: readonly string[]): Promise<ActEnv> {
+/** What thread-acts.ts goes by (ActEnv), for these bots, read in the act's transaction; `mayUse`: the one acting has Use its computer. */
+async function envOf(c: Db, account: string, blob: Record<string, unknown>, botIds: readonly string[], mayUse: boolean): Promise<ActEnv> {
   const facts = new Map<string, ComputerFacts | null>();
   for (const id of botIds) facts.set(id, await computerFacts(c, account, blob, id));
-  return { now: now(), macOn: isOn(account), owner: ownerOf(blob), computerOf: (id) => facts.get(id) ?? null };
+  const on = isOn(account);
+  return { now: now(), macOn: on, macAway: on ? 0 : awayFor(account), mayUse, owner: ownerOf(blob), computerOf: (id) => facts.get(id) ?? null };
 }
 
 /**
@@ -1464,8 +1468,11 @@ function askerOf(account: string, blob: Record<string, unknown>, a: Record<strin
   return null;
 }
 
-/** orgo-web's word on a bot's key (PUT /api/projects/<id>/bops-keys/bots, with the member's own Orgo key): done, its route not there yet, or why not. */
-type KeyGrant = { ok: true } | { missing: true } | { down: true } | { status: number; code?: string; error?: string };
+/**
+ * orgo-web's word on a bot's key (PUT /api/projects/<id>/bops-keys/bots, with the member's own Orgo key): done (with
+ * `changed`, whether that changed its grant, from an orgo-web that says), its route not there yet, or why not.
+ */
+type KeyGrant = { ok: true; changed?: boolean } | { missing: true } | { down: true } | { status: number; code?: string; error?: string };
 
 /** Let a bot use a key in orgo-web, or stop it (W3: the runner's broker reads that grant), with the member's own key; never stored. */
 async function keyGrant(key: string, projectId: string, botId: string, name: string, on: boolean): Promise<KeyGrant> {
@@ -1481,8 +1488,8 @@ async function keyGrant(key: string, projectId: string, botId: string, name: str
     return { down: true };
   }
   if (res.ok) {
-    void res.body?.cancel().catch(() => {});
-    return { ok: true };
+    const j = (await res.json().catch(() => null)) as { changed?: unknown } | null;
+    return { ok: true, ...(typeof j?.changed === "boolean" ? { changed: j.changed } : {}) };
   }
   const j = (await res.json().catch(() => null)) as { error?: unknown; code?: unknown } | null;
   const code = typeof j?.code === "string" ? j.code : undefined;
@@ -1496,6 +1503,15 @@ async function keyGrant(key: string, projectId: string, botId: string, name: str
 export const KEYS_NOT_YET = "Keys can't be changed from the cloud yet. Try again later.";
 export const keysUnknownBot = (bot: string) => `Orgo doesn't know ${bot} yet, so it can't be given keys from here. Try again in a few minutes.`;
 export const keysStillOn = (bot: string, name: string) => `Orgo still lets ${bot} use ${name}. Try again.`;
+/** The chat's line, for every viewer, when a key is off in the owner's state and orgo-web still grants it (in place of the "stopped" line). */
+export const keysStillOnNote = (who: string, bot: string, name: string) => `${who} turned off ${name} for ${bot}, but Orgo still lets ${bot} use it.`;
+/** Whether bot `botId` has key `name` on in the owner's state. */
+const keyOnIn = (blob: Record<string, unknown>, botId: string, name: string) => {
+  const b = list(blob.bots).find((x) => x.id === botId);
+  return Array.isArray(b?.keys) && b.keys.includes(name);
+};
+/** A "key" act's line in the bot's chat, as theirs, by their key (the same act again writes the same line). */
+const keyNote = (botId: string, who: MemberWho, key: string, text: string): Record<string, unknown> => ({ id: `msg_key_${who.userId}_${key}`, chatId: `bot:${botId}`, role: "system", botId, text, at: now() });
 
 /** A refusal from orgo-web for a "key" act turning a key on, in words (no state was written). */
 function keyRefused(g: Exclude<KeyGrant, { ok: true }>, bot: string): HttpError {
@@ -1504,6 +1520,9 @@ function keyRefused(g: Exclude<KeyGrant, { ok: true }>, bot: string): HttpError 
   if (g.code === "BOT_NOT_FOUND") return new HttpError(409, keysUnknownBot(bot), { code: CLOUD_NOT_YET });
   return new HttpError(g.status === 404 || g.status === 403 || g.status === 400 ? g.status : 409, g.error ?? "Orgo didn't change that key.");
 }
+
+/** What a "key" act's line says once it's done. */
+const keyWords = (who: string, bot: string, name: string, on: boolean) => (on ? `${who} let ${bot} use ${name}` : `${who} stopped ${bot} using ${name}`);
 
 /** Bot `botId`'s keys on the owner's state, with key `name` on or off (keys.ts grantKey), and the note that says so as theirs; null when it already is. */
 function keyIn(blob: Record<string, unknown>, botId: string, name: string, on: boolean, who: MemberWho, key: string): { written: Record<string, unknown>; note: Record<string, unknown> } | null {
@@ -1518,10 +1537,7 @@ function keyIn(blob: Record<string, unknown>, botId: string, name: string, on: b
   else if (rest.length) next.keys = rest;
   else delete next.keys;
   const bot = typeof b.name === "string" && b.name.trim() ? b.name.trim() : "The bot";
-  return {
-    written: { ...blob, bots: all.map((x) => (x === b ? next : x)) },
-    note: { id: `msg_key_${who.userId}_${key}`, chatId: `bot:${botId}`, role: "system", botId, text: on ? `${who.name} let ${bot} use ${name}` : `${who.name} stopped ${bot} using ${name}`, at: now() },
-  };
+  return { written: { ...blob, bots: all.map((x) => (x === b ? next : x)) }, note: keyNote(botId, who, key, keyWords(who.name, bot, name, on)) };
 }
 
 /** A workspace renamed on orgo-web with the member's own Orgo key (PATCH /api/projects/<id>, which lets anyone with full access in a Bops workspace), before the owner's lock. */
@@ -1565,22 +1581,29 @@ type CloudActOpts = {
 /**
  * actIn's checks again, on the owner's state under their lock (as it was read before, it may have moved): what's in the
  * caller's view, Write on every bot it touches (a chat's every bot for a chat's Compact), the owner's app work at Your
- * Apps Write, the power a change needs, and Use its computer for what acts on a bot's computer.
+ * Apps Write, the power a change needs, and Use its computer for what acts on a bot's computer (a chat's Compact too:
+ * it's a job on one of its bots' computers, which it may wake). Returns whether they have Use its computer, for what
+ * the act itself may hand to a bot's computer (thread-acts.ts ActEnv.mayUse).
  */
-function recheck(blob: Record<string, unknown>, o: CloudActOpts) {
+function recheck(blob: Record<string, unknown>, o: CloudActOpts): boolean {
   const { act } = o;
   const slice = sliceOf(blob, o.target.ws, o.viewer);
   if (!slice.workspace) throw new HttpError(404, "No such workspace");
   const access = viewerAccess(slice.workspace, o.viewer);
+  const mayUse = computerUseOf(slice.workspace, o.viewer);
   if (act.act === "change") changeTouched(blob, o.target.ws, slice, o.viewer, access, act);
   else if (act.act === "key") botsTouched(blob, slice, act, o.actor);
   else {
     const bots = botsTouched(blob, slice, act, o.actor);
-    const may = act.act === "compact" && "chatId" in act ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
+    const chat = act.act === "compact" && "chatId" in act;
+    const may = chat ? writesChat(access, bots) : bots.length > 0 && bots.every((id) => permits(levelOf(access, id), "write"));
     if (!may) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
     if (appWorkRefused(blob, o.viewer, access, threadsOfAct(slice, act))) throw new HttpError(403, APP_WORK, { code: MEMBER_APPS_READ_ONLY });
+    // A chat's Compact runs on one of its bots' computers here (turns.ts takeChatJob), never on the owner's Mac.
+    if (chat && !mayUse && bots.some((id) => !!computerFor(blob, id, true))) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
   }
-  if (!computerUseOf(slice.workspace, o.viewer) && computerAct(blob, slice, act)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
+  if (!mayUse && computerAct(blob, slice, act)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
+  return mayUse;
 }
 
 /** What an act did under the lock: the state written (null: nothing), the chats' notes, the computers to wake, and a run's asks to wake for. */
@@ -1611,9 +1634,13 @@ async function cloudAct(res: ServerResponse, o: CloudActOpts): Promise<boolean> 
   // and a workspace's new name; the switch for where its chat is answered (setRouting takes the owner's lock itself).
   let renamed: Renamed | undefined;
   let chatDone = false;
+  // Whether this act's grant on orgo-web is new (its `changed`; an orgo-web that doesn't say: new unless the owner's
+  // state had the key on already): only a new one is taken back when the owner's state can't say so, never one that was there before.
+  let granted = false;
   if (act.act === "key" && act.on) {
     const g = await keyGrant(o.bearer, o.projectId, act.botId, act.name, true);
     if (!("ok" in g)) throw keyRefused(g, botName(o.blob, act.botId));
+    granted = g.changed ?? !keyOnIn(o.blob, act.botId, act.name);
   }
   if (act.act === "change" && act.path === "/api/workspaces") {
     const b = act.body;
@@ -1640,10 +1667,10 @@ async function cloudAct(res: ServerResponse, o: CloudActOpts): Promise<boolean> 
       if (!chatDone && !(await allCloud(account, target.ws, c))) return null;
       const blob = await lockedState(c, account);
       // An answer sent again whose ask holds their own reply: done.
-      if (act.act === "answer" && answeredBy(blob, act.askId, o.user.id)) return { blob: null, notes: [], wakes: [], reason: "", env: await envOf(c, account, blob, []) };
-      recheck(blob, o);
+      if (act.act === "answer" && answeredBy(blob, act.askId, o.user.id)) return { blob: null, notes: [], wakes: [], reason: "", env: await envOf(c, account, blob, [], false) };
+      const mayUse = recheck(blob, o);
       const ids = act.act === "stop" ? act.sessionIds : "sessionId" in act ? [act.sessionId] : [];
-      const env = await envOf(c, account, blob, threadBots(blob, ids));
+      const env = await envOf(c, account, blob, threadBots(blob, ids), mayUse);
       let reason = `Stopped by ${who.name}`;
       let done: CloudDone;
       switch (act.act) {
@@ -1677,7 +1704,7 @@ async function cloudAct(res: ServerResponse, o: CloudActOpts): Promise<boolean> 
           break;
         }
         case "change": {
-          const ch = applyChange(blob, target.ws, act, who, o.key, now(), { ...(renamed ? { renamed } : {}), chatDone });
+          const ch = applyChange(blob, target.ws, act, who, o.key, now(), { ...(renamed ? { renamed } : {}), chatDone, macOn: env.macOn });
           done = { blob: ch?.blob ?? null, notes: ch?.said ? [ch.said] : [], wakes: [] };
           break;
         }
@@ -1688,12 +1715,12 @@ async function cloudAct(res: ServerResponse, o: CloudActOpts): Promise<boolean> 
       return { ...done, reason, env };
     });
   } catch (e) {
-    // orgo-web lets the bot use the key, and the owner's state couldn't say so: taken back there, as best it can be.
-    if (act.act === "key" && act.on) void keyGrant(o.bearer, o.projectId, act.botId, act.name, false).catch(() => {});
+    // orgo-web lets the bot use the key because of this act, and the owner's state couldn't say so: taken back there, as best it can be.
+    if (act.act === "key" && granted) void keyGrant(o.bearer, o.projectId, act.botId, act.name, false).catch(() => {});
     throw e;
   }
   if (!out) {
-    if (act.act === "key" && act.on) void keyGrant(o.bearer, o.projectId, act.botId, act.name, false).catch(() => {});
+    if (act.act === "key" && granted) void keyGrant(o.bearer, o.projectId, act.botId, act.name, false).catch(() => {});
     return false;
   }
   const done = out;
@@ -1701,24 +1728,33 @@ async function cloudAct(res: ServerResponse, o: CloudActOpts): Promise<boolean> 
     announce(account);
     stateWritten(account, done.blob, "cloud");
   }
-  // A key turned off: orgo-web too, after the owner's state (so the owner's Mac never sends it back on), tried three times;
-  // also when the state had it off already (orgo-web may still have it on from before).
+  // A key turned off: orgo-web too, after the owner's state (so the owner's Mac never sends it back on), tried three times
+  // while it can't be reached (its own answer is the answer); also when the state had it off already (orgo-web may still
+  // have it on from before).
   if (act.act === "key" && !act.on) {
     let g: KeyGrant = { down: true };
-    for (let i = 0; i < 3 && !("ok" in g); i++) {
-      g = await keyGrant(o.bearer, o.projectId, act.botId, act.name, false);
-      if ("missing" in g) break;
-    }
+    for (let i = 0; i < 3 && "down" in g; i++) g = await keyGrant(o.bearer, o.projectId, act.botId, act.name, false);
     if ("missing" in g) {
       // orgo-web can't take it from here yet: the owner's state goes back as it was, and nothing is said.
       if (done.blob) await keyBack(account, act.botId, act.name);
       throw new HttpError(409, KEYS_NOT_YET, { code: CLOUD_NOT_YET });
     }
-    if (done.notes.length) await writeMessages(account, done.notes);
-    // Off in the owner's state; the owner's Mac sends orgo-web the whole set as it next looks (lib/server/access-sync.ts).
-    if (!("ok" in g)) throw new HttpError(502, keysStillOn(botName(done.blob ?? o.blob, act.botId), act.name));
-    sendJson(res, 202, CLOUD_DONE);
-    return true;
+    const bot = botName(done.blob ?? o.blob, act.botId);
+    // orgo-web doesn't know the bot, or the key: it has no grant to take back, so the key is off.
+    const off = "ok" in g || ("status" in g && g.status === 404 && (g.code === "BOT_NOT_FOUND" || g.code === "KEY_NOT_FOUND"));
+    if (off) {
+      if (done.notes.length) await writeMessages(account, done.notes);
+      // Sent again after a try that left orgo-web granting it (its line said so): the line says it's stopped now.
+      else if ((await query("SELECT 1 FROM bops.chat_messages WHERE user_id = $1 AND id = $2", [account, keyNote(act.botId, who, o.key, "").id])).rowCount)
+        await writeMessages(account, [keyNote(act.botId, who, o.key, keyWords(who.name, bot, act.name, false))]);
+      sendJson(res, 202, CLOUD_DONE);
+      return true;
+    }
+    // Off in the owner's state, still granted on orgo-web: every viewer's told so, in place of the "stopped" line. The
+    // owner's Mac sends orgo-web the whole set as it next looks (lib/server/access-sync.ts).
+    await writeMessages(account, [keyNote(act.botId, who, o.key, keysStillOnNote(who.name, bot, act.name))]);
+    if ("status" in g) throw new HttpError(g.status === 403 || g.status === 400 || g.status === 409 ? g.status : 409, g.error ?? keysStillOn(bot, act.name));
+    throw new HttpError(502, keysStillOn(bot, act.name));
   }
   if (done.notes.length) await writeMessages(account, done.notes);
   for (const w of done.wakes) void wakeForThread(account, target.ws, w, done.reason, done.env).catch((e: Error) => console.warn(`[members] waking for an act: ${e.message}`));
@@ -1747,11 +1783,15 @@ async function keyBack(account: string, botId: string, name: string) {
   stateWritten(account, written, "cloud");
 }
 
+/** The line in an ask's chat when the owner's Mac asked it and is closed: the answer is kept, and waits for that Mac. */
+export const askOnMacWords = (bot: string, owner: string) => `${bot} asked for this on ${owner}'s Mac, so it goes on once ${owner} opens Bops.`;
+
 /**
  * An answer to a request for the owner's OK (thread-acts.ts answerIn: Allow once, Deny, Always allow), wherever the request
- * came from: a computer's runner, or the owner's Mac (it reads the reply as it opens). A routine's run waits on a runner
- * new enough to send Orgo the routine's next time once it reads it (CLOUD_ALL_MIN_VERSION: lib/server/permission.ts
- * settleAsks), else 409 COMPUTER_NOT_READY. Each runner that asked is woken after (answerWake).
+ * came from: a computer's runner, or the owner's Mac (it reads the reply as it opens; while it's closed, the ask's chat
+ * says so, once per ask: askOnMacWords). A routine's run waits on a runner new enough to send Orgo the routine's next
+ * time once it reads it (CLOUD_ALL_MIN_VERSION: lib/server/permission.ts settleAsks), else 409 COMPUTER_NOT_READY. Each
+ * runner that asked is woken after (answerWake).
  */
 async function answerInCloud(c: Db, account: string, blob: Record<string, unknown>, act: Extract<MemberAct, { act: "answer" }>, who: MemberWho): Promise<CloudDone> {
   const a = list(blob.appApprovals).find((x) => x.id === act.askId);
@@ -1768,15 +1808,24 @@ async function answerInCloud(c: Db, account: string, blob: Record<string, unknow
   const { blob: written, answered } = answerIn(blob, act.askId, act.reply, act.message?.slice(0, MEMBER_MAX_NOTE), who, now());
   const sessions = list(blob.sessions);
   const asks: NonNullable<CloudDone["asks"]> = [];
+  const notes: Record<string, unknown>[] = [];
+  const macOff = !isOn(account);
   for (const x of answered) {
+    if (typeof x.botId !== "string") continue;
     const asker = askerOf(account, blob, x);
-    if (!asker || asker === "mac" || typeof x.botId !== "string") continue;
     const thread = typeof x.threadId === "string" ? sessions.find((s) => s.id === x.threadId) : undefined;
     const chatId = typeof x.chatId === "string" ? x.chatId : typeof thread?.chatId === "string" ? thread.chatId : null;
     const name = list(blob.bots).find((b) => b.id === x.botId)?.name;
-    asks.push({ askId: String(x.id), desktop: asker.desktop, chatId, botId: x.botId, ...(typeof x.threadId === "string" ? { threadId: x.threadId } : {}), bot: typeof name === "string" && name.trim() ? name.trim() : "The bot" });
+    const bot = typeof name === "string" && name.trim() ? name.trim() : "The bot";
+    if (!asker || asker === "mac") {
+      // Asked by the owner's Mac (or a Bops it can't tell): that Mac reads the answer as it opens. Closed now, the chat says so.
+      if (macOff && chatId)
+        notes.push({ id: `msg_askmac_${String(x.id)}`, chatId, role: "system", botId: x.botId, text: askOnMacWords(bot, ownerOf(blob)), ...(typeof x.threadId === "string" ? { sessionIds: [x.threadId] } : {}), at: now() });
+      continue;
+    }
+    asks.push({ askId: String(x.id), desktop: asker.desktop, chatId, botId: x.botId, ...(typeof x.threadId === "string" ? { threadId: x.threadId } : {}), bot });
   }
-  return { blob: written, notes: [], wakes: [], asks };
+  return { blob: written, notes, wakes: [], asks };
 }
 
 /** Wake a computer for a thread an act left with it (thread-acts.ts Wake); one that won't wake: the thread says why, or ends (afterWake). */
@@ -1815,10 +1864,12 @@ async function compactChatIn(res: ServerResponse, o: CloudActOpts, who: MemberWh
       ...who,
       ref: o.key,
       ...(o.role.joinedAt !== undefined ? { joinedAt: o.role.joinedAt } : {}),
+      // Use its computer as orgo-web said it now, which the job goes by at its claim (turns.ts jobStill).
+      ...(o.role.computerUse !== undefined ? { computerUse: o.role.computerUse } : {}),
       projectId: o.projectId,
       ...(o.role.role === "admin" ? { role: "admin" as const } : {}),
     },
-    check: (locked) => recheck(locked, o),
+    check: (locked) => void recheck(locked, o),
     still,
   });
   sendJson(res, 202, { ...CLOUD_DONE, turn: taken.turn.id } satisfies MemberActAnswer);
@@ -2319,6 +2370,8 @@ export function resetMembers(
     state?: (account: string) => Promise<Record<string, unknown>>;
     queue?: Queue;
     isOn?: (owner: string) => boolean;
+    /** How long the owner's Mac has been off (unset: tunnel.ts awayFor; with `isOn` faked, a long while whenever it says off). */
+    awayFor?: (owner: string) => number;
     drop?: (projectId: string, userId: string) => Promise<void>;
     count?: (userId: string, what?: "act" | "file") => Promise<void>;
     cancel?: (projectId: string, userId: string) => Promise<void>;
@@ -2352,6 +2405,8 @@ export function resetMembers(
   takeChat = opts.takeChat ?? realTakeChat;
   queue = opts.queue ?? realQueue;
   isOn = opts.isOn ?? realIsOn;
+  const faked = opts.isOn;
+  awayFor = opts.awayFor ?? (faked ? (o) => (faked(o) ? 0 : 24 * 3600_000) : realAwayFor);
   drop = opts.drop ?? dropActs;
   count = opts.count ?? countAct;
   cancel = opts.cancel ?? ((...a) => cancelMember(...a));

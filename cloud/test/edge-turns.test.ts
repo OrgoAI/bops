@@ -1672,8 +1672,9 @@ test("a chat's compact goes to the first bot of the chat whose computer's runner
   assert.equal(ok.status, 200, await ok.clone().text());
   const claimed = ((await ok.json()) as { turn: { chatId: string; botId: string; member: { job: unknown; ref: string } } }).turn;
   assert.deepEqual([claimed.chatId, claimed.botId, claimed.member.job, claimed.member.ref], ["team", "max", { act: "compactChat" }, "key-cc-0001"]);
-  // None of a chat's bots has a runner new enough (Lee's own chat): 409 with the words, and nothing owed.
-  await assert.rejects(s.compact("key-cc-0002", "bot:lee"), { status: 409, message: NO_CHAT_COMPUTER, extra: { code: COMPUTER_NOT_READY } });
+  // None of a chat's bots has a runner new enough (Lee's own chat): 409, saying why of the first with a computer (its
+  // runner too old), as a thread's act says it, and nothing owed.
+  await assert.rejects(s.compact("key-cc-0002", "bot:lee"), { status: 409, message: "Lee's computer needs a newer Bops before it can do this. It updates the next time Tara opens Bops.", extra: { code: COMPUTER_NOT_READY } });
   assert.equal(NO_CHAT_COMPUTER, "No bot in this chat has a computer to compact it.");
   assert.equal((await turnsOf(s.owner)).length, 2, "nothing owed");
   assert.deepEqual(await pendingFor(s.owner), [], "nothing waits for the owner's Mac");
@@ -1688,7 +1689,33 @@ test("a chat's compact goes to the first bot of the chat whose computer's runner
   const mx = await stream("/v1/runner/live", vm(none.owner, none.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
   t.after(() => mx.close());
   assert.equal((await none.compact("key-cc-0004")).turn.botId, "max");
-  await assert.rejects(none.compact("key-cc-0005", "bot:lee"), { status: 409, extra: { code: COMPUTER_NOT_READY } });
+  await assert.rejects(none.compact("key-cc-0005", "bot:lee"), { status: 409, message: "Lee's computer isn't set up yet. Tara's Bops sets it up the next time it opens.", extra: { code: COMPUTER_NOT_READY } });
+});
+
+test("a chat's compact none of whose bots can do it says why of the first with a computer (down, no runner, an older one), and that none has one only when none has", async () => {
+  const s = await setupChat();
+  const why = async (edit: Parameters<typeof ownerChanges>[1], key: string) => {
+    await ownerChanges(s.owner, edit, own(s.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+    return s.compact(key, "bot:max").then(
+      () => assert.fail("taken"),
+      (e: { status: number; message: string; extra?: { code?: string } }) => [e.status, e.extra?.code, e.message],
+    );
+  };
+  const D = s.desktop.toUpperCase();
+  const runners = (st: unknown) => st as { runners: Record<string, Record<string, unknown>> };
+  // Found down by the owner's Mac.
+  assert.deepEqual(await why((st) => void (runners(st).runners[D].down = { status: "stopped", at: 1 }), "key-cc-0301"), [409, COMPUTER_NOT_READY, "Max's computer isn't running, so it can't compact this chat. Tara can start it again."]);
+  // An older runner.
+  assert.deepEqual(await why((st) => void (runners(st).runners[D] = { status: "running", version: "0.0.53", buildId: "b1", by: "mac-o", at: 1 }), "key-cc-0302"), [
+    409,
+    COMPUTER_NOT_READY,
+    "Max's computer needs a newer Bops before it can do this. It updates the next time Tara opens Bops.",
+  ]);
+  // No runner yet.
+  assert.deepEqual(await why((st) => void delete runners(st).runners[D], "key-cc-0303"), [409, COMPUTER_NOT_READY, "Max's computer isn't set up yet. Tara's Bops sets it up the next time it opens."]);
+  // No computer at all.
+  assert.deepEqual(await why((st) => void (st as unknown as { bots: { computerId?: string }[] }).bots.forEach((b) => delete b.computerId), "key-cc-0304"), [409, COMPUTER_NOT_READY, NO_CHAT_COMPUTER]);
+  assert.equal((await turnsOf(s.owner)).length, 0, "nothing owed");
 });
 
 test("a chat's compact ends with its line in the chat, stamped as theirs so their window sees it land: Compacted by them, or why it didn't go; the owner's state is as it was", async (t) => {
@@ -1751,4 +1778,24 @@ test("a chat's compact that ends without its computer saying is said in its line
   const gone = await lineOf(o.owner, c.turn.messageId);
   assert.deepEqual([gone.text, (gone.member as { name: string }).name, (gone.member as { ref: string }).ref], ["Couldn't compact this chat: Who can do this changed, so it didn't go.", "Sam", "key-cc-0203"]);
   assert.equal((await turnById(o.owner, c.turn.id))?.state, "failed");
+});
+
+test("a chat's compact runs on a bot's computer, so it needs Use its computer: one taken without it (as orgo-web said) is refused at its claim, and one whose Use its computer the owner turned off meanwhile ends; each line says why", async (t) => {
+  const o = await setupChat();
+  const box = await stream("/v1/runner/live", vm(o.owner, o.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  // orgo-web said Sam may not use the bots' computers as it was taken: refused at the claim, the line says why, as theirs.
+  const a = await o.compact("key-cc-0401", "team", { ...o.who(o.sam, "Sam", "key-cc-0401"), computerUse: false });
+  assert.equal((await runnerOn(o.owner, o.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn.id}/claim`, {})).status, 410);
+  const refused = await lineOf(o.owner, a.turn.messageId);
+  assert.deepEqual([refused.text, (refused.member as { ref: string }).ref], ["Couldn't compact this chat: Tara hasn't let Sam use Max's computer.", "key-cc-0401"]);
+  assert.ok(!(await messages(o.owner)).some((m) => m.id === `${a.turn.messageId}_note`), "its own line, no other note");
+  // Allowed as it was taken, then the owner turned Use its computer off for Sam: it ends, saying why.
+  const b = await o.compact("key-cc-0402", "team", { ...o.who(o.sam, "Sam", "key-cc-0402"), computerUse: true });
+  await ownerChanges(o.owner, (st) => void (st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess![`${o.sam}@example.com`].computer = "none"), own(o.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+  assert.equal((await lineOf(o.owner, b.turn.messageId)).text, "Couldn't compact this chat: Tara hasn't let Sam use Max's computer.");
+  assert.equal((await turnById(o.owner, b.turn.id))?.state, "failed");
+  // An Admin always may.
+  const c = await o.compact("key-cc-0403");
+  assert.equal((await runnerOn(o.owner, o.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${c.turn.id}/claim`, {})).status, 200);
 });

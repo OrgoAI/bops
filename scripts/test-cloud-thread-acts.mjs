@@ -41,6 +41,9 @@ const maxComputer = (o = {}) => ({ desktop: "c-max", devices: [R, "dev-r-max-raw
 const env = (o = {}) => ({
   now: NOW,
   macOn: o.macOn ?? false,
+  // The Mac off an hour unless said (on: 0), and Use its computer theirs unless said.
+  macAway: o.macAway ?? (o.macOn ? 0 : 3600_000),
+  mayUse: o.mayUse ?? true,
   owner: "Alex",
   computerOf: (id) => (id === "max" ? (o.max === null ? null : maxComputer(o.max)) : id === "ivy" ? null : null),
 });
@@ -94,6 +97,59 @@ test("a thread running on the owner's Mac while it's on stays there; with the Ma
   // Paused at an OK on the Mac: nothing of it runs anywhere, and the Mac carries it on as it reads the reply.
   const paused = state([onMac], { appApprovals: [{ id: "ask-1", botId: "max", threadId: "t1", askedBy: MAC, action: "Send an email", resume: { engine: "agents" } }] });
   assert.equal(only(T.replyIn(paused, "t1", "More", SAM, "key-mac-04", env({ macOn: false })).blob).by, MAC);
+});
+
+test("a Mac's live thread stays the Mac's while it's off only a moment, or was at work on it a moment ago; handed over once it's been off a while and the thread quiet, or quiet as long as the Mac's own rule for one left behind", () => {
+  const MIN = 60_000;
+  /** A thread on the owner's Mac, its last step `ago` ms before now. */
+  const onMac = (ago) => state([thread({ status: "running", by: MAC, runsOn: "mac", host: "mac", steps: [{ at: NOW - ago, tool: "note", detail: "Opened the site" }] })]);
+  const where = (ago, macAway) => {
+    const d = T.replyIn(onMac(ago), "t1", "Also check prices", SAM, `key-grace-${ago}-${macAway}`, env({ macOn: false, macAway }));
+    return [only(d.blob).by, only(d.blob).status, only(d.blob).replies.length, d.wakes.length];
+  };
+  // The tunnel dropped seconds ago (a blip, Bops Cloud restarting): the Mac keeps it, the reply waits for its poll, nothing is woken.
+  assert.deepEqual(where(5 * MIN, 5_000), [MAC, "running", 1, 0]);
+  // Off an hour by the tunnel, but a step from it seconds ago (its state reaches Bops Cloud without the tunnel): still the Mac's.
+  assert.deepEqual(where(10_000, 3600_000), [MAC, "running", 1, 0]);
+  // At the edge: a minute of each is still the Mac's.
+  assert.deepEqual(where(T.MAC_GRACE_MS, T.MAC_GRACE_MS + 1)[0], MAC);
+  // Off a while, and the thread quiet a while: handed over, saying what's lost.
+  assert.deepEqual(where(5 * MIN, 2 * MIN).slice(0, 2), [R, "queued"]);
+  // Quiet as long as the Mac's own rule for a thread left behind (store.ts LEFT_BEHIND_MS): handed over, even just after Bops Cloud started.
+  assert.equal(T.LEFT_BEHIND_MS, 10 * MIN);
+  assert.deepEqual(where(11 * MIN, 5_000).slice(0, 2), [R, "queued"]);
+  // Someone's reply seconds ago is no sign of the Mac at work: off an hour, the thread is handed over.
+  const replied = state([thread({ status: "running", by: MAC, runsOn: "mac", host: "mac", steps: [{ at: NOW - 5 * MIN, tool: "note", detail: "x" }], replies: [{ id: "r0", role: "user", text: "Hi", at: NOW - 5_000 }] })]);
+  assert.equal(only(T.replyIn(replied, "t1", "More", SAM, "key-grace-reply", env({ macOn: false, macAway: 3600_000 })).blob).by, R);
+  // Its other live threads' work counts too (lastWorkOf): the Mac at work on another of its threads keeps this one.
+  const busy = state([thread({ status: "running", by: MAC, runsOn: "mac", host: "mac" }), thread({ id: "t2", status: "running", by: MAC, runsOn: "mac", host: "mac", steps: [{ at: NOW - 5_000, tool: "note", detail: "x" }] })]);
+  assert.equal(only(T.replyIn(busy, "t1", "More", SAM, "key-grace-busy", env({ macOn: false, macAway: 3600_000 })).blob).by, MAC);
+});
+
+test("a thread live on another computer's runner (the bot's computer before it moved) keeps the reply there: that run stays its own to the end", () => {
+  const old = state([thread({ status: "running", by: "dev-r-old" })]);
+  const d = T.replyIn(old, "t1", "Use the window seat", SAM, "key-oldr-1", env());
+  assert.deepEqual([only(d.blob).by, only(d.blob).status, only(d.blob).replies.length, d.wakes], ["dev-r-old", "running", 1, []]);
+  // Its bot with no computer now: the same, with no note.
+  const none = T.replyIn(old, "t1", "Use the window seat", SAM, "key-oldr-2", env({ max: null }));
+  assert.deepEqual([only(none.blob).by, only(none.blob).steps], ["dev-r-old", []]);
+  // A thread the owner's Mac ran, by a Mac the state no longer knows: never taken for another computer's run, so handed over.
+  assert.equal(only(T.replyIn(state([thread({ status: "running", by: "mac-gone", runsOn: "mac", host: "mac" })]), "t1", "Again", SAM, "key-oldr-4", env()).blob).by, R);
+  // Once it ended there: queued again for the bot's own computer.
+  assert.equal(only(T.replyIn(state([thread({ status: "done", by: "dev-r-old" })]), "t1", "Again", SAM, "key-oldr-3", env()).blob).by, R);
+});
+
+test("a reply that would hand a thread the owner's Mac ran to the bot's computer needs Use its computer: refused (403 member_no_computer), nothing written", () => {
+  const ended = state([thread({ status: "done", by: MAC, runsOn: "mac", host: "mac" })]);
+  refused(() => T.replyIn(ended, "t1", "And book it", SAM, "key-nouse-1", env({ mayUse: false })), 403, T.NO_COMPUTER, "member_no_computer");
+  // Left behind by a Mac that's off: the same.
+  const left = state([thread({ status: "running", by: MAC, runsOn: "mac", host: "mac" })]);
+  refused(() => T.replyIn(left, "t1", "And book it", SAM, "key-nouse-2", env({ mayUse: false })), 403, T.NO_COMPUTER, "member_no_computer");
+  // Live on the Mac while it's on: it carries the reply on itself, as before.
+  assert.equal(only(T.replyIn(left, "t1", "And book it", SAM, "key-nouse-3", env({ macOn: true, mayUse: false })).blob).by, MAC);
+  // A bot with no computer: nothing goes to one, so the words are kept with the note.
+  const ivy = state([thread({ botId: "ivy", status: "done", by: MAC, runsOn: "mac", host: "mac" })]);
+  assert.equal(only(T.replyIn(ivy, "t1", "Hello", SAM, "key-nouse-4", env({ mayUse: false })).blob).replies.length, 1);
 });
 
 test("an ended thread is queued again for the bot's computer (by its runner, what ended it cleared), woken when it isn't listening", () => {

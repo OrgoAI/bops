@@ -76,6 +76,25 @@ test("no Mac, a Mac that doesn't answer in time, or one that goes away: no answe
   assert.ok(Date.now() - gone < 2_000, "a request on a connection that closes ends then, not at its timeout");
 });
 
+test("how long a Mac has been off: 0 while it's on (a newer connection replacing it too), since it went off after, and at least since this process started for one never on here", async () => {
+  const id = user("away");
+  // Never on here: since this process started (a restart forgets: it may have gone a moment ago).
+  const t = Date.now();
+  const started = t - tunnel.awayFor(id, t);
+  assert.ok(started <= t);
+  assert.equal(tunnel.awayFor(id, started + 5_000), 5_000);
+  const mac = await connectMac(cloud.url, id);
+  assert.equal(tunnel.awayFor(id), 0);
+  const next = await connectMac(cloud.url, id);
+  await mac.closed;
+  assert.equal(tunnel.awayFor(id), 0, "replaced, not off");
+  next.ws.close();
+  await until(() => !tunnel.isConnected(id), "the Mac to go");
+  const off = Date.now();
+  assert.ok(tunnel.awayFor(id) < 1_000, "just went");
+  assert.ok(Math.abs(tunnel.awayFor(id, off + 90_000) - 90_000) < 1_000, "counted from when it went");
+});
+
 test("a newer connection replaces the older one", async () => {
   const id = user("replace");
   const first = await connectMac(cloud.url, id);

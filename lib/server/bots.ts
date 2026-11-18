@@ -89,12 +89,22 @@ export function renameBot(botId: string, name: string): { ok: true } | { error: 
   if (clean === b.name) return { ok: true };
   if (getState().bots.some((x) => x.id !== botId && workspaceOf(x) === workspaceOf(b) && x.name.toLowerCase() === clean.toLowerCase())) return { error: "a bot with that name exists" };
   update(() => (b.name = clean));
+  followRename(b);
+  return { ok: true };
+}
+
+/**
+ * What a bot's new name changes outside the state: its email address, its phone agents' names (and their voice), its
+ * names in Telegram and Discord, and the name on its computer's desktop. After a rename here (renameBot), and after one
+ * another Bops made comes in (bot-follow.ts: Bops Cloud's for a teammate).
+ */
+export function followRename(b: Bot) {
+  const botId = b.id;
   void ensureInbox(botId).catch((e: Error) => console.warn(`[rename] ${botId} email: ${e.message}`));
   void import("./phone").then(({ renameAgents }) => renameAgents(botId)).catch((e: Error) => console.warn(`[rename] ${botId} phone: ${e.message}`));
   void import("./channels").then(({ renameInChannels }) => renameInChannels(botId)).catch((e: Error) => console.warn(`[rename] ${botId} channels: ${e.message}`));
   // Just the name on the desktop: Chrome keeps running.
   if (b.computerId) void import("./desktop").then(({ applyDesktop }) => applyDesktop(b, { restartChrome: false })).catch((e: Error) => console.warn(`[rename] ${botId} desktop: ${e.message}`));
-  return { ok: true };
 }
 
 /**

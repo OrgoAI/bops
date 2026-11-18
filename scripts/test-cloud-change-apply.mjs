@@ -12,8 +12,10 @@
 // still "bops".
 //
 // Not compared: what the routes also start on the Mac (a rename's inbox, phone agents, channels and desktop, the voice
-// on its line, Orgo's copy of its routines), which the cloud leaves to the owner's Mac; and a workspace's rename and
-// where its chat is answered, which go through orgo-web and Bops Cloud's switch (cloud/members.ts asks those itself).
+// on its line, Orgo's copy of its routines), which the cloud leaves to the owner's Mac (it follows them as the change
+// comes in or as it opens: lib/server/bot-follow.ts, scripts/test-bot-follow.mjs; with it closed, the cloud's line says
+// so, checked here); and a workspace's rename and where its chat is answered, which go through orgo-web and Bops
+// Cloud's switch (cloud/members.ts asks those itself).
 //
 // The state is a throwaway file store in a temporary folder (BOPS_SELF_HOSTED), every other address a fake that answers
 // nothing useful, and modules that would start processes are stand-ins: nothing reaches a real service. The people and
@@ -298,6 +300,28 @@ await test("what Bops Cloud doesn't do yet is refused in words (409 cloud_not_ye
   assert.equal(inCloud(fixture(), wsCall({ chat: "mac" }), "k-chat").refused.status, 400);
   const chat = A.applyChange(fixture(), WS, wsCall({ chat: "mac" }), SAM, "k-chat", 1, { chatDone: true });
   assert.equal(chat.said.text, "Sam changed where the chat is answered");
+});
+
+await test("with the owner's Mac closed, a new name or call voice says what follows once its Bops opens, for a bot with a phone or channels; nothing more with it on, or without them", () => {
+  const fx = fixture();
+  fx.owner = { name: "Alex" };
+  const max = fx.bots.find((b) => b.id === "max");
+  const said = (f, body, o) => A.applyChange(f, WS, botCall(body), SAM, `k-follow-${Math.random()}`, 1, o).said.text;
+  // No phone, no channels: nothing to follow (the line names it as it's named now).
+  assert.equal(said(clone(fx), { name: "Maxine" }, { macOn: false }), "Sam changed Maxine's settings");
+  max.phoneLine = { numberId: "n1", agentId: "ag1" };
+  assert.equal(said(clone(fx), { name: "Maxine" }, { macOn: false }), "Sam changed Maxine's settings. Its name on calls follows when Alex's Bops next opens.");
+  fx.channels = [{ id: "ch1", kind: "telegram", botId: "max" }];
+  assert.equal(said(clone(fx), { name: "Maxine" }, { macOn: false }), "Sam changed Maxine's settings. Its phone and channel names follow when Alex's Bops next opens.");
+  assert.equal(said(clone(fx), { name: "Maxine" }, { macOn: true }), "Sam changed Maxine's settings", "the Mac follows it as it comes in");
+  assert.equal(said(clone(fx), { name: "Maxine" }), "Sam changed Maxine's settings", "unsaid: as before");
+  assert.equal(said(clone(fx), { callVoice: "ash" }, { macOn: false }), "Sam changed Max's settings. Its calls take the new voice when Alex's Bops next opens.");
+  assert.equal(said(clone(fx), { effort: "high" }, { macOn: false }), "Sam changed Max's settings", "nothing to follow");
+  // The same name again: no change, nothing follows.
+  assert.equal(said(clone(fx), { name: "Max" }, { macOn: false }), "Sam changed Max's settings");
+  // Channels only.
+  delete max.phoneLine;
+  assert.equal(said(clone(fx), { name: "Maxine" }, { macOn: false }), "Sam changed Maxine's settings. Its channel names follow when Alex's Bops next opens.");
 });
 
 console.log(`\ncloud change apply: ${passed} passed, ${failed} failed`);

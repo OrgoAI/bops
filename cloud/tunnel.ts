@@ -45,8 +45,19 @@ type Mac = {
 
 const macs = new Map<string, Mac>();
 const wss = new WebSocketServer({ noServer: true, clientTracking: false, maxPayload: MAX_FRAME });
+/** When each user's Mac last went off this process's tunnel (detach); with this process's start, what awayFor goes by. */
+const closedAt = new Map<string, number>();
+const startedAt = Date.now();
 
 export const isConnected = (userId: string): boolean => macs.get(userId)?.ws.readyState === WebSocket.OPEN;
+/**
+ * How long the user's Mac has been off the tunnel, in ms: 0 while it's connected; else since it last went off, or since
+ * this process started when it hasn't been on here (a restart forgets: it may have gone a moment ago).
+ */
+export function awayFor(userId: string, now = Date.now()): number {
+  if (isConnected(userId)) return 0;
+  return Math.max(0, now - (closedAt.get(userId) ?? startedAt));
+}
 export const connectedCount = (): number => macs.size;
 
 /** Shutdown: every Mac is told the cloud is going away (1001) and will reconnect to the next one. */
@@ -182,7 +193,10 @@ function attach(userId: string, ws: WebSocket, level: number) {
 /** Forget a connection: its timer stops and requests waiting on it get no answer. Safe to call twice. */
 function detach(mac: Mac) {
   clearInterval(mac.ticker);
-  if (macs.get(mac.userId) === mac) macs.delete(mac.userId);
+  if (macs.get(mac.userId) === mac) {
+    macs.delete(mac.userId);
+    closedAt.set(mac.userId, Date.now());
+  }
   for (const done of [...mac.waiting.values()]) done(null);
 }
 

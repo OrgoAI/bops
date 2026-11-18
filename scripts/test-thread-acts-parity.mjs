@@ -3,8 +3,8 @@
 // replyToSession, stopSession, dismissWaiting, compactThread, setWhere; lib/server/permission.ts replyToAsk), run here for
 // real as "another Bops": this Bops's device is none of the threads' (Session.by is a computer's runner, or another Mac),
 // so it does what the owner's Mac does for a thread it doesn't run. The helpers the cloud copies from the app (live,
-// waitsForOk, pausedForOk, threadCompacts, threadCompactBlocked, COMPACTED, limitPick and its words, CARRY_ON, ASKS_AGAIN,
-// keepsOffPreview) are checked equal to the app's own on many fixtures first.
+// waitsForOk, pausedForOk, lastWorkOf, LEFT_BEHIND_MS, threadCompacts, threadCompactBlocked, COMPACTED, limitPick and its
+// words, CARRY_ON, ASKS_AGAIN, keepsOffPreview) are checked equal to the app's own on many fixtures first.
 //
 // Where the cloud is meant to differ, the difference is asserted, and why: a thread the cloud picks up or ends is its
 // runner's (`by` R) or Bops Cloud's own (`by` "cloud"), where the Mac makes it its own device's; a reply's id is the
@@ -119,6 +119,19 @@ await test("live, waitsForOk and pausedForOk are the app's own, on every status,
   assert.ok(n > 100);
 });
 
+await test("lastWorkOf and LEFT_BEHIND_MS are the app's own: a thread's signs of work, and its Bops's other live threads'", () => {
+  assert.equal(T.LEFT_BEHIND_MS, S.LEFT_BEHIND_MS);
+  const signs = [{}, { startedAt: 5 }, { createdAt: 3, lastFrameAt: 9 }, { steps: [{ at: 4, tool: "note", detail: "" }, { at: 12, tool: "note", detail: "" }] }, { replies: [{ id: "r", role: "user", text: "x", at: 15 }] }];
+  for (const a of signs)
+    for (const b of signs)
+      for (const status of ["running", "done"])
+        for (const by of ["mac-o", "dev-r", undefined]) {
+          const s = { id: "t", status: "running", by: "mac-o", steps: [], replies: [], ...a };
+          const others = [s, { id: "u", status, ...(by ? { by } : {}), steps: [], replies: [], ...b }];
+          assert.equal(T.lastWorkOf(s, others), L.lastWorkOf(s, others), JSON.stringify(others));
+        }
+});
+
 await test("threadCompacts, threadCompactBlocked and COMPACTED are the app's own (a build with brains)", () => {
   assert.equal(L.BRAINS_ON, true, "set before the app's types load");
   assert.equal(T.COMPACTED, L.COMPACTED);
@@ -215,6 +228,8 @@ async function onMac(fx, act) {
 const env = (o = {}) => ({
   now: Date.now(),
   macOn: o.macOn ?? false,
+  macAway: o.macAway ?? (o.macOn ? 0 : 3600_000),
+  mayUse: o.mayUse ?? true,
   owner: "Alex",
   computerOf: (id) => (id === "max" ? { desktop: "c-max", devices: [R], listening: o.listening ?? true, runner: o.runner ?? "ok" } : null),
 });

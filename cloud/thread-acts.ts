@@ -1,6 +1,6 @@
 import { HttpError } from "./http.ts";
 import { alwaysRule, ruleFor, taskWrite, type PermissionRule } from "./permission-rules.ts";
-import { CLOUD_BY, COMPUTER_NOT_READY, NOT_WAITING } from "./protocol.ts";
+import { CLOUD_BY, COMPUTER_NOT_READY, MEMBER_NO_COMPUTER, NOT_WAITING } from "./protocol.ts";
 
 /**
  * A teammate's acts on the owner's threads and asks, done by Bops Cloud itself in a workspace where everything goes
@@ -13,8 +13,9 @@ import { CLOUD_BY, COMPUTER_NOT_READY, NOT_WAITING } from "./protocol.ts";
  * (lib/server/state-merge.ts mergeSession, ASKED_ELSEWHERE; mergeApproval). What it can't know itself (whether the
  * owner's Mac is on, the bot's computer and its runner, whether that runner listens) the caller reads first (ActEnv).
  *
- * Where a thread goes on is never the owner's Mac: one the Mac ran and left (its Mac off) or that ended is handed to the
- * bot's own computer (R), saying what's lost; one still running on the Mac while it's on stays there, as it's the Mac
+ * Where a thread goes on is never the owner's Mac: one the Mac ran and left (its Mac off a while, the thread quiet) or
+ * that ended is handed to the bot's own computer (R), saying what's lost, and only for someone who may use that computer
+ * (Use its computer); one still running on the Mac while it's on, or away only a moment, stays there, as it's the Mac
  * running it now. A bot with no computer keeps the teammate's words, with a note that nothing can run them here.
  *
  * The helpers marked "as lib" are copies of the app's own, which this side can't import; scripts/test-thread-acts-parity.mjs
@@ -36,6 +37,14 @@ export const waitsForOk = (s: Blob, state: Blob) => live(s) && list(state.appApp
 /** As lib/types.ts pausedForOk: paused at a request its own Bops made, answered or not, until that Bops reads the reply. */
 export const pausedForOk = (s: Blob, state: Blob) =>
   list(state.appApprovals).some((a) => a.threadId === s.id && (a.askedBy ?? undefined) === (s.by ?? undefined) && (isObject(a.resume) ? a.resume.engine : undefined) !== "held");
+
+/** As lib/types.ts lastWorkOf: when the Bops that runs `s` last showed a sign of work on it or on any of its live threads. */
+export function lastWorkOf(s: Blob, sessions: Blob[]): number {
+  const signs = (x: Blob) => [x.startedAt, x.createdAt, x.lastFrameAt, ...list(x.steps).map((y) => y.at), ...list(x.replies).map((y) => y.at)].filter((y): y is number => typeof y === "number");
+  return Math.max(0, ...sessions.filter((x) => x.by === s.by && live(x)).flatMap(signs), ...signs(s));
+}
+/** As lib/server/store.ts LEFT_BEHIND_MS: a live thread of a Mac's quiet this long is one that Mac left behind (leftBehind). */
+export const LEFT_BEHIND_MS = 10 * 60_000;
 
 /** As lib/types.ts threadRunner. */
 function threadRunner(s: Blob): string | undefined {
@@ -114,6 +123,13 @@ export type ActEnv = {
   now: number;
   /** Whether the owner's Mac is on (the tunnel: members.ts isOn). */
   macOn: boolean;
+  /**
+   * How long the owner's Mac has been off (ms; 0 while it's on): since its tunnel last closed, or at least since this
+   * Bops Cloud started when it can't say (cloud/tunnel.ts awayFor).
+   */
+  macAway: number;
+  /** Whether the one acting may use the bots' computers (Use its computer: ws-slice.ts computerUseOf). */
+  mayUse: boolean;
   /** The owner's name, as their state says it (turns.ts ownerOf). */
   owner: string;
   /** Each bot's own computer (ComputerFacts), or null for a bot with none. */
@@ -131,6 +147,8 @@ export type ActDone = { blob: Blob | null; notes: Blob[]; wakes: Wake[] };
 export const movedWords = (bot: string, owner: string) => `This thread moved to ${bot}'s computer. What it was doing on ${owner}'s Mac isn't there.`;
 /** Said on a thread whose bot has no computer: the teammate's words stay, and nothing runs them here. */
 export const noComputerWords = (bot: string) => `${bot} has no computer, so this can't go on in the cloud. Give ${bot} a computer in ${bot}'s settings.`;
+/** 403 MEMBER_NO_COMPUTER: what they did would run on a bot's computer, and the owner kept them off it (Use its computer). */
+export const NO_COMPUTER = "This runs on the bot's computer, and the owner hasn't let you use it.";
 /** 409: a thread's act needs a computer the bot hasn't got. */
 export const noComputerToRun = (bot: string) => `${bot} has no computer to run this on.`;
 /** 409 COMPUTER_NOT_READY: the bot's computer has no runner yet. */
@@ -170,6 +188,24 @@ const isMac = (blob: Blob, device: unknown) => typeof device === "string" && isO
 const macThread = (s: Blob) => s.runsOn === "mac" || s.host === "mac";
 /** Whether a live thread is run by the owner's Mac now: a Mac's device, or no device said (a thread from before Session.by is the Mac's). */
 const onMacNow = (blob: Blob, s: Blob) => isMac(blob, s.by) || (s.by === undefined && macThread(s));
+/**
+ * How long the owner's Mac may be off before a live thread of its is taken from it (cloud/tunnel.ts timing.dropMs: a
+ * tunnel quiet this long is dropped), so a tunnel that drops for a moment, or Bops Cloud restarting, never hands over a
+ * thread the Mac is still running.
+ */
+export const MAC_GRACE_MS = 60_000;
+/**
+ * Whether the owner's Mac, off now, still has a live thread of its: away only a moment (MAC_GRACE_MS), or at work on it
+ * that recently (a step or frame of its own on it or its other live threads, never someone's reply: its state reaches
+ * Bops Cloud without the tunnel); never once the thread is quiet as long as the Mac's own rule for one left behind
+ * (lastWorkOf, LEFT_BEHIND_MS). Handed over before then, the Mac's run and the bot's computer's would both do the task.
+ */
+function macStillHas(blob: Blob, s: Blob, env: ActEnv): boolean {
+  const sessions = list(blob.sessions);
+  if (env.now - lastWorkOf(s, sessions) > LEFT_BEHIND_MS) return false;
+  const own = (x: Blob): Blob => ({ ...x, replies: [] });
+  return env.macAway <= MAC_GRACE_MS || env.now - lastWorkOf(own(s), sessions.map(own)) <= MAC_GRACE_MS;
+}
 
 /** The computer a thread's act needs, ready: else 409 (no computer, no runner, too old). */
 function readyComputer(blob: Blob, env: ActEnv, botId: unknown, noneWords = noComputerToRun): ComputerFacts {
@@ -201,9 +237,12 @@ function queueAgain(blob: Blob, s: Blob, env: ActEnv, c: ComputerFacts): ActDone
  * first, never a watch), kept by their key (`rep_m_<userId>_<key>`: the same act again changes nothing) and named as theirs
  * (`member.ref`, which their window waits for). A brain's limit pick (limitPick) and the router's bump as the Mac does
  * them. Then:
- * - live on the bot's computer, or on the owner's Mac while it's on: that's where it runs, and its poll takes the reply;
+ * - live on the bot's computer, on another computer's runner (the bot's computer before it moved: that run stays its own
+ *   to the end), or on the owner's Mac while it's on or off only a moment (macStillHas): that's where it runs, and its
+ *   poll takes the reply; nothing is woken for the Mac;
  * - waiting for where it runs: kept, for whoever picks;
- * - ended, or left behind by a Mac that's off: queued again for the bot's computer (queueAgain), the Mac's handed over;
+ * - ended, or left behind by a Mac that's off: queued again for the bot's computer (queueAgain), the Mac's handed over,
+ *   which only someone with Use its computer may do (403 MEMBER_NO_COMPUTER: the owner's Mac would have run it on itself);
  * - a bot with no computer: kept, with a note that nothing runs it here.
  */
 export function replyIn(blob: Blob, sessionId: string, text: string, who: ActWho, key: string, env: ActEnv): ActDone {
@@ -234,10 +273,15 @@ export function replyIn(blob: Blob, sessionId: string, text: string, who: ActWho
   if (live(s)) {
     if (s.askWhere === true) return { blob: kept, notes: [], wakes: [] };
     if (c && typeof s.by === "string" && c.devices.includes(s.by)) return { blob: kept, notes: [], wakes: c.listening ? [] : [{ desktop: c.desktop, botId: String(s.botId), threadId: sessionId, then: "step" }] };
-    // Running on the owner's Mac now (paused at an OK counts: nothing of it runs anywhere, and the Mac carries it on).
-    if (onMacNow(blob, s) && (env.macOn || pausedForOk(s, blob))) return { blob: kept, notes: [], wakes: [] };
+    if (onMacNow(blob, s)) {
+      // Running on the owner's Mac now (paused at an OK counts: nothing of it runs anywhere, and the Mac carries it on;
+      // so does a Mac off only a moment: macStillHas).
+      if (env.macOn || pausedForOk(s, blob) || macStillHas(blob, s, env)) return { blob: kept, notes: [], wakes: [] };
+    } else if (!macThread(s) && typeof s.by === "string" && s.by !== CLOUD_BY) return { blob: kept, notes: [], wakes: [] };
   }
   if (!c) return { blob: withThread(kept, sessionId, (x) => withStep(x, env.now, "note", noComputerWords(botName(blob, s.botId)))), notes: [], wakes: [] };
+  // The owner's Mac would have carried this on itself; here it goes to the bot's computer.
+  if (macThread(s) && !env.mayUse) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
   const ready = readyComputer(blob, env, s.botId);
   // It failed, or they say it's wrong: on the router's route, the next turn thinks a tier harder (routing.ts taskConfig).
   const route = isObject(next.route) ? next.route : undefined;

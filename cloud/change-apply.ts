@@ -17,9 +17,14 @@ import { CLOUD_NOT_YET } from "./protocol.ts";
  *
  * What it doesn't do yet, said plainly (409 CLOUD_NOT_YET): a bot's own computer and its email (they cost the owner's plan
  * and delete computers), and which site a bot works on (Workspace.botSites, with the Locals of the app it leaves stopped on
- * its computer). A bot set to work on the owner's Mac is refused: every bot here works on its own computer. What a
- * rename also changes on the Mac (the bot's inbox, phone agents, channels and desktop), its voice on calls and Orgo's copy
- * of its routines wait for the owner's Mac, which does them as it merges the change.
+ * its computer). A bot set to work on the owner's Mac is refused: every bot here works on its own computer.
+ *
+ * What the owner's route also does outside the state for a bot's new name (its email, phone agents, Telegram and Discord
+ * names, desktop), call voice (its phone agents' voice) or place to work (Orgo's copy of its routines) is the owner's
+ * Mac's, with its keys and logins: it follows each as the change comes in, or as its Bops next opens
+ * (lib/server/bot-follow.ts, from CLOUD_ALL_MIN_VERSION, which a workspace needs to go through the cloud at all). The
+ * change itself never waits for that Mac; with it closed, the line in the chat says what follows once it opens
+ * (followWords).
  */
 
 type Blob = Record<string, unknown>;
@@ -154,6 +159,31 @@ function changeBot(blob: Blob, botId: string, body: Blob): Blob {
   return out;
 }
 
+/** A bot's call voice as its workspace keeps it (lib/types.ts settingsOf), or null. */
+const voiceOf = (blob: Blob, b: Blob): unknown => {
+  const all = list(blob.workspaces).find((w) => w.id === wsOfBot(b))?.botSettings;
+  const x = isObject(all) && Object.hasOwn(all, String(b.id)) ? all[String(b.id)] : undefined;
+  return isObject(x) ? (x.callVoice ?? null) : null;
+};
+
+/**
+ * What the chat's line adds for a bot's change while the owner's Mac is closed, when it's of use (a sentence after it): a new
+ * name its phone and channels (Telegram, Discord) take, and a new call voice its calls take, once the owner's Bops opens
+ * (lib/server/bot-follow.ts). Nothing for a bot with no phone or channels.
+ */
+export function followWords(before: Blob, after: Blob, botId: string): string {
+  const was = list(before.bots).find((x) => x.id === botId);
+  const now = list(after.bots).find((x) => x.id === botId);
+  if (!was || !now) return "";
+  const owner = isObject(after.owner) && typeof after.owner.name === "string" && after.owner.name.trim() ? after.owner.name.trim() : "the owner";
+  const line = list(after.workspaces).find((w) => w.id === wsOfBot(now))?.line;
+  const phone = (isObject(now.phoneLine) && typeof now.phoneLine.agentId === "string") || (now.isMain === true && isObject(line) && typeof line.agentId === "string");
+  const channels = list(after.channels).some((c) => c.botId === botId && (c.kind === "telegram" || c.kind === "discord"));
+  if (was.name !== now.name && (phone || channels)) return `. ${phone && channels ? "Its phone and channel names follow" : phone ? "Its name on calls follows" : "Its channel names follow"} when ${owner}'s Bops next opens.`;
+  if (voiceOf(before, was) !== voiceOf(after, now) && phone) return `. Its calls take the new voice when ${owner}'s Bops next opens.`;
+  return "";
+}
+
 /** As lib/types.ts siteOf: the site a bot works on (Workspace.botSites). */
 const siteOf = (blob: Blob, b: Blob): Blob | undefined => {
   const all = list(blob.workspaces).find((w) => w.id === wsOfBot(b))?.botSites;
@@ -229,10 +259,11 @@ export function renameRefused(blob: Blob, wsId: string, name: string): string | 
  * Apply a change on the owner's state (`blob`) for workspace `wsId`, as the owner's route does it: the route's own checks
  * (checkChange, against the workspace's bots and apps), then its fields. `renamed`: what orgo-web said of the workspace's
  * new name (asked before). `chat`: where its chat is answered, set by the caller (setRouting) already. Kept by its key in
- * Workspace.changesDone (the same key again: nothing changes) and said as theirs. Returns the state and the note, or
- * null when it was done already; throws why not (HttpError).
+ * Workspace.changesDone (the same key again: nothing changes) and said as theirs; with the owner's Mac off (`macOn`
+ * false), the line says what follows once it opens (followWords). Returns the state and the note, or null when it was
+ * done already; throws why not (HttpError).
  */
-export function applyChange(blob: Blob, wsId: string, call: ChangeCall, who: ChangeWho, key: string, at: number, o: { renamed?: Renamed; chatDone?: boolean } = {}): { blob: Blob; said: Blob | null } | null {
+export function applyChange(blob: Blob, wsId: string, call: ChangeCall, who: ChangeWho, key: string, at: number, o: { renamed?: Renamed; chatDone?: boolean; macOn?: boolean } = {}): { blob: Blob; said: Blob | null } | null {
   const ws = list(blob.workspaces).find((w) => w.id === wsId);
   if (!ws) throw new HttpError(404, "No such workspace");
   if (list(ws.changesDone).some((d) => d.key === key)) return null;
@@ -271,7 +302,14 @@ export function applyChange(blob: Blob, wsId: string, call: ChangeCall, who: Cha
   const to = b ?? chief;
   const said =
     r.route.said && to
-      ? { id: `msg_change_${who.userId}_${key}`, chatId: `bot:${String(to.id)}`, role: "system", botId: to.id, text: `${who.name} ${r.route.said(body, { bot: typeof b?.name === "string" ? b.name : undefined, ...(r.app ? { app: r.app } : {}) })}`, at }
+      ? {
+          id: `msg_change_${who.userId}_${key}`,
+          chatId: `bot:${String(to.id)}`,
+          role: "system",
+          botId: to.id,
+          text: `${who.name} ${r.route.said(body, { bot: typeof b?.name === "string" ? b.name : undefined, ...(r.app ? { app: r.app } : {}) })}${o.macOn === false && r.bot ? followWords(blob, out, r.bot) : ""}`,
+          at,
+        }
       : null;
   return { blob: out, said };
 }

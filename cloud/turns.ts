@@ -41,6 +41,7 @@ import {
   type TurnShown,
 } from "./protocol.ts";
 import { announce, checkUser, loadState, lockedState, lockUser, toJson, writeMessages } from "./state.ts";
+import { noRunnerWords, oldRunnerWords } from "./thread-acts.ts";
 import { deliverWaitingTo, isConnected } from "./tunnel.ts";
 import { computerUseOf, list, viewerAccess, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 
@@ -1120,7 +1121,12 @@ async function jobsOver(turns: TurnRow[], why?: string) {
 }
 
 /** Why a chat's job ended that its computer never said, by its turn's note: JOB_NOTES' words, or the chat's own where an app's don't fit. */
-const chatJobWords = (t: TurnRow, owner: string, bot: string): string => (t.note && Object.hasOwn(CHAT_JOB_NOTES, t.note) ? CHAT_JOB_NOTES[t.note](owner, bot) : jobWords(t, owner, bot));
+const chatJobWords = (t: TurnRow, owner: string, bot: string): string =>
+  t.note === "noUse"
+    ? `${owner} hasn't let ${t.member?.name ?? "them"} use ${bot}'s computer.`
+    : t.note && Object.hasOwn(CHAT_JOB_NOTES, t.note)
+      ? CHAT_JOB_NOTES[t.note](owner, bot)
+      : jobWords(t, owner, bot);
 
 /** Chat jobs (compactChat) that ended without their computer saying how: each its line in its chat, why (`why`, else by its note), once. Never throws. */
 async function chatJobsOver(turns: TurnRow[], why?: string) {
@@ -1269,8 +1275,11 @@ export async function takeAppJob(o: {
 
 /* ---------------- A chat's compact, as a job ---------------- */
 
-/** 409 COMPUTER_NOT_READY for a chat's compact (takeChatJob): none of its bots has a computer whose runner can do it. */
+/** 409 COMPUTER_NOT_READY for a chat's compact (takeChatJob): none of its bots has a computer. */
 export const NO_CHAT_COMPUTER = "No bot in this chat has a computer to compact it.";
+/** 409 COMPUTER_NOT_READY for a chat's compact (takeChatJob): its first bot with a computer can't do it, and why (a thread's act says the same: thread-acts.ts). */
+export const chatJobUnready = (bot: string, owner: string, why: "down" | "none" | "old") =>
+  why === "old" ? oldRunnerWords(bot, owner) : why === "none" ? noRunnerWords(bot, owner) : `${bot}'s computer isn't running, so it can't compact this chat. ${owner} can start it again.`;
 
 /**
  * Compacting a chat (the "compact" act of a chat, in a workspace where everything goes through the cloud: members.ts)
@@ -1279,7 +1288,8 @@ export const NO_CHAT_COMPUTER = "No bot in this chat has a computer to compact i
  * owner's Mac. Under the owner's lock, on their state as it is then: `check` (throwing to refuse: still theirs to do),
  * then the chat's first bot (in its order) whose computer, its own or the one it shares (computerFor, `cloud`: a bot set
  * to the owner's Mac too), has a runner (runnerVersionOf) at CLOUD_ALL_MIN_VERSION on a computer the owner's Mac didn't
- * find down; none is 409 COMPUTER_NOT_READY (NO_CHAT_COMPUTER), and nothing is kept. Else, once by its id (a retry finds
+ * find down; none is 409 COMPUTER_NOT_READY, and nothing is kept: why the first bot with a computer can't (chatJobUnready),
+ * or NO_CHAT_COMPUTER when none has one. Else, once by its id (a retry finds
  * it and changes nothing): a turn in the chat itself, so it waits behind the answers there (one at a time per chat:
  * claim), owed to that computer with the job on its member, given out and woken as a chat turn is, until its deadline
  * (jobDeadline). No note in the chat: its end is the line (finish, jobsOver), stamped as theirs, done or why not. `still`
@@ -1302,16 +1312,23 @@ export async function takeChatJob(o: {
     const was = (await c.query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND message_id = $2`, [o.account, o.id])).rows[0];
     if (was) return { turn: turnOf(was), fresh: false };
     let on: { botId: string; desktop: string } | null = null;
+    // The first bot with a computer that can't do it, and why: what's said when none can.
+    let first: { botId: string; why: "down" | "none" | "old" } | null = null;
     for (const botId of botsOfChat(blob, o.chatId)) {
       const desktop = computerFor(blob, botId, true);
-      if (!desktop || runnerAt(blob, desktop)?.down) continue;
+      if (!desktop) continue;
+      if (runnerAt(blob, desktop)?.down) {
+        first ??= { botId, why: "down" };
+        continue;
+      }
       const v = await runnerVersionOf(c, o.account, blob, desktop);
       if (v && !olderThan(v, CLOUD_ALL_MIN_VERSION)) {
         on = { botId, desktop };
         break;
       }
+      first ??= { botId, why: v ? "old" : "none" };
     }
-    if (!on) throw new HttpError(409, NO_CHAT_COMPUTER, { code: COMPUTER_NOT_READY });
+    if (!on) throw new HttpError(409, first ? chatJobUnready(nameOf(blob, first.botId), ownerOf(blob), first.why) : NO_CHAT_COMPUTER, { code: COMPUTER_NOT_READY });
     const ins = await c.query<RawTurn>(
       `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 'owed', now() + make_interval(secs => $10), $11)
@@ -1676,7 +1693,7 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
     ...(typeof t.member.computerUse === "boolean" ? { computerUse: t.member.computerUse } : {}),
   };
   // A job (takeAppJob): what its kind needs, for their membership now; never the bot's level or Use its computer (it runs
-  // no words of theirs), but for a chat's own job.
+  // no words of theirs), but for a chat's own job, which runs a model on its bot's computer and may wake it.
   if (t.member.job) return jobStill(blob, ws, viewer, t.member.job, t.chatId);
   const access = viewerAccess(ws, viewer);
   const bots = t.isGroup ? botsOfChat(blob, t.chatId) : [t.botId];
@@ -1688,9 +1705,9 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
  * Whether a job's member may still have it done, by its kind: an app's GitHub job needs Your Apps at Write and the power
  * of Publish (an Admin always, a Member with App secrets); a deploy, rollback, settings or domain Your Apps at Write, and
  * what goes on Published (env "prod") the power of Publish too; a remove an Admin; compacting a chat Write on every bot
- * of the chat.
+ * of the chat, and Use its computer ("noUse" without: it runs on one of its bots' computers).
  */
-function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | null, viewer: SliceViewer, job: TurnJob, chatId: string): "ok" | "gone" {
+function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | null, viewer: SliceViewer, job: TurnJob, chatId: string): "ok" | "gone" | "noUse" {
   const access = viewerAccess(ws, viewer);
   const appsWrite = appsLevelOf(access) === "write";
   const publish = hasPower("appSecrets", viewer.role, access.can);
@@ -1709,7 +1726,8 @@ function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | n
       return viewer.role === "admin" ? "ok" : "gone";
     case "compactChat": {
       const bots = botsOfChat(blob, chatId);
-      return bots.length && bots.every((id) => permits(levelOf(access, id), "write")) ? "ok" : "gone";
+      if (!bots.length || !bots.every((id) => permits(levelOf(access, id), "write"))) return "gone";
+      return computerUseOf(ws, viewer) ? "ok" : "noUse";
     }
   }
 }
@@ -1805,7 +1823,8 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
 /** A turn that ended as its member may no longer have it run (or its bot moved): the note in its chat, every viewer told, the runner stopped, its chat's next. */
 async function afterRevoked(t: Ended) {
   toRunner(t.userId, t.targetDevice, "turn-cancel", { id: t.id });
-  if (t.note === "noUse") {
+  // (A chat's job ends with its own line, stamped as theirs, saying why: ended, by its note.)
+  if (t.note === "noUse" && !chatJob(t)) {
     const blob = ((await loadState(t.userId))?.state ?? {}) as Record<string, unknown>;
     const say = NOTES.noUse(ownerOf(blob), t.member?.name ?? "them", nameOf(blob, t.botId));
     await writeMessages(t.userId, [noteRow(t, say)]).catch(() => {});
