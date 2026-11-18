@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { accessIsDefault, levelIn, memberOf, memberThread, workspaceOf, type AccessUse, type AppAccount, type LastUses } from "@/lib/types";
 import { onRunner } from "./persist";
 import { cleanText, fit } from "./routine-sync";
-import { bot, getState, session, stateReady, userDir, watchChanges } from "./store";
+import { bot, getState, pullState, session, statePulledAt, stateReady, userDir, watchChanges } from "./store";
 import { outbox } from "./sync-outbox";
 
 /**
@@ -27,7 +27,10 @@ import { outbox } from "./sync-outbox";
  * its routines' threads made. Logged uses Orgo hasn't taken yet wait in an outbox kept with the user's
  * folder (sync-outbox.ts), so a quit while Orgo is away loses none: what's left goes after the next start.
  * Orgo takes MAX_GRANTS grants a call and replaces the whole set with them: a workspace with more has the
- * rest cut (said in the log; orgo-web's follow-up is a paged PUT).
+ * rest cut (said in the log; orgo-web's follow-up is a paged PUT). Because the PUT replaces the set, it goes only right
+ * after this Mac read and merged the newest state from Bops Cloud (newestMerged): a teammate's key given or taken away
+ * through Bops Cloud (which tells Orgo that one grant itself, cloud/members.ts) is in it, never undone by a set from
+ * before it.
  */
 
 export const SYNC_DEBOUNCE_MS = 2_000;
@@ -193,7 +196,20 @@ function hold(wsId: string, grants: boolean, uses: Waiting[]) {
   held.set(wsId, { grants: grants || !!h?.grants, uses: [...(h?.uses ?? []), ...uses].slice(-MAX_USES_WAITING) });
 }
 
-/** Send what's waiting for a workspace: its set when it changed, then its logged uses. */
+/**
+ * Whether this Mac has just read the newest of the user's state from Bops Cloud and merged it in (store.ts pullState),
+ * so the set it sends next has what Bops Cloud wrote for a teammate meanwhile (a key given or taken away from the cloud:
+ * cloud/members.ts, which tells Orgo that one grant itself). A whole set from before it would put a grant back that a
+ * teammate took away, or take one away they just gave. True where the state isn't kept in Bops Cloud (nothing to read).
+ */
+async function newestMerged(): Promise<boolean> {
+  const asked = Date.now();
+  await pullState();
+  const at = statePulledAt();
+  return at === 0 || at >= asked;
+}
+
+/** Send what's waiting for a workspace: its set when it changed (only right after the newest state is merged in: newestMerged), then its logged uses. */
 async function flush(wsId: string): Promise<void> {
   const p = pending.get(wsId);
   if (!p) return;
@@ -202,8 +218,11 @@ async function flush(wsId: string): Promise<void> {
   const projectId = projectOf(wsId);
   if (!projectId || routesMissing(projectId)) return;
   const base = `/api/projects/${encodeURIComponent(projectId)}/access`;
-  if (p.grants) {
-    const all = accessPayload(wsId, await vaultKeys(wsId));
+  const keyNames = p.grants ? await vaultKeys(wsId) : [];
+  // Bops Cloud couldn't be read just now: the set goes later, never one that may be from before (its uses go now).
+  if (p.grants && !(await newestMerged())) requeue(wsId, p, [], true);
+  else if (p.grants) {
+    const all = accessPayload(wsId, keyNames);
     if (all.length > MAX_GRANTS) console.warn(`[access-sync] ${wsId}: ${all.length} grants, Orgo takes ${MAX_GRANTS}; the rest aren't mirrored`);
     const res = await send("PUT", base, { grants: all.slice(0, MAX_GRANTS) });
     const status = res?.status ?? null;

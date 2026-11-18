@@ -390,6 +390,23 @@ async function routineFailed(sessionId: string, error: string, chatOnly = false)
 }
 
 /**
+ * A routine's run of this Bops's that another Bops ended while it was paused for the user's OK (permission.ts settleAsks:
+ * Bops Cloud's Stop for a teammate, in a workspace where everything goes through the cloud, which ends the thread there
+ * and can't record the run): recorded as failed with the thread's own words, as routineFailed records one, but only in
+ * the state and its chat: nothing is sent where its results go (the one who stopped it knows). Only while its record
+ * still says it runs, so once.
+ */
+export async function routineEndedElsewhere(sessionId: string): Promise<void> {
+  const s = session(sessionId);
+  if (!s || live(s) || !s.routineId) return;
+  if (routineOf(s)?.last?.status !== "running") return;
+  const { onRoutineTaskEnd } = await import("./routines");
+  // Read again once it's loaded, as routineFailed does.
+  const now = session(sessionId);
+  if (now && !live(now) && routineOf(now)?.last?.status === "running") await onRoutineTaskEnd(now, undefined, now.error ?? "Stopped", { chatOnly: true });
+}
+
+/**
  * A routine's thread finished with its answer: the routine records it and sends it where its results
  * go. True when nothing should be posted: a quiet routine's run that found nothing for the user.
  */

@@ -19,6 +19,8 @@
  *   the Bops that has the bot now runs it;
  * - how a bot on it is doing on its computer (computerStatus, computerRam, computerNeverReady,
  *   wakeFailed, tailnet) and its Composio session (composio);
+ * - the running summary of its bots' chats (chatsOn: Chat.summary), which a turn there folds after it and a Compact
+ *   asked of it writes (lib/server/chat-summary.ts); nothing else of a chat;
  * - its own requests for the user's OK (appApprovals, AppApproval.askedBy its device) of its bots, or of a thread
  *   of its own: added unanswered, and taken out (cancelled, or read once answered). Never a reply: that's the
  *   user's, from a Bops of their own (a person's action), so a computer never says yes to itself, and never
@@ -614,6 +616,14 @@ const RULES: Record<string, (stored: unknown, next: unknown, ctx: Ctx) => Kept> 
         (ctx.bots.has(x.botId as string) || (typeof x.threadId === "string" && ctx.threads.get(x.threadId)?.botId === x.botId)),
       remove: (s) => s.askedBy === ctx.device,
       item: (s) => ({ value: s, denied: [`appApprovals.${s.id}`] }),
+    }),
+  // Its bots' chats (chatsOn): only their running summary (Chat.summary), which a turn there folds after it, or a Compact
+  // asked of it writes (lib/server/chat-summary.ts). Never a chat added, taken out, or anything else of one.
+  chats: (stored, next, ctx) =>
+    keepList("chats", stored, next, ctx, {
+      add: () => false,
+      remove: () => false,
+      item: (s, n) => (ctx.chats.has(s.id as string) ? onlyFields("chats", s, n, ["summary"]) : { value: s, denied: [`chats.${s.id}`] }),
     }),
   // How its bots are doing on it.
   bots: (stored, next, ctx) =>

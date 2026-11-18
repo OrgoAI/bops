@@ -107,6 +107,8 @@ export function askFor(spec: AskSpec, place: AskPlace, resume: AskResume): AppAp
  * time again once they answer or Stop: the one after now, the times that came in the wait past (routines.ts pastWait).
  */
 function routinesFollow(asks: AppApproval[]) {
+  // (Each answered one once: the Bops that asked follows those another Bops answered as it reads them, settleAsks.)
+  for (const a of asks) if (a.reply) followed.add(a.id);
   const theirs = asks.filter((a) => a.routineId && a.threadId);
   const bots = new Set(theirs.map((a) => a.botId));
   if (bots.size)
@@ -253,6 +255,19 @@ export async function takeAnswer(threadId: string): Promise<AppApproval | undefi
 
 /** Chat turns resuming here now (chat.ts resumeChat), by request id: each once. */
 const resuming = new Set<string>();
+/** Answered requests whose routine this Bops followed (routinesFollow), by id: each once. Forgotten as they go from the state. */
+const followed = new Set<string>();
+/** Routines' runs this Bops recorded as stopped elsewhere (settleAsks), by thread id: each once. */
+const stoppedRuns = new Set<string>();
+
+/** Forget what's no longer in the state (followed, stoppedRuns), now and then: both only keep a request or a run from being done twice. */
+function forgetGone() {
+  if (followed.size + stoppedRuns.size < 500) return;
+  const asks = new Set((getState().appApprovals ?? []).map((a) => a.id));
+  for (const id of followed) if (!asks.has(id)) followed.delete(id);
+  const threads = new Set(getState().sessions.map((s) => s.id));
+  for (const id of stoppedRuns) if (!threads.has(id)) stoppedRuns.delete(id);
+}
 
 /**
  * This Bops's own requests that were answered (here or on another of the user's Bops): a thread's run is picked up
@@ -260,12 +275,20 @@ const resuming = new Set<string>();
  * resumeChat). One stopped, or whose thread is over anyway, is taken out: nothing waits on it. Runs after every
  * change from elsewhere (store.ts watchArrivals), each time the user's state loads here (settleLoaded), and after a
  * reply or a stop here.
+ *
+ * One of a routine's run answered on another Bops (Bops Cloud for a teammate, in a workspace where everything goes
+ * through the cloud: cloud/members.ts) has its routine followed here, once (routinesFollow: Orgo's copy gets its next
+ * time again), as the Bops that answered would have if it could. One stopped elsewhere whose thread that Bops ended (a
+ * Stop Bops Cloud did, cloud/thread-acts.ts) has the run recorded as failed here, once, as its routine's own end would
+ * (sessions.ts routineEndedElsewhere): nothing else of that run is left to.
  */
 export function settleAsks() {
   const me = stateDevice();
   let threads = false;
+  const follow: AppApproval[] = [];
   for (const a of getState().appApprovals ?? []) {
     if (!a.reply || !mine(a, me) || a.resume?.engine === "held") continue;
+    if (a.routineId && !followed.has(a.id)) follow.push(a);
     if (a.threadId) {
       const t = session(a.threadId);
       if (!t || !live(t) || a.reply.reason === "stopped") {
@@ -278,6 +301,13 @@ export function settleAsks() {
         // Stopped elsewhere while it waited here: over here too, if it isn't yet (the Bops that stopped it ended it).
         const at = a.reply.at;
         if (t && live(t) && a.reply.reason === "stopped") void import("./sessions").then((m) => m.endStopped(t.id, at), () => {});
+        // Stopped, and its thread ended there: a routine's run is recorded as it would be had it ended here.
+        if (t && !live(t) && a.reply.reason === "stopped" && a.routineId && !stoppedRuns.has(t.id)) {
+          stoppedRuns.add(t.id);
+          void import("./sessions")
+            .then((m) => m.routineEndedElsewhere(t.id))
+            .catch((e: Error) => console.warn(`[asks] ${t.id}: ${e.message}`));
+        }
       } else threads = true;
     } else if (a.resume?.engine === "chat" && !resuming.has(a.id)) {
       resuming.add(a.id);
@@ -289,6 +319,8 @@ export function settleAsks() {
         .finally(() => resuming.delete(a.id));
     } else if (!a.resume || a.resume.engine !== "chat") takeOut(a.id);
   }
+  if (follow.length) routinesFollow(follow);
+  forgetGone();
   if (threads) void import("./sessions").then((m) => m.pickUpAnswered(), () => {});
   void takeOutOrphans().catch((e: Error) => console.warn(`[asks] orphans: ${e.message}`));
   void wakeForAnswers().catch((e: Error) => console.warn(`[asks] waking: ${e.message}`));

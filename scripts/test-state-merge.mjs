@@ -11,7 +11,8 @@
 // that runs it (Session.by), with the replies and steps of both and a stop, a move to the Mac or a dismiss
 // asked from elsewhere. A thread, routine or watch kept between us (secret) on either side stays so,
 // whichever side's copy wins: a merge never takes the mark back. A bot's How I work changed on one side only is that side's
-// (an Admin's that Bops Cloud kept never loses to the Mac's older words), and so is a Preview password only Bops Cloud
+// (an Admin's that Bops Cloud kept never loses to the Mac's older words), as is each other bot field Bops Cloud writes for
+// a teammate (keys, rules, name, effort, where it runs, Just do it, data off, app access), and so is a Preview password only Bops Cloud
 // writes (Workspace.previewPasswords), which the Mac's next save carries as it was. Anything else changed on both sides
 // still keeps the merging side's copy whole.
 //
@@ -173,6 +174,42 @@ check("a bot's How I work changed on one side only is that side's, whatever else
   // Changed on both sides (the owner's own Save here): this side's, as before.
   const saved = { ...here, persona: "Owner's newer words" };
   assert.deepEqual(M.merge3({ bots: [was] }, { bots: [saved] }, { bots: [there] }).bots, [saved]);
+});
+
+check("each bot field Bops Cloud writes for a teammate changed on one side only is that side's, field by field: a Mac that only saw the computer change never puts back a key taken away", () => {
+  const was = { id: "max", name: "Max", keys: ["GITHUB", "OPENAI"], permissions: [{ action: "Send an email", resource: "*", effect: "ask" }], effort: "low", runsOn: "auto", autoApprove: false, dataOff: false, access: { a1: "read" }, computerStatus: "ready", computerRam: 4 };
+  // This Mac saw only its computer change (computerStatus, computerRam); Bops Cloud wrote a teammate's change to each field.
+  const here = { ...was, computerStatus: "asleep", computerRam: 8 };
+  const each = {
+    keys: ["GITHUB"],
+    permissions: [...was.permissions, { action: "Call Stripe", resource: "*", effect: "allow" }],
+    name: "Maxine",
+    effort: "high",
+    runsOn: "cloud",
+    autoApprove: true,
+    dataOff: true,
+    access: { a1: "act" },
+  };
+  for (const [k, v] of Object.entries(each)) {
+    const there = { ...was, [k]: v };
+    const got = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [there] }).bots[0];
+    assert.deepEqual(got[k], v, `${k}: the side that changed it`);
+    assert.deepEqual([got.computerStatus, got.computerRam], ["asleep", 8], `${k}: and the Mac's own change too`);
+    assert.deepEqual(M.merge3({ bots: [was] }, { bots: [there] }, { bots: [here] }).bots[0][k], v, `${k}: merged the other way too`);
+    // Taken away there (a field gone): gone here too.
+    const gone = { ...was };
+    delete gone[k];
+    assert.ok(!(k in M.merge3({ bots: [was] }, { bots: [here] }, { bots: [gone] }).bots[0]), `${k}: gone`);
+    // Changed on both sides (to something else each: not a yes or no, which has only one other): this side's, as before.
+    const other = { name: "Mo", keys: ["OPENAI"], access: { a1: "none" }, permissions: [], effort: "medium", runsOn: "mac" };
+    if (k in other) assert.deepEqual(M.merge3({ bots: [was] }, { bots: [{ ...here, [k]: other[k] }] }, { bots: [there] }).bots[0][k], other[k], `${k}: changed on both`);
+  }
+  // All of them at once, with the Mac's own change: every one the cloud's, nothing of the Mac's lost.
+  const all = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [{ ...was, ...each }] }).bots[0];
+  assert.deepEqual(all, { ...here, ...each });
+  // A field Bops Cloud never writes (its computer) still goes by this side's copy whole where both changed the bot.
+  const moved = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [{ ...was, computer: "own", computerId: "c2" }] }).bots[0];
+  assert.deepEqual(moved, here);
 });
 
 /* ---------------- Threads ---------------- */
@@ -461,8 +498,9 @@ check("an older Bops's kept copy never undoes a bot's rename, own computer or ac
   // Changed the same field both ways: the newer one's.
   const named = M.merge3({ bots: [was] }, { bots: [{ ...was, name: "Sammy" }] }, { bots: [cloud] }, OLD).bots[0];
   assert.equal(named.name, "Samantha");
-  // An ordinary merge still keeps this Mac's copy whole.
-  assert.deepEqual(M.merge3({ bots: [was] }, { bots: [kept] }, { bots: [cloud] }, { device: MAC }).bots, [kept]);
+  // An ordinary merge keeps this Mac's copy, but for the fields Bops Cloud writes for a teammate that only the other side
+  // changed (its name and app access here: state-merge.ts keepBotFields); its own computer stays this Mac's.
+  assert.deepEqual(M.merge3({ bots: [was] }, { bots: [kept] }, { bots: [cloud] }, { device: MAC }).bots, [{ ...kept, name: "Samantha", access: { ca_gmail: "act" } }]);
 });
 
 check("an older Bops's kept copy never gives a routine its clock: an edit made since runs at its time", () => {

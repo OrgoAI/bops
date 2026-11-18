@@ -216,9 +216,12 @@ export function foldChat(chatId: string, botId?: string): Promise<void> {
  * Compact (the chat's menu): every message of chat `chatId` up to now folded into its summary, and a line in the
  * chat ("Compacted") where its bots read it afresh from. Not while a bot is answering there, nor with nothing new
  * since the last one (lib/chat-summary.ts compactBlocked). `member`: who pressed it, when it wasn't the owner (a
- * member with Write on every bot in it: member-acts.ts), named on the line. Its words for the window when it didn't go.
+ * member with Write on every bot in it: member-acts.ts), named on the line. `line` false: no line of its own, on a bot's
+ * computer compacting as a job someone asked for in a workspace where everything goes through the cloud (runner-chat.ts
+ * runnerJob): Bops Cloud writes that line, stamped as theirs, which only it may (cloud/turns.ts finish). Its words for
+ * the window when it didn't go.
  */
-export async function compactChat(chatId: string, member?: MemberSaid): Promise<{ ok: true } | { ok: false; error: string; status: number }> {
+export async function compactChat(chatId: string, member?: MemberSaid, opts: { line?: boolean } = {}): Promise<{ ok: true } | { ok: false; error: string; status: number }> {
   const c = chat(chatId);
   if (!c) return { ok: false, error: "No such chat.", status: 404 };
   const blocked = compactBlocked(c, getState().messages, (id) => bot(id)?.name);
@@ -232,7 +235,7 @@ export async function compactChat(chatId: string, member?: MemberSaid): Promise<
     console.warn(`[chat-summary] compact ${chatId}: ${(e as Error)?.message ?? e}`);
     return { ok: false, error: noteOutOfCredit(e) ? outOfCreditWords() : "That didn't compact. Try again.", status: 502 };
   }
-  addMessage({ chatId, role: "system", text: member ? `Compacted by ${member.name}` : "Compacted", compacted: true, ...(member ? { member } : {}) });
+  if (opts.line !== false) addMessage({ chatId, role: "system", text: member ? `Compacted by ${member.name}` : "Compacted", compacted: true, ...(member ? { member } : {}) });
   return { ok: true };
 }
 
