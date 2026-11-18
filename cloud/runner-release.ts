@@ -127,10 +127,17 @@ export function forgetReleases(): void {
   newest = null;
 }
 
+type ReleaseRow = { version: string; build_id: string; state_level: number; released_at: Date | null };
+/** The releases kept (bops.runner_releases), all or that of `version`, as Bops Cloud knows them; never one that isn't well formed. */
+async function keptReleases(version?: string): Promise<KnownRelease[]> {
+  const sql = "SELECT version, build_id, state_level, released_at FROM bops.runner_releases";
+  const r = version === undefined ? await query<ReleaseRow>(sql) : await query<ReleaseRow>(`${sql} WHERE version = $1`, [version]);
+  return r.rows.filter((x) => VERSION.test(x.version) && BUILD.test(x.build_id)).map((x) => ({ version: x.version, buildId: x.build_id, stateLevel: x.state_level, releasedAt: x.released_at?.getTime() ?? null }));
+}
+
 /** Every release kept, known again (at start: one read before a restart still counts). */
 export async function loadReleases(): Promise<void> {
-  const r = await query<{ version: string; build_id: string; state_level: number; released_at: Date | null }>("SELECT version, build_id, state_level, released_at FROM bops.runner_releases");
-  for (const x of r.rows) if (VERSION.test(x.version) && BUILD.test(x.build_id)) rememberRelease({ version: x.version, buildId: x.build_id, stateLevel: x.state_level, releasedAt: x.released_at?.getTime() ?? null });
+  for (const r of await keptReleases()) rememberRelease(r);
 }
 
 /** The text at `url`, or why not: 200 only (a redirect is never followed), at most RELEASE_MAX_TEXT, within READ_MS. */
@@ -179,9 +186,11 @@ const say = (why: string) => {
 
 /**
  * Read latest.json once (`url`: BOPS_RUNNER_RELEASES), and keep the release it says when it's signed (verifyRelease,
- * with `keys`: RELEASE_KEYS but in tests): written to bops.runner_releases (a build signed again for the same version
- * replaces the one before), and known at once. One whose version Bops Cloud hadn't seen and that is the newest now
- * calls `nudge` once (turns.ts nudgeUpdates). The release read (null: none, or not signed). Never throws.
+ * with `keys`: RELEASE_KEYS but in tests): written to bops.runner_releases, and known at once. A version signed again
+ * replaces the one kept only when it was signed later (`released`): an older signing of it served again (a stale cache,
+ * or someone replaying a file they kept, whose signature never expires) changes nothing, here or in the table, and the
+ * one kept is known instead. One whose version Bops Cloud hadn't seen and that is the newest now calls `nudge` once
+ * (turns.ts nudgeUpdates). The release now known for the version read (null: none, or not signed). Never throws.
  */
 export async function checkReleases(o: { url?: string; keys?: Readonly<Record<string, string>>; nudge?: () => void } = {}): Promise<KnownRelease | null> {
   const url = o.url ?? config.runnerReleases();
@@ -195,26 +204,33 @@ export async function checkReleases(o: { url?: string; keys?: Readonly<Record<st
     say("isn't a signed release");
     return null;
   }
-  say("");
   const was = known.get(r.version);
   const release: KnownRelease = { version: r.version, buildId: r.buildId, stateLevel: r.stateLevel, releasedAt: Date.parse(r.released) };
-  if (was && was.buildId === release.buildId && was.stateLevel === release.stateLevel && was.releasedAt === release.releasedAt) return was;
+  const older = !!was && was.releasedAt !== null && release.releasedAt! <= was.releasedAt;
+  const same = !!was && was.buildId === release.buildId && was.stateLevel === release.stateLevel && was.releasedAt === release.releasedAt;
+  say(older && !same ? `is ${r.version} (${r.buildId}) signed ${r.released}, no later than the one kept (${was!.buildId})` : "");
+  if (was && (same || older)) return was;
+  let kept: KnownRelease | undefined;
   try {
-    await query(
-      `INSERT INTO bops.runner_releases (version, build_id, state_level, released_at) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (version) DO UPDATE SET build_id = $2, state_level = $3, released_at = $4`,
+    const wrote = await query(
+      `INSERT INTO bops.runner_releases AS k (version, build_id, state_level, released_at) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (version) DO UPDATE SET build_id = EXCLUDED.build_id, state_level = EXCLUDED.state_level, released_at = EXCLUDED.released_at
+       WHERE k.released_at IS NULL OR k.released_at < EXCLUDED.released_at`,
       [release.version, release.buildId, release.stateLevel, new Date(release.releasedAt!)],
     );
+    // Not written: the table has a signing of it as late or later (kept by another Bops Cloud, or before a restart whose read failed).
+    kept = wrote.rowCount ? release : (await keptReleases(release.version))[0];
   } catch (e) {
     console.warn(`[releases] keeping ${release.version}: ${(e as Error).message}`);
     return null;
   }
-  rememberRelease(release);
-  if (!was && newest === release) {
-    console.info(`[releases] ${release.version} (${release.buildId}) is out`);
+  if (!kept) return null;
+  rememberRelease(kept);
+  if (!was && newest === kept) {
+    console.info(`[releases] ${kept.version} (${kept.buildId}) is out`);
     o.nudge?.();
   }
-  return release;
+  return kept;
 }
 
 /**

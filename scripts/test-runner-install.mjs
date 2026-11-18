@@ -161,10 +161,17 @@ function freshOrgo() {
   });
 }
 const pc = (c) => orgo.computers[c];
+/** Every reason a runner was marked failed with here (a record written through the store, not one a test put there). */
+const markedFailed = new Set();
 globalThis.__fake = {
   store: {
     getState: () => state,
-    update: (fn) => fn(state),
+    update: (fn) => {
+      const before = new Map(Object.entries(state.runners ?? {}));
+      const out = fn(state);
+      for (const [id, x] of Object.entries(state.runners ?? {})) if (x !== before.get(id) && x?.status === "failed") markedFailed.add(x.error);
+      return out;
+    },
     flushState: async () => true,
     stateDevice: () => ME,
     stateInCloud: () => true,
@@ -293,6 +300,8 @@ globalThis.fetch = async (url, init = {}) => {
 
 const I = await import(`${root}/lib/server/runner-install.ts`);
 const T = I.runnerInstallForTests;
+const P = await import(`${root}/cloud/protocol.ts`);
+const { RUNNER_NO_SIGN_IN } = await import(`${root}/lib/types.ts`);
 
 function reset() {
   fresh();
@@ -490,6 +499,24 @@ await check("versions: a newer one replaces it, never an older one; the same ver
   await I.lookAtRunners();
   assert.equal(runner().version, "0.0.40", "the one there, kept");
   assert.ok(!bashText().includes("__BOPS_INSTALLED__"));
+});
+
+await check("a newer one there already that listens beyond its computer, or whose computer can't say what it listens on: stopped as well as marked, as one this Mac set up is", async () => {
+  for (const [health, error] of [
+    ["__BOPS_EXPOSED__", P.RUNNER_EXPOSED],
+    ["__BOPS_NO_SS__", P.RUNNER_LISTENS_UNKNOWN],
+  ]) {
+    reset();
+    pc(C1).current = "0.0.40-newer";
+    pc(C1).program = true;
+    orgo.health = health;
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().error], ["failed", error]);
+    assert.ok(orgo.bash.some((b) => /^supervisorctl stop bops-runner/.test(b.command)), `stopped (${health})`);
+    assert.equal(pc(C1).program, false);
+    assert.ok(!bashText().includes("__BOPS_INSTALLED__"), "never replaced by this older one");
+  }
+  assert.deepEqual([P.RUNNER_EXPOSED, P.RUNNER_LISTENS_UNKNOWN], ["it listened beyond its own computer", "its computer can't say what it listens on"], "as records hold them");
 });
 
 await check("someone else can use the workspace: no runner, nothing on the computer, and one up is stopped; Orgo's other refusals say why", async () => {
@@ -2044,6 +2071,15 @@ await check("the probe says key=yes only for a line that sets a non-empty ORGO_A
   assert.equal(says({ env: "# export ORGO_API_KEY=sk_old\nexport MY_ORGO_API_KEY=sk_x\nexport ORGO_API_KEY_OLD=sk_y\n" }), "key=no\n");
   assert.ok(!ask().includes("sk_"), "never a value");
   rmSync(dir, { recursive: true, force: true });
+});
+
+// Last, after every other check: what Bops Cloud does with each reason (cloud/turns.ts cloudRecord) is word for word.
+await check("every reason a runner was marked failed here is one Bops Cloud marks running again once a runner connects (RUNNER_FAILED_PASSING), or one it leaves as it is for its safety: none it doesn't know", async () => {
+  const safety = [P.RUNNER_FULL_ACCESS, P.RUNNER_OWNER_ONLY, P.RUNNER_EXPOSED, P.RUNNER_LISTENS_UNKNOWN, RUNNER_NO_SIGN_IN];
+  for (const e of safety) assert.ok(!P.RUNNER_FAILED_PASSING.has(e), e);
+  for (const e of safety) assert.ok(markedFailed.has(e), `marked here: ${e}`);
+  assert.deepEqual([...markedFailed].filter((e) => !P.RUNNER_FAILED_PASSING.has(e) && !safety.includes(e)), []);
+  assert.ok([...markedFailed].filter((e) => P.RUNNER_FAILED_PASSING.has(e)).length >= 5, [...markedFailed].join(" | "));
 });
 
 rmSync(scratch, { recursive: true, force: true });

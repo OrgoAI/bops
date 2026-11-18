@@ -166,7 +166,7 @@ test("a redirect is never followed, and an answer that isn't 200 or is too long 
   assert.equal((await query("SELECT 1 FROM bops.runner_releases WHERE version LIKE '70.%'")).rowCount, 0);
 });
 
-test("a new version is kept and known, and every runner is told once; the same again, an older one or another build of it tells nobody", async () => {
+test("a new version is kept and known, and every runner is told once; the same again, an older one or another build of it signed later tells nobody", async () => {
   let nudged = 0;
   const look = (path: string) => checkReleases({ url: `${site.url}${path}`, keys: KEYS, nudge: () => nudged++ });
   serve("/v1.json", signed(releaseOfV(V1)));
@@ -192,11 +192,13 @@ test("a new version is kept and known, and every runner is told once; the same a
   await look("/v1.json");
   assert.equal(nudged, 2);
   assert.equal(latestRelease()?.version, V2);
-  // Another build of a version it knows (signed again): kept in its place, but it's no new version.
-  serve("/v2b.json", signed(releaseOfV(V2, "BuildGhi_3", { stateLevel: 5 })));
+  // Another build of a version it knows, signed again later: kept in its place, but it's no new version.
+  const later = "2026-11-18T21:00:00.000Z";
+  serve("/v2b.json", signed(releaseOfV(V2, "BuildGhi_3", { stateLevel: 5, released: later })));
   await look("/v2b.json");
   assert.equal(nudged, 2);
   assert.equal(releaseOf(V2)?.buildId, "BuildGhi_3");
+  assert.equal(latestRelease()?.buildId, "BuildGhi_3");
   // Read back after a restart: the same releases, the same newest.
   forgetReleases();
   assert.equal(latestRelease(), null);
@@ -204,4 +206,44 @@ test("a new version is kept and known, and every runner is told once; the same a
   assert.equal(latestRelease()?.version, V2);
   assert.equal(releaseOf(V2)?.buildId, "BuildGhi_3");
   assert.equal(releaseOf(V1)?.buildId, "BuildAbc_1");
+});
+
+test("an older signing of a version known, served again (a stale cache, or a file someone kept), never takes the place of the one signed later: in memory, in the table, after a restart, or with nothing known yet", async () => {
+  let nudged = 0;
+  const look = (path: string) => checkReleases({ url: `${site.url}${path}`, keys: KEYS, nudge: () => nudged++ });
+  const kept = async () => (await query<{ build_id: string; released_at: Date }>("SELECT build_id, released_at FROM bops.runner_releases WHERE version = $1", [V2])).rows[0];
+  serve("/old.json", signed(releaseOfV(V2, "BuildDef_2")));
+  serve("/new.json", signed(releaseOfV(V2, "BuildGhi_3", { released: "2026-11-18T21:00:00.000Z" })));
+  serve("/tie.json", signed(releaseOfV(V2, "BuildJkl_4", { released: "2026-11-18T21:00:00.000Z" })));
+  await look("/old.json");
+  await look("/new.json");
+  assert.equal(nudged, 1);
+  const GHI = { version: V2, buildId: "BuildGhi_3", stateLevel: 4, releasedAt: Date.parse("2026-11-18T21:00:00.000Z") };
+  assert.deepEqual(releaseOf(V2), GHI);
+  // The older one served again, then another build signed at the same time: neither replaces it.
+  assert.deepEqual(await look("/old.json"), GHI);
+  assert.deepEqual(await look("/tie.json"), GHI);
+  assert.deepEqual(releaseOf(V2), GHI);
+  assert.deepEqual(latestRelease(), GHI);
+  assert.deepEqual([(await kept()).build_id, (await kept()).released_at.toISOString()], ["BuildGhi_3", "2026-11-18T21:00:00.000Z"]);
+  // After a restart, the same.
+  forgetReleases();
+  await loadReleases();
+  assert.deepEqual(releaseOf(V2), GHI);
+  // Nothing known here (another Bops Cloud kept it, or the read at start failed): the older one read now isn't written
+  // over the table's, and the table's is known instead; the same release read again is known too.
+  forgetReleases();
+  assert.deepEqual(await look("/old.json"), GHI);
+  assert.deepEqual(releaseOf(V2), GHI);
+  assert.equal((await kept()).build_id, "BuildGhi_3");
+  forgetReleases();
+  assert.deepEqual(await look("/new.json"), GHI);
+  assert.deepEqual(latestRelease(), GHI);
+  // A row with no time it was signed (kept before that was known) is replaced by any signed one.
+  await query("UPDATE bops.runner_releases SET released_at = NULL WHERE version = $1", [V2]);
+  forgetReleases();
+  await loadReleases();
+  assert.equal(releaseOf(V2)?.releasedAt, null);
+  assert.equal((await look("/old.json"))?.buildId, "BuildDef_2");
+  assert.equal((await kept()).build_id, "BuildDef_2");
 });

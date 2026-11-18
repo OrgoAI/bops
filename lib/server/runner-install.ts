@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { RUNNER_FULL_ACCESS, RUNNER_OWNER_ONLY } from "@/cloud/protocol";
+import { RUNNER_EXPOSED, RUNNER_FULL_ACCESS, RUNNER_LISTENS_UNKNOWN, RUNNER_OWNER_ONLY } from "@/cloud/protocol";
 import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, workspaceOf, type AppState, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { forgetGoneMembers, othersCanUse } from "./members";
@@ -629,8 +629,10 @@ async function install(id: string, bundle: Bundle, key: string, me: string, shar
   if (there && compareVersions(there[1], bundle.version) > 0) {
     const up = await health(id);
     const x = runnerOf(id);
-    if (up.up === "ok") mark(id, { status: "running", version: there[1], buildId: there[2], by: x?.by ?? me, at: Date.now(), ...keyOf(x), ...authOf(up.auth) });
-    else failed(id, UNHEALTHY[up.up], bundle, me);
+    if (up.up === "ok") return void mark(id, { status: "running", version: there[1], buildId: there[2], by: x?.by ?? me, at: Date.now(), ...keyOf(x), ...authOf(up.auth) });
+    // One that answered beyond its computer, or whose computer can't say what it listens on, is stopped too, as below.
+    if (up.up === "exposed" || up.up === "unknown") await orgo.bash(id, "supervisorctl stop bops-runner >/dev/null 2>&1; true", 30).catch(() => null);
+    failed(id, UNHEALTHY[up.up], bundle, me);
     return;
   }
   // Its key: the computer's own ORGO_API_KEY. One it has (made with it from a template that asks for it,
@@ -700,8 +702,8 @@ const UNHEALTHY = {
   down: "it didn't answer on its computer",
   nostate: RUNNER_NO_SIGN_IN,
   noidentity: RUNNER_NO_SIGN_IN,
-  exposed: "it listened beyond its own computer",
-  unknown: "its computer can't say what it listens on",
+  exposed: RUNNER_EXPOSED,
+  unknown: RUNNER_LISTENS_UNKNOWN,
   lost: "its computer didn't answer",
 } as const;
 

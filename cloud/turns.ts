@@ -32,8 +32,8 @@ import {
   MEMBER_MAX_TEXT,
   MESSAGE_TAKEN,
   RUNNER_BUILD_HEADER,
+  RUNNER_FAILED_PASSING,
   RUNNER_FULL_ACCESS,
-  RUNNER_OWNER_ONLY,
   STORED_ACT_MS,
   TURN_LEASE_MS,
   type ChatSendAnswer,
@@ -1685,9 +1685,16 @@ export type RunnerSaid = { version: string; buildId: string; auth: "identity" | 
  * - none: running, by CLOUD_BY, with `shared` where a workspace whose bots work there has members (memberAccess entries);
  * - running but older, or (one Bops Cloud wrote) the same version with another build: caught up (version, buildId, at,
  *   auth), keeping who set it up, its key and `shared`, and dropping `upgrading` once that's at or below the new version;
- * - failed, but not as someone else can use it or only the owner may (RUNNER_FULL_ACCESS, RUNNER_OWNER_ONLY), and before
- *   this connect: running, by CLOUD_BY, keeping its key and `shared`;
- * - being set up, being stopped, or failed for those two: as it is.
+ * - failed for a reason a runner connecting since outlives (RUNNER_FAILED_PASSING: its computer didn't answer, it stopped
+ *   there, its files didn't get there...), and before this connect: running, by CLOUD_BY, keeping its key and `shared`;
+ * - being set up, being stopped, or failed for any other reason (someone else can use it, only the owner may, it listened
+ *   beyond its computer, it couldn't sign in, or one not named there): as it is.
+ *
+ * Never on a computer someone else can use (a workspace whose bots work there has members, or the record says `shared`)
+ * unless the Mac would keep that runner (lib/server/runner-install.ts sharedRunnerOk): one on its computer's identity
+ * alone (never a key, which its people could read as root there), where every bot on it is of that one workspace and its
+ * chat goes through Bops Cloud (Workspace.chatOn "cloud", or chatAuto while the owner didn't choose the Mac). Any other
+ * is left as it is, and the owner's Mac stops it once it looks.
  *
  * The key is the record's own (any case), else the bot's computer id as the state has it (the runner looks it up so).
  */
@@ -1702,7 +1709,13 @@ export function cloudRecord(blob: Record<string, unknown>, desktop: string, said
   const id = workBotOf(on[0], bots).computerId;
   const key = had ?? (typeof id === "string" && id.toLowerCase() === d ? id : d);
   const wss = new Set(on.map(wsOfBot));
-  const team = list(blob.workspaces).some((w) => wss.has(w.id as string) && isObject(w.memberAccess) && Object.keys(w.memberAccess).length > 0);
+  const spaces = list(blob.workspaces).filter((w) => wss.has(w.id as string));
+  const team = spaces.some((w) => isObject(w.memberAccess) && Object.keys(w.memberAccess).length > 0);
+  if (team || r?.shared === true) {
+    const w = wss.size === 1 ? spaces[0] : undefined;
+    const kept = !!w && (w.chatOn === "cloud" || (w.chatAuto === true && w.chatOn !== "mac"));
+    if (said.auth !== "identity" || !kept) return null;
+  }
   const fresh = (keep: Record<string, unknown> = {}) => ({
     status: "running",
     version: said.version,
@@ -1725,7 +1738,7 @@ export function cloudRecord(blob: Record<string, unknown>, desktop: string, said
     if (r.upgrading !== undefined && (!up || !VERSION.test(up) || !olderThan(said.version, up))) delete record.upgrading;
     return { key, record };
   }
-  if (r.status === "failed" && r.error !== RUNNER_FULL_ACCESS && r.error !== RUNNER_OWNER_ONLY && typeof r.at === "number" && r.at < at) return { key, record: fresh(r) };
+  if (r.status === "failed" && typeof r.error === "string" && RUNNER_FAILED_PASSING.has(r.error) && typeof r.at === "number" && r.at < at) return { key, record: fresh(r) };
   return null;
 }
 

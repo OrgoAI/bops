@@ -1612,6 +1612,38 @@ export const RUNNER_HOLD = "/var/run/bops/upgrading";
  */
 export const RUNNER_FULL_ACCESS = "someone else can use this workspace";
 export const RUNNER_OWNER_ONLY = "only the workspace's owner can set a runner up there";
+/**
+ * Why a runner was stopped as it came up (lib/server/runner-install.ts, its health check): it listened beyond its own
+ * computer, or its computer couldn't say what it listens on. Bops Cloud leaves such a record as it is too, whatever
+ * connects after it (supervisord starts that runner again when its computer restarts): only the owner's Mac sets one up again.
+ */
+export const RUNNER_EXPOSED = "it listened beyond its own computer";
+export const RUNNER_LISTENS_UNKNOWN = "its computer can't say what it listens on";
+/**
+ * The failures (RunnerState.error, word for word as lib/server/runner-install.ts writes them) that a runner connecting
+ * since outlives: its computer didn't answer, it stopped there or didn't answer there, Orgo or its files didn't get it set
+ * up. The only ones Bops Cloud marks running again once a runner of a signed release connects after them (cloud/turns.ts
+ * cloudRecord). Every other stays as it is until the owner's Mac looks again: the four above, a runner that couldn't sign
+ * in (lib/types.ts RUNNER_NO_SIGN_IN), and any failure not named here (scripts/test-runner-install.mjs checks that each
+ * one the Mac writes is one or the other).
+ */
+export const RUNNER_FAILED_PASSING: ReadonlySet<string> = new Set([
+  "it stopped on its computer",
+  "its computer didn't answer",
+  "it didn't answer on its computer",
+  "its computer can't keep a runner going (no supervisord)",
+  "Orgo or Bops Cloud runs on this Mac, which the computer can't reach",
+  "no server bundle",
+  "the server bundle is damaged",
+  "Orgo didn't take its files",
+  "its files didn't upload",
+  "its files didn't reach its computer",
+  "its files weren't on its computer",
+  "its files couldn't be put in place",
+  "Orgo can't set up a runner on it yet",
+  "a runner needs a Linux computer",
+  "Orgo didn't give its computer its key",
+]);
 
 /* ---------------- Runners that set up and update themselves (CLOUD_SELF_MIN_VERSION) ---------------- */
 
