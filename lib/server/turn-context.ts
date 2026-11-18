@@ -26,6 +26,8 @@ export type TurnContext = {
   humanAt: number;
   acting: boolean;
   cancelled: boolean;
+  /** A job's turn (runner-chat.ts runJob): Bops Cloud holds its app's lease for it (app-lease.ts holdApp takes none). */
+  job?: boolean;
   /** Told once, the first time it does something that can't be done twice. */
   onActing?: () => void;
 };

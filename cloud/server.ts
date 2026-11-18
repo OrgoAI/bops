@@ -22,6 +22,7 @@ import * as pages from "./pages.ts";
 import * as plans from "./plans.ts";
 import * as previewPasswords from "./preview-passwords.ts";
 import * as appsView from "./apps-view.ts";
+import * as appLease from "./app-lease.ts";
 import * as proxy from "./proxy.ts";
 import * as reconcile from "./reconcile.ts";
 import * as guard from "./turn-guard.ts";
@@ -36,7 +37,7 @@ import * as verify from "./verify.ts";
 /**
  * Bops Cloud. One process serves every user: each module owns its routes (session.ts, proxy.ts,
  * verify.ts, lines.ts, handles.ts, plans.ts, ops.ts, tunnel.ts, hooks.ts, slack.ts, state.ts, pages.ts,
- * usage.ts, agent.ts, live.ts, members.ts, turns.ts, delete-user.ts, browser.ts, preview-passwords.ts, apps-view.ts) and this file only puts them together. See README.md.
+ * usage.ts, agent.ts, live.ts, members.ts, turns.ts, delete-user.ts, browser.ts, preview-passwords.ts, apps-view.ts, app-lease.ts) and this file only puts them together. See README.md.
  */
 
 const health: Route = {
@@ -78,6 +79,7 @@ export const routes = (): Route[] => [
   ...browser.routes,
   ...previewPasswords.routes,
   ...appsView.routes,
+  ...appLease.routes,
 ];
 export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades, ...browser.upgrades];
 
