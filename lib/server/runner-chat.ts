@@ -281,10 +281,14 @@ async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } 
 /** The most tapbacks a turn's end carries (cloud/turns.ts MAX_REACTS). */
 const MAX_REACTS = 8;
 
-/** The OK request a chat turn just paused for: the one asked on this turn (AskResume.cloudTurn), unanswered, the newest. */
+/**
+ * The OK request a chat turn just paused for: the one asked on this turn (AskResume.cloudTurn) by its bot (a group's:
+ * any of its bots), unanswered, the newest.
+ */
 function askOf(ctx: TurnContext): AppApproval | undefined {
+  const bots = ctx.botIds ?? [ctx.botId];
   return [...(getState().appApprovals ?? [])]
-    .filter((a) => a.chatId === ctx.chatId && a.botId === ctx.botId && a.resume?.engine === "chat" && a.resume.cloudTurn === ctx.id && !a.reply)
+    .filter((a) => a.chatId === ctx.chatId && bots.includes(a.botId) && a.resume?.engine === "chat" && a.resume.cloudTurn === ctx.id && !a.reply)
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))[0];
 }
 
@@ -428,7 +432,10 @@ async function resumeMarked<T extends { paused?: boolean }>(a: AppApproval, id: 
     console.warn(`[runner-chat] ${id}: not going on from ${a.id} (${r.status || "no answer"})`);
     return { paused: false } as T;
   }
-  const ctx: TurnContext = { id, chatId: a.chatId!, botId: a.botId, offsetMs: r.body.now - Date.now(), humanAt: r.body.humanAt, acting: true, cancelled: false };
+  // A group's (only a group's turn runs in a group chat here): its bots' tapbacks go with its end, as they would have.
+  const c = getState().chats.find((x) => x.id === a.chatId);
+  const botIds = c?.kind === "group" ? c.botIds : undefined;
+  const ctx: TurnContext = { id, chatId: a.chatId!, botId: a.botId, ...(botIds ? { botIds } : {}), offsetMs: r.body.now - Date.now(), humanAt: r.body.humanAt, acting: true, cancelled: false };
   let out: T | undefined;
   await asTurn(ctx, async () => (out = await go()));
   return out ?? ({ paused: false } as T);

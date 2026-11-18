@@ -1,5 +1,6 @@
 import "server-only";
 import { cleanChange } from "@/cloud/change-routes";
+import { deviceIdOf } from "@/cloud/device";
 import { cleanMemberFiles, isAppAct, isGithubAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
@@ -274,7 +275,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
       const why = askOwnersOnly(a, a.threadId ? session(a.threadId) : undefined, me);
       if (why === "logins") return "the owner's apps or keys";
       if (why === "mac") return "on the owner's Mac";
-      if (!computer && (a.threadId ? onComputer(a.threadId) : hasComputer(a.botId))) return "no computer";
+      if (!computer && (a.threadId ? onComputer(a.threadId) : hasComputer(a.botId) || askedOnComputer(a.askedBy))) return "no computer";
       return apps || !ofApp(a.threadId) ? null : "an app's ask";
     }
   }
@@ -432,6 +433,18 @@ async function keyEvent(wsId: string, act: Extract<MemberAct, { act: "key" }>, w
 function hasComputer(botId: string): boolean {
   const b = bot(botId);
   return !!b && b.runsOn !== "mac" && !!workBot(b, getState().bots).computerId;
+}
+
+/**
+ * Whether an ask was made on a bot's computer (AppApproval.askedBy is its runner's device): the work it lets go on runs
+ * there, as a bot's set to work on the Mac does where everything goes through the cloud.
+ */
+function askedOnComputer(askedBy: string | undefined): boolean {
+  const s = getState();
+  const user = s.account?.user.id;
+  if (!askedBy || !user) return false;
+  const ids = [...Object.keys(s.runners ?? {}), ...s.bots.map((b) => b.computerId)];
+  return ids.some((id) => typeof id === "string" && !!id && (deviceIdOf(user, id) === askedBy || deviceIdOf(user, id.toLowerCase()) === askedBy));
 }
 
 /** Whether a chat's answer would use a bot's computer (any of its bots has one). */

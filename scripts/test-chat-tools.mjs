@@ -2761,6 +2761,47 @@ await check("on a computer's runner, a group whose bots all work on this compute
   }
 });
 
+await check("on a computer's runner, a group's bot that pauses for an OK ends the exchange there, paused: the turn holds that one OK (asked on it), and no other bot answers meanwhile", async () => {
+  const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
+  const gid = "chat_group_pause";
+  const T = Date.now() + 125_000;
+  const was = S.getState().bots.find((x) => x.id === "boppy").computerId;
+  S.update((st) => {
+    st.bots.find((x) => x.id === "boppy").computerId = "comp_here";
+    st.chats.push({ id: gid, kind: "group", botIds: ["boppy", "max"], typing: [], title: "Here" });
+    st.messages.push({ id: "msg_grp_mail", chatId: gid, role: "user", text: "both of you: email Jordan the plan", at: T });
+  });
+  process.env.TYPESAFE_API_KEY = "ts-test-group-pause";
+  process.env.BOPS_RUNNER_COMPUTER = "COMP_HERE";
+  const choice = (c) => ({ type: "choice", choice: c, confidence: 1, probabilities: { [c]: 1 } });
+  const ctx = { id: "turn_grp_mail", chatId: gid, botId: "boppy", botIds: ["boppy", "max"], offsetMs: 0, humanAt: T, acting: false, cancelled: false };
+  const n = asked.length;
+  try {
+    // Both answer, Boppy first; Boppy's email asks for an OK.
+    jev.answer = (b) => (b.questions.need ? { need: choice("words"), reaction: choice("like"), boppy: { type: "noul", noul: 0.95 }, max: { type: "noul", noul: 0.9 } } : {});
+    answers.push(calling(toolCall("send_email", { to: ["jordan@acme.example"], cc: null, subject: "The plan", text: "Here's the plan.\n\nBoppy" })), reply("Max here, on it."));
+    const out = await runInTurn(ctx, () => Chat.answerMessage(gid, "msg_grp_mail"));
+    assert.deepEqual(out, { text: null, paused: true }, "paused, so the runner says so (never done)");
+    assert.equal(asked.length - n, 1, "Max never asked meanwhile");
+    assert.ok(!S.getState().messages.some((m) => m.chatId === gid && m.botId === "max" && m.role === "bot"));
+    const ask = (S.getState().appApprovals ?? []).find((a) => a.chatId === gid && !a.reply);
+    assert.deepEqual([ask?.botId, ask?.resume?.engine, ask?.resume?.cloudTurn], ["boppy", "chat", "turn_grp_mail"]);
+  } finally {
+    jev.answer = null;
+    answers.length = 0;
+    delete process.env.TYPESAFE_API_KEY;
+    delete process.env.BOPS_RUNNER_COMPUTER;
+    S.update((st) => {
+      const b = st.bots.find((x) => x.id === "boppy");
+      if (was === undefined) delete b.computerId;
+      else b.computerId = was;
+      st.chats = st.chats.filter((c) => c.id !== gid);
+      st.messages = st.messages.filter((x) => x.chatId !== gid);
+      st.appApprovals = (st.appApprovals ?? []).filter((a) => a.chatId !== gid);
+    });
+  }
+});
+
 await check("on a computer's runner, a bot set to work on the Mac answers there: it's told work on the Mac isn't here while the workspace runs in the cloud, and a task it means for the Mac starts on its computer", async () => {
   const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
   const T = Date.now() + 130_000;

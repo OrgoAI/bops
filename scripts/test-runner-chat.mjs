@@ -430,6 +430,39 @@ await check("a turn paused for an OK says so with its request, which carries the
   assert.deepEqual([plain, sent.length], [undefined, 0]);
 });
 
+await check("a group's turn paused for an OK by any of its bots (not only the one it names) says so with that request, and goes on as the group's turn from the answer", async () => {
+  reset();
+  const T = Date.now();
+  state.chats = [{ id: "team", kind: "group", botIds: ["max", "dana"] }];
+  state.messages.push({ id: "mg2", chatId: "team", role: "user", text: "book it", at: T });
+  answers.set("claim", { status: 200, body: { ok: true, now: Date.now(), turn: { id: "tg2", messageId: "mg2", chatId: "team", botId: "max", humanAt: T, seq: 1, group: true } } });
+  R.runnerChatForTests({
+    identity: async () => "same",
+    answer: async () => {
+      // Dana's turn in the group asked (the turn names Max).
+      state.appApprovals.push({ id: "ask-dana", botId: "dana", chatId: "team", at: Date.now(), resume: { engine: "chat", cloudTurn: TC.currentTurn().id } });
+      return { text: null, paused: true };
+    },
+  });
+  await R.answerTurn({ id: "tg2", messageId: "mg2", chatId: "team", botId: "max", seq: 1 });
+  assert.deepEqual(sent.at(-1).body, { state: "paused", approvalId: "ask-dana" }, "never done: Bops Cloud's resume takes it");
+  // Allowed: it goes on as the group's turn (its bots' rows the turn's).
+  sent.length = 0;
+  answers.set("resume", { status: 200, body: { ok: true, now: Date.now(), humanAt: T } });
+  let inTurn;
+  await R.resumeAsTurn({ id: "ask-dana", botId: "dana", chatId: "team", resume: { engine: "chat", cloudTurn: "tg2" } }, async () => {
+    inTurn = TC.currentTurn();
+    state.messages.push(TC.stamp({ id: "gd2", chatId: "team", role: "bot", botId: "dana", text: "Booked.", at: Date.now() }));
+    state.messages.push(TC.stamp({ id: "gm2", chatId: "team", role: "bot", botId: "max", text: "Nice.", at: Date.now() }));
+    return { text: "Booked." };
+  });
+  assert.deepEqual([inTurn?.id, inTurn?.botId, inTurn?.botIds], ["tg2", "dana", ["max", "dana"]]);
+  assert.deepEqual(["gd2", "gm2"].map((id) => state.messages.find((m) => m.id === id).turn), ["tg2", "tg2"]);
+  assert.deepEqual(paths(), ["resume", "done"]);
+  assert.deepEqual(sent.at(-1).body, { state: "done" });
+  state.chats = [];
+});
+
 await check("a paused turn Bops Cloud ended meanwhile (its member's access taken away, past its day), or that it never answers about, never runs the approved action", async () => {
   reset();
   R.runnerChatForTests({ identity: async () => "same", retryMs: [1, 1] });

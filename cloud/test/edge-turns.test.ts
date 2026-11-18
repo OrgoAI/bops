@@ -3,13 +3,13 @@ import { createHmac, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { after, before, test } from "node:test";
 import { clearAuthCache } from "../auth.ts";
-import { closeDb, query } from "../db.ts";
+import { closeDb, db, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
 import { CLOUD_ALL_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
 import { howIWork } from "../style.ts";
-import { APP_JOB_DEADLINE_MS, closeRunners, JOB_OLD_RUNNER, jobDeadline, resetTurns, runnerVersionOf, sweepTurns, takeAppJob, turnById, TURN_DEADLINE_MS, turnTiming } from "../turns.ts";
+import { APP_JOB_DEADLINE_MS, closeRunners, JOB_OLD_RUNNER, jobDeadline, noteTrouble, resetTurns, runnerVersionOf, sweepTurns, takeAppJob, turnById, TURN_DEADLINE_MS, turnTiming } from "../turns.ts";
 import { connectMac, dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
@@ -1453,5 +1453,137 @@ test("the owner's send: with all, a group, a bot set to work on the Mac and a bo
     await query("UPDATE bops.cloud_accounts SET app_version = '0.0.53' WHERE user_id = $1", [s.owner]);
     assert.deepEqual(await code(await sendAs(s.owner, "team", { key: "own-all-team02", text: "again", all: true })), [409, "chat_not_in_cloud"]);
     assert.deepEqual(await pendingFor(s.owner), []);
+  });
+});
+
+/** A member's chat message (Wren's, at Write on Max, Dana and Zed): its turn, if one is owed, and its message id. */
+const said = async (s: { writer: string; project: string }, key: string, chatId: string, text = "hi") =>
+  (await (await act(s.writer, s.project, key, { act: "chat", chatId, text })).json()) as { turn?: string; messageId: string };
+const claimOf = async (owner: string, desktop: string, turn: string) => {
+  const r = await newRunner(owner, desktop, `/v1/runner/turns/${turn}/claim`, {});
+  const t = await turnById(owner, turn);
+  return [r.status, t?.state, t?.note];
+};
+const MOVED_ZED = "Zed moved to another computer before it could answer. Send it again.";
+
+test("a group's turn with a bot set to work on the Mac is claimed only while everything still goes through the cloud, as that bot's own turn is: the switch turned off, or the owner's last Mac older, and both are refused, the chat naming that bot", async () => {
+  await inCloudAll(async () => {
+    const s = await setupAll();
+    await stateChanges(s.owner, (st) => void st.chats.push({ id: "mixed", kind: "group", botIds: ["max", "zed"], workspaceId: "ws_acme" }));
+    // In the cloud: claimed.
+    const a = await said(s, "key-mix-00001", "mixed");
+    assert.equal((await turnById(s.owner, a.turn!))?.isGroup, true);
+    assert.deepEqual(await claimOf(s.owner, s.desktop, a.turn!), [200, "claimed", null]);
+    assert.equal((await newRunner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/done`, { state: "done" })).status, 200);
+    for (const off of ["switch", "older"] as const) {
+      const g = await said(s, `key-mix-g-${off}`, "mixed");
+      const z = await said(s, `key-mix-z-${off}`, "bot:zed");
+      assert.ok(g.turn && z.turn, off);
+      if (off === "switch") assert.equal((await fetch(`${cloud.url}/v1/chat-routing`, { method: "POST", headers: own(s.owner), body: JSON.stringify({ wsId: "ws_acme", mode: "mac" }) })).status, 200);
+      else await query("UPDATE bops.cloud_accounts SET app_version = '0.0.53' WHERE user_id = $1", [s.owner]);
+      for (const t of [g, z]) {
+        assert.deepEqual(await claimOf(s.owner, s.desktop, t.turn!), [410, "failed", "moved"], `${off}: ${t.turn}`);
+        assert.equal(await noteOf(s.owner, `${t.messageId}_note`), MOVED_ZED);
+      }
+      // Back as it was, for the next.
+      if (off === "switch") assert.equal((await fetch(`${cloud.url}/v1/chat-routing`, { method: "POST", headers: own(s.owner), body: JSON.stringify({ wsId: "ws_acme", mode: "cloud" }) })).status, 200);
+    }
+  });
+});
+
+test("a group's turn refused at claim as the group is split now, or a bot of it has no computer, says that (naming that bot); a bot moved says it moved", async () => {
+  await inCloudAll(async () => {
+    const s = await setupAll();
+    const dana = (more: Record<string, unknown>) => stateChanges(s.owner, (st) => void Object.assign(st.bots.find((b) => b.id === "dana")!, more));
+    // Dana on a computer of her own before the claim: split.
+    const a = await said(s, "key-grp-split1", "team");
+    await dana({ computer: "own", computerId: randomUUID() });
+    assert.deepEqual(await claimOf(s.owner, s.desktop, a.turn!), [410, "failed", "groupSplit"]);
+    assert.equal(await noteOf(s.owner, `${a.messageId}_note`), "A group's bots work on different computers, so that group can't answer in the cloud yet.");
+    // Dana with no computer at all: named, not Max.
+    await dana({ computer: undefined, computerId: undefined });
+    const b = await said(s, "key-grp-nocom1", "team");
+    assert.ok(b.turn);
+    await dana({ computer: "own", computerId: undefined });
+    assert.deepEqual(await claimOf(s.owner, s.desktop, b.turn!), [410, "failed", "groupNoComputer"]);
+    assert.equal(await noteOf(s.owner, `${b.messageId}_note`), "Dana has no computer, so Dana can't answer in the cloud. Give Dana a computer in Dana's settings.");
+    // The whole group on another computer: moved, as before.
+    await dana({ computer: undefined, computerId: undefined });
+    const c = await said(s, "key-grp-moved1", "team");
+    assert.ok(c.turn);
+    await stateChanges(s.owner, (st) => void (st.bots.find((x) => x.id === "max")!.computerId = randomUUID()));
+    assert.deepEqual(await claimOf(s.owner, s.desktop, c.turn!), [410, "failed", "moved"]);
+    assert.equal(await noteOf(s.owner, `${c.messageId}_note`), "Max moved to another computer before it could answer. Send it again.");
+  });
+});
+
+test("a teammate's OK for a chat's ask a bot set to work on the Mac made on its own computer (everything through the cloud): answered by Bops Cloud with the owner's Mac shut, and only with Use its computer; an older owner's waits for the Mac as before", async () => {
+  await inCloudAll(async () => {
+    const s = await setupAll();
+    const ask = (id: string) => ({ id, botId: "zed", chatId: "bot:zed", action: "Run a command", kind: "brain", at: 1, askedBy: s.device, resume: { engine: "chat", cloudTurn: `turn_${id}` } });
+    await ownerChanges(s.owner, (st) => {
+      (st as unknown as { appApprovals: unknown[] }).appApprovals = [ask("ask-zed1"), ask("ask-zed2")];
+      Object.assign(st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess![`${s.noUse}@example.com`].bots as Record<string, string>, { zed: "write" });
+    });
+    // Without Use its computer: refused, as for a bot with a computer of its own.
+    const r = await act(s.noUse, s.project, "key-zed-ok-nc1", { act: "answer", askId: "ask-zed1", reply: "once" });
+    assert.deepEqual([r.status, ((await r.json()) as { code: string }).code], [403, "member_no_computer"]);
+    // With it: written now, nothing for the Mac.
+    const ok = await act(s.writer, s.project, "key-zed-ok-0001", { act: "answer", askId: "ask-zed1", reply: "once" });
+    assert.deepEqual([ok.status, ((await ok.json()) as { macOn?: boolean }).macOn], [202, true]);
+    const full = (await (await fetch(`${cloud.url}/v1/state`, { headers: own(s.owner) })).json()) as { state: { appApprovals: { id: string; reply?: { reply: string; by: string } }[] } };
+    const reply = full.state.appApprovals.find((a) => a.id === "ask-zed1")?.reply;
+    assert.deepEqual([reply?.reply, reply?.by], ["once", "cloud"]);
+    assert.deepEqual(await pendingFor(s.owner), []);
+    // The owner's last Mac older: Zed answers on the Mac there, so the answer waits for it, as before.
+    await query("UPDATE bops.cloud_accounts SET app_version = '0.0.53' WHERE user_id = $1", [s.owner]);
+    assert.equal((await act(s.writer, s.project, "key-zed-ok-0002", { act: "answer", askId: "ask-zed2", reply: "once" })).status, 202);
+    assert.deepEqual((await pendingFor(s.owner)).map((p) => (p.act as { askId?: string }).askId), ["ask-zed2"]);
+  });
+});
+
+test("trouble said of a computer goes once no bot of the workspace works on it (a new computer given), or once the computer its bot works on now answers; another computer answering leaves it", async () => {
+  await inCloudAll(async () => {
+    const s = await setupAll();
+    const trouble = async () => (await acmeOf(s.owner)).chatTrouble;
+    await noteTrouble(s.owner, s.desktop, "deleted", "max");
+    assert.equal((await until(trouble, "said"))?.note, "deleted");
+    const d2 = randomUUID();
+    const other = await stream("/v1/runner/live", vm(s.owner, d2), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal((await trouble())?.note, "deleted", "a computer it isn't about");
+    other.close();
+    // Max given a new computer (Dana and Zed with him): none on the deleted one now.
+    await stateChanges(s.owner, (st) => void (st.bots.find((b) => b.id === "max")!.computerId = d2.toUpperCase()));
+    await until(async () => (await trouble()) === undefined, "cleared: about no bot's computer");
+    // Said of Dana on Max's computer; Dana then on her own (Max's still in use): it stays until Dana's answers.
+    await noteTrouble(s.owner, d2, "stopped", "dana");
+    assert.equal((await until(async () => ((await trouble())?.botId === "dana" ? await trouble() : undefined), "said of Dana"))?.note, "stopped");
+    const d3 = randomUUID();
+    await stateChanges(s.owner, (st) => void Object.assign(st.bots.find((b) => b.id === "dana")!, { computer: "own", computerId: d3 }));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal((await trouble())?.note, "stopped");
+    const hers = await stream("/v1/runner/live", vm(s.owner, d3), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+    await until(async () => (await trouble()) === undefined, "cleared by Dana's computer answering");
+    hers.close();
+  });
+});
+
+test("a member's message and a claim read the owner's Mac's version on their own transaction: with one connection of the pool free, neither waits for a second", async () => {
+  await inCloudAll(async () => {
+    const s = await setupAll();
+    const held = await Promise.all(Array.from({ length: 9 }, () => db().connect()));
+    try {
+      const at = Date.now();
+      const r = await act(s.writer, s.project, "key-pool-00001", { act: "chat", chatId: "bot:zed", text: "hi Zed" });
+      assert.equal(r.status, 202, await r.clone().text());
+      const z = (await r.json()) as { turn?: string };
+      assert.ok(z.turn);
+      // A bot set to work on the Mac: the claim asks allCloud under the lock.
+      assert.equal((await newRunner(s.owner, s.desktop, `/v1/runner/turns/${z.turn}/claim`, {})).status, 200);
+      assert.ok(Date.now() - at < 8000, "never waited on the pool");
+    } finally {
+      for (const c of held) c.release();
+    }
   });
 });

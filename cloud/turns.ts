@@ -359,9 +359,13 @@ async function newEnoughFor(userId: string, version: string | null | undefined) 
     throw new HttpError(409, `Update Bops to ${CLOUD_CHAT_MIN_VERSION} or newer on every Mac first.`, { code: CHAT_NEEDS_UPDATE });
 }
 
-/** Whether the last Mac of the user's that said its version is at `min` (CLOUD_CHAT_MIN_VERSION) or newer. */
-export async function macNewEnough(userId: string, min = CLOUD_CHAT_MIN_VERSION): Promise<boolean> {
-  const v = (await query<{ v: string | null }>("SELECT app_version AS v FROM bops.cloud_accounts WHERE user_id = $1", [userId])).rows[0]?.v ?? null;
+/**
+ * Whether the last Mac of the user's that said its version is at `min` (CLOUD_CHAT_MIN_VERSION) or newer. `c`: the
+ * transaction to read in, if any (one holding the owner's lock never waits on the pool for a second connection).
+ */
+export async function macNewEnough(userId: string, min = CLOUD_CHAT_MIN_VERSION, c?: pg.PoolClient): Promise<boolean> {
+  const sql = "SELECT app_version AS v FROM bops.cloud_accounts WHERE user_id = $1";
+  const v = (c ? await c.query<{ v: string | null }>(sql, [userId]) : await query<{ v: string | null }>(sql, [userId])).rows[0]?.v ?? null;
   return !!v && !olderThan(v, min);
 }
 
@@ -372,7 +376,7 @@ export async function macNewEnough(userId: string, min = CLOUD_CHAT_MIN_VERSION)
  * seam (resetMembers allCloud).
  */
 export async function allCloud(owner: string, ws: string, c?: pg.PoolClient): Promise<boolean> {
-  return (await routingOf(owner, ws, c)).cloud && (await macNewEnough(owner, CLOUD_ALL_MIN_VERSION));
+  return (await routingOf(owner, ws, c)).cloud && (await macNewEnough(owner, CLOUD_ALL_MIN_VERSION, c));
 }
 
 /* ---------------- The switch, by itself ---------------- */
@@ -450,20 +454,41 @@ export async function noteTrouble(userId: string, desktop: string, note: string,
 }
 
 /**
- * A computer answers again (its runner connected, or a turn there ended done): the trouble said of it goes. One for an
- * older Bops ("old") stays while what connects is still older than CLOUD_ALL_MIN_VERSION (`version`: what it says it
- * runs; none: not known, so it stays). One cheap read when there's none.
+ * Whether trouble `t` said on workspace `ws` goes, on the owner's state `blob`: it names a computer none of the
+ * workspace's bots works on any more (computerFor `cloud`: a bot moved, or given a new computer), so it says nothing
+ * true; or `answered` (a computer whose runner connected, or a turn there ended done) is its computer, or the one its
+ * bot works on now. One for an older Bops ("old") stays while what answered is still older than CLOUD_ALL_MIN_VERSION
+ * (`version`: what it says it runs; none: not known, so it stays).
  */
-export async function clearTrouble(userId: string, desktop: string, version: string | null): Promise<void> {
-  const d = desktop.toLowerCase();
-  const keepOld = !version || olderThan(version, CLOUD_ALL_MIN_VERSION);
-  const where = "user_id = $1 AND trouble_desktop = $2 AND (NOT $3::boolean OR trouble <> 'old')";
-  if (!(await query(`SELECT 1 FROM bops.chat_routing WHERE ${where} LIMIT 1`, [userId, d, keepOld])).rowCount) return;
+export function troubleGoes(blob: Record<string, unknown>, ws: string, t: Pick<Trouble, "note" | "botId" | "desktop">, answered: { desktop: string; version: string | null } | null): boolean {
+  const on = (b: Record<string, unknown>) => (typeof b.id === "string" ? computerFor(blob, b.id, true) : null);
+  if (t.desktop && !list(blob.bots).some((b) => wsOfBot(b) === ws && on(b) === t.desktop)) return true;
+  if (!answered) return false;
+  const d = answered.desktop.toLowerCase();
+  if (t.note === "old" && (!answered.version || olderThan(answered.version, CLOUD_ALL_MIN_VERSION))) return false;
+  return t.desktop === d || (!!t.botId && computerFor(blob, t.botId, true) === d);
+}
+
+/**
+ * Trouble said on the owner's cloud workspaces (noteTrouble) that no longer holds goes (troubleGoes): when a computer
+ * answers again (`answered`: its runner connected, or a turn there ended done), and when the owner's state is written
+ * (`blob`, as written: a bot moved, or given a new computer). One cheap read when there's none.
+ */
+export async function clearTrouble(userId: string, answered: { desktop: string; version: string | null } | null, blob?: Record<string, unknown>): Promise<void> {
+  type Raw = { ws_id: string; trouble: string; trouble_bot: string | null; trouble_desktop: string | null };
+  const said = (await query<Raw>("SELECT ws_id, trouble, trouble_bot, trouble_desktop FROM bops.chat_routing WHERE user_id = $1 AND trouble IS NOT NULL", [userId])).rows;
+  if (!said.length) return;
+  const goes = (b: Record<string, unknown>, r: Raw) => troubleGoes(b, r.ws_id, { note: r.trouble, botId: r.trouble_bot, desktop: r.trouble_desktop }, answered);
+  const seen = blob ?? (((await loadState(userId))?.state ?? {}) as Record<string, unknown>);
+  if (!said.some((r) => goes(seen, r))) return;
   const next = await tx(async (c) => {
     await lockUser(c, userId);
-    const blob = await lockedState(c, userId);
-    const u = await c.query(`UPDATE bops.chat_routing SET trouble = NULL, trouble_bot = NULL, trouble_desktop = NULL, trouble_at = NULL WHERE ${where}`, [userId, d, keepOld]);
-    return u.rowCount ? await mirrorAfter(c, userId, blob) : null;
+    const locked = await lockedState(c, userId);
+    const rows = (await c.query<Raw>("SELECT ws_id, trouble, trouble_bot, trouble_desktop FROM bops.chat_routing WHERE user_id = $1 AND trouble IS NOT NULL FOR UPDATE", [userId])).rows;
+    const gone = rows.filter((r) => goes(locked, r)).map((r) => r.ws_id);
+    if (!gone.length) return null;
+    await c.query("UPDATE bops.chat_routing SET trouble = NULL, trouble_bot = NULL, trouble_desktop = NULL, trouble_at = NULL WHERE user_id = $1 AND ws_id = ANY($2::text[])", [userId, gone]);
+    return await mirrorAfter(c, userId, locked);
   });
   if (!next) return;
   announce(userId);
@@ -494,8 +519,9 @@ export type AutoMove = { wsId: string; mode: "mac" | "cloud"; why: string; hold?
  * the owner and their last Mac new enough (CHAT_AUTO_MIN_VERSION), once every computer its bots work on (computerFor: not a bot with none, or
  * set to work on the Mac, but where the owner's Mac keeps to everything through the cloud: cloudAll) has a runner the Mac set up and saw running (AppState.runners, as the Mac writes it), at
  * CLOUD_CHAT_MIN_VERSION or newer, with its computer not found down, that connected to Bops Cloud at that version since
- * it started and since that computer last couldn't answer; and not while one moved back for a wake refused waits
- * (AUTO_HOLD_MS). Each needn't be listening now: computers nap, and a turn wakes them. Never back to the Mac where the
+ * it started and since that computer last couldn't answer; where the owner's Mac keeps to everything through the cloud
+ * (cloudAll), only once every bot of it has a computer and every group of it is on one (wholeOnComputers); and not
+ * while one moved back for a wake refused waits (AUTO_HOLD_MS). Each needn't be listening now: computers nap, and a turn wakes them. Never back to the Mac where the
  * owner's Mac keeps to everything through the cloud (cloudAll). Else back to the Mac, for one Bops
  * Cloud moved, whenever its bots have no computer any more, or one has no runner, a runner that failed or is being
  * stopped, is found down, or couldn't answer since its runner last connected; never because a runner just went quiet.
@@ -537,6 +563,9 @@ export function autoMoves(blob: Record<string, unknown>, rows: Map<string, Routi
     }
     if (!o.on || !o.appOk || !computers.size) continue;
     if (row?.setBy === "auto-held" && o.now - row.setAt < AUTO_HOLD_MS) continue;
+    // Where the owner's Mac keeps to everything through the cloud, one moved never comes back: only once every bot of it
+    // has a computer and every group of it is on one (else those would get only notes where the Mac answered them).
+    if (o.cloudAll && !wholeOnComputers(blob, w.id)) continue;
     const ready = [...computers].every((c) => {
       const r = runners.get(c);
       const p = o.proved(c);
@@ -546,6 +575,15 @@ export function autoMoves(blob: Record<string, unknown>, rows: Map<string, Routi
     if (ready) out.push({ wsId: w.id, mode: "cloud", why: "its computers answer" });
   }
   return out;
+}
+
+/**
+ * Whether everything in workspace `ws` can be answered on a computer: each of its bots has one (computerFor `cloud`: a
+ * bot set to work on the Mac too), and each of its groups' bots are all on one (groupComputer).
+ */
+export function wholeOnComputers(blob: Record<string, unknown>, ws: string): boolean {
+  if (list(blob.bots).some((b) => typeof b.id === "string" && wsOfBot(b) === ws && !computerFor(blob, b.id, true))) return false;
+  return list(blob.chats).every((c) => typeof c.id !== "string" || wsOfChat(blob, c.id) !== ws || botsOfChat(blob, c.id).length < 2 || "desktop" in groupComputer(blob, c.id));
 }
 
 /** The look under way for each owner (autoRoute), whether another was asked for meanwhile, and the state as last written, when the asker had it. */
@@ -862,7 +900,7 @@ export async function takeMessage(o: {
     await lockUser(c, o.account);
     const blob = await lockedState(c, o.account);
     const routed = !o.byRow || (await routingOf(o.account, o.wsId, c)).cloud;
-    const all = o.cloudAll !== false && o.byRow === true && routed && (await macNewEnough(o.account, CLOUD_ALL_MIN_VERSION));
+    const all = o.cloudAll !== false && o.byRow === true && routed && (await macNewEnough(o.account, CLOUD_ALL_MIN_VERSION, c));
     const { botId, wsId, mayUse, group } = o.check(blob, all);
     const was = (await c.query<{ json: Record<string, unknown> | null }>("SELECT json FROM bops.chat_messages WHERE user_id = $1 AND id = $2", [o.account, o.id])).rows[0];
     if (was) {
@@ -1397,13 +1435,16 @@ async function endWaiting(userId: string, desktopId: string, note: Exclude<keyof
   noteBroken(userId, desktopId, note, turns[0]?.botId);
 }
 
+/** A turn that ended, and the bot its note names when that isn't the turn's own (`about`: a group's bot that says why). */
+type Ended = TurnRow & { about?: string };
+
 /** Turns that ended with a note (turn.note, a NOTES key): the note in each chat, and every viewer told. */
-async function ended(turns: TurnRow[]) {
+async function ended(turns: Ended[]) {
   if (!turns.length) return;
   const blob = ((await loadState(turns[0].userId))?.state ?? {}) as Record<string, unknown>;
   const rows: Record<string, unknown>[] = [];
   for (const t of turns) {
-    const say = t.note && t.note in NOTES && t.note !== "noUse" ? NOTES[t.note as Exclude<keyof typeof NOTES, "noUse">](ownerOf(blob), nameOf(blob, t.botId)) : undefined;
+    const say = t.note && t.note in NOTES && t.note !== "noUse" ? NOTES[t.note as Exclude<keyof typeof NOTES, "noUse">](ownerOf(blob), nameOf(blob, t.about ?? t.botId)) : undefined;
     if (say) rows.push(noteRow(t, say));
     shown(t, "failed", say);
   }
@@ -1479,7 +1520,7 @@ const runnerLive: Route = {
         [userId, c.desktopId.toLowerCase(), c.device, said],
       ).catch((e: Error) => console.warn(`[turns] runner seen: ${e.message}`));
     // Its computer answers again: what was said of it on its cloud workspaces goes (an "old" one only once it's new enough).
-    if (!done) await clearTrouble(userId, c.desktopId, said && VERSION.test(said) ? said : null).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
+    if (!done) await clearTrouble(userId, { desktop: c.desktopId, version: said && VERSION.test(said) ? said : null }).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
     // A wake waiting for it carries on now, and what it's owed goes to it.
     for (const w of [...(waiters.get(k) ?? [])]) w();
     for (const t of await owedTo(userId, c.device)) if (!done) stream.write("turn", await eventOf(t));
@@ -1554,7 +1595,7 @@ const botsOfChat = (blob: Record<string, unknown>, chatId: string): string[] => 
 
 async function claim(user: CloudUser, id: string, version: string | null): Promise<RunnerClaim> {
   const c = user.computer!;
-  const out = await tx(async (db): Promise<{ ok: RunnerClaim; t: TurnRow } | { refused: TurnRow; words?: string }> => {
+  const out = await tx(async (db): Promise<{ ok: RunnerClaim; t: TurnRow } | { refused: Ended; words?: string }> => {
     await lockUser(db, user.id);
     const raw = (await db.query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND id = $2 FOR UPDATE`, [user.id, id])).rows[0];
     if (!raw || raw.target_device !== c.device) throw new HttpError(404, "No such turn");
@@ -1574,16 +1615,30 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
     // Checked again on the owner's state now: the bot still works here, and its member still may.
     const blob = await lockedState(db, user.id);
     const still = memberStill(blob, t);
-    // A group's: its bots all on this one computer still (groupComputer). A bot's: still on it, as computerFor has it, or
-    // (a bot set to work on the Mac) as it has it where everything goes through the cloud.
+    // A group's: its bots all on this one computer still (groupComputer), else the note that says why (split, or the bot
+    // with no computer, named). A bot set to work on the Mac counts as on it only where everything goes through the cloud
+    // still, as for a bot's own turn. A bot's: still on it, as computerFor has it, or (a bot set to work on the Mac) as it
+    // has it where everything goes through the cloud.
+    let why: "moved" | "groupSplit" | "groupNoComputer" | null = null;
+    let about: string | undefined;
     const g = t.isGroup ? groupComputer(blob, t.chatId) : null;
-    const moved = g
-      ? !("desktop" in g) || g.desktop !== t.desktopId
-      : computerFor(blob, t.botId) !== t.desktopId && (computerFor(blob, t.botId, true) !== t.desktopId || !(await allCloud(user.id, t.wsId, db)));
-    if (still !== "ok" || moved) {
-      const note = moved ? "moved" : still === "noUse" ? "noUse" : null;
+    if (g) {
+      if (!("desktop" in g)) {
+        why = g.why === "split" ? "groupSplit" : "groupNoComputer";
+        about = g.bot ?? undefined;
+      } else if (g.desktop !== t.desktopId) why = "moved";
+      else {
+        const onMac = botsOfChat(blob, t.chatId).find((b) => computerFor(blob, b) !== t.desktopId);
+        if (onMac && !(await allCloud(user.id, t.wsId, db))) {
+          why = "moved";
+          about = onMac;
+        }
+      }
+    } else if (computerFor(blob, t.botId) !== t.desktopId && (computerFor(blob, t.botId, true) !== t.desktopId || !(await allCloud(user.id, t.wsId, db)))) why = "moved";
+    if (still !== "ok" || why) {
+      const note = why ?? (still === "noUse" ? "noUse" : null);
       await db.query("UPDATE bops.chat_turns SET state = 'failed', note = $3, updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id, note]);
-      return { refused: { ...t, state: "failed", note } };
+      return { refused: { ...t, state: "failed", note, ...(why && about ? { about } : {}) } };
     }
     // A job only runners from CLOUD_ALL_MIN_VERSION on know, claimed by an older one (by its own word, this call's): it
     // would read Bops' note and do nothing, or worse, so it ends here and the app (or chat) says why.
@@ -1619,7 +1674,7 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
 }
 
 /** A turn that ended as its member may no longer have it run (or its bot moved): the note in its chat, every viewer told, the runner stopped, its chat's next. */
-async function afterRevoked(t: TurnRow) {
+async function afterRevoked(t: Ended) {
   toRunner(t.userId, t.targetDevice, "turn-cancel", { id: t.id });
   if (t.note === "noUse") {
     const blob = ((await loadState(t.userId))?.state ?? {}) as Record<string, unknown>;
@@ -1812,7 +1867,7 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
   shown(t, state === "paused" ? "paused" : state === "failed" ? "failed" : "done", note ?? undefined);
   if (state !== "paused") void nextOf(user.id, t.chatId).catch(() => {});
   // Its computer answered: what was said of it on its cloud workspaces goes (noteTrouble).
-  if (state === "done") void clearTrouble(user.id, t.desktopId, version).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
+  if (state === "done") void clearTrouble(user.id, { desktop: t.desktopId, version }).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
 }
 
 const runnerTurn: Route = {

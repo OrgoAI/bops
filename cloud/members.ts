@@ -782,10 +782,11 @@ const liveStatus = (s: Record<string, unknown>) => s.status === "running" || s.s
 /**
  * Whether an act (other than saying something in a chat, which turns.ts and the owner's Mac gate on their own) acts on
  * a bot's computer: telling a thread there more, saying there's nothing to add, folding it up, or answering an ask that
- * lets work there go on (one of a thread there, or a chat's for a bot with a computer). Stop never: ending work is
- * safe. botsTouched has refused what's on the owner's Mac by here.
+ * lets work there go on (one of a thread there, or a chat's for a bot with a computer: with `cloud`, where everything goes
+ * through the cloud, a bot set to work on the Mac too, as its turns run on its computer there). Stop never: ending work
+ * is safe. botsTouched has refused what's on the owner's Mac by here.
  */
-function computerAct(blob: Record<string, unknown>, slice: ReturnType<typeof sliceOf>, act: MemberAct): boolean {
+function computerAct(blob: Record<string, unknown>, slice: ReturnType<typeof sliceOf>, act: MemberAct, cloud = false): boolean {
   const onComputer = (id: unknown) => typeof id === "string" && slice.sessions.some((x) => x.id === id && x.runsOn !== "mac");
   if (act.act === "reply" || act.act === "dismiss") return onComputer(act.sessionId);
   // Where a thread runs: on the bot's computer.
@@ -794,7 +795,7 @@ function computerAct(blob: Record<string, unknown>, slice: ReturnType<typeof sli
   if (act.act === "answer") {
     const a = slice.approvals?.find((x) => x.id === act.askId);
     if (!a) return false;
-    return typeof a.threadId === "string" ? onComputer(a.threadId) : typeof a.botId === "string" && !!computerFor(blob, a.botId);
+    return typeof a.threadId === "string" ? onComputer(a.threadId) : typeof a.botId === "string" && !!computerFor(blob, a.botId, cloud);
   }
   return false;
 }
@@ -1091,8 +1092,11 @@ const actIn: Route = {
       if (!computer) throw new HttpError(403, FILES_NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
       if (!(await adminGate(target.account, MEMBER_FILES_MIN_VERSION))) throw new HttpError(409, FILES_OWNER_OLD, { code: OWNER_BOPS_OLD });
     }
+    // Where everything goes through the cloud (an answer's: a bot set to work on the Mac runs on its own computer there).
+    // Read here, never under the owner's lock.
+    const cloud = body.act.act === "answer" ? await cloudAll(target.account, target.ws) : false;
     // Telling work on a bot's computer more, or letting it go on (computerAct): only with Use its computer.
-    if (!computer && computerAct(blob, slice, body.act)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
+    if (!computer && computerAct(blob, slice, body.act, cloud)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
     // A workspace whose chat goes through Bops Cloud, or may move there: a message in a chat is written here now (cloudChat).
     if (body.act.act === "chat" && ((await routed(target.account, target.ws)) || (await storedFirst(target.account, target.ws)))) {
       const chatAct = body.act;
@@ -1110,7 +1114,7 @@ const actIn: Route = {
     // An answer (Allow once, Deny) to an ask of a bot's computer's runner while the owner's Mac is away: written here, so
     // the run there goes on now, as the Mac would (answerOnComputer). Always allow saves a rule the Mac keeps: it waits.
     if (body.act.act === "answer" && body.act.reply !== "always" && !isOn(target.account)) {
-      const answered = await answerHere({ target, viewer, actor, act: body.act, who: whoOf(user!), still: () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked });
+      const answered = await answerHere({ target, viewer, actor, act: body.act, who: whoOf(user!), still: () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked, cloud });
       if (answered) return sendJson(res, 202, { ok: true, macOn: true } satisfies MemberActAnswer);
     }
     const payload: MemberActPayload = {
@@ -1153,8 +1157,10 @@ const actIn: Route = {
  * orgo-web sent no notice for them. Named as theirs (AskAnswer.member), the runner told (announce nudges it) and its
  * computer woken as for a turn. A reply is never taken back, and the earliest one stands (state-merge.ts mergeApproval),
  * so one crossing the Mac's is safe. False when it isn't such an ask: the act then waits for the owner's Mac as before.
+ * `cloud`: everything in the workspace goes through the cloud (allCloud, read before the lock), so a bot set to work on
+ * the Mac runs on its own computer, and its ask there is answered here too.
  */
-async function answerOnComputer(o: { target: LiveTarget; viewer: SliceViewer; actor: Actor; act: Extract<MemberAct, { act: "answer" }>; who: MemberWho; still: () => boolean }): Promise<boolean> {
+async function answerOnComputer(o: { target: LiveTarget; viewer: SliceViewer; actor: Actor; act: Extract<MemberAct, { act: "answer" }>; who: MemberWho; still: () => boolean; cloud?: boolean }): Promise<boolean> {
   const { target, act } = o;
   const out = await tx(async (c) => {
     await lockUser(c, target.account);
@@ -1165,7 +1171,7 @@ async function answerOnComputer(o: { target: LiveTarget; viewer: SliceViewer; ac
     // A routine's run: the owner's Mac sends Orgo its next time again once it's answered (lib/server/permission.ts
     // routinesFollow, routines.ts pastWait), which only it can. So it waits for the Mac, as before.
     if (typeof a.routineId === "string" && a.routineId) return null;
-    const desktop = computerFor(blob, a.botId);
+    const desktop = computerFor(blob, a.botId, o.cloud === true);
     // Its runner's device id, from the computer's id as Orgo gave it (a runner says it either way: lib/server/runner.ts).
     const all = list(blob.bots);
     const raw = workBotOf(all.find((b) => b.id === a.botId) ?? {}, all).computerId;

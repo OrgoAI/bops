@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { closeDb } from "../db.ts";
-import { AUTO_HOLD_MS, autoMoves, chatAutoFor, keepChatOn, mirrorOf, type AutoSeen, type RoutingRow } from "../turns.ts";
+import { AUTO_HOLD_MS, autoMoves, chatAutoFor, keepChatOn, mirrorOf, troubleGoes, wholeOnComputers, type AutoSeen, type RoutingRow } from "../turns.ts";
 
 /**
  * Chat through Bops Cloud by itself (turns.ts autoMoves, keepChatOn, chatAutoFor), with no database: a workspace nobody
@@ -108,6 +108,48 @@ test("a cloud workspace whose computer can't answer stays in the cloud where the
   assert.ok(moves(zedOwn, rows(), seen({ live: [D1] })).includes("ws_acme:cloud"), "an older owner's: Zed2 isn't counted");
   assert.ok(!moves(zedOwn, rows(), all(seen({ live: [D1] }))).includes("ws_acme:cloud"), "Zed2's computer has no runner yet");
   assert.ok(moves(blob({ [D1]: running(), [D2]: running() }, [{ id: "zed2", workspaceId: "ws_acme", runsOn: "mac", computer: "own", computerId: D2 }]), rows(), all(seen())).includes("ws_acme:cloud"));
+});
+
+test("where the owner's Mac keeps to everything through the cloud, never moved there by itself while a bot of it has no computer or a group of it spans computers; an older owner's moves as before", () => {
+  const all = (s: AutoSeen) => ({ ...s, cloudAll: true });
+  const acme = (b: Record<string, unknown>, s: AutoSeen) => moves(b, rows(), s).includes("ws_acme:cloud");
+  // Ivy, with no computer: her messages would get only notes in the cloud, where the Mac answered them.
+  const ivy = blob(undefined, [{ id: "ivy", workspaceId: "ws_acme", computer: "own" }]);
+  assert.equal(wholeOnComputers(ivy, "ws_acme"), false);
+  assert.ok(!acme(ivy, all(seen())), "a bot with no computer");
+  assert.ok(acme(ivy, seen()), "an older owner's: as before (the Mac answers Ivy)");
+  // A group across computers (Max on D1, Rex's computer D2), then one whose bots share one.
+  const split = { ...blob(), chats: [{ id: "g1", kind: "group", botIds: ["max", "rex"], workspaceId: "ws_acme" }] };
+  assert.equal(wholeOnComputers(split, "ws_acme"), false);
+  assert.ok(!acme(split, all(seen())), "a group across computers");
+  assert.ok(acme(split, seen()), "an older owner's: as before");
+  const shared = { ...blob(), chats: [{ id: "g2", kind: "group", botIds: ["max", "dana", "zed"], workspaceId: "ws_acme" }, { id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_acme" }] };
+  assert.equal(wholeOnComputers(shared, "ws_acme"), true);
+  assert.ok(acme(shared, all(seen())), "every bot on a computer, the group on one: it moves");
+  // Another workspace's group or bot changes nothing here.
+  const elsewhere = { ...blob(undefined, [{ id: "pip", workspaceId: "ws_beta", computer: "own" }]), chats: [{ id: "g3", kind: "group", botIds: ["rex", "max"], workspaceId: "ws_beta" }] };
+  assert.ok(acme(elsewhere, all(seen())));
+});
+
+test("trouble said on a workspace goes once it's about no computer of its bots (moved, given a new one), or the computer it names (or its bot's now) answers; an older Bops's stays until a new enough one answers", () => {
+  const b = blob();
+  const t = (note: string, botId: string | null, desktop: string | null) => ({ note, botId, desktop });
+  // Max (and Dana, Zed) on D1; D1 named: it stays until D1 answers.
+  assert.equal(troubleGoes(b, "ws_acme", t("deleted", "max", D1), null), false);
+  assert.equal(troubleGoes(b, "ws_acme", t("deleted", "max", D1), { desktop: D2, version: "0.0.54" }), false, "another computer answered");
+  assert.equal(troubleGoes(b, "ws_acme", t("deleted", "max", D1), { desktop: D1.toUpperCase(), version: "0.0.54" }), true);
+  // Max given a new computer (D2): D1 is no bot's of Acme's any more.
+  const moved = { ...b, bots: b.bots.map((x) => (x.id === "max" ? { ...x, computerId: D2 } : x)) };
+  assert.equal(troubleGoes(moved, "ws_acme", t("deleted", "max", D1), null), true);
+  // Dana moved to D2 while Max stays on D1: said of Dana, it goes when D2 answers; said of Max, it stays.
+  const dana = { ...b, bots: [...b.bots.filter((x) => x.id !== "dana"), { id: "dana", workspaceId: "ws_acme", computer: "own", computerId: D2 }] };
+  assert.equal(troubleGoes(dana, "ws_acme", t("stopped", "dana", D1), null), false);
+  assert.equal(troubleGoes(dana, "ws_acme", t("stopped", "dana", D1), { desktop: D2, version: "0.0.54" }), true);
+  assert.equal(troubleGoes(dana, "ws_acme", t("stopped", "max", D1), { desktop: D2, version: "0.0.54" }), false);
+  // An older Bops: only a new enough one clears it.
+  assert.equal(troubleGoes(b, "ws_acme", t("old", "max", D1), { desktop: D1, version: "0.0.53" }), false);
+  assert.equal(troubleGoes(b, "ws_acme", t("old", "max", D1), { desktop: D1, version: null }), false);
+  assert.equal(troubleGoes(b, "ws_acme", t("old", "max", D1), { desktop: D1, version: "0.0.54" }), true);
 });
 
 test("the mirror carries chatTrouble only while the workspace is in the cloud, puts it back on a save that drops it, and takes it off once it's gone", () => {
