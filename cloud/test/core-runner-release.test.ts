@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createPublicKey, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { createServer, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
 import { closeDb, query } from "../db.ts";
 import { RELEASE_MAX_BYTES, type RunnerRelease } from "../protocol.ts";
@@ -40,9 +40,13 @@ const signed = (payload: unknown, key: KeyObject = mine.privateKey, keyId = "t1"
   return JSON.stringify({ payload: text, sig: sign(null, Buffer.from(text, "utf8"), key).toString("base64"), keyId });
 };
 
-/** latest.json served on localhost: what each path answers, and how many times each was asked. */
+/**
+ * latest.json served on localhost: what each path answers (a status, headers, and a body sent whole, or `chunks` of 1 KB
+ * streamed with no length said), and how many times each was asked.
+ */
+type Answer = { status: number; headers: Record<string, string>; body?: string; chunks?: number };
 let site: Listening;
-const answers = new Map<string, (res: ServerResponse) => void>();
+const answers = new Map<string, Answer>();
 const hits = new Map<string, number>();
 
 before(async () => {
@@ -52,8 +56,10 @@ before(async () => {
       const path = req.url ?? "/";
       hits.set(path, (hits.get(path) ?? 0) + 1);
       const a = answers.get(path);
-      if (a) return a(res);
-      res.writeHead(404).end();
+      if (!a) return void res.writeHead(404).end();
+      res.writeHead(a.status, a.headers);
+      for (let i = 0; i < (a.chunks ?? 0); i++) res.write("y".repeat(1024));
+      res.end(a.body);
     }),
   );
 });
@@ -72,7 +78,7 @@ after(async () => {
   await closeDb();
 });
 
-const serve = (path: string, body: string, headers: Record<string, string> = { "content-type": "application/json" }) => answers.set(path, (res) => res.writeHead(200, headers).end(body));
+const serve = (path: string, body: string) => answers.set(path, { status: 200, headers: { "content-type": "application/json" }, body });
 
 test("the release key built in is Orgo's r1, an ed25519 public key, and the only one", () => {
   assert.deepEqual(Object.keys(RELEASE_KEYS), ["r1"]);
@@ -142,7 +148,7 @@ test("signed but not a well-formed release: the wrong kind or name, too big, a b
 
 test("a redirect is never followed, and an answer that isn't 200 or is too long is no release", async () => {
   serve("/real.json", signed(releaseOfV(V1)));
-  answers.set("/latest.json", (res) => res.writeHead(302, { location: `${site.url}/real.json` }).end());
+  answers.set("/latest.json", { status: 302, headers: { location: `${site.url}/real.json` } });
   let nudged = 0;
   assert.equal(await checkReleases({ url: `${site.url}/latest.json`, keys: KEYS, nudge: () => nudged++ }), null);
   assert.equal(hits.get("/real.json") ?? 0, 0, "never asked where it pointed");
@@ -151,11 +157,7 @@ test("a redirect is never followed, and an answer that isn't 200 or is too long 
   assert.equal(await checkReleases({ url: `${site.url}/missing.json`, keys: KEYS }), null);
   serve("/said-long.json", "x".repeat(RELEASE_MAX_TEXT + 1));
   assert.equal(await checkReleases({ url: `${site.url}/said-long.json`, keys: KEYS }), null);
-  answers.set("/streamed.json", (res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    for (let i = 0; i < 70; i++) res.write("y".repeat(1024));
-    res.end();
-  });
+  answers.set("/streamed.json", { status: 200, headers: { "content-type": "application/json" }, chunks: 70 });
   assert.equal(await checkReleases({ url: `${site.url}/streamed.json`, keys: KEYS }), null);
   // Signed by a key it doesn't know: no release either, and nothing kept.
   serve("/unknown.json", signed(releaseOfV(V1), other.privateKey));
