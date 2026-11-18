@@ -3,6 +3,7 @@
 import { botChatId, type AppState, type Bot, type Session } from "@/lib/types";
 import { Your, yourMac } from "@/lib/shared";
 import { BotAiSection } from "./bot-ai";
+import { inCloud, MAC_OFF_HINT } from "./chat-switch";
 import { Segmented } from "./segmented";
 import { useBotSave } from "./sequences";
 
@@ -28,6 +29,8 @@ export function AiSlot({
 }) {
   const { busy, error, send } = useBotSave(b.id);
   const runsOn = b.runsOn ?? "auto";
+  // A workspace that runs everything in the cloud: its bots work on their own computers, so "Your Mac" isn't taken.
+  const cloud = inCloud(state, b);
   return (
     <div className="flex flex-col gap-3" data-ai-slot>
       <BotAiSection
@@ -41,7 +44,7 @@ export function AiSlot({
       />
       <Segmented
         title="Works on"
-        hint={runsOn === "auto" ? `Its cloud computer, or ${yourMac(state)} when a task needs it` : runsOn === "mac" ? `${Your(state)} Mac, always` : "Its cloud computer, always"}
+        hint={cloud ? MAC_OFF_HINT : runsOn === "auto" ? `Its cloud computer, or ${yourMac(state)} when a task needs it` : runsOn === "mac" ? `${Your(state)} Mac, always` : "Its cloud computer, always"}
         value={runsOn}
         options={[
           ["auto", "Auto"],
@@ -49,6 +52,7 @@ export function AiSlot({
           ["mac", `${Your(state)} Mac`],
         ]}
         disabled={busy || !!state.shared}
+        off={cloud ? ["mac"] : undefined}
         onPick={(v) => void send({ runsOn: v })}
       />
       {error && (

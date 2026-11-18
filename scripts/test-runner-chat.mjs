@@ -150,6 +150,71 @@ await check("a turn is claimed, answered in its context on Bops Cloud's clock, a
   assert.equal(TC.turnsRunning(), false);
 });
 
+await check("a group's turn (claimed as one) runs as the group: every bot of its chat writes rows that carry the turn, and its end sends their tapbacks (reacts), eight at most", async () => {
+  reset();
+  const T = Date.now();
+  state.chats = [{ id: "team", kind: "group", botIds: ["max", "dana"] }];
+  state.messages.push({ id: "mg1", chatId: "team", role: "user", text: "thanks both", at: T });
+  answers.set("claim", { status: 200, body: { ok: true, now: Date.now(), turn: { id: "tg1", messageId: "mg1", chatId: "team", botId: "max", humanAt: T, seq: 1, group: true } } });
+  let seen;
+  R.runnerChatForTests({
+    identity: async () => "same",
+    answer: async (chatId, messageId) => {
+      seen = { chatId, messageId, botIds: TC.currentTurn()?.botIds };
+      state.messages.push(TC.stamp({ id: "gmax", chatId, role: "bot", botId: "max", text: "you're welcome", at: Date.now() }));
+      state.messages.push(TC.stamp({ id: "gdana", chatId, role: "bot", botId: "dana", text: "anytime", at: Date.now() }));
+      state.messages.push(TC.stamp({ id: "gzed", chatId, role: "bot", botId: "zed", text: "not mine", at: Date.now() }));
+      state.messages[0].reactions = [{ by: "max", type: "love", at: 1 }, { by: "dana", type: "like", at: 1 }, { by: "u_owner", type: "laugh", at: 1 }];
+      return { text: null };
+    },
+  });
+  await R.answerTurn({ id: "tg1", messageId: "mg1", chatId: "team", botId: "max", seq: 1 });
+  assert.deepEqual(seen, { chatId: "team", messageId: "mg1", botIds: ["max", "dana"] });
+  assert.deepEqual(["gmax", "gdana", "gzed"].map((id) => state.messages.find((m) => m.id === id).turn), ["tg1", "tg1", undefined], "a bot not of the group's: not the turn's");
+  assert.deepEqual(paths(), ["claim", "done"]);
+  assert.deepEqual(sent[1].body, { state: "done", react: "love", reacts: [{ botId: "max", type: "love" }, { botId: "dana", type: "like" }] });
+  // A one bot turn sends only its own, as before.
+  reset();
+  state.chats = [];
+  state.messages.push({ id: "m1b", chatId: "bot:max", role: "user", text: "hi", at: T });
+  answers.set("claim", claimed("t1b", "m1b", T));
+  R.runnerChatForTests({ identity: async () => "same", answer: async () => ((state.messages[0].reactions = [{ by: "max", type: "like", at: 1 }, { by: "dana", type: "love", at: 1 }]), { text: "ok" }) });
+  await R.answerTurn(ev("t1b", "m1b"));
+  assert.deepEqual(sent.at(-1).body, { state: "done", react: "like" });
+  // Many bots: eight at most.
+  reset();
+  const ids = Array.from({ length: 10 }, (_, i) => `b${i}`);
+  state.chats = [{ id: "crowd", kind: "group", botIds: ids }];
+  state.messages.push({ id: "mc", chatId: "crowd", role: "user", text: "hi all", at: T, reactions: ids.map((by) => ({ by, type: "like", at: 1 })) });
+  answers.set("claim", { status: 200, body: { ok: true, now: Date.now(), turn: { id: "tc", messageId: "mc", chatId: "crowd", botId: "b0", humanAt: T, seq: 1, group: true } } });
+  R.runnerChatForTests({ identity: async () => "same", answer: async () => ({ text: null }) });
+  await R.answerTurn({ id: "tc", messageId: "mc", chatId: "crowd", botId: "b0", seq: 1 });
+  assert.equal(sent.at(-1).body.reacts.length, 8);
+  state.chats = [];
+});
+
+await check("a bot set to work on the Mac, in a workspace in the cloud, is answered here as any other: claimed, run in its turn, done", async () => {
+  reset();
+  const T = Date.now();
+  state.bots = [{ id: "zed", name: "Zed", runsOn: "mac" }];
+  state.messages.push({ id: "mz", chatId: "bot:zed", role: "user", text: "hi Zed", at: T });
+  answers.set("claim", { status: 200, body: { ok: true, now: Date.now(), turn: { id: "tz", messageId: "mz", chatId: "bot:zed", botId: "zed", humanAt: T, seq: 1 } } });
+  let ran;
+  R.runnerChatForTests({
+    identity: async () => "same",
+    answer: async (chatId, messageId) => {
+      ran = { chatId, messageId, turn: TC.currentTurn()?.id };
+      state.messages.push(TC.stamp({ id: "az", chatId, role: "bot", botId: "zed", text: "hello", at: Date.now() }));
+      return { text: "hello" };
+    },
+  });
+  await R.answerTurn({ id: "tz", messageId: "mz", chatId: "bot:zed", botId: "zed", seq: 1 });
+  assert.deepEqual(ran, { chatId: "bot:zed", messageId: "mz", turn: "tz" });
+  assert.equal(state.messages.find((m) => m.id === "az").turn, "tz");
+  assert.deepEqual(paths(), ["claim", "done"]);
+  delete state.bots;
+});
+
 await check("a reply is marked on its computer from before its claim until its end is said to Bops Cloud, failed or not; an upgrade's hold stops a new one before its claim, unless it's stale", async () => {
   const { mkdtempSync, readdirSync, writeFileSync, utimesSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -363,6 +428,39 @@ await check("a turn paused for an OK says so with its request, which carries the
   let plain;
   await R.resumeAsTurn({ id: "ask_unknown", botId: "max", chatId: "bot:max", resume: { engine: "chat" } }, async () => ((plain = TC.currentTurn()), {}));
   assert.deepEqual([plain, sent.length], [undefined, 0]);
+});
+
+await check("a group's turn paused for an OK by any of its bots (not only the one it names) says so with that request, and goes on as the group's turn from the answer", async () => {
+  reset();
+  const T = Date.now();
+  state.chats = [{ id: "team", kind: "group", botIds: ["max", "dana"] }];
+  state.messages.push({ id: "mg2", chatId: "team", role: "user", text: "book it", at: T });
+  answers.set("claim", { status: 200, body: { ok: true, now: Date.now(), turn: { id: "tg2", messageId: "mg2", chatId: "team", botId: "max", humanAt: T, seq: 1, group: true } } });
+  R.runnerChatForTests({
+    identity: async () => "same",
+    answer: async () => {
+      // Dana's turn in the group asked (the turn names Max).
+      state.appApprovals.push({ id: "ask-dana", botId: "dana", chatId: "team", at: Date.now(), resume: { engine: "chat", cloudTurn: TC.currentTurn().id } });
+      return { text: null, paused: true };
+    },
+  });
+  await R.answerTurn({ id: "tg2", messageId: "mg2", chatId: "team", botId: "max", seq: 1 });
+  assert.deepEqual(sent.at(-1).body, { state: "paused", approvalId: "ask-dana" }, "never done: Bops Cloud's resume takes it");
+  // Allowed: it goes on as the group's turn (its bots' rows the turn's).
+  sent.length = 0;
+  answers.set("resume", { status: 200, body: { ok: true, now: Date.now(), humanAt: T } });
+  let inTurn;
+  await R.resumeAsTurn({ id: "ask-dana", botId: "dana", chatId: "team", resume: { engine: "chat", cloudTurn: "tg2" } }, async () => {
+    inTurn = TC.currentTurn();
+    state.messages.push(TC.stamp({ id: "gd2", chatId: "team", role: "bot", botId: "dana", text: "Booked.", at: Date.now() }));
+    state.messages.push(TC.stamp({ id: "gm2", chatId: "team", role: "bot", botId: "max", text: "Nice.", at: Date.now() }));
+    return { text: "Booked." };
+  });
+  assert.deepEqual([inTurn?.id, inTurn?.botId, inTurn?.botIds], ["tg2", "dana", ["max", "dana"]]);
+  assert.deepEqual(["gd2", "gm2"].map((id) => state.messages.find((m) => m.id === id).turn), ["tg2", "tg2"]);
+  assert.deepEqual(paths(), ["resume", "done"]);
+  assert.deepEqual(sent.at(-1).body, { state: "done" });
+  state.chats = [];
 });
 
 await check("a paused turn Bops Cloud ended meanwhile (its member's access taken away, past its day), or that it never answers about, never runs the approved action", async () => {

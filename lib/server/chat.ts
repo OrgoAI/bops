@@ -34,6 +34,7 @@ import { savePage } from "./pages";
 import { onRunner } from "./persist";
 import { currentTurn, noteActing, stillTurn } from "./turn-context";
 import { createRoutine, deleteRoutine, describeSchedule, editRoutine, isNothing, NO_CREDIT_FOR_ROUTINES, routinesNote, runRoutine, setRoutineEnabled, setRoutineWhere, skipRoutine, unskipRoutine, zoneOf } from "./routines";
+import { runnerComputer } from "./runner";
 import { undash } from "./procedures";
 import { draftDeed, draftsIn, draftsJob, draftTools, offerDraft, ReadLog, sameTarget, writesReplies, type DraftArgs, type KeptReads } from "./reply-drafts";
 import { readyWords } from "@/lib/reply-drafts";
@@ -696,21 +697,40 @@ export async function handleMessage(
 
 /**
  * Answer a message Bops Cloud wrote already, as handleMessage does once it's added it: remembered as theirs, then the
- * bot's turn. On a computer's runner (runner-chat.ts) it runs in the turn's context, so what it writes is the turn's, and
- * only for a one bot chat; on the owner's Mac (member-acts.ts, a bot on the Mac or a group) a group's turn too. Never
- * sent on into a thread (on a runner, the thread may be another Bops's). Null when the chat or the message isn't here.
+ * bot's turn. On a computer's runner (runner-chat.ts) it runs in the turn's context, so what it writes is the turn's: a
+ * one bot chat's, or a group's whose bots all work on this computer (groupHere: Bops Cloud owes it one only then); on
+ * the owner's Mac (member-acts.ts, a bot on the Mac or a group) a group's turn too. Never sent on into a thread (on a
+ * runner, the thread may be another Bops's). Null when the chat or the message isn't here.
  */
 export async function answerMessage(chatId: string, messageId: string, member?: MemberTurn): Promise<TurnOut | null> {
   const c = chat(chatId);
   const mine = getState().messages.find((m) => m.id === messageId && m.chatId === chatId && m.role === "user");
-  if (!c || !mine || (c.kind === "group" && currentTurn())) return null;
+  if (!c || !mine || (c.kind === "group" && currentTurn() && !groupHere(c.botIds))) return null;
   const words = member ? `${member.name} said: ${mine.text}` : mine.text;
   rememberMessage(c.kind === "bot" ? scopeOf(c.botIds[0]) : wsOf(c.botIds[0]), chatId, mine.id, words, { chat: chatName(chatId) }, member);
   if (c.kind === "group") {
-    await groupTurn(chatId, mine, member);
-    return { text: null };
+    // Paused for an OK (on a computer's runner: the turn waits on it, runner-chat.ts askOf).
+    const paused = await groupTurn(chatId, mine, member);
+    return { text: null, ...(paused ? { paused: true } : {}) };
   }
   return turn(c.botIds[0], chatId, { ...(mine.replyTo ? { replyTo: mine.replyTo } : {}), answering: mine.id, ...(member ? { member } : {}) });
+}
+
+/**
+ * On a computer's runner, whether every bot of a group works on this computer (runner.ts runnerComputer; a bot set to
+ * work on the Mac too: in the cloud it works on its own), so its turn is this runner's to answer.
+ */
+export function groupHere(botIds: string[]): boolean {
+  const here = runnerComputer()?.toLowerCase();
+  const bots = getState().bots;
+  return (
+    !!here &&
+    botIds.length > 0 &&
+    botIds.every((id) => {
+      const b = bots.find((x) => x.id === id);
+      return !!b && (workBot(b, bots).computerId ?? "").toLowerCase() === here;
+    })
+  );
 }
 
 /**
@@ -2507,6 +2527,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // (Not the Mac's on a member's turn: what's watched on the owner's Mac is the owner's own.)
       opts.outside ? "" : watchesNote([botId, ...below], b.isMain && !member),
       // Answered on the bot's computer (runner-chat.ts): what it can't do from there, said plainly (never sent elsewhere for it).
+      // A bot set to work on the Mac, answered on its own computer (a workspace in the cloud: cloud/turns.ts computerFor).
+      onBox && b.runsOn === "mac" ? `You're answering from your own computer. Work on ${owner}'s Mac isn't here while the workspace runs in the cloud.` : "",
       onBox
         ? `You're answering from your computer, not from ${owner}'s Mac.${offered.has("work_on_app") ? " Your workspace's apps on the web (Local, Preview and Published) work from here as always." : ""}${offered.has("create_skill") ? `${offered.has("work_on_app") ? " So do skills" : " Skills work from here too"}: a new one is saved as a draft, and a change to one is a proposal under your answer.` : ""} You can't set up routines, reminders or watches, make a new bot, a page, a picture or an app in Bops' panel, or hand work to a teammate from here yet: if asked, say plainly that you can't do that from your computer yet. Never say a tool isn't available in this chat, and never tell anyone to ask again somewhere else.`
         : "",
@@ -3132,7 +3154,9 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // A thread already doing the job moves to the Mac only when the user's own words ask for it too (sessions.ts foldInto).
       // A thread started for what the user kept between us is kept between us too (Session.secret).
       // A member's turn places work as someone else's does (the cloud, or the owner picks), never on the Mac (sessions.ts StartOptions.member).
-      const place = { where: args.where ?? "auto", thenOnMac: args.then_on_mac ?? undefined, outside: outsideFrom, ownerAsked: !opts.outside && !member && asksForMac(ownerSaid(chatId)), secret: isSecret(opts.answering), ...(member ? { member: saidOf(member) } : {}) };
+      // On a computer's runner there's no Mac to put work on (a bot set to work on it too, in a workspace in the cloud):
+      // "mac" is read as "auto", and nothing waits to go on there.
+      const place = { where: onBox && args.where === "mac" ? "auto" : (args.where ?? "auto"), thenOnMac: onBox ? undefined : (args.then_on_mac ?? undefined), outside: outsideFrom, ownerAsked: !opts.outside && !member && asksForMac(ownerSaid(chatId)), secret: isSecret(opts.answering), ...(member ? { member: saidOf(member) } : {}) };
       if (item.name === "start_task") {
         // The skill it follows: the one the bot named, else (in a routine's run) the routine's.
         const named = args.skill?.trim();
@@ -3453,28 +3477,37 @@ function reactLater(messageId: string, botId: string, type: Tapback) {
  * A group chat: Jev decides what the user's message needs and from whom; bots answer in turn, and one
  * put a question by another answers it, until the exchange comes to rest.
  */
-/** `who`: the member whose message `first` is, as their turn goes by them (MemberTurn: with their role), else as it's kept on the message. */
-async function groupTurn(chatId: string, first: Message, who?: MemberTurn) {
+/**
+ * `who`: the member whose message `first` is, as their turn goes by them (MemberTurn: with their role), else as it's kept
+ * on the message. On a computer's runner (a turn Bops Cloud owed), one bot's turn that pauses for an OK ends the
+ * exchange there: the turn holds one OK, and goes on from its answer (runner-chat.ts resumeAsTurn). True then.
+ */
+async function groupTurn(chatId: string, first: Message, who?: MemberTurn): Promise<boolean> {
   const member: MemberTurn | undefined = first.member && who?.userId === first.member.userId ? { ...first.member, ...(who.role === "admin" ? { role: "admin" as const } : {}) } : first.member;
   const c = chat(chatId)!;
   const members = c.botIds.map((x) => bot(x)).filter(Boolean) as Bot[];
   const ours = sameState();
   const start = await plan(chatId, members, first, 0);
-  if (!ours()) return;
-  for (const r of start.react) reactLater(first.id, r.botId, r.type);
+  if (!ours()) return false;
+  // On a computer's runner at once: the turn's end carries them to Bops Cloud (runner-chat.ts reacts), which writes them.
+  const tap = currentTurn() ? botReact : reactLater;
+  for (const r of start.react) tap(first.id, r.botId, r.type);
   const queue = start.reply.map((id) => ({ id, to: first, hop: 0 }));
   for (let turns = 0; queue.length && turns < MAX_GROUP_TURNS; turns++) {
     const { id, to, hop } = queue.shift()!;
     // A member's message in a group (every bot in it theirs at Write): each bot's turn is theirs.
-    const said = await botTurn(id, chatId, { group: members, replyTo: first.replyTo, answering: to.id, ...(member ? { member } : {}) });
+    const out = await turn(id, chatId, { group: members, replyTo: first.replyTo, answering: to.id, ...(member ? { member } : {}) });
+    if (out.paused && currentTurn()) return true;
+    const said = out.text;
     if (!said) continue;
     const posted = [...getState().messages].reverse().find((x) => x.chatId === chatId && x.botId === id && x.text === said);
     // The user wrote again meanwhile: their new message gets its own plan; this exchange stops here.
     if (!posted || getState().messages.some((x) => x.chatId === chatId && x.role === "user" && x.at > first.at)) continue;
     // Only bot-to-bot hops count toward winding down; answering the user together doesn't.
     const next = await plan(chatId, members, posted, hop + 1);
-    if (!ours()) return;
-    for (const r of next.react) reactLater(posted.id, r.botId, r.type);
+    if (!ours()) return false;
+    for (const r of next.react) tap(posted.id, r.botId, r.type);
     for (const n of next.reply) if (!queue.some((q) => q.id === n)) queue.push({ id: n, to: posted, hop: hop + 1 });
   }
+  return false;
 }

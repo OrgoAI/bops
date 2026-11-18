@@ -557,7 +557,20 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   const chatOn = s.workspace?.chatOn === "cloud" || s.workspace?.chatOn === "mac" ? { chatOn: s.workspace.chatOn as "cloud" | "mac" } : {};
   // The org chart, for someone who may change it (cloud/ws-slice.ts sharedSlice): the chart draws it as the owner's does.
   const chain = s.chain && typeof s.chain === "object" ? { chain: s.chain as unknown as Workspace["chain"] } : {};
-  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}), ...chatOn, ...chain, ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}), ...(s.workspace?.chatAutoOff === true ? { chatAutoOff: true } : {}) };
+  // Why it can't answer now (an Admin's: cloud/ws-slice.ts ADMIN_WORKSPACE), said under the switch.
+  const t = s.workspace?.chatTrouble as Record<string, unknown> | undefined;
+  const chatTrouble = t && typeof t === "object" && typeof t.note === "string" ? { chatTrouble: { note: t.note, ...(typeof t.botId === "string" ? { botId: t.botId } : {}), at: Number(t.at) || 0 } } : {};
+  const workspace: Workspace = {
+    id: ws,
+    name: open.name,
+    createdAt: Number(s.workspace?.createdAt) || 0,
+    ...(s.sites ? { botSites: s.sites } : {}),
+    ...chatOn,
+    ...chain,
+    ...(s.workspace?.chatAuto === true ? { chatAuto: true } : {}),
+    ...(s.workspace?.chatAutoOff === true ? { chatAutoOff: true } : {}),
+    ...chatTrouble,
+  };
   // A bot's keys, for someone with Keys: as switched here until the owner's Bops has it (switchedKeys).
   const bots = s.bots.map((b) => {
     const { keys: _keys, ...rest } = b;

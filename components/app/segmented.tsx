@@ -11,6 +11,7 @@ export function Segmented<V extends string>({
   options,
   onPick,
   disabled,
+  off,
 }: {
   title: string;
   hint?: string;
@@ -18,6 +19,8 @@ export function Segmented<V extends string>({
   options: readonly (readonly [V, string])[];
   onPick: (v: V) => void;
   disabled?: boolean;
+  /** Choices that can't be picked now (the hint says why), the rest as they are. */
+  off?: readonly V[];
 }) {
   return (
     <div className="flex w-full items-center gap-3" data-setting={title}>
@@ -32,7 +35,7 @@ export function Segmented<V extends string>({
             type="button"
             role="radio"
             aria-checked={value === v}
-            disabled={disabled}
+            disabled={disabled || (!!off?.includes(v) && value !== v)}
             onClick={() => value !== v && onPick(v)}
             className={`rounded-full px-2.5 py-1 text-[12px] leading-4 disabled:opacity-60 ${value === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
           >

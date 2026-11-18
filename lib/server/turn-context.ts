@@ -18,6 +18,8 @@ export type TurnContext = {
   id: string;
   chatId: string;
   botId: string;
+  /** A group's turn (RunnerClaim.turn.group): every bot of its chat, whose rows in it carry the turn too. */
+  botIds?: string[];
   /** Bops Cloud's clock less this computer's, at the claim (ms). */
   offsetMs: number;
   /** The time of the message it answers: its rows come after. */
@@ -60,11 +62,11 @@ export const stillTurn = (ours: () => boolean) => {
 };
 
 /**
- * A message the turn adds: its bot's words or Bops' note in the turn's chat carry the turn's id and Bops Cloud's time
- * (after the message it answers). Anything else, or with no turn, as it is.
+ * A message the turn adds: its bot's words (a group's: any of its bots') or Bops' note in the turn's chat carry the
+ * turn's id and Bops Cloud's time (after the message it answers). Anything else, or with no turn, as it is.
  */
 export function stamp<M extends { chatId: string; at: number; role: string; botId?: string }>(m: M): M & { turn?: string } {
   const t = als.getStore();
-  if (!t || m.chatId !== t.chatId || (m.role !== "bot" && m.role !== "system") || (m.botId !== undefined && m.botId !== t.botId)) return m;
+  if (!t || m.chatId !== t.chatId || (m.role !== "bot" && m.role !== "system") || (m.botId !== undefined && !(t.botIds ?? [t.botId]).includes(m.botId))) return m;
   return { ...m, turn: t.id, at: Math.max(m.at + t.offsetMs, t.humanAt + 1) };
 }

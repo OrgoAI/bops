@@ -1250,11 +1250,16 @@ export const STORED_ACT_MS = 24 * 3600_000;
  * (Workspace.chatOn "cloud", or "mac" for a choice of the Mac; chatAuto while Bops Cloud may move it; chatAutoOff where
  * it refuses {mode: "auto"} for the owner, so the switch can't be turned back on from it).
  */
-/** What the owner's Bops sends: its own key for the message (its id is "msg_o_<key>"), the words, and the message it replies to. */
-export type ChatSendBody = { key: string; text: string; replyTo?: string };
-/** 200: the message as written (the same on a retry with the key), and its turn (none: no answer owed here: a bot with no computer, which the Mac answers). */
+/**
+ * What the owner's Bops sends: its own key for the message (its id is "msg_o_<key>"), the words, and the message it
+ * replies to. `all`: it keeps to everything through the cloud (CLOUD_ALL_MIN_VERSION), so where everything goes through
+ * the cloud (cloud/turns.ts allCloud) a group, a bot set to work on the Mac and a bot with no computer are taken too,
+ * each answered on a computer or with a note in the chat; never CHAT_NOT_IN_CLOUD for those. Without it, as before.
+ */
+export type ChatSendBody = { key: string; text: string; replyTo?: string; all?: true };
+/** 200: the message as written (the same on a retry with the key), and its turn (none: no answer owed here: a note in the chat says why, or a bot with no computer, which the Mac answers). */
 export type ChatSendAnswer = { ok: true; message: Record<string, unknown>; turn?: string };
-/** 409: this chat doesn't go through Bops Cloud (its workspace isn't switched, it's a group, or its bot has no computer): the Mac answers it as before. */
+/** 409: this chat doesn't go through Bops Cloud (its workspace isn't switched, it's a group, or its bot has no computer, without ChatSendBody.all where everything goes through the cloud): the Mac answers it as before. */
 export const CHAT_NOT_IN_CLOUD = "chat_not_in_cloud";
 /** 409: a message with that id is someone else's. */
 export const MESSAGE_TAKEN = "message_taken";
@@ -1348,7 +1353,12 @@ export const jobApp = (j: TurnJob): string | null => ("app" in j && typeof j.app
  * clock, which the answer's times are taken from (a computer's own can lag after it wakes); `humanAt` the message's
  * time, which its rows come after. 409 another turn of the chat runs first, or it's taken; 410 it's over (refused now).
  */
-export type RunnerClaim = { ok: true; now: number; turn: { id: string; messageId: string; chatId: string; botId: string; humanAt: number; seq: number; member?: TurnMember } };
+/**
+ * `group`: a group's turn (cloud/turns.ts groupComputer): every bot of its chat works on this computer, and it answers as
+ * the group does (lib/server/chat.ts groupTurn), its bots' rows carrying the turn. Only a runner at CLOUD_ALL_MIN_VERSION
+ * claims one (an older one: 410, the note "old").
+ */
+export type RunnerClaim = { ok: true; now: number; turn: { id: string; messageId: string; chatId: string; botId: string; humanAt: number; seq: number; member?: TurnMember; group?: true } };
 /** POST /v1/runner/turns/<id>/beat: still running, every 30 seconds; `tools` once it did something that can't be done twice. 409: it isn't this runner's any more (stop). */
 export type RunnerBeat = { phase: "model" | "tools" };
 /**
@@ -1356,8 +1366,16 @@ export type RunnerBeat = { phase: "model" | "tools" };
  * message (only Bops Cloud writes on a person's row). `job`: a job turn's (TurnMember.job) result, done or why not, in
  * words, which Bops Cloud keeps on the app (SharedApp.acts); a job turn done without it went to a runner from before.
  * `removed`: a remove job took the app ("app") or its site ("site") off the web, for Bops Cloud to drop from the state.
+ * `reacts`: a group's turn's tapbacks on the message, one per bot (at most 8), each a bot of the chat on this computer.
  */
-export type RunnerDone = { state: "done" | "paused" | "failed"; approvalId?: string; note?: string; react?: string; job?: { ok: boolean; said: string; removed?: "app" | "site" } };
+export type RunnerDone = {
+  state: "done" | "paused" | "failed";
+  approvalId?: string;
+  note?: string;
+  react?: string;
+  reacts?: { botId: string; type: string }[];
+  job?: { ok: boolean; said: string; removed?: "app" | "site" };
+};
 /**
  * POST /v1/runner/turns/<id>/resume {approvalId}: a turn paused for an OK goes on once the OK is answered, only for that
  * request (the one its pause named), only on the runner that paused it, and only while whoever said the message still

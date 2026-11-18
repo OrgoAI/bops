@@ -14,6 +14,7 @@ import { AppRoutinesButton, BotRoutines, hasTemplates, routineCount, routinesFro
 import { BotKeys } from "./keys";
 import { AgentChip, AgentMark } from "./agent-marks";
 import { BotAiSection } from "./bot-ai";
+import { inCloud, MAC_OFF_HINT } from "./chat-switch";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
@@ -306,15 +307,17 @@ function Details({
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Works on</span>
           <span className="text-[12px] leading-4 text-[#6B6B6B]">
-            {(b.runsOn ?? "auto") === "auto" ? `Its cloud computer, or ${yourMac(state)} when a task needs it` : b.runsOn === "mac" ? `${Your(state)} Mac, always` : "Its cloud computer, always"}
+            {inCloud(state, b) ? MAC_OFF_HINT : (b.runsOn ?? "auto") === "auto" ? `Its cloud computer, or ${yourMac(state)} when a task needs it` : b.runsOn === "mac" ? `${Your(state)} Mac, always` : "Its cloud computer, always"}
           </span>
         </div>
         <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
           {([["auto", "Auto"], ["cloud", "Cloud"], ["mac", `${Your(state)} Mac`]] as const).map(([v, label]) => (
             <button
               key={v}
+              // A workspace that runs everything in the cloud: its bots work on their own computers, so "Your Mac" isn't taken.
+              disabled={v === "mac" && (b.runsOn ?? "auto") !== "mac" && inCloud(state, b)}
               onClick={() => void post("/api/bots", { botId: b.id, runsOn: v }, "PATCH")}
-              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${(b.runsOn ?? "auto") === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 disabled:opacity-60 ${(b.runsOn ?? "auto") === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
             >
               {label}
             </button>

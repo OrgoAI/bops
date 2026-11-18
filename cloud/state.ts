@@ -30,7 +30,7 @@ import {
 import { dropOlderMac, notifyMac } from "./tunnel.ts";
 import { messagesWritten, stateWritten } from "./live.ts";
 import { forgetTelemetryChoice } from "./analytics.ts";
-import { autoRoute, chatAutoFor, keepChatOn, nudgeRunners, recheckTurns, routedWorkspaces, turnRowsMayWrite } from "./turns.ts";
+import { autoRoute, chatAutoFor, clearTrouble, keepChatOn, nudgeRunners, recheckTurns, routedWorkspaces, turnRowsMayWrite } from "./turns.ts";
 
 /**
  * The app's state, kept here for each user (protocol.ts, "The app's state in Bops Cloud"). Owner: edge builder.
@@ -573,7 +573,7 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
       // An account with no row, that Bops Cloud doesn't move workspaces for, and with no mark of either left: nothing to put back.
       const rows = await routedWorkspaces(c, user.id);
       const on = chatAutoFor(user.id);
-      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && (w.chatAuto !== undefined || w.chatAutoOff !== undefined)) ? keepChatOn(written, rows, on) : written;
+      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && (w.chatAuto !== undefined || w.chatAutoOff !== undefined || w.chatTrouble !== undefined)) ? keepChatOn(written, rows, on) : written;
       if (kept !== written) {
         written = kept;
         json = toJson(blobOf(kept));
@@ -607,6 +607,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   if (!user.computer) void recheckTurns(user.id).catch((e: Error) => console.warn(`[state] turns recheck: ${e.message}`));
   // A runner set up, taken down or failed, a bot moved, a newer Mac: a workspace's chat may move (turns.ts autoRoute).
   if (!user.computer) void autoRoute(user.id, written);
+  // A bot moved or given a new computer: trouble said of a computer none of a workspace's bots works on any more goes.
+  if (!user.computer) void clearTrouble(user.id, null, written).catch((e: Error) => console.warn(`[state] trouble cleared: ${e.message}`));
 }
 
 /** A build from before: its whole state, messages and all, the Mac's own `version` kept as given. */

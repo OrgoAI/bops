@@ -5,6 +5,7 @@ import { after, before, test } from "node:test";
 import { closeDb, query } from "../db.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
+import { CLOUD_ALL_MIN_VERSION } from "../protocol.ts";
 import { autoRoute, closeRunners, resetTurns, revertAuto, sweepTurns, turnTiming } from "../turns.ts";
 import { dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
@@ -82,7 +83,18 @@ const user = (what: string) => {
   users.push(id);
   return id;
 };
-const own = (userId: string, version = "0.0.38", device = "mac-o") => ({
+/** The Bops the owner's Mac says it runs on every call (atAll: CLOUD_ALL_MIN_VERSION, where everything goes through the cloud). */
+let macAt = "0.0.38";
+/** `fn` as an owner whose Mac runs CLOUD_ALL_MIN_VERSION: their workspaces in the cloud never move back to the Mac. */
+async function atAll(fn: () => Promise<void>) {
+  macAt = CLOUD_ALL_MIN_VERSION;
+  try {
+    await fn();
+  } finally {
+    macAt = "0.0.38";
+  }
+}
+const own = (userId: string, version = macAt, device = "mac-o") => ({
   Authorization: `Bearer ${keyOf(userId)}`,
   "x-bops-user": userId,
   "x-bops-protocol": "2",
@@ -93,7 +105,7 @@ const own = (userId: string, version = "0.0.38", device = "mac-o") => ({
 const vm = (userId: string, desktop: string) => `orgo_vm_${userId}~${desktop}`;
 const runnerState = (version = "0.0.37", more: Record<string, unknown> = {}) => ({ status: "running", version, buildId: "b1", by: "mac-o", at: 1, auth: "identity", ...more });
 
-type Ws = { id: string; chatOn?: string; chatAuto?: boolean };
+type Ws = { id: string; chatOn?: string; chatAuto?: boolean; chatTrouble?: { note: string; botId?: string; at: number } };
 type State = { workspaces: Ws[]; runners?: Record<string, unknown>; bots: Record<string, unknown>[] };
 
 /** An owner with Acme: Max on its own computer (the Mac set up its runner unless `runner` is false), a member at Write with Use its computer. */
@@ -118,7 +130,7 @@ async function setup(opts: { runner?: boolean } = {}) {
   };
   assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: own(owner), body: JSON.stringify({ base: 0, state }) })).status, 200);
   // The account as Bops Cloud made it at the Mac's first session, with the version that Mac said (one with the switch).
-  await query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, '0.0.38') ON CONFLICT (user_id) DO UPDATE SET app_version = '0.0.38'", [owner]);
+  await query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET app_version = $2", [owner, macAt]);
   return { owner, writer, project, desktop };
 }
 
@@ -248,60 +260,103 @@ test("where Bops Cloud doesn't move workspaces for the owner yet, the switch bac
   }
 });
 
-test("taken down or failed on the Mac's write, it goes back to the Mac; back up and connected, to Bops Cloud again", async () => {
-  const s = await setup();
-  const box = await listenAs(s.owner, s.desktop);
-  await until(() => cloudNow(s.owner), "moved");
-  await ownerChanges(s.owner, (st) => void (st.runners = { [s.desktop]: runnerState("0.0.37", { status: "failed", error: "it stopped on its computer" }) }));
-  await until(async () => !(await cloudNow(s.owner)), "back to the Mac");
-  assert.deepEqual(await rowOf(s.owner), { mode: "mac", set_by: "auto", allow_hourly: false });
-  assert.deepEqual([(await acmeOf(s.owner)).chatOn, (await acmeOf(s.owner)).chatAuto], [undefined, true]);
-  // Set up again: the Mac marks it running, and its runner (still connected) answers.
-  await ownerChanges(s.owner, (st) => void (st.runners = { [s.desktop]: runnerState() }));
-  await until(() => cloudNow(s.owner), "to Bops Cloud again");
-  await ownerChanges(s.owner, (st) => delete st.runners);
-  await until(async () => !(await cloudNow(s.owner)), "back with no runner");
-  box.close();
+test("where the owner's Mac keeps to everything through the cloud: taken down or failed on the Mac's write, it stays in the cloud, and a member's message is still owed to the computer", async () => {
+  await atAll(async () => {
+    const s = await setup();
+    const box = await listenAs(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION);
+    await until(() => cloudNow(s.owner), "moved");
+    await ownerChanges(s.owner, (st) => void (st.runners = { [s.desktop]: runnerState("0.0.37", { status: "failed", error: "it stopped on its computer" }) }));
+    await autoRoute(s.owner);
+    assert.deepEqual(await rowOf(s.owner), { mode: "cloud", set_by: "auto", allow_hourly: false });
+    await ownerChanges(s.owner, (st) => delete st.runners);
+    await autoRoute(s.owner);
+    assert.deepEqual(await rowOf(s.owner), { mode: "cloud", set_by: "auto", allow_hourly: false });
+    assert.equal((await acmeOf(s.owner)).chatOn, "cloud");
+    const a = (await (await act(s.writer, s.project, "key-all-down01", { act: "chat", chatId: "bot:max", text: "still here?" })).json()) as { turn?: string };
+    assert.ok(a.turn, "owed to its computer");
+    assert.deepEqual(await pendingOf(s.owner), [], "nothing for the Mac");
+    box.close();
+  });
 });
 
-test("a computer that's on with no runner coming goes back to the Mac after its turns end, and to Bops Cloud again once its runner connects", async () => {
-  const s = await setup();
-  const box = await listenAs(s.owner, s.desktop);
-  await until(() => cloudNow(s.owner), "moved");
-  box.close();
-  await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
-  // It naps: nothing moves.
-  await autoRoute(s.owner);
-  assert.equal(await cloudNow(s.owner), true);
-  wakeAnswers.set(s.desktop, () => ({ state: "running" }));
-  const a = (await (await act(s.writer, s.project, "key-auto-nr001", { act: "chat", chatId: "bot:max", text: "x" })).json()) as { turn: string };
-  await until(async () => (await query<{ note: string }>("SELECT note FROM bops.chat_turns WHERE user_id = $1 AND id = $2", [s.owner, a.turn])).rows[0]?.note === "noRunner", "the turn ended", 15_000);
-  await until(async () => !(await cloudNow(s.owner)), "back to the Mac");
-  // The next message is written first and handed to the Mac to answer: nothing is lost.
-  const b = (await (await act(s.writer, s.project, "key-auto-nr002", { act: "chat", chatId: "bot:max", text: "y" })).json()) as { turn?: string; messageId: string; stored: boolean };
-  assert.deepEqual([b.turn, b.stored], [undefined, true]);
-  assert.ok((await pendingOf(s.owner)).some((p) => p.stored && p.messageId === b.messageId));
-  const again = await listenAs(s.owner, s.desktop);
-  await until(() => cloudNow(s.owner), "to Bops Cloud again once it connects");
-  again.close();
-  wakeAnswers.delete(s.desktop);
+test("where the owner's Mac keeps to everything through the cloud: a computer that's on with no runner coming stays in the cloud and says why, the next message is still owed to it, and its runner connecting clears it", async () => {
+  await atAll(async () => {
+    const s = await setup();
+    const box = await listenAs(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION);
+    await until(() => cloudNow(s.owner), "moved");
+    box.close();
+    await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
+    wakeAnswers.set(s.desktop, () => ({ state: "running" }));
+    try {
+      const a = (await (await act(s.writer, s.project, "key-all-nr0001", { act: "chat", chatId: "bot:max", text: "x" })).json()) as { turn: string };
+      await until(async () => (await query<{ note: string }>("SELECT note FROM bops.chat_turns WHERE user_id = $1 AND id = $2", [s.owner, a.turn])).rows[0]?.note === "noRunner", "the turn ended", 15_000);
+      const trouble = await until(async () => (await acmeOf(s.owner)).chatTrouble, "the trouble said on the workspace");
+      assert.deepEqual([trouble.note, trouble.botId, typeof trouble.at], ["noRunner", "max", "number"]);
+      await autoRoute(s.owner);
+      assert.deepEqual(await rowOf(s.owner), { mode: "cloud", set_by: "auto", allow_hourly: false }, "never back to the Mac");
+      const b = (await (await act(s.writer, s.project, "key-all-nr0002", { act: "chat", chatId: "bot:max", text: "y" })).json()) as { turn?: string; stored: boolean };
+      assert.ok(b.turn, "owed to its computer again");
+      assert.deepEqual(await pendingOf(s.owner), [], "nothing handed to the Mac");
+      const again = await listenAs(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION);
+      await until(async () => (await acmeOf(s.owner)).chatTrouble === undefined, "cleared as its runner connects");
+      assert.equal((await query<{ trouble: string | null }>("SELECT trouble FROM bops.chat_routing WHERE user_id = $1 AND ws_id = 'ws_acme'", [s.owner])).rows[0].trouble, null);
+      again.close();
+    } finally {
+      wakeAnswers.delete(s.desktop);
+    }
+  });
 });
 
-test("a computer that can't be woken (billed by the hour) goes back to the Mac and stays there a while, even when its runner connects", async () => {
-  const s = await setup();
-  const box = await listenAs(s.owner, s.desktop);
-  await until(() => cloudNow(s.owner), "moved");
-  box.close();
-  await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
-  wakeAnswers.set(s.desktop, () => ({ state: "hourly" }));
-  await act(s.writer, s.project, "key-auto-hr001", { act: "chat", chatId: "bot:max", text: "x" });
-  await until(async () => (await rowOf(s.owner))?.set_by === "auto-held", "held on the Mac");
-  assert.equal((await rowOf(s.owner))?.mode, "mac");
-  const again = await listenAs(s.owner, s.desktop);
-  await autoRoute(s.owner);
-  assert.equal(await cloudNow(s.owner), false);
-  again.close();
-  wakeAnswers.delete(s.desktop);
+test("where the owner's Mac keeps to everything through the cloud: a computer that can't be woken (billed by the hour) stays in the cloud, says why, and a turn that ends done there clears it", async () => {
+  await atAll(async () => {
+    const s = await setup();
+    const box = await listenAs(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION);
+    await until(() => cloudNow(s.owner), "moved");
+    box.close();
+    await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
+    wakeAnswers.set(s.desktop, () => ({ state: "hourly" }));
+    try {
+      await act(s.writer, s.project, "key-all-hr0001", { act: "chat", chatId: "bot:max", text: "x" });
+      const trouble = await until(async () => (await acmeOf(s.owner)).chatTrouble, "the trouble said");
+      assert.deepEqual([trouble.note, trouble.botId], ["hourly", "max"]);
+      await autoRoute(s.owner);
+      assert.deepEqual(await rowOf(s.owner), { mode: "cloud", set_by: "auto", allow_hourly: false }, "not held on the Mac");
+      assert.deepEqual(await pendingOf(s.owner), []);
+      // The owner lets it be woken: the next answer there, done, clears it (its runner said nothing new meanwhile).
+      wakeAnswers.set(s.desktop, () => ({ state: "woke" }));
+      const b = (await (await act(s.writer, s.project, "key-all-hr0002", { act: "chat", chatId: "bot:max", text: "y" })).json()) as { turn: string };
+      const runnerSays = (path: string, body: unknown) =>
+        fetch(`${cloud.url}${path}`, { method: "POST", headers: { Authorization: `Bearer ${vm(s.owner, s.desktop)}`, "x-bops-user": s.owner, "x-bops-protocol": "2", "x-bops-version": CLOUD_ALL_MIN_VERSION, "content-type": "application/json" }, body: JSON.stringify(body) });
+      assert.equal((await runnerSays(`/v1/runner/turns/${b.turn}/claim`, {})).status, 200);
+      assert.equal((await runnerSays(`/v1/runner/turns/${b.turn}/done`, { state: "done" })).status, 200);
+      await until(async () => (await acmeOf(s.owner)).chatTrouble === undefined, "cleared by a turn done there");
+    } finally {
+      wakeAnswers.delete(s.desktop);
+    }
+  });
+});
+
+test("the owner's or an Admin's \"cloud\" is a choice: never moved by itself, even with no runner and a computer that can't answer", async () => {
+  for (const at of ["0.0.38", CLOUD_ALL_MIN_VERSION]) {
+    macAt = at;
+    try {
+      const s = await setup({ runner: false });
+      assert.equal((await routeAs(s.owner, { mode: "cloud" })).status, 200);
+      await autoRoute(s.owner);
+      assert.deepEqual(await rowOf(s.owner), { mode: "cloud", set_by: "owner", allow_hourly: false }, `the owner's, at ${at}`);
+      // An Admin's, through the shared workspace's route.
+      const t = await setup({ runner: false });
+      const admin = user("admin");
+      roles[`${admin} ${t.project}`] = { role: "admin", ownerUserId: t.owner, bopsWsId: "ws_acme", name: "Acme" };
+      const r = await fetch(`${cloud.url}/v1/ws/${t.project}/routing`, { method: "PATCH", headers: { Authorization: `Bearer ${keyOf(admin)}`, "content-type": "application/json" }, body: JSON.stringify({ mode: "cloud" }) });
+      assert.equal(r.status, 200, await r.clone().text());
+      await ownerChanges(t.owner, (st) => void (st.runners = { [t.desktop]: runnerState("0.0.37", { status: "failed" }) }));
+      await autoRoute(t.owner);
+      assert.deepEqual(await rowOf(t.owner), { mode: "cloud", set_by: "admin", allow_hourly: false }, `the Admin's, at ${at}`);
+    } finally {
+      macAt = "0.0.38";
+    }
+  }
 });
 
 test("a restart of Bops Cloud leaves a moved workspace as it is, and its runner connecting again proves it once more", async () => {
@@ -451,7 +506,35 @@ test("a turn that ran out of time behind a longer answer in its chat, its runner
   box.close();
 });
 
-test("moved back to the Mac while a member's turn waits on its computer: the Mac is handed the message to answer, and the owner's own says to send it again", async () => {
+test("where everything goes through the cloud, a member's and the owner's turns waiting on its computer while its runner fails on the Mac keep waiting there: nothing is handed to the Mac", async () => {
+  await atAll(async () => {
+    const s = await setup();
+    const box = await listenAs(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION);
+    await until(() => cloudNow(s.owner), "moved");
+    box.close();
+    await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
+    wakeAnswers.set(s.desktop, () => ({ state: "storage", expectedSeconds: 30 }));
+    try {
+      const a = (await (await act(s.writer, s.project, "key-all-hb0001", { act: "chat", chatId: "bot:max", text: "while it wakes" })).json()) as { turn: string; messageId: string };
+      const o = await fetch(`${cloud.url}/v1/chats/${encodeURIComponent("bot:max")}/send`, { method: "POST", headers: own(s.owner), body: JSON.stringify({ key: "key-all-hbown", text: "mine too", all: true }) });
+      assert.equal(o.status, 200);
+      const mine = ((await o.json()) as { turn: string }).turn;
+      await until(async () => (await turnOf(s.owner, a.turn))?.state === "waking", "waking");
+      await ownerChanges(s.owner, (st) => void (st.runners = { [s.desktop]: runnerState("0.0.37", { status: "failed" }) }));
+      await autoRoute(s.owner);
+      assert.equal(await cloudNow(s.owner), true, "still the cloud's");
+      assert.equal((await turnOf(s.owner, a.turn))?.state, "waking");
+      assert.ok(["owed", "waking"].includes((await turnOf(s.owner, mine))!.state));
+      assert.deepEqual(await pendingOf(s.owner), [], "no queued Mac act");
+      const all = await readAllMessages(s.owner);
+      assert.ok(!all.some((m) => /Mac answers/.test(m.json?.text ?? "")), "no note that the Mac answers");
+    } finally {
+      wakeAnswers.delete(s.desktop);
+    }
+  });
+});
+
+test("an owner whose Mac is older than CLOUD_ALL_MIN_VERSION, as before: moved back to the Mac while a member's turn waits on its computer, the Mac is handed the message to answer, and the owner's own says to send it again", async () => {
   const s = await setup();
   const box = await listenAs(s.owner, s.desktop);
   await until(() => cloudNow(s.owner), "moved");

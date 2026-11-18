@@ -352,6 +352,24 @@ await check("without Use its computer: no reply, Nothing to add, folding up or a
   assert.equal(did[0]?.[0], "chat");
 });
 
+await check("without Use its computer: no answer to a chat's ask a bot set to work on the Mac made on its own computer (everything through the cloud); one made on this Mac as before", async () => {
+  const { deviceIdOf } = await import("../cloud/device.ts");
+  // Max set to work on the Mac, with a computer all the same: where everything goes through the cloud, its turn ran there.
+  fresh({ samComputer: "none" });
+  state.bots.find((b) => b.id === "max").runsOn = "mac";
+  state.workspaces[1].chatOn = "cloud";
+  state.appApprovals.push({ id: "ask-runner", botId: "max", chatId: "bot:max", action: "Run a command", kind: "brain", askedBy: deviceIdOf("user_owner", "c1") });
+  await memberEvent(event({ act: "answer", askId: "ask-runner", reply: "once" }, { key: "key_answ00003" }), "e_nc8");
+  assert.deepEqual(did, [], "not answered");
+  assert.ok(warned.some((w) => w.includes("e_nc8") && w.includes("no computer")));
+  // The same bot's ask made on this Mac: no computer is used, so it's answered as before.
+  fresh({ samComputer: "none" });
+  state.bots.find((b) => b.id === "max").runsOn = "mac";
+  state.appApprovals.push({ id: "ask-here", botId: "max", chatId: "bot:max", action: "Run a command", kind: "brain", askedBy: "this-mac" });
+  await memberEvent(event({ act: "answer", askId: "ask-here", reply: "once" }, { key: "key_answ00004" }), "e_nc9");
+  assert.equal(did[0]?.[0], "answer");
+});
+
 await check("a member's chat queued before the workspace was switched to Bops Cloud: never added here (only Bops Cloud stamps their words there)", async () => {
   fresh();
   state.workspaces[1].chatOn = "cloud";
