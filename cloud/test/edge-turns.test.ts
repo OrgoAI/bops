@@ -7,9 +7,9 @@ import { closeDb, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import { GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState } from "../protocol.ts";
+import { CLOUD_ALL_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
 import { howIWork } from "../style.ts";
-import { closeRunners, JOB_OLD_RUNNER, resetTurns, sweepTurns, turnById, turnTiming } from "../turns.ts";
+import { APP_JOB_DEADLINE_MS, closeRunners, JOB_OLD_RUNNER, jobDeadline, resetTurns, runnerVersionOf, sweepTurns, takeAppJob, turnById, TURN_DEADLINE_MS, turnTiming } from "../turns.ts";
 import { connectMac, dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
@@ -164,10 +164,10 @@ async function setup(opts: { cloud?: boolean } = {}) {
 }
 
 type Ev = { type: string; data: Record<string, unknown> };
-/** An SSE stream's events as they come (`first`: the event that says it's open). */
-async function stream(path: string, key: string, first: string) {
+/** An SSE stream's events as they come (`first`: the event that says it's open; `headers`: more to send, a runner's version). */
+async function stream(path: string, key: string, first: string, headers: Record<string, string> = {}) {
   const ctl = new AbortController();
-  const res = await fetch(`${cloud.url}${path}`, { headers: { Authorization: `Bearer ${key}` }, signal: ctl.signal });
+  const res = await fetch(`${cloud.url}${path}`, { headers: { Authorization: `Bearer ${key}`, ...headers }, signal: ctl.signal });
   assert.equal(res.status, 200, `${path}: ${res.status}`);
   const got: Ev[] = [];
   void (async () => {
@@ -1014,4 +1014,231 @@ test("a job's end its computer never says is kept on the app too: a runner from 
   await until(async () => (await turnById(w.owner, c.turn))?.state === "failed", "ended: it can't wake", 15_000);
   await until(async () => (await actsOn(w.owner))[0]?.going === undefined, "kept on the app");
   assert.deepEqual((await actsOn(w.owner)).map((x) => [x.ok, x.said]), [[false, "Max's computer is stopped. Tara can start it again."]]);
+});
+
+/* ---------------- Everything through the cloud: the plumbing (no workspace behaves differently yet) ---------------- */
+
+/** A call from a computer's runner that says which Bops it runs (none: one that doesn't say). */
+const runnerOn = (owner: string, desktop: string, version: string | null, path: string, body?: unknown) =>
+  fetch(`${cloud.url}${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { Authorization: `Bearer ${vm(owner, desktop)}`, "x-bops-user": owner, "x-bops-protocol": "2", "content-type": "application/json", ...(version ? { "x-bops-version": version } : {}) },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+const seenOf = async (owner: string) => (await query<{ desktop_id: string; device_id: string; version: string }>("SELECT desktop_id, device_id, version FROM bops.runner_seen WHERE user_id = $1", [owner])).rows;
+/** The owner's state as it is in Postgres (what takeAppJob and runnerVersionOf read). */
+const blobOf = async (owner: string) => (await query<{ state: Record<string, unknown> }>("SELECT state FROM bops.app_state WHERE user_id = $1", [owner])).rows[0].state;
+/** A job turn owed to Max's computer, written as Bops Cloud writes one (takeAppJob), for kinds nothing owes yet. */
+async function oweJob(s: { owner: string; desktop: string; device: string }, id: string, member: Omit<TurnMember, "job">, job: TurnJob, chatId = "bot:max") {
+  await query(
+    `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at)
+     VALUES ($1, $2, $3, $4, 'max', 'ws_acme', $5::jsonb, $6, $7, 'owed', now() + make_interval(secs => $8), $9)`,
+    [s.owner, id, `msg_${id}`, chatId, JSON.stringify({ ...member, job }), s.desktop, s.device, jobDeadline(job) / 1000, Date.now()],
+  );
+  return id;
+}
+
+test("a runner's own word on its Bops is kept as it connects and stays once it goes; one that says none, or nonsense, keeps nothing", async () => {
+  const s = await setupGithub();
+  const quiet = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  quiet.close();
+  const junk = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": "latest" });
+  junk.close();
+  assert.deepEqual(await seenOf(s.owner), [], "nothing said, nothing kept");
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": "0.0.53" });
+  await until(async () => (await seenOf(s.owner)).length === 1, "kept as it connected");
+  assert.deepEqual(await seenOf(s.owner), [{ desktop_id: s.desktop.toLowerCase(), device_id: s.device, version: "0.0.53" }]);
+  // Gone: its presence goes, what it runs stays.
+  box.close();
+  await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
+  assert.deepEqual((await seenOf(s.owner)).map((x) => x.version), ["0.0.53"]);
+  // Upgraded and back: one row, the newer word.
+  const again = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  await until(async () => (await seenOf(s.owner))[0]?.version === CLOUD_ALL_MIN_VERSION, "its newer word");
+  again.close();
+  assert.equal((await seenOf(s.owner)).length, 1);
+});
+
+test("runnerVersionOf: the newer of the owner's Mac's record and the runner's own word; a record that isn't running (being set up again, failed, being stopped) since it last said is no runner, and so is no record", async () => {
+  const s = await setupGithub({ runner: "0.0.53" });
+  const DESKTOP = s.desktop.toUpperCase();
+  const blob = await blobOf(s.owner);
+  assert.equal(await runnerVersionOf(null, s.owner, blob, s.desktop), "0.0.53", "the Mac's record alone");
+  // It said it runs a newer one (an upgrade the Mac's record doesn't have yet): that.
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  box.close();
+  await until(async () => (await seenOf(s.owner)).length === 1, "its word kept");
+  assert.equal(await runnerVersionOf(null, s.owner, blob, DESKTOP), CLOUD_ALL_MIN_VERSION, "its own newer word, any case of the id");
+  // Its word older than the Mac's record: the record.
+  await query("UPDATE bops.runner_seen SET version = '0.0.50' WHERE user_id = $1", [s.owner]);
+  assert.equal(await runnerVersionOf(null, s.owner, blob, s.desktop), "0.0.53");
+  await query("UPDATE bops.runner_seen SET version = $2 WHERE user_id = $1", [s.owner, CLOUD_ALL_MIN_VERSION]);
+  const seenAt = (await query<{ at: Date }>("SELECT seen_at AS at FROM bops.runner_seen WHERE user_id = $1", [s.owner])).rows[0].at.getTime();
+  const record = (status: string, at: number) => ({ ...blob, runners: { [DESKTOP]: { status, version: "0.0.53", buildId: "b1", by: "mac-o", at } } });
+  // The Mac's record says it failed, or is being stopped, after the runner last said: no runner.
+  assert.equal(await runnerVersionOf(null, s.owner, record("failed", seenAt + 60_000), s.desktop), null, "a failed record newer than its word");
+  assert.equal(await runnerVersionOf(null, s.owner, record("stopping", seenAt + 60_000), s.desktop), null);
+  // Being set up again after the runner last said (a retry after it failed, or a reinstall after a stop): no runner either.
+  assert.equal(await runnerVersionOf(null, s.owner, record("installing", seenAt + 60_000), s.desktop), null, "an installing record newer than its word");
+  // At the same moment, or with no time on it: taken as newer, so no runner.
+  assert.equal(await runnerVersionOf(null, s.owner, record("installing", seenAt), s.desktop), null);
+  assert.equal(await runnerVersionOf(null, s.owner, { ...blob, runners: { [DESKTOP]: { status: "failed", version: "0.0.53", buildId: "b1", by: "mac-o" } } }, s.desktop), null, "a record with no time");
+  // One that failed, was being stopped or set up before the runner said it runs: its word.
+  assert.equal(await runnerVersionOf(null, s.owner, record("failed", seenAt - 60_000), s.desktop), CLOUD_ALL_MIN_VERSION, "a failed record older than its word");
+  assert.equal(await runnerVersionOf(null, s.owner, record("stopping", seenAt - 60_000), s.desktop), CLOUD_ALL_MIN_VERSION);
+  assert.equal(await runnerVersionOf(null, s.owner, record("installing", seenAt - 60_000), s.desktop), CLOUD_ALL_MIN_VERSION);
+  // A record that says running, whenever: the newer of the two.
+  assert.equal(await runnerVersionOf(null, s.owner, record("running", seenAt + 60_000), s.desktop), CLOUD_ALL_MIN_VERSION);
+  // No record of a runner there (the Mac forgets one only after taking it down): none, whatever it said before.
+  assert.equal(await runnerVersionOf(null, s.owner, { ...blob, runners: {} }, s.desktop), null);
+  // No word and no record: none.
+  const none = await setupGithub({ runner: null });
+  assert.equal(await runnerVersionOf(null, none.owner, await blobOf(none.owner), none.desktop), null);
+});
+
+test("an app's GitHub job goes to its computer when the runner there said it runs a new enough Bops, though the owner's Mac's record of it is older", async (t) => {
+  const s = await setupGithub({ runner: "0.0.51" });
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": GITHUB_ACTS_MIN_VERSION });
+  t.after(() => box.close());
+  await until(async () => (await seenOf(s.owner)).length === 1, "its word kept");
+  const r = await act(s.sam, s.project, "key-seen-0001", { act: "githubPull", app: "site" });
+  assert.equal(r.status, 202, await r.clone().text());
+  assert.deepEqual(await r.json(), { ok: true, macOn: true, stored: true, computer: true, turn: `turn_msg_job_${s.sam}_key-seen-0001` });
+  assert.deepEqual(await pendingFor(s.owner), [], "nothing waits for the owner's Mac");
+});
+
+test("an app's GitHub job keeps the rule from before: the owner's Mac's record of the runner must say running, so one being set up again, failed or being stopped leaves it to the Mac, whatever the runner said before or since", async () => {
+  /** A runner on Max's computer that said 0.0.53 as it connected and went, then the owner's Mac's record of it as `status`, `ago` ms after it said (less than 0: before). */
+  const after = async (status: string, ago: number) => {
+    const s = await setupGithub();
+    const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": "0.0.53" });
+    await until(async () => (await seenOf(s.owner)).length === 1, "its word kept");
+    box.close();
+    await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
+    const seenAt = (await query<{ at: Date }>("SELECT seen_at AS at FROM bops.runner_seen WHERE user_id = $1", [s.owner])).rows[0].at.getTime();
+    const runners = { [s.desktop.toUpperCase()]: { status, version: "0.0.53", buildId: "b2", by: "mac-o", at: seenAt + ago } };
+    await ownerChanges(s.owner, (st) => void ((st as unknown as { runners: unknown }).runners = runners), own(s.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+    return s;
+  };
+  for (const [status, ago] of [["installing", 60_000], ["installing", -60_000], ["failed", -60_000], ["stopping", -60_000]] as const) {
+    const s = await after(status, ago);
+    const r = await act(s.sam, s.project, "key-asbefore-01", { act: "githubPull", app: "site" });
+    assert.equal(r.status, 202, await r.clone().text());
+    assert.deepEqual(await r.json(), { ok: true, macOn: false }, `${status} ${ago > 0 ? "after" : "before"} its word: the owner's Mac does it when it opens`);
+    assert.deepEqual((await pendingFor(s.owner)).map((p) => [p.act, p.key]), [[{ act: "githubPull", app: "site" }, "key-asbefore-01"]]);
+    assert.equal((await turnsOf(s.owner)).length, 0, "nothing owed to a computer whose runner isn't running");
+  }
+  // Running again (the Mac's record says so): its computer, as before.
+  const s = await after("running", 60_000);
+  const r = await act(s.sam, s.project, "key-asbefore-02", { act: "githubPull", app: "site" });
+  assert.equal(((await r.json()) as { computer?: boolean }).computer, true);
+});
+
+test("how long a job waits for its computer, by kind: what's removed, goes on Published or reaches GitHub keeps a chat turn's ten minutes; the rest half an hour", () => {
+  assert.equal(TURN_DEADLINE_MS, 10 * 60_000);
+  assert.equal(APP_JOB_DEADLINE_MS, 30 * 60_000);
+  const short: TurnJob[] = [
+    { act: "githubLink", app: "site" },
+    { act: "githubPull", app: "site" },
+    { act: "remove", app: "site" },
+    { act: "remove", app: "site", repo: true },
+    { act: "removeSite", app: "site", site: "docs" },
+    { act: "removeLeftOver", app: "site", leftOver: "site-old" },
+    { act: "deploy", app: "site", env: "prod" },
+    { act: "rollback", app: "site", deployment: "d1", env: "prod" },
+  ];
+  const long: TurnJob[] = [
+    { act: "deploy", app: "site" },
+    { act: "rollback", app: "site", deployment: "d1" },
+    { act: "settings", app: "site", port: 3000 },
+    { act: "domain", app: "site", zone: "z1" },
+    { act: "compactChat" },
+  ];
+  for (const j of short) assert.equal(jobDeadline(j), TURN_DEADLINE_MS, j.act);
+  for (const j of long) assert.equal(jobDeadline(j), APP_JOB_DEADLINE_MS, j.act);
+});
+
+test("a job only a newer runner knows, claimed by an older one (0.0.53, or one that doesn't say): 410 with the words why, the turn ends, and Your Apps says so; one at CLOUD_ALL_MIN_VERSION takes it, with its half hour", async (t) => {
+  const s = await setupGithub({ runner: CLOUD_ALL_MIN_VERSION });
+  // A runner listens there, so nothing owed wakes the computer meanwhile.
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  t.after(() => box.close());
+  const deploy = (key: string) =>
+    takeAppJob({
+      account: s.owner,
+      wsId: "ws_acme",
+      job: { act: "deploy", app: "site" },
+      id: `msg_job_${s.admin}_${key}`,
+      member: { userId: s.admin, email: `${s.admin}@example.com`, name: "Ada", ref: key, projectId: s.project, role: "admin" },
+      words: (bot) => `Ada asked ${bot}'s computer to deploy site.`,
+      check: () => {},
+    });
+  const taken = await deploy("key-old-0001");
+  assert.equal(taken.where, "computer");
+  const id = taken.where === "computer" ? taken.turn.id : "";
+  assert.deepEqual((await actsOn(s.owner)).map((x) => [x.key, x.act, x.going]), [["key-old-0001", "deploy", true]]);
+  // Claimed by a runner on 0.0.53: refused with why, never run.
+  const old = await runnerOn(s.owner, s.desktop, "0.0.53", `/v1/runner/turns/${id}/claim`, {});
+  assert.equal(old.status, 410);
+  const words = "Max's computer took this on an older Bops. Try again once it's updated.";
+  assert.deepEqual(await old.json(), { error: words, code: "over" });
+  assert.deepEqual([(await turnById(s.owner, id))?.state, (await turnById(s.owner, id))?.note], ["failed", "oldRunner"]);
+  assert.deepEqual((await actsOn(s.owner)).map((x) => [x.key, x.ok, x.said, x.going]), [["key-old-0001", false, words, undefined]], "Your Apps says why");
+  // A runner that doesn't say which Bops it runs is one from before too.
+  const quiet = await deploy("key-old-0002");
+  const quietId = quiet.where === "computer" ? quiet.turn.id : "";
+  assert.equal((await runnerOn(s.owner, s.desktop, null, `/v1/runner/turns/${quietId}/claim`, {})).status, 410);
+  // A chat's job (no app): refused the same, and nothing is kept on an app.
+  const before = (await fullState(s.owner)).version;
+  const compact = await oweJob(s, "turn_compact_old", { userId: s.admin, email: `${s.admin}@example.com`, name: "Ada", ref: "key-old-0003", projectId: s.project, role: "admin" }, { act: "compactChat" });
+  const c = await runnerOn(s.owner, s.desktop, "0.0.53", `/v1/runner/turns/${compact}/claim`, {});
+  assert.deepEqual([c.status, ((await c.json()) as { error: string }).error], [410, words]);
+  assert.deepEqual([(await turnById(s.owner, compact))?.state, (await turnById(s.owner, compact))?.note], ["failed", "oldRunner"]);
+  assert.equal((await fullState(s.owner)).version, before, "no app to say it on, so the state is as it was");
+  // A runner at CLOUD_ALL_MIN_VERSION takes the same kind, and it waits half an hour, not a chat turn's ten minutes.
+  const fresh = await deploy("key-old-0004");
+  const freshId = fresh.where === "computer" ? fresh.turn.id : "";
+  const left = (await turnById(s.owner, freshId))!.deadline - Date.now();
+  assert.ok(left > 29 * 60_000 && left <= 30 * 60_000, `about half an hour (${left} ms)`);
+  const ok = await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${freshId}/claim`, {});
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.deepEqual(((await ok.json()) as { turn: { member: { job: unknown } } }).turn.member.job, { act: "deploy", app: "site" });
+  // Its end, as a 0.0.54 runner that can't do it yet says it: kept on the app as not done, in its words.
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${freshId}/done`, { state: "done", job: { ok: false, said: "This computer's Bops doesn't know how to do that yet." } })).status, 200);
+  assert.deepEqual((await actsOn(s.owner)).filter((x) => x.key === "key-old-0004").map((x) => [x.ok, x.said, x.going]), [[false, "This computer's Bops doesn't know how to do that yet.", undefined]]);
+  // A GitHub job still goes to a runner that doesn't say (one from 0.0.52 on, before it said).
+  const gh = (await (await act(s.admin, s.project, "key-old-0005", { act: "githubLink", app: "site" })).json()) as { turn: string };
+  assert.equal((await runnerOn(s.owner, s.desktop, null, `/v1/runner/turns/${gh.turn}/claim`, {})).status, 200);
+});
+
+test("who may still have a job done, by kind: Your Apps at Write for a deploy, and the power of Publish for Published; an Admin for a remove; Write on every bot of the chat to compact it", async () => {
+  const s = await setupGithub({ runner: CLOUD_ALL_MIN_VERSION });
+  const who = (u: string, role?: "admin") => ({ userId: u, email: `${u}@example.com`, name: u, ref: `key-${u.slice(-8)}`, projectId: s.project, ...(role ? { role } : {}) });
+  let n = 0;
+  /** Owed, then claimed by a new enough runner: its status, and the claim let go so the chat's next can go. */
+  const claimOf = async (member: Omit<TurnMember, "job">, job: TurnJob) => {
+    const id = await oweJob(s, `turn_who_${++n}`, { ...member, ref: `${member.ref}-${n}` }, job);
+    const r = await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${id}/claim`, {});
+    if (r.status === 200) assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${id}/done`, { state: "done", job: { ok: false, said: "Not now." } })).status, 200);
+    return r.status;
+  };
+  // Ivy: Your Apps at Write, no App secrets, Max at Read.
+  assert.equal(await claimOf(who(s.ivy), { act: "deploy", app: "site" }), 200, "a Preview deploy: Your Apps at Write");
+  assert.equal(await claimOf(who(s.ivy), { act: "settings", app: "site", port: 3000 }), 200);
+  assert.equal(await claimOf(who(s.ivy), { act: "domain", app: "site", zone: "z1" }), 200);
+  assert.equal(await claimOf(who(s.ivy), { act: "deploy", app: "site", env: "prod" }), 410, "Publish needs App secrets");
+  assert.equal(await claimOf(who(s.ivy), { act: "rollback", app: "site", deployment: "d1", env: "prod" }), 410);
+  assert.equal(await claimOf(who(s.ivy), { act: "githubPull", app: "site" }), 410, "as today");
+  // Sam: App secrets too.
+  assert.equal(await claimOf(who(s.sam), { act: "deploy", app: "site", env: "prod" }), 200);
+  assert.equal(await claimOf(who(s.sam), { act: "remove", app: "site" }), 410, "a remove is an Admin's");
+  assert.equal(await claimOf(who(s.sam), { act: "removeSite", app: "site", site: "docs" }), 410);
+  assert.equal(await claimOf(who(s.admin, "admin"), { act: "remove", app: "site", repo: true }), 200);
+  assert.equal(await claimOf(who(s.admin, "admin"), { act: "removeLeftOver", app: "site", leftOver: "site-old" }), 200);
+  // Compacting a chat: Write on every bot of it (Max is at Read for Sam and Ivy).
+  assert.equal(await claimOf(who(s.sam), { act: "compactChat" }), 410);
+  assert.equal(await claimOf(who(s.admin, "admin"), { act: "compactChat" }), 200);
+  // Taken off Your Apps: a deploy owed meanwhile ends as they may no longer.
+  await ownerChanges(s.owner, (st) => void (st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess![`${s.ivy}@example.com`].apps = "read"), own(s.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+  assert.equal(await claimOf(who(s.ivy), { act: "deploy", app: "site" }), 410);
 });

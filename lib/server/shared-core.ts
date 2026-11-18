@@ -1,4 +1,4 @@
-import { ADMIN_ONLY, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_PERSONA, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_NO_KEYS, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, PERSONA_CHANGED, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
+import { ADMIN_ONLY, CLOUD_ACT_MS, isAppAct, MEMBER_ACT_MS, MEMBER_APPS_READ_ONLY, MEMBER_MAX_PERSONA, MEMBER_MAX_TEXT, MEMBER_NO_COMPUTER, MEMBER_NO_KEYS, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, NOT_WAITING, OWNER_BOPS_OLD, PERSONA_CHANGED, STORED_ACT_MS, type MemberAct, type MemberAppAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
 import { askOwnersOnly, cleanPowers, threadOwnersOnly, type Power } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
 import { ADMIN_LINE, APP_WORK_LINE, KEYS_GIVEN_LINE, OWNER_UPDATE_LINE, ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
@@ -30,12 +30,15 @@ type Older = { messages: Record<string, unknown>[]; more: boolean };
 
 /**
  * Something the user did in the workspace (MemberAct) that the owner's Bops hasn't written yet: on its way to
- * Bops Cloud ("sending"), there and waiting for the owner's Bops to open ("waiting"), or not sent (`error`).
+ * Bops Cloud ("sending"), there and waiting for the owner's Bops to open ("waiting"), done by Bops Cloud and the
+ * bots' computers with no Mac at all ("cloud": MemberActAnswer.cloud), or not sent (`error`).
  * `me`: who they are on it, as their own words show until the owner's copy comes.
  */
 export type PendingAct = { key: string; act: MemberAct; at: number; state: MemberSend["state"]; error?: string; me: MemberSaid };
 /** What an act waiting past MEMBER_ACT_MS, or one the owner's access no longer lets go, says. */
 export const ACT_EXPIRED = "The workspace's Mac didn't open in time, so this didn't go.";
+/** What an act Bops Cloud does without the Mac ("cloud") says once CLOUD_ACT_MS went by and it hasn't landed: no Mac in it. */
+export const CLOUD_ACT_EXPIRED = "That didn't go through in time. Try again.";
 export const ACT_ACCESS_CHANGED = "The owner changed your access, so this didn't go.";
 /** What one too long to send says (more than MEMBER_MAX_TEXT, or a body Bops Cloud won't take). */
 export const ACT_TOO_LONG = "That's too long to send. Make it shorter.";
@@ -45,6 +48,8 @@ const THEIR_LOGINS = "This uses the owner's apps or keys. Only the owner can ans
 /** What Bops Cloud says of what acts on a bot's computer without Use its computer (MEMBER_NO_COMPUTER): the same words. */
 const NO_COMPUTER = "This runs on the bot's computer, and the owner hasn't let you use it.";
 const LIVE = new Set(["running", "queued", "starting"]);
+/** How long an act stays pending before it says it didn't go: an answer as long as its ask can wait, one done by Bops Cloud without the Mac CLOUD_ACT_MS, the rest MEMBER_ACT_MS. */
+const waitOf = (p: PendingAct) => (p.state === "cloud" ? CLOUD_ACT_MS : p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS);
 
 /** The bots an act touches, as the copy has them: none when what it names is gone. */
 function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
@@ -272,14 +277,14 @@ export class SharedCopy {
     this.changed();
   }
 
-  /** Bops Cloud took it: on its way to the owner's Bops ("sending"), or waiting for it to open ("waiting"). */
-  acted(key: string, state: "sending" | "waiting") {
+  /** Bops Cloud took it: on its way to the owner's Bops ("sending"), waiting for it to open ("waiting"), or done by Bops Cloud and the bots' computers ("cloud"). */
+  acted(key: string, state: "sending" | "waiting" | "cloud") {
     const p = this.pending.get(key);
     if (!p) return;
     this.pending.set(key, { ...p, state });
     this.changed();
     // Not kept by then (waiting, or on its way and never written), it says it didn't go (acts): the window's state changes then too.
-    const t = setTimeout(() => ["waiting", "sending"].includes(this.pending.get(key)?.state ?? "") && this.changed(), (p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS) + 1000);
+    const t = setTimeout(() => ["waiting", "sending", "cloud"].includes(this.pending.get(key)?.state ?? "") && this.changed(), waitOf({ ...p, state }) + 1000);
     (t as { unref?: () => void }).unref?.();
   }
 
@@ -298,12 +303,12 @@ export class SharedCopy {
 
   /**
    * What's still on its way, as it stands now: one waiting longer than MEMBER_ACT_MS for the owner's Bops didn't go. An
-   * answer waits as long as its ask can (STORED_ACT_MS, as Bops Cloud keeps it): the run waits for it too.
+   * answer waits as long as its ask can (STORED_ACT_MS, as Bops Cloud keeps it): the run waits for it too. One Bops
+   * Cloud does without the Mac ("cloud") gives up after CLOUD_ACT_MS, in words that never name the Mac.
    */
   acts(): PendingAct[] {
     const now = this.now();
-    const ms = (p: PendingAct) => (p.act.act === "answer" ? STORED_ACT_MS : MEMBER_ACT_MS);
-    return [...this.pending.values()].map((p) => (p.state !== "failed" && now - p.at > ms(p) ? { ...p, state: "failed" as const, error: ACT_EXPIRED } : p));
+    return [...this.pending.values()].map((p) => (p.state !== "failed" && now - p.at > waitOf(p) ? { ...p, state: "failed" as const, error: p.state === "cloud" ? CLOUD_ACT_EXPIRED : ACT_EXPIRED } : p));
   }
 
   /** Why the user can't do this here, from the copy (Bops Cloud decides, this only saves a round trip), or null. */
@@ -468,7 +473,7 @@ export class SharedCopy {
 }
 
 /** What Bops Cloud answered an act (POST /v1/ws/<project>/act): its status (0: it didn't answer) and body. */
-export type ActResult = { status: number; body?: { ok?: boolean; macOn?: boolean; error?: string; code?: string } };
+export type ActResult = { status: number; body?: { ok?: boolean; macOn?: boolean; cloud?: boolean; error?: string; code?: string } };
 
 /** The words for an act Bops Cloud turned down, plain: its own where it says them, else by its status. */
 function actError(r: ActResult): string {
@@ -493,7 +498,7 @@ export async function actWith(copy: SharedCopy, act: MemberAct, key: string, me:
   copy.acting(key, act, me);
   const r = await send(JSON.stringify({ key, act })).catch((): ActResult => ({ status: 0 }));
   if (r.status === 202) {
-    copy.acted(key, r.body?.macOn ? "sending" : "waiting");
+    copy.acted(key, r.body?.cloud ? "cloud" : r.body?.macOn ? "sending" : "waiting");
     void copy.refresh();
     return { ok: true, key, macOn: !!r.body?.macOn };
   }
