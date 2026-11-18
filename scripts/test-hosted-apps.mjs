@@ -7392,6 +7392,131 @@ await check("A computer's apps view carries its room as the owner's Mac reads it
   }
 });
 
+await check("One lease per app through Bops Cloud (app-lease.ts holdApp, under withApp): taken and freed around a deploy and a restore; a removal refused at once while a deploy holds it; a deploy waits for another, then refuses at 2 minutes; the Mac goes ahead when Bops Cloud is out of reach or from before, a runner refuses after 3 tries; nothing asked in a job's turn; its renew stops once it's freed", async () => {
+  const AL = await import(`${root}/lib/server/app-lease.ts`);
+  const TC = await import(`${root}/lib/server/turn-context.ts`);
+  const { APP_BUSY } = await import(`${root}/cloud/protocol.ts`);
+  /** What Bops Cloud was sent, and how it answers (`fails`: no answer at all). */
+  const sent = [];
+  let answer = () => ({ status: 200, body: { ok: true, until: Date.now() + 90_000 } });
+  const send = async (body, headers) => {
+    sent.push({ body: structuredClone(body), headers });
+    const a = answer(body);
+    if (a.fails) throw new Error("no answer");
+    return new Response(JSON.stringify(a.body ?? {}), { status: a.status });
+  };
+  const busy = (by, kind) => () => ({ status: 409, body: { error: "busy", code: APP_BUSY, by, kind } });
+  let clock = 0;
+  const as = (more = {}) => {
+    sent.length = 0;
+    clock = 0;
+    AL.appLeaseForTests({ send, on: () => true, user: () => "u_alex", runner: () => false, renewMs: 20, retryMs: [1, 1], clock: { now: () => clock, sleep: async (ms) => void (clock += ms) }, ...more });
+  };
+  const ops = () => sent.map((x) => x.body.op);
+  const turnCtx = (more) => ({ id: "turn_x", chatId, botId: "boppy", offsetMs: 0, humanAt: 0, acting: true, cancelled: false, ...more });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    // A deploy from the window: taken (as this Mac, for the user, its kind), then freed.
+    as();
+    const d = await post(DEMO, { ws: WS, action: "deploy" });
+    assert.equal(d.status, 200, JSON.stringify(d.body));
+    assert.deepEqual(ops(), ["take", "free"]);
+    assert.deepEqual(pick(sent[0].body, ["ws", "app", "kind"]), { ws: WS, app: DEMO, kind: "deploy" });
+    assert.match(sent[0].body.holder, /^mac:[^:]+:[a-f0-9]{16}$/);
+    assert.equal(sent[1].body.holder, sent[0].body.holder, "freed by the holder that took it");
+    assert.equal(sent[0].headers["x-bops-user"], "u_alex");
+    // Remove app while a deploy holds it elsewhere: refused at once in words, nothing taken down, no wait.
+    as();
+    answer = busy("runner", "deploy");
+    let n = web.calls.length;
+    const away = await ask(AppRoute, "DELETE", `/api/hosted-apps/${DEMO}`, { name: DEMO }, { ws: WS });
+    assert.deepEqual([away.status, away.body.error], [409, "demo-app's computer is changing it right now. Try again once that's done."]);
+    assert.deepEqual([ops(), clock, writesSince(n)], [["take"], 0, []]);
+    assert.ok(demo(), "still there");
+    // A deploy while a removal holds it: refused at once too; while a job holds it, its words.
+    for (const [by, kind, words] of [
+      ["mac", "remove", "demo-app is being changed on another of your Macs right now. Try again once that's done."],
+      ["job", "removeSite", "A change to demo-app is still going on its computer. Try again once it's done."],
+    ]) {
+      as();
+      answer = busy(by, kind);
+      await assert.rejects(AL.holdApp(WS, DEMO, "deploy"), { status: 409, message: words });
+      assert.deepEqual([ops(), clock], [["take"], 0]);
+    }
+    // A first save while another deploy holds it: asked again every 3 seconds, taken once it's free.
+    as();
+    let left = 2;
+    answer = () => (left-- > 0 ? busy("runner", "deploy")() : { status: 200, body: { ok: true, until: 1 } });
+    const got = await AL.holdApp(WS, DEMO, "first");
+    assert.deepEqual([ops(), clock], [["take", "take", "take"], 6_000]);
+    got.free();
+    // Held all along: refused at 2 minutes (a runner hears the owner's Mac by name).
+    as({ runner: () => true });
+    answer = busy("mac", "first");
+    await assert.rejects(AL.holdApp(WS, DEMO, "deploy"), { status: 409, message: "demo-app is being changed on Alex's Mac right now. Try again once that's done." });
+    assert.deepEqual([ops().length, clock], [41, 120_000]);
+    // Bops Cloud out of reach, failing, or from before leases (404): the Mac goes ahead, as it always did.
+    for (const a of [{ fails: true }, { status: 503 }, { status: 404 }]) {
+      as();
+      answer = () => a;
+      const l = await AL.holdApp(WS, DEMO, "deploy");
+      l.free();
+      assert.deepEqual(ops(), ["take"], JSON.stringify(a));
+    }
+    // A runner asks 3 times, then refuses; a Bops Cloud from before (404) it goes ahead with.
+    for (const a of [{ fails: true }, { status: 502 }]) {
+      as({ runner: () => true });
+      answer = () => a;
+      await assert.rejects(AL.holdApp(WS, DEMO, "deploy"), { status: 503, message: "Bops Cloud can't be reached, so demo-app wasn't changed. Try again." });
+      assert.deepEqual(ops(), ["take", "take", "take"]);
+      assert.match(sent[0].body.holder, /^runner:here:[a-f0-9]{16}$/);
+      assert.equal(sent[0].headers["x-bops-device"], undefined, "a runner's device is the one Bops Cloud knows");
+    }
+    as({ runner: () => true });
+    answer = () => ({ status: 404 });
+    (await AL.holdApp(WS, DEMO, "remove")).free();
+    assert.deepEqual(ops(), ["take"]);
+    // In a job's turn on a runner, Bops Cloud holds it for the job: nothing asked. In a chat's turn there, it's asked.
+    as({ runner: () => true });
+    answer = () => ({ status: 200, body: { ok: true, until: 1 } });
+    (await TC.runInTurn(turnCtx({ job: true }), () => AL.holdApp(WS, DEMO, "deploy"))).free();
+    assert.deepEqual(ops(), []);
+    (await TC.runInTurn(turnCtx({}), () => AL.holdApp(WS, DEMO, "deploy"))).free();
+    assert.deepEqual(ops(), ["take", "free"]);
+    // Nothing when the app doesn't use Bops Cloud, or no one's signed in.
+    as({ on: () => false });
+    (await AL.holdApp(WS, DEMO, "deploy")).free();
+    as({ user: () => null });
+    (await AL.holdApp(WS, DEMO, "deploy")).free();
+    assert.deepEqual(ops(), []);
+    // Renewed while held; once freed, never again.
+    as();
+    const held = await AL.holdApp(WS, DEMO, "deploy");
+    await wait(70);
+    assert.ok(ops().filter((o) => o === "renew").length >= 2, "renewed while held");
+    held.free();
+    held.free();
+    const after = sent.length;
+    await wait(70);
+    assert.deepEqual(ops().slice(after - 1), ["free"], "its timer stopped, and freed once");
+    // Restore goes through it (a deploy's kind): refused while a removal holds it, before Ingot is asked; else taken and freed.
+    as();
+    answer = busy("runner", "remove");
+    const c = central.calls.length;
+    const refused = await post(DEMO, { ws: WS, action: "restore", to: "a".repeat(64) });
+    assert.deepEqual([refused.status, refused.body.error], [409, "demo-app's computer is changing it right now. Try again once that's done."]);
+    assert.deepEqual([ops(), central.calls.length], [["take"], c], "Ingot never asked");
+    as();
+    answer = () => ({ status: 200, body: { ok: true, until: 1 } });
+    await post(DEMO, { ws: WS, action: "restore", to: "a".repeat(64) });
+    assert.deepEqual(ops(), ["take", "free"]);
+    assert.equal(sent[0].body.kind, "deploy");
+  } finally {
+    AL.appLeaseForTests();
+    answer = () => ({ status: 200, body: {} });
+  }
+});
+
 console.log(`\nhosted apps: ${passed} passed, ${failed} failed`);
 // The throwaway folder this run made (its state, the made-up binaries, the shell checks), gone with it.
 process.chdir(tmpdir());

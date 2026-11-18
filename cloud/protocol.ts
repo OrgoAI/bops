@@ -985,6 +985,44 @@ export const APPS_VIEW_PATH = "/v1/apps/view";
 export type AppsViewPost = { ws: string; apps: Record<string, unknown>; room?: Record<string, unknown> | null };
 /** A runner stream's "apps-view" event (cloud/turns.ts nudgeAppViews): share these apps' view now (none: all of this computer's). */
 export type RunnerAppsViewEvent = { ws: string; apps?: string[] };
+
+/**
+ * One lease per app (cloud/app-lease.ts, bops.app_leases), shared by every Bops of the owner's (each Mac, each computer's
+ * runner) and Bops Cloud's own jobs (cloud/turns.ts claim), so nothing on one app runs twice: a deploy, a first save of
+ * its settings or variables (each may make a deploy project), a site removed, or the app removed. The Mac and a runner
+ * hold it around their work on an app (lib/server/app-lease.ts holdApp, under hosted-apps.ts withApp); a job holds it
+ * from its claim until its end. A holder that stops renewing loses it in APP_LEASE_MS.
+ *
+ * POST APP_LEASE_PATH (AppLeaseBody), with BOPS_USER_HEADER: `take` answers AppLeaseAnswer, or 409 AppLeaseBusy while
+ * another holds it; `renew` the same (409 once it isn't this holder's any more); `free` 200 always. `holder` is
+ * "<who>:<device>:<nonce>" (nonce 8 to 32 hex characters, one per hold): Bops Cloud keeps only the nonce, and sets who
+ * ("mac" for a person, "runner" for a computer) and the device (a computer's from its sign in) itself. "job:" holders
+ * are Bops Cloud's own, never a caller's.
+ */
+export const APP_LEASE_PATH = "/v1/apps/lease";
+/** How long a lease lasts without a renew. */
+export const APP_LEASE_MS = 90_000;
+/** How often its holder renews it. */
+export const APP_LEASE_RENEW_MS = 30_000;
+/** 409: another holds the app's lease (AppLeaseBusy). */
+export const APP_BUSY = "app_busy";
+/** What's under way on an app (lib/server/hosted-apps.ts AppWork). */
+export type AppLeaseKind = "deploy" | "first" | "removeSite" | "remove";
+export type AppLeaseBody = { op: "take" | "renew" | "free"; ws: string; app: string; kind: AppLeaseKind; holder: string };
+export type AppLeaseAnswer = { ok: true; until: number };
+/** Who holds an app's lease: a job of Bops Cloud's on the app's computer, one of the owner's Macs, or a computer's runner. */
+export type AppLeaseHolder = "job" | "mac" | "runner";
+export type AppLeaseBusy = { error: string; code: typeof APP_BUSY; by: AppLeaseHolder; kind: AppLeaseKind };
+/** What a change to an app says while another holds its lease, by who holds it (`owner`: the owner's name, for a runner). */
+export const APP_BUSY_WORDS = {
+  job: (app: string) => `A change to ${app} is still going on its computer. Try again once it's done.`,
+  mac: (app: string, owner: string) => `${app} is being changed on ${owner}'s Mac right now. Try again once that's done.`,
+  otherMac: (app: string) => `${app} is being changed on another of your Macs right now. Try again once that's done.`,
+  runner: (app: string) => `${app}'s computer is changing it right now. Try again once that's done.`,
+  unreachable: (app: string) => `Bops Cloud can't be reached, so ${app} wasn't changed. Try again.`,
+};
+/** A job's claim refused (409 "busy") while another holds its app's lease: the sweep offers it again. */
+export const APP_CLAIM_BUSY = "Another change to this app comes first.";
 export type SharedWsState = {
   projectId: string;
   wsId: string;

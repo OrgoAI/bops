@@ -213,7 +213,7 @@ const count = async (table: string, userId: string, column = "user_id") => Numbe
 /** Every table that names a user, and how many rows each has for this one. */
 async function rowsOf(userId: string) {
   const out: Record<string, number> = {};
-  for (const t of ["app_state", "app_state_backups", "chat_messages", "chat_routing", "chat_turns", "runner_presence", "runner_seen", "app_views", "cloud_accounts", "cloud_agents", "cloud_numbers", "cloud_objects", "cloud_pending", "cloud_usage", "mail_handles", "mail_inboxes", "notice_dismissals", "phone_lines", "plans", "slack_links"])
+  for (const t of ["app_state", "app_state_backups", "chat_messages", "chat_routing", "chat_turns", "runner_presence", "runner_seen", "app_views", "app_leases", "cloud_accounts", "cloud_agents", "cloud_numbers", "cloud_objects", "cloud_pending", "cloud_usage", "mail_handles", "mail_inboxes", "notice_dismissals", "phone_lines", "plans", "slack_links"])
     out[t] = await count(t, userId);
   out.owner_phones = await count("owner_phones", userId, "orgo_user_id");
   out.owner_emails = await count("owner_emails", userId, "orgo_user_id");
@@ -224,7 +224,7 @@ const nothingOf = (rows: Record<string, number>) => Object.fromEntries(Object.ke
 
 const ZERO = {
   app_state: 0, app_state_backups: 0, chat_messages: 0, chat_routing: 0, chat_turns: 0, cloud_accounts: 0, cloud_agents: 0, cloud_limits: 0, cloud_numbers: 0, cloud_objects: 0,
-  cloud_pending: 0, runner_presence: 0, runner_seen: 0, app_views: 0, cloud_usage: 0, mail_inboxes: 0, notice_dismissals: 0, owner_emails: 0, owner_phones: 0, phone_lines: 0, plans: 0, slack_links: 0,
+  cloud_pending: 0, runner_presence: 0, runner_seen: 0, app_views: 0, app_leases: 0, cloud_usage: 0, mail_inboxes: 0, notice_dismissals: 0, owner_emails: 0, owner_phones: 0, phone_lines: 0, plans: 0, slack_links: 0,
 };
 const NO_PROVIDERS = { agentphone: { numbers: 0 }, agentmail: { inboxes: 0, pods: 0 }, honcho: { workspaces: 0 }, openai: { responses: 0 }, composio: { connectedAccounts: 0 } };
 
@@ -252,6 +252,7 @@ async function fullUser() {
   await query("INSERT INTO bops.runner_presence (user_id, device_id, desktop_id) VALUES ($1, 'dev1', 'd1')", [id]);
   await query("INSERT INTO bops.runner_seen (user_id, desktop_id, device_id, version) VALUES ($1, 'd1', 'dev1', '0.0.54')", [id]);
   await query("INSERT INTO bops.app_views (user_id, ws_id, app, view, view_at) VALUES ($1, 'ws_main', 'demo-app', '{}'::jsonb, now())", [id]);
+  await query("INSERT INTO bops.app_leases (user_id, ws_id, app, holder, device_id, kind, until) VALUES ($1, 'ws_main', 'demo-app', 'mac:dev1:aaaa0001', 'dev1', 'deploy', now() + interval '90 seconds')", [id]);
   await query("INSERT INTO bops.chat_routing (user_id, ws_id, mode) VALUES ($1, 'ws_main', 'cloud')", [id]);
   await query("INSERT INTO bops.app_state_backups (user_id, state) VALUES ($1, '{\"messages\":[]}')", [id]);
   await query("INSERT INTO bops.owner_phones (orgo_user_id, phone_e164, consent_at, verified_at) VALUES ($1, $2, now(), now())", [id, phone]);
@@ -346,7 +347,7 @@ test("everything of the user's goes, here and at every provider, with counts; th
   const r = await deleteCall({ userId: u.id });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.deepEqual(r.json.deleted, {
-    ...ZERO, app_state: 1, app_state_backups: 1, chat_messages: 2, chat_routing: 1, chat_turns: 1, runner_presence: 1, runner_seen: 1, app_views: 1, cloud_accounts: 1, cloud_agents: 1, cloud_limits: 2, cloud_numbers: 1,
+    ...ZERO, app_state: 1, app_state_backups: 1, chat_messages: 2, chat_routing: 1, chat_turns: 1, runner_presence: 1, runner_seen: 1, app_views: 1, app_leases: 1, cloud_accounts: 1, cloud_agents: 1, cloud_limits: 2, cloud_numbers: 1,
     // An agent session and a code's hold at once; two responses and the connected account once their provider deleted them.
     cloud_objects: 5,
     cloud_pending: 1, cloud_usage: 1, mail_inboxes: 1, notice_dismissals: 1, owner_emails: 1, owner_phones: 1,

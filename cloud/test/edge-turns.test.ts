@@ -7,7 +7,7 @@ import { closeDb, db, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import { CLOUD_ALL_MIN_VERSION, COMPUTER_NOT_READY, DELETE_CODE_MS, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
+import { APP_BUSY_WORDS, APP_CLAIM_BUSY, APP_LEASE_MS, CLOUD_ALL_MIN_VERSION, COMPUTER_NOT_READY, DELETE_CODE_MS, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
 import { howIWork } from "../style.ts";
 import { APP_JOB_DEADLINE_MS, closeRunners, JOB_OLD_RUNNER, jobDeadline, NO_CHAT_COMPUTER, noteTrouble, resetTurns, runnerVersionOf, sweepTurns, takeAppJob, takeChatJob, turnById, TURN_DEADLINE_MS, turnTiming } from "../turns.ts";
 import { connectMac, dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
@@ -2211,4 +2211,134 @@ test("in a workspace still on the owner's Mac, a remove waits for that Mac as be
   assert.equal((await act(half.ivy, half.project, "key-cmac-0004", { act: "deploy", app: "site" })).status, 202);
   assert.equal((await turnsOf(half.owner)).length, 0);
   assert.equal((await pendingFor(half.owner)).length, 1);
+});
+
+/* ---------------- One lease per app, and the app jobs' lane ---------------- */
+
+/** The owner's Mac (device "mac-o", at `version`) on app `app`'s lease (cloud/app-lease.ts). */
+const leaseOf = (owner: string, op: "take" | "renew" | "free", nonce: string, version = CLOUD_ALL_MIN_VERSION, app = "site", kind = "deploy") =>
+  fetch(`${cloud.url}/v1/apps/lease`, { method: "POST", headers: own(owner, "mac-o", version), body: JSON.stringify({ op, ws: "ws_acme", app, kind, holder: `mac:mac-o:${nonce}` }) });
+const leasesOf = async (owner: string) => (await query<{ app: string; holder: string; device_id: string; kind: string; until: Date }>("SELECT app, holder, device_id, kind, until FROM bops.app_leases WHERE user_id = $1 ORDER BY app", [owner])).rows;
+/** A turn the sweep offers again now (owed past OFFER_AGAIN_S). */
+const owedAWhile = (owner: string, id: string) => query("UPDATE bops.chat_turns SET updated_at = now() - interval '1 minute' WHERE user_id = $1 AND id = $2", [owner, id]);
+/** An answer owed in Max's chat (the owner's own: no member), after whatever's owed there already. */
+const oweAnswer = async (s: { owner: string; desktop: string; device: string }, id: string) => {
+  await query(
+    `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at)
+     VALUES ($1, $2, $3, 'bot:max', 'max', 'ws_acme', NULL, $4, $5, 'owed', now() + interval '10 minutes', $6)`,
+    [s.owner, id, `msg_${id}`, s.desktop, s.device, Date.now()],
+  );
+  return id;
+};
+const offers = (box: { of: (type: string) => Ev[] }, id: string) => box.of("turn").filter((e) => e.data.id === id).length;
+
+test("an app's job waits on its app's lease: owed as before (takeAppJob doesn't look), its claim 409 busy while the owner's Mac holds it and offered again, claimed once it's free; then the job holds it, its beat renews it and its done frees it", async (t) => {
+  const s = await setupCloudApps();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  assert.equal((await leaseOf(s.owner, "take", "aaaa0001")).status, 200);
+  const r = await cact(s.ivy, s.project, "key-lease-0001", { act: "deploy", app: "site" });
+  assert.equal(r.status, 202, await r.clone().text());
+  const a = (await r.json()) as { turn: string };
+  assert.equal(a.turn, `turn_msg_job_${s.ivy}_key-lease-0001`);
+  await until(() => offers(box, a.turn) > 0, "the job's turn event");
+  const busy = await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/claim`, {});
+  assert.deepEqual([busy.status, await busy.json()], [409, { error: APP_CLAIM_BUSY, code: "busy" }]);
+  assert.equal(APP_CLAIM_BUSY, "Another change to this app comes first.");
+  assert.equal((await turnById(s.owner, a.turn))?.state, "owed", "nothing changed");
+  assert.deepEqual((await leasesOf(s.owner)).map((l) => l.holder), ["mac:mac-o:aaaa0001"]);
+  // The sweep offers it again; still held, still waiting.
+  const before = offers(box, a.turn);
+  await owedAWhile(s.owner, a.turn);
+  await sweepTurns();
+  await until(() => offers(box, a.turn) > before, "offered again");
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/claim`, {})).status, 409);
+  // Freed: claimed, and now the job's (held by the computer that claimed it).
+  assert.equal((await leaseOf(s.owner, "free", "aaaa0001")).status, 200);
+  const ok = await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/claim`, {});
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.deepEqual((await leasesOf(s.owner)).map((l) => [l.app, l.holder, l.device_id, l.kind]), [["site", `job:${a.turn}`, s.device, "deploy"]]);
+  // The Mac meanwhile: refused, the job's, in its words.
+  const mac = await leaseOf(s.owner, "take", "bbbb0002");
+  assert.deepEqual([mac.status, ((await mac.json()) as { by: string; error: string }).by], [409, "job"]);
+  assert.equal(APP_BUSY_WORDS.job("site"), "A change to site is still going on its computer. Try again once it's done.");
+  // Its beat keeps it.
+  await query("UPDATE bops.app_leases SET until = now() + interval '5 seconds' WHERE user_id = $1", [s.owner]);
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/beat`, { phase: "tools" })).status, 200);
+  assert.ok((await leasesOf(s.owner))[0].until.getTime() > Date.now() + APP_LEASE_MS - 5_000, "renewed");
+  // Its end frees it, and the Mac takes it.
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/done`, { state: "done", job: { ok: true, said: "Deployed site to its Preview." } })).status, 200);
+  assert.deepEqual(await leasesOf(s.owner), []);
+  assert.equal((await leaseOf(s.owner, "take", "bbbb0002")).status, 200);
+});
+
+test("a job's lease goes when its runner goes quiet (the sweep owes it again), and with a failed end", async (t) => {
+  const s = await setupCloudApps();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  const a = (await (await cact(s.ivy, s.project, "key-lease-0002", { act: "deploy", app: "site" })).json()) as { turn: string };
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/claim`, {})).status, 200);
+  assert.equal((await leasesOf(s.owner)).length, 1);
+  await query("UPDATE bops.chat_turns SET lease_until = now() - interval '1 second' WHERE user_id = $1 AND id = $2", [s.owner, a.turn]);
+  await sweepTurns();
+  assert.equal((await turnById(s.owner, a.turn))?.state, "owed", "owed again (it did nothing yet)");
+  assert.deepEqual(await leasesOf(s.owner), [], "the sweep freed it");
+  // Claimed again, then a failed end: freed too.
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/claim`, {})).status, 200);
+  assert.equal((await leasesOf(s.owner)).length, 1);
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn}/done`, { state: "failed", note: "Orgo didn't answer." })).status, 200);
+  assert.deepEqual(await leasesOf(s.owner), []);
+});
+
+test("a GitHub job takes its app's lease too, in a workspace still on the owner's Mac: owed while the Mac holds it, claimed once it's freed", async (t) => {
+  const s = await setupGithub();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello");
+  t.after(() => box.close());
+  assert.equal((await leaseOf(s.owner, "take", "aaaa0001", GITHUB_ACTS_MIN_VERSION)).status, 200);
+  const r = await act(s.admin, s.project, "key-lease-gh01", { act: "githubPull", app: "site" });
+  assert.equal(r.status, 202, await r.clone().text());
+  const a = (await r.json()) as { turn: string };
+  const busy = await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/claim`, {});
+  assert.deepEqual([busy.status, ((await busy.json()) as { code: string }).code], [409, "busy"]);
+  assert.equal((await leaseOf(s.owner, "free", "aaaa0001", GITHUB_ACTS_MIN_VERSION)).status, 200);
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/claim`, {})).status, 200);
+  assert.deepEqual((await leasesOf(s.owner)).map((l) => [l.holder, l.kind]), [[`job:${a.turn}`, "deploy"]]);
+  assert.equal((await runner(s.owner, s.desktop, `/v1/runner/turns/${a.turn}/done`, { state: "done", job: { ok: true, said: "Brought 2 changes from GitHub into Ingot." } })).status, 200);
+  assert.deepEqual(await leasesOf(s.owner), []);
+});
+
+test("the app jobs' lane: a job owed on its app's lease doesn't hold an answer in that chat, and an answer running doesn't hold a job; each lane's next is offered as one ends, and by the sweep", async (t) => {
+  const s = await setupCloudApps();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  const claim = (id: string) => runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${id}/claim`, {});
+  // The owner's Mac holds the app: the job is owed, first in the chat.
+  assert.equal((await leaseOf(s.owner, "take", "aaaa0001")).status, 200);
+  const job = ((await (await cact(s.ivy, s.project, "key-lane-0001", { act: "deploy", app: "site" })).json()) as { turn: string }).turn;
+  const first = await oweAnswer(s, "turn_lane_answer1");
+  const second = await oweAnswer(s, "turn_lane_answer2");
+  // An answer after it isn't held by it (before, one at a time in the chat held it for the job's half hour).
+  assert.equal((await claim(job)).status, 409);
+  assert.equal((await claim(first)).status, 200, "the answer goes on");
+  const held = await claim(second);
+  assert.deepEqual([held.status, ((await held.json()) as { error: string }).error], [409, "Another answer in this chat comes first."], "answers still one at a time");
+  // The sweep offers each lane's oldest: the job and the next answer alike.
+  for (const id of [job, second]) await owedAWhile(s.owner, id);
+  const was = { job: offers(box, job), second: offers(box, second) };
+  await sweepTurns();
+  await until(() => offers(box, job) > was.job && offers(box, second) > was.second, "each lane's oldest offered again");
+  // The first answer ends: its lane's next goes to the runner (not only the chat's oldest, the job).
+  const n = offers(box, second);
+  assert.equal((await claim(second)).status, 409);
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${first}/done`, { state: "done" })).status, 200);
+  await until(() => offers(box, second) > n, "the next answer offered");
+  assert.equal((await claim(second)).status, 200);
+  // An answer running doesn't hold a job: freed, the job is claimed beside it.
+  assert.equal((await leaseOf(s.owner, "free", "aaaa0001")).status, 200);
+  const ok = await claim(job);
+  assert.equal(ok.status, 200, await ok.clone().text());
+  // App jobs are still one at a time in their lane: another of the chat's (another app's) waits for it.
+  const next = await oweJob(s, "turn_lane_job2", { userId: s.admin, email: `${s.admin}@example.com`, name: "Ada", ref: "key-lane-0002", projectId: s.project, role: "admin" }, { act: "deploy", app: "other" });
+  const lane = await claim(next);
+  assert.deepEqual([lane.status, ((await lane.json()) as { error: string }).error], [409, "Another answer in this chat comes first."]);
 });

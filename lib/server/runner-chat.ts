@@ -447,6 +447,8 @@ async function chatJob(chatId: string): Promise<JobResult> {
  */
 async function runJob(ctx: TurnContext, job: TurnJob, by: string) {
   ctx.acting = true;
+  // Bops Cloud took its app's lease as this runner claimed it, and keeps it while it beats: none taken here (app-lease.ts).
+  ctx.job = true;
   const first = await post(`/v1/runner/turns/${encodeURIComponent(ctx.id)}/beat`, { phase: "tools" });
   if (first.status === 409) return;
   let result: JobResult = { ok: false, said: "That didn't go. Try again." };
