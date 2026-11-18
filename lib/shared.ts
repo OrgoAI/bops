@@ -11,6 +11,7 @@ import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
  */
 import { APPS_NAME } from "@/lib/apps-access";
 import { askOwnersOnly, threadOwnersOnly, type Power, type PowerWho } from "@/lib/member-access";
+import type { MemberSend } from "@/lib/types";
 
 /** The roles in a workspace: the owner everything; an Admin every bot, its computer and its apps, all but deleting it; a Member what the owner picks. */
 export type SharedRole = "owner" | "admin" | "member";
@@ -63,15 +64,15 @@ export type SharedOpen = SharedWorkspace & {
    */
   appGithub?: true;
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
-  appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
+  appActs?: { key: string; act: MemberAppAct; at: number; state: MemberSend["state"]; error?: string }[];
   /** The same for a bot's How I work (bot-panel.tsx HowIWork). */
-  personaActs?: { key: string; botId: string; state: "sending" | "waiting" | "failed"; error?: string }[];
+  personaActs?: { key: string; botId: string; state: MemberSend["state"]; error?: string }[];
   /** What they may change here (cloud/member-access.ts Power: an Admin every one, a Member the ones turned on for them in Team). */
   can?: string[];
   /** The owner's Bops takes their changes (SharedWsSlice.changes). */
   changes?: true;
   /** Their changes on their way to the owner's Mac, or that didn't go (with why): lib/server/change-relay.ts. */
-  changeActs?: { key: string; path: string; state: "sending" | "waiting" | "failed"; error?: string }[];
+  changeActs?: { key: string; path: string; state: MemberSend["state"]; error?: string }[];
   /**
    * Keys (cloud/ws-slice.ts keysOf): the user manages this workspace's own keys and picks which bots use any key it sees
    * (keys.tsx). `keyActs`: the owner's Bops takes those switches; without it they wait for its update.
@@ -79,7 +80,7 @@ export type SharedOpen = SharedWorkspace & {
   keys?: true;
   keyActs?: true;
   /** A bot's key switched here that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
-  keySends?: { key: string; botId: string; name: string; on: boolean; state: "sending" | "waiting" | "failed"; error?: string }[];
+  keySends?: { key: string; botId: string; name: string; on: boolean; state: MemberSend["state"]; error?: string }[];
 };
 
 /** The id a shared workspace has in the window's state: its own Bops id could be the same as one of the user's ("ws_main"). */
