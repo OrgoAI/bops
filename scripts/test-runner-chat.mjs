@@ -20,7 +20,7 @@ for (const k of Object.keys(process.env)) if (/^(BOPS|ORGO)_/.test(k)) delete pr
 process.env.BOPS_RUNNER = "1";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const FAKES = { store: ["getState", "pullState", "stateReady", "addMessage", "flushState"], cloud: ["cloudFetch"], "free-hours": ["sayInUse"], "apps-view-share": ["shareAppsView"] };
+const FAKES = { store: ["getState", "pullState", "stateReady", "addMessage", "flushState", "ownSession"], cloud: ["cloudFetch"], "free-hours": ["sayInUse"], "apps-view-share": ["shareAppsView"] };
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "server-only") return { url: "data:text/javascript,", shortCircuit: true };
@@ -82,6 +82,8 @@ globalThis.__fake = {
   store: {
     getState: () => state,
     pullState: async () => (pulls++, onPull()),
+    // A thread is this runner's when it's by this computer's device (store.ts ownSession).
+    ownSession: (x) => x.by === "device:me",
     stateReady: () => true,
     addMessage: (m) => (state.messages.push(globalThis.__stamp({ id: `msg_${state.messages.length}`, at: Date.now(), ...m })), state.messages.at(-1)),
     flushState: async () => {
@@ -564,6 +566,97 @@ await check("the stream gives it turns, turn-cancel stops one, and state reads t
   stream.send("state", {});
   await until(() => pulls > before, "a read of the state");
   R.stopRunnerChat();
+});
+
+/* ---------------- The runner's markers for its keeper ---------------- */
+
+await check("an update on its stream (a new runner release out) touches its keeper's look file, its folder made first, and again later; nothing is said to Bops Cloud, and a file it can't make stops nothing", async () => {
+  const { existsSync, mkdtempSync, statSync, utimesSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const base = mkdtempSync(`${tmpdir()}/bops-keeper-look-`);
+  const look = `${base}/run/keeper-look`;
+  reset();
+  R.runnerChatForTests({ turnsDir: `${base}/run/turns` });
+  stream = null;
+  R.startRunnerChat();
+  await until(() => stream, "the stream to open");
+  stream.send("update", {});
+  await until(() => existsSync(look), "the look file");
+  const old = new Date(Date.now() - 60 * 60_000);
+  utimesSync(look, old, old);
+  stream.send("update", {});
+  await until(() => statSync(look).mtimeMs > old.getTime() + 60_000, "the look file touched again");
+  assert.deepEqual(sent, [], "nothing said to Bops Cloud");
+  R.stopRunnerChat();
+  // Where its folder can't be made (a file in its place): nothing touched, and the stream goes on.
+  writeFileSync(`${base}/file`, "");
+  R.runnerChatForTests({ turnsDir: `${base}/file/turns` });
+  stream = null;
+  R.startRunnerChat();
+  await until(() => stream, "the stream to open");
+  stream.send("update", {});
+  const before = pulls;
+  stream.send("state", {});
+  await until(() => pulls > before, "a read of the state after it");
+  R.stopRunnerChat();
+  R.runnerChatForTests({});
+});
+
+await check("the working beat: its marker touched while a thread of its own is going, not for one only paused for an OK, another device's, or one that's over", async () => {
+  const { existsSync, mkdtempSync, rmSync, statSync, utimesSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const base = mkdtempSync(`${tmpdir()}/bops-working-`);
+  const marker = `${base}/run/working`;
+  R.runnerChatForTests({ turnsDir: `${base}/run/turns` });
+  const run = (o = {}) => ({ id: "ses_1", botId: "max", chatId: "bot:max", title: "Weekly email", goal: "x", host: "orgo", status: "running", by: "device:me", steps: [], replies: [], createdAt: Date.now(), ...o });
+  const asked = { id: "apr_1", botId: "max", threadId: "ses_1", askedBy: "device:me", action: "Send an email", resources: [], preview: "", at: Date.now(), resume: { engine: "responses", responseId: "resp_1", callId: "call_1", call: { name: "use_app", arguments: "{}" } } };
+  const idle = [
+    ["none", [], []],
+    ["another device's", [run({ by: "device:other" })], []],
+    ["one that's over", [run({ status: "done" }), run({ id: "ses_2", status: "failed" })], []],
+    ["only one paused for an OK", [run({ status: "queued" })], [asked]],
+  ];
+  for (const [what, sessions, approvals] of idle) {
+    state.sessions = sessions;
+    state.appApprovals = approvals;
+    assert.equal(R.workingNow(), false, what);
+    assert.equal(await R.beatWorking(), false, what);
+    assert.ok(!existsSync(marker), `${what}: nothing touched`);
+  }
+  // A live one of its own (with one paused beside it, or starting, or queued with no OK asked): touched, its folder made first.
+  for (const [what, sessions] of [
+    ["running", [run({ id: "ses_4" })]],
+    ["starting, one paused beside it", [run({ id: "ses_2", status: "starting" }), run({ status: "queued" })]],
+    ["queued with no OK asked", [run({ id: "ses_3", status: "queued" })]],
+  ]) {
+    state.sessions = sessions;
+    state.appApprovals = [asked];
+    rmSync(marker, { force: true });
+    assert.equal(await R.beatWorking(), true, what);
+    assert.ok(existsSync(marker), `${what}: touched`);
+  }
+  const old = new Date(Date.now() - 10 * 60_000);
+  utimesSync(marker, old, old);
+  await R.beatWorking();
+  assert.ok(statSync(marker).mtimeMs > old.getTime() + 60_000, "its time moves on at each beat");
+  // Started, it beats on its own, every 30 seconds (here, every few ms), once however often it's started.
+  R.runnerChatForTests({ turnsDir: `${base}/run/turns`, workingMs: 5 });
+  rmSync(marker, { force: true });
+  R.startWorkingBeat();
+  R.startWorkingBeat();
+  await until(() => existsSync(marker), "the beat");
+  rmSync(marker, { force: true });
+  await until(() => existsSync(marker), "the next beat");
+  // Idle, it leaves the marker as it is: an update waits only until it's 2 minutes old.
+  state.sessions = [];
+  // (A beat on its way when the thread ended lands first.)
+  await new Promise((r) => setTimeout(r, 30));
+  utimesSync(marker, old, old);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(Math.round(statSync(marker).mtimeMs), Math.round(old.getTime()), "left as it was");
+  R.runnerChatForTests({});
+  state.appApprovals = [];
+  rmSync(base, { recursive: true, force: true });
 });
 
 /* ---------------- An app's GitHub job ---------------- */

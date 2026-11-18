@@ -20,8 +20,8 @@
 // Usage: node --conditions=react-server scripts/test-runner-install.mjs
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -157,6 +157,7 @@ function freshOrgo() {
     auth: "key",
     starts: 0,
     installFails: false,
+    healths: [],
   });
 }
 const pc = (c) => orgo.computers[c];
@@ -242,7 +243,7 @@ globalThis.__fake = {
         if (command.includes('echo "current=$c"')) {
           const dir = /\/opt\/bops\/runner\/([^/ ]+)\/server\.js/.exec(command)[1];
           const ident = command.includes('echo "ident=') ? `ident=${orgo.ident}\n` : "";
-          return { output: `current=${x.current}\nkey=${x.key ? "yes" : "no"}\n${ident}have=${x.have.has(dir) ? "yes" : "no"}\nsup=yes\nbusy=${x.busy ? "yes" : "no"}\n`, exit_code: 0 };
+          return { output: `current=${x.current}\nkey=${x.key ? "yes" : "no"}\n${ident}have=${x.have.has(dir) ? "yes" : "no"}\nsup=yes\nbusy=${x.busy ? "yes" : "no"}\nrunning=${x.program ? "yes" : "no"}\nhold=${x.hold ? "yes" : "no"}\n`, exit_code: 0 };
         }
         if (command.includes("__BOPS_INSTALLED__")) {
           orgo.duringInstall?.();
@@ -259,7 +260,11 @@ globalThis.__fake = {
           x.wrapper = /cat > \/opt\/bops\/runner\/run\.sh <<'BOPS_EOF'\n([\s\S]*?)BOPS_EOF/.exec(command)[1];
           return { output: "__BOPS_INSTALLED__\n", exit_code: 0 };
         }
-        if (command.includes("__BOPS_HEALTHY__")) return { output: `${orgo.health === "__BOPS_HEALTHY__" ? `auth=${orgo.auth}\n` : ""}${orgo.health}\n`, exit_code: 0 };
+        if (command.includes("__BOPS_HEALTHY__")) {
+          // What each health check says in turn (orgo.healths), then orgo.health.
+          const health = orgo.healths?.shift() ?? orgo.health;
+          return { output: `${health === "__BOPS_HEALTHY__" ? `auth=${orgo.auth}\n` : ""}${health}\n`, exit_code: 0 };
+        }
         if (command.includes("__BOPS_OFF__")) {
           // As the script does: the program, its script and the builds, never the computer's key.
           Object.assign(x, { current: "", have: new Set(), program: false });
@@ -1499,9 +1504,506 @@ await check("a shared workspace Bops Cloud may move by itself gets its runner on
   assert.ok(T.check().looking, "a look for the switch");
 });
 
+/* ---------------- One copy of the steps (vm/runner-steps.mjs), and the Mac's guards against fighting a keeper ---------------- */
+
+const STEPS = await import(`${root}/vm/runner-steps.mjs`);
+
+/** The steps as runner-install.ts had them in 0.0.54, before they moved to vm/runner-steps.mjs: what each still says, apart from what's new. */
+function was054() {
+  const ROOT = "/opt/bops/runner";
+  const PORT = 3210;
+  const RUNNER_TURNS_DIR = "/var/run/bops/turns";
+  const RUNNER_HOLD = "/var/run/bops/upgrading";
+  const RUNNER_CONF = "/etc/supervisor/conf.d/bops-runner.conf";
+  const RUNNER_WRAPPER = "/opt/bops/runner/run.sh";
+  const RUNNER_AUTH_FILE = "/opt/bops/runner/auth";
+  const ORGO_KEY_FILES = ["/root/.orgo-secrets.env", "/root/.env"];
+  const ORGO_KEY_LINE = `^[[:space:]]*(export[[:space:]]+)?ORGO_API_KEY=['"]?[^'"[:space:]]`;
+  const q = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const KEY_LINE = `grep -qsE ${q(ORGO_KEY_LINE)} ${ORGO_KEY_FILES.join(" ")} && echo key=yes || echo key=no`;
+  const IDENT_LINE = `echo "ident=$(curl --noproxy '*' -s -m 3 -o /dev/null -w '%{http_code}' -H 'Metadata-Flavor: Orgo' http://169.254.169.254/orgo/v1/identity/token)"`;
+  const AUTH_LINE = `echo "auth=$( (grep -sxE '(identity|key|none)' ${RUNNER_AUTH_FILE} || grep -E '^\\[runner\\] auth: (identity|key|none)$' /var/log/bops/runner.log 2>/dev/null | sed 's/^.*: //') | tail -n 1)"`;
+  const BUSY_EXIT = `if [ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ]; then echo __BOPS_BUSY__; exit 0; fi`;
+  const BUSY_LINE = `[ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ] && echo busy=yes || echo busy=no`;
+  const probeScript = (dirName, { ident = false } = {}) =>
+    [
+      `c=$(readlink ${ROOT}/current 2>/dev/null | sed 's#.*/##')`,
+      `echo "current=$c"`,
+      KEY_LINE,
+      ...(ident ? [IDENT_LINE] : []),
+      `[ -f ${ROOT}/${dirName}/server.js ] && echo have=yes || echo have=no`,
+      `command -v supervisorctl >/dev/null 2>&1 && echo sup=yes || echo sup=no`,
+      BUSY_LINE,
+    ].join("; ");
+  function wrapperScript(o) {
+    return [
+      "#!/bin/sh",
+      "# The Bops runner on this computer, set up by the Bops app on the user's Mac (lib/server/runner-install.ts).",
+      "# Its window token is made fresh each start and kept nowhere: nothing on this computer needs it.",
+      "BOPS_UI_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')",
+      "export BOPS_UI_TOKEN",
+      `export HOME=/root HOSTNAME=127.0.0.1 PORT=${PORT} NODE_ENV=production NEXT_MANUAL_SIG_HANDLE=true`,
+      `export BOPS_RUNNER=1 BOPS_RUNNER_COMPUTER=${q(o.computerId)} BOPS_DEVICE_SEED=${q(o.computerId)}`,
+      `export BOPS_ORGO_ORIGIN=${q(o.orgo)} BOPS_CLOUD_URL=${q(o.cloud)}`,
+      ...(o.timeZone ? [`export TZ=${q(o.timeZone)}`] : []),
+      `cd ${ROOT}/current || exit 1`,
+      "exec /usr/bin/node server.js",
+      "",
+    ].join("\n");
+  }
+  const SUPERVISOR_CONF = [
+    "[program:bops-runner]",
+    `command=${RUNNER_WRAPPER}`,
+    `directory=${ROOT}`,
+    "user=root",
+    "autostart=true",
+    "autorestart=true",
+    "startsecs=10",
+    "startretries=5",
+    "stopsignal=TERM",
+    "stopwaitsecs=15",
+    "redirect_stderr=true",
+    "stdout_logfile=/var/log/bops/runner.log",
+    "stdout_logfile_maxbytes=5MB",
+    "stdout_logfile_backups=2",
+    "",
+  ].join("\n");
+  function installScript(b, wrapper) {
+    const dirName = `${b.version}-${b.buildId}`;
+    return [
+      "set -e",
+      `d=${ROOT}`,
+      `mkdir -p "$d/incoming" /var/log/bops /etc/supervisor/conf.d`,
+      `exec 9>"$d/.lock"`,
+      "flock -w 120 9",
+      `cd "$d/incoming"`,
+      `if [ -f ${q(b.name)} ]; then`,
+      `  printf '%s  %s\\n' ${q(b.sha256)} ${q(b.name)} | sha256sum -c --status`,
+      `  rm -rf "$d/${dirName}.part"`,
+      `  mkdir "$d/${dirName}.part"`,
+      `  tar -xzf ${q(b.name)} -C "$d/${dirName}.part" --no-same-owner`,
+      `  test -f "$d/${dirName}.part/server.js"`,
+      `  rm -rf "$d/${dirName}"`,
+      `  mv "$d/${dirName}.part" "$d/${dirName}"`,
+      `  rm -f ${q(b.name)}`,
+      `elif [ ! -f "$d/${dirName}/server.js" ]; then`,
+      "  echo __BOPS_NO_FILES__",
+      "  exit 3",
+      "fi",
+      `mkdir -p ${RUNNER_TURNS_DIR} && touch ${RUNNER_HOLD} && trap 'rm -f ${RUNNER_HOLD}' EXIT`,
+      BUSY_EXIT,
+      `ln -sfn ${q(dirName)} "$d/current.next"`,
+      `mv -Tf "$d/current.next" "$d/current"`,
+      `cat > ${RUNNER_WRAPPER} <<'BOPS_EOF'\n${wrapper}BOPS_EOF`,
+      `chmod 700 ${RUNNER_WRAPPER}`,
+      `cat > ${RUNNER_CONF} <<'BOPS_EOF'\n${SUPERVISOR_CONF}BOPS_EOF`,
+      ": > /var/log/bops/runner.log",
+      `rm -f ${RUNNER_AUTH_FILE}`,
+      "supervisorctl reread >/dev/null 2>&1 || true",
+      "supervisorctl update >/dev/null 2>&1 || true",
+      "supervisorctl restart bops-runner >/dev/null 2>&1 || true",
+      `for v in "$d"/*/; do v="\${v%/}"; case "\${v##*/}" in incoming|current|${dirName}) ;; *) rm -rf "$v" ;; esac; done`,
+      "echo __BOPS_INSTALLED__",
+    ].join("\n");
+  }
+  const HEALTH_SCRIPT = [
+    "command -v ss >/dev/null 2>&1 || { echo __BOPS_NO_SS__; exit 0; }",
+    'up=""',
+    "for i in $(seq 1 45); do",
+    `  if curl -fsS --max-time 3 -o /dev/null http://127.0.0.1:${PORT}/api/health; then`,
+    "    up=1",
+    `    l=$(ss -ltnH 'sport = :${PORT}' | awk '{print $4}')`,
+    '    if [ -z "$l" ]; then echo __BOPS_NO_SS__; exit 0; fi',
+    "    if printf '%s\\n' \"$l\" | grep -qv '^127\\.0\\.0\\.1:'; then echo __BOPS_EXPOSED__; exit 0; fi",
+    `    if grep -q '^\\[runner\\] running the routines' /var/log/bops/runner.log 2>/dev/null; then ${AUTH_LINE}; echo __BOPS_HEALTHY__; exit 0; fi`,
+    "  fi",
+    "  sleep 2",
+    "done",
+    'if [ -n "$up" ]; then echo __BOPS_NO_STATE__; else echo __BOPS_DOWN__; fi',
+  ].join("\n");
+  const UNINSTALL_SCRIPT = [
+    "supervisorctl stop bops-runner >/dev/null 2>&1",
+    `rm -f ${RUNNER_CONF} ${RUNNER_WRAPPER}`,
+    "supervisorctl update >/dev/null 2>&1",
+    `mkdir -p ${ROOT}`,
+    `exec 9>${ROOT}/.lock`,
+    "flock -w 120 9",
+    `find ${ROOT} -mindepth 1 -maxdepth 1 ! -name .lock -exec rm -rf {} +`,
+    "echo __BOPS_OFF__",
+  ].join("\n");
+  return { q, KEY_LINE, IDENT_LINE, AUTH_LINE, BUSY_EXIT, BUSY_LINE, probeScript, wrapperScript, SUPERVISOR_CONF, installScript, HEALTH_SCRIPT, UNINSTALL_SCRIPT };
+}
+const OLD = was054();
+const PIN_ON = "mkdir -p /opt/bops/keeper && date +%s > /opt/bops/keeper/pin";
+const PIN_OFF = "rm -f /opt/bops/keeper/pin";
+
+await check("the steps moved to vm/runner-steps.mjs byte for byte: 0.0.54's, apart from the working check, keep and pin, the off marker, the probe's two lines and the wrapper's comment", () => {
+  const b = { name: BUNDLE, sha256: SHA, version: "0.0.29", buildId: "buildA1" };
+  const o = { computerId: C1, timeZone: "America/New_York", orgo: "https://orgo.example", cloud: "https://bops.example/api" };
+  // The same, and what runner-install.ts says is runner-steps.mjs's.
+  for (const k of ["SUPERVISOR_CONF", "HEALTH_SCRIPT", "AUTH_LINE", "BUSY_LINE", "KEY_LINE", "BUSY_EXIT"]) assert.equal(STEPS[k], OLD[k], k);
+  for (const k of ["SUPERVISOR_CONF", "HEALTH_SCRIPT", "AUTH_LINE", "BUSY_LINE", "UNINSTALL_SCRIPT", "wrapperScript", "installScript"]) assert.equal(I[k], STEPS[k], `runner-install.ts's ${k} is runner-steps.mjs's`);
+  assert.equal(I.IDENT_LINE, OLD.IDENT_LINE);
+  for (const s of ["plain", "it's", "a'b'c", ""]) assert.equal(STEPS.q(s), OLD.q(s), s);
+  assert.deepEqual([STEPS.ROOT, STEPS.PORT, String(STEPS.BUNDLE_NAME)], ["/opt/bops/runner", 3210, String(/^bops-server-(\d+\.\d+\.\d+)-([A-Za-z0-9_-]{1,64})\.tgz$/)]);
+  const lines = (s) => s.split("\n");
+  // The wrapper: only its comment, which names both that write it.
+  for (const opts of [o, { ...o, timeZone: undefined }]) {
+    const [now, then] = [lines(STEPS.wrapperScript(opts)), lines(OLD.wrapperScript(opts))];
+    assert.deepEqual(now.filter((_, i) => i !== 1), then.filter((_, i) => i !== 1));
+    assert.notEqual(now[1], then[1]);
+  }
+  const comment = lines(STEPS.wrapperScript(o))[1];
+  assert.ok(comment.startsWith("# ") && comment.includes("lib/server/runner-install.ts") && comment.includes("keeper") && comment.includes("vm/runner-steps.mjs"), comment);
+  // The install script: one line more (the working marker, right after the reply marks); pin adds its line before the swap; keep only spares its build.
+  const wrapper = STEPS.wrapperScript(o);
+  const was = lines(OLD.installScript(b, wrapper));
+  const at = was.indexOf(OLD.BUSY_EXIT);
+  const plain = [...was.slice(0, at + 1), STEPS.WORKING_EXIT, ...was.slice(at + 1)];
+  assert.deepEqual(lines(STEPS.installScript(b, wrapper)), plain);
+  assert.deepEqual(lines(STEPS.installScript(b, wrapper, {})), plain);
+  assert.deepEqual(lines(STEPS.installScript(b, wrapper, { pin: true })), [...plain.slice(0, at + 2), PIN_ON, ...plain.slice(at + 2)]);
+  assert.deepEqual(lines(STEPS.installScript(b, wrapper, { pin: false })), [...plain.slice(0, at + 2), PIN_OFF, ...plain.slice(at + 2)]);
+  const cleanup = plain.findIndex((l) => l.startsWith('for v in "$d"/*/;'));
+  const kept = lines(STEPS.installScript(b, wrapper, { keep: "0.0.28-old" }));
+  assert.deepEqual(kept.filter((_, i) => i !== cleanup), plain.filter((_, i) => i !== cleanup));
+  assert.equal(kept[cleanup], plain[cleanup].replace("in incoming|current|0.0.29-buildA1)", "in incoming|current|0.0.29-buildA1|'0.0.28-old')"));
+  assert.deepEqual(lines(STEPS.installScript(b, wrapper, { keep: "0.0.29-buildA1" })), plain, "keeping the build it sets up is no change");
+  for (const keep of ["../etc", "0.0.28-old; rm -rf /", "current", "0.0.28", ""]) assert.throws(() => STEPS.installScript(b, wrapper, { keep }), /keep/, `keep ${JSON.stringify(keep)} refused`);
+  // The probe: the hold and whether its program runs, at its end.
+  for (const ident of [false, true]) assert.equal(I.probeScript("0.0.29-buildA1", { ident }), `${OLD.probeScript("0.0.29-buildA1", { ident })}; ${I.RUNNING_LINE}; ${I.HOLD_LINE}`);
+  // Taking it off: the keeper told first, then as before.
+  assert.deepEqual(lines(STEPS.UNINSTALL_SCRIPT), [`mkdir -p /opt/bops/keeper && printf '{"at":%s,"why":"mac"}\\n' "$(date +%s)" > /opt/bops/keeper/off`, ...lines(OLD.UNINSTALL_SCRIPT)]);
+});
+
+await check("the names vm/runner-steps.mjs keeps copies of are the app's own", async () => {
+  const P = await import(`${root}/cloud/protocol.ts`);
+  const K = await import(`${root}/lib/server/runner-key.ts`);
+  const R = await import(`${root}/lib/server/runner.ts?real`);
+  assert.deepEqual([...STEPS.ORGO_KEY_FILES], [...K.ORGO_KEY_FILES]);
+  assert.equal(STEPS.ORGO_KEY_LINE, K.ORGO_KEY_LINE);
+  assert.equal(STEPS.RUNNER_AUTH_FILE, K.RUNNER_AUTH_FILE);
+  assert.deepEqual([STEPS.RUNNER_TURNS_DIR, STEPS.RUNNER_HOLD], [P.RUNNER_TURNS_DIR, P.RUNNER_HOLD]);
+  assert.deepEqual([STEPS.RUNNER_CONF, STEPS.RUNNER_WRAPPER], [R.RUNNER_CONF, R.RUNNER_WRAPPER]);
+  assert.deepEqual([STEPS.RUNNER_CONF, STEPS.RUNNER_WRAPPER], [VALUES.runner.RUNNER_CONF, VALUES.runner.RUNNER_WRAPPER], "this test's stand-ins too");
+});
+
+await check("a copy of a computer takes its runner off (COPY_TAKES_OFF, RUNNER_SCRUB) and never its keeper", async () => {
+  const R = await import(`${root}/lib/server/runner.ts?real`);
+  assert.ok(R.COPY_TAKES_OFF.length > 0);
+  for (const f of R.COPY_TAKES_OFF) assert.ok(!f.startsWith(`${STEPS.KEEPER_DIR}/`) && f !== STEPS.KEEPER_DIR && f !== STEPS.KEEPER_CONF_FILE, `${f} isn't the keeper's`);
+  assert.ok(!R.RUNNER_SCRUB.includes("bops-keeper") && !R.RUNNER_SCRUB.includes(STEPS.KEEPER_DIR), "the scrub never stops or removes the keeper");
+});
+
+await check("the keeper's program and markers: node running its file as root, started with the computer and again whenever it stops, its log at 1 MB with one kept", () => {
+  assert.deepEqual(lines2(STEPS.KEEPER_CONF), [
+    "[program:bops-keeper]",
+    "command=/usr/bin/node /opt/bops/keeper/keeper.mjs",
+    "user=root",
+    "autostart=true",
+    "autorestart=true",
+    "startsecs=5",
+    "redirect_stderr=true",
+    "stdout_logfile=/var/log/bops/keeper.log",
+    "stdout_logfile_maxbytes=1MB",
+    "stdout_logfile_backups=1",
+    "",
+  ]);
+  assert.ok(!STEPS.KEEPER_CONF.includes("environment="), "no settings in the program");
+  assert.deepEqual(
+    [STEPS.KEEPER_DIR, STEPS.KEEPER_CONF_FILE, STEPS.KEEPER_HOLD, STEPS.RUNNER_WORKING, STEPS.RUNNER_KEEPER_LOOK],
+    ["/opt/bops/keeper", "/etc/supervisor/conf.d/bops-keeper.conf", "/var/run/bops/keeper-hold", "/var/run/bops/working", "/var/run/bops/keeper-look"],
+  );
+});
+function lines2(s) {
+  return s.split("\n");
+}
+
+await check("its keeper at work on the computer (a fresh hold): nothing set up and nothing written, the runner's state as it was, looked at again in a minute", async () => {
+  const cases = [
+    ["none there", undefined],
+    ["one up, older", { status: "running", version: "0.0.28", buildId: "old", by: ME, keyMade: true, keyId: "key-0", at: Date.now() - 86_400_000 }],
+    ["one that didn't start", { status: "failed", version: "0.0.29", buildId: "buildA1", by: ME, error: "it didn't answer on its computer", at: Date.now() - 60 * 60_000 }],
+  ];
+  for (const [what, before] of cases) {
+    reset();
+    if (before?.status === "running") Object.assign(pc(C1), { current: "0.0.28-old", have: new Set(["0.0.28-old"]), program: true, key: true });
+    state.runners = before ? { [C1]: structuredClone(before) } : undefined;
+    pc(C1).hold = true;
+    const log = console.info;
+    console.info = () => {};
+    await I.lookAtRunners();
+    console.info = log;
+    assert.deepEqual(state.runners?.[C1], before, `${what}: its state as it was`);
+    assert.ok(!/__BOPS_INSTALLED__|__BOPS_HEALTHY__|__BOPS_OFF__/.test(bashText()), `${what}: nothing set up, checked or taken off`);
+    assert.equal(keyCalls("PUT"), 0, `${what}: no key`);
+    assert.ok(!orgo.calls.some((c) => c.path.startsWith("/api/files/")), `${what}: nothing uploaded`);
+    assert.equal(T.retryAt(C1), undefined, `${what}: no longer wait`);
+    assert.ok(T.lookSoon(), `${what}: looked at again in a minute`);
+    // The keeper's done (its hold gone): set up, or kept, as ever.
+    pc(C1).hold = false;
+    T.reset();
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().version], ["running", "0.0.29"], `${what}: then set up`);
+  }
+  // On the computer: a hold touched under 5 minutes ago says yes; an older one (a keeper that died) or none, no.
+  const dir = mkdtempSync(join(tmpdir(), "bops-keeper-hold-"));
+  const file = join(dir, "keeper-hold");
+  const ask = () => spawnSync("bash", ["-c", I.HOLD_LINE.replace(STEPS.KEEPER_HOLD, file)], { encoding: "utf8" }).stdout;
+  assert.equal(ask(), "hold=no\n", "none");
+  writeFileSync(file, "");
+  assert.equal(ask(), "hold=yes\n", "fresh");
+  const old = new Date(Date.now() - 6 * 60_000);
+  utimesSync(file, old, old);
+  assert.equal(ask(), "hold=no\n", "stale");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+await check("its own bundle's very build already up there (its keeper set it up, another Mac): adopted after a health check, with no files sent, no restart and no key step", async () => {
+  const cases = [
+    ["none in the state", undefined],
+    ["one that didn't start, by Bops Cloud", { status: "failed", version: "0.0.29", buildId: "buildA1", by: "cloud", error: "it didn't answer on its computer", at: Date.now() - 60 * 60_000, keyMade: true, keyId: "key-0" }],
+    ["one up, older, by this Mac", null],
+  ];
+  for (const [what, before] of cases) {
+    reset();
+    Object.assign(pc(C1), { current: "0.0.29-buildA1", have: new Set(["0.0.29-buildA1"]), program: true });
+    orgo.auth = "identity";
+    if (before) state.runners = { [C1]: structuredClone(before) };
+    if (before === null) state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, at: Date.now() - 86_400_000 } };
+    await I.lookAtRunners();
+    const x = runner();
+    if (before === null) {
+      // The record says this Mac runs an older one: set up as today (it may be this Mac's own swap that it never marked).
+      assert.ok(bashText().includes("__BOPS_INSTALLED__"), `${what}: set up as before`);
+      assert.deepEqual([x.status, x.version, x.buildId], ["running", "0.0.29", "buildA1"]);
+      continue;
+    }
+    assert.deepEqual([x.status, x.version, x.buildId, x.auth, x.by], ["running", "0.0.29", "buildA1", "identity", before?.by ?? ME], `${what}: ${JSON.stringify(x)}`);
+    assert.deepEqual([x.keyMade, x.keyId], before ? [true, "key-0"] : [undefined, undefined], `${what}: its key state kept`);
+    assert.ok(bashText().includes("__BOPS_HEALTHY__"), `${what}: its health checked`);
+    assert.ok(!bashText().includes("__BOPS_INSTALLED__") && !bashText().includes("supervisorctl restart"), `${what}: no files swapped, no restart`);
+    assert.equal(keyCalls("PUT"), 0, `${what}: no key step`);
+    assert.ok(!orgo.calls.some((c) => c.path.startsWith("/api/files/")), `${what}: nothing uploaded`);
+    // Kept as it is at the next look: the same build, up.
+    orgo.bash.length = 0;
+    T.reset();
+    await I.lookAtRunners();
+    assert.equal(orgo.bash.length, 0, `${what}: nothing more sent`);
+  }
+  // Not healthy: set up as any other (its files put in place again and restarted), then healthy.
+  reset();
+  Object.assign(pc(C1), { current: "0.0.29-buildA1", have: new Set(["0.0.29-buildA1"]), program: true });
+  orgo.healths = ["__BOPS_DOWN__"];
+  await I.lookAtRunners();
+  assert.ok(bashText().includes("__BOPS_INSTALLED__"), "set up again");
+  assert.deepEqual([runner().status, runner().by, runner().keyMade], ["running", ME, true]);
+  // Its program not running (a copy of a computer, whose runner was taken off): no health check first, set up at once.
+  reset();
+  Object.assign(pc(C1), { current: "0.0.29-buildA1", have: new Set(["0.0.29-buildA1"]), program: false });
+  await I.lookAtRunners();
+  const sent = orgo.bash.map((b) => (b.command.includes("__BOPS_INSTALLED__") ? "install" : b.command.includes("__BOPS_HEALTHY__") ? "health" : b.command.includes('echo "current=$c"') ? "probe" : "other"));
+  assert.deepEqual(sent, ["probe", "install", "health"]);
+  assert.equal(runner().status, "running");
+});
+
+await check("someone else can use the workspace: a key line on its computer, or its identity refused, is refused before any adopt (no health check)", async () => {
+  for (const [what, key, ident] of [["a key line", true, "200"], ["identity refused", false, "403"]]) {
+    reset();
+    orgo.full = true;
+    state.workspaces[0].chatOn = "cloud";
+    orgo.ident = ident;
+    orgo.auth = "identity";
+    Object.assign(pc(C1), { current: "0.0.29-buildA1", have: new Set(["0.0.29-buildA1"]), program: true, key });
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().error], ["failed", "someone else can use this workspace"], what);
+    assert.ok(!bashText().includes("__BOPS_HEALTHY__"), `${what}: never adopted`);
+    assert.ok(!bashText().includes("__BOPS_INSTALLED__"), `${what}: nothing set up`);
+    assert.equal(keyCalls("PUT"), 0, `${what}: no key`);
+  }
+  // Its identity answering and no key on it: adopted, kept shared.
+  reset();
+  orgo.full = true;
+  state.workspaces[0].chatOn = "cloud";
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  Object.assign(pc(C1), { current: "0.0.29-buildA1", have: new Set(["0.0.29-buildA1"]), program: true });
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().shared, runner().auth, runner().keyMade], ["running", true, "identity", undefined]);
+  assert.ok(!bashText().includes("__BOPS_INSTALLED__"), "adopted as it is");
+});
+
+await check("a dev Mac's own build pins the computer for its keeper, before its files are swapped; a packaged one takes the pin off", async () => {
+  reset();
+  await I.lookAtRunners();
+  const dev = orgo.bash.find((b) => b.command.includes("__BOPS_INSTALLED__")).command;
+  assert.ok(dev.includes(PIN_ON) && !dev.includes(PIN_OFF), "dev: pinned");
+  assert.ok(dev.indexOf(STEPS.WORKING_EXIT) < dev.indexOf(PIN_ON) && dev.indexOf(PIN_ON) < dev.indexOf("ln -sfn"), "after the busy checks, before the swap");
+  // Packaged: the bundle beside the app's server (Resources/runner), as the Mac app ships it.
+  reset();
+  const app = join(scratch, "Bops.app", "Contents", "Resources");
+  mkdirSync(join(app, "runner"), { recursive: true });
+  writeFileSync(join(app, "runner", BUNDLE), BYTES);
+  writeFileSync(join(app, "runner", `${BUNDLE}.sha256`), `${SHA}  ${BUNDLE}\n`);
+  rmSync(join(scratch, "dist-runner"), { recursive: true, force: true });
+  process.env.BOPS_SERVER_JS = join(app, "server", "server.js");
+  try {
+    await I.lookAtRunners();
+  } finally {
+    delete process.env.BOPS_SERVER_JS;
+    rmSync(join(scratch, "Bops.app"), { recursive: true, force: true });
+  }
+  const packaged = orgo.bash.find((b) => b.command.includes("__BOPS_INSTALLED__")).command;
+  assert.ok(packaged.includes(PIN_OFF) && !packaged.includes(PIN_ON), "packaged: the pin off");
+  assert.equal(runner().status, "running");
+});
+
+/** A script as it would run on a computer, in a folder standing in for its root, with supervisorctl a stand-in that writes down what it was asked. */
+function onComputer(script, env = {}) {
+  const base = mkdtempSync(join(tmpdir(), "bops-computer-"));
+  const at = (p) => join(base, p);
+  mkdirSync(at("bin"));
+  writeFileSync(at("bin/supervisorctl"), `#!/bin/sh\necho "$*" >> '${at("supervisorctl.log")}'\n`, { mode: 0o755 });
+  const run = (s) =>
+    spawnSync("bash", ["-c", s.replaceAll("/opt/bops", at("opt/bops")).replaceAll("/etc/supervisor", at("etc/supervisor")).replaceAll("/var/run/bops", at("var/run/bops")).replaceAll("/var/log/bops", at("var/log/bops"))], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${at("bin")}:${process.env.PATH}`, ...env },
+    });
+  const asked = () => (existsSync(at("supervisorctl.log")) ? readFileSync(at("supervisorctl.log"), "utf8").trim().split("\n") : []);
+  return { base, at, run: () => run(script), runThis: run, asked, done: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+await check("taking a runner off tells its keeper (off, with when and why) and leaves the keeper, its files and its program alone", () => {
+  const c = onComputer(I.UNINSTALL_SCRIPT);
+  for (const d of ["opt/bops/runner/0.0.29-buildA1", "opt/bops/keeper", "etc/supervisor/conf.d"]) mkdirSync(c.at(d), { recursive: true });
+  writeFileSync(c.at("opt/bops/runner/0.0.29-buildA1/server.js"), "");
+  writeFileSync(c.at("opt/bops/runner/run.sh"), "#!/bin/sh\n");
+  writeFileSync(c.at("etc/supervisor/conf.d/bops-runner.conf"), I.SUPERVISOR_CONF);
+  writeFileSync(c.at("etc/supervisor/conf.d/bops-keeper.conf"), STEPS.KEEPER_CONF);
+  writeFileSync(c.at("opt/bops/keeper/keeper.mjs"), "// the keeper\n");
+  writeFileSync(c.at("opt/bops/keeper/runner-steps.mjs"), "// its steps\n");
+  writeFileSync(c.at("opt/bops/keeper/keeper.json"), "{}\n");
+  const r = c.run();
+  assert.ok(r.stdout.includes("__BOPS_OFF__"), r.stderr);
+  const off = JSON.parse(readFileSync(c.at("opt/bops/keeper/off"), "utf8"));
+  assert.deepEqual(Object.keys(off), ["at", "why"]);
+  assert.equal(off.why, "mac");
+  assert.ok(Number.isInteger(off.at) && Math.abs(off.at - Date.now() / 1000) < 120, "when, in seconds");
+  assert.deepEqual(readdirSync(c.at("opt/bops/keeper")).sort(), ["keeper.json", "keeper.mjs", "off", "runner-steps.mjs"], "the keeper's files stay");
+  assert.ok(existsSync(c.at("etc/supervisor/conf.d/bops-keeper.conf")), "its program stays");
+  assert.ok(!existsSync(c.at("etc/supervisor/conf.d/bops-runner.conf")), "the runner's program goes");
+  assert.deepEqual(readdirSync(c.at("opt/bops/runner")).filter((f) => f !== ".lock"), [], "the runner's files go");
+  assert.ok(c.asked().every((l) => !l.includes("bops-keeper")) && c.asked().includes("stop bops-runner"), c.asked().join(" | "));
+  c.done();
+});
+
+await check("on a computer, the install script: busy while the runner's working marker is fresh, keeps the build it's told to, and pins or unpins", () => {
+  const tools = ["flock", "sha256sum", "tar"].every((t) => spawnSync("sh", ["-c", `command -v ${t}`]).status === 0);
+  if (process.platform !== "linux" || !tools) return console.log("  (the install script's run on a computer is checked on Linux only: GNU mv -T, flock, sha256sum)");
+  const src = mkdtempSync(join(tmpdir(), "bops-bundle-"));
+  writeFileSync(join(src, "server.js"), "// the server\n");
+  const tgz = join(src, "..", `${BUNDLE}.${process.pid}`);
+  spawnSync("tar", ["-czf", tgz, "-C", src, "."]);
+  const bytes = readFileSync(tgz);
+  const b = { name: BUNDLE, sha256: createHash("sha256").update(bytes).digest("hex"), version: "0.0.29", buildId: "buildA1" };
+  const wrapper = I.wrapperScript({ computerId: C1, orgo: "https://orgo.example", cloud: "https://bops.example/api" });
+  const c = onComputer("");
+  const runner = (p = "") => c.at(`opt/bops/runner${p}`);
+  for (const v of ["0.0.28-old", "0.0.27-older"]) {
+    mkdirSync(runner(`/${v}`), { recursive: true });
+    writeFileSync(runner(`/${v}/server.js`), "");
+  }
+  spawnSync("ln", ["-s", "0.0.28-old", runner("/current")]);
+  mkdirSync(runner("/incoming"), { recursive: true });
+  writeFileSync(runner(`/incoming/${BUNDLE}`), bytes);
+  mkdirSync(c.at("opt/bops/keeper"), { recursive: true });
+  writeFileSync(c.at("opt/bops/keeper/pin"), "1\n");
+  // A thread of the runner's own going (its marker touched just now): busy, nothing swapped, the hold gone.
+  mkdirSync(c.at("var/run/bops"), { recursive: true });
+  writeFileSync(c.at("var/run/bops/working"), "");
+  let r = c.runThis(I.installScript(b, wrapper, { keep: "0.0.28-old", pin: false }));
+  assert.ok(r.stdout.includes("__BOPS_BUSY__") && !r.stdout.includes("__BOPS_INSTALLED__"), r.stdout + r.stderr);
+  assert.equal(readlinkSync(runner("/current")), "0.0.28-old", "current as it was");
+  assert.ok(!existsSync(c.at("var/run/bops/upgrading")), "the hold goes with the script");
+  assert.ok(existsSync(c.at("opt/bops/keeper/pin")), "nothing changed past the busy check");
+  assert.deepEqual(c.asked(), [], "nothing restarted");
+  // Its marker 3 minutes old (the thread is over): set up, the build it was told to keep kept, the one before that gone, the pin off.
+  const old = new Date(Date.now() - 3 * 60_000);
+  utimesSync(c.at("var/run/bops/working"), old, old);
+  r = c.runThis(I.installScript(b, wrapper, { keep: "0.0.28-old", pin: false }));
+  assert.ok(r.stdout.includes("__BOPS_INSTALLED__"), r.stdout + r.stderr);
+  assert.equal(readlinkSync(runner("/current")), "0.0.29-buildA1");
+  assert.deepEqual(readdirSync(runner()).filter((f) => f !== ".lock").sort(), ["0.0.28-old", "0.0.29-buildA1", "current", "incoming", "run.sh"]);
+  assert.ok(!existsSync(c.at("opt/bops/keeper/pin")), "a packaged build takes the pin off");
+  assert.ok(c.asked().includes("restart bops-runner"));
+  // Again, pinned (a dev build) and keeping nothing: the old build goes, the pin is there.
+  r = c.runThis(I.installScript(b, wrapper, { pin: true }));
+  assert.ok(r.stdout.includes("__BOPS_INSTALLED__"), r.stdout + r.stderr);
+  assert.deepEqual(readdirSync(runner()).filter((f) => f !== ".lock").sort(), ["0.0.29-buildA1", "current", "incoming", "run.sh"]);
+  assert.ok(/^\d+\n$/.test(readFileSync(c.at("opt/bops/keeper/pin"), "utf8")), "pinned");
+  c.done();
+  rmSync(src, { recursive: true, force: true });
+  rmSync(tgz, { force: true });
+});
+
+await check("a release is taken only signed by a key built in, and only a bops-runner release whose name is its version and build, with a sha256, a size up to 400 MB and a state level", () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const keys = { t1: publicKey.export({ type: "spki", format: "pem" }) };
+  const good = { kind: "bops-runner", version: "0.0.55", buildId: "abcDEF_12-x", name: "bops-server-0.0.55-abcDEF_12-x.tgz", sha256: "a".repeat(64), size: 123_456_789, released: "2026-11-18T12:00:00Z", stateLevel: 42 };
+  const signed = (p, o = {}) => {
+    const payload = typeof p === "string" ? p : JSON.stringify(p);
+    return JSON.stringify({ payload, sig: sign(null, Buffer.from(payload), o.key ?? privateKey).toString("base64"), keyId: o.keyId ?? "t1" });
+  };
+  assert.deepEqual(STEPS.verifyRelease(signed(good), keys), good);
+  assert.deepEqual(STEPS.verifyRelease(signed({ ...good, released: 1_763_467_200_000, size: STEPS.RELEASE_MAX_SIZE }), keys), { ...good, released: 1_763_467_200_000, size: STEPS.RELEASE_MAX_SIZE });
+  assert.deepEqual(STEPS.verifyRelease(signed({ ...good, extra: "x" }), keys), good, "only the release's own fields");
+  // The keys built in: r1, an ed25519 key, and nothing else; frozen. A release signed by any other key is nothing.
+  assert.deepEqual(Object.keys(STEPS.RELEASE_KEYS), ["r1"]);
+  assert.equal(createPublicKey(STEPS.RELEASE_KEYS.r1).asymmetricKeyType, "ed25519");
+  assert.ok(Object.isFrozen(STEPS.RELEASE_KEYS));
+  assert.equal(STEPS.verifyRelease(signed(good)), null, "not signed with r1");
+  assert.equal(STEPS.verifyRelease(signed(good, { keyId: "r1" })), null, "r1's name on another key's signature");
+  // The signature.
+  assert.equal(STEPS.verifyRelease(signed(good, { key: generateKeyPairSync("ed25519").privateKey }), keys), null, "another key");
+  for (const keyId of ["t2", "__proto__", "constructor", "", "t1 "]) assert.equal(STEPS.verifyRelease(signed(good, { keyId }), keys), null, `keyId ${JSON.stringify(keyId)}`);
+  const tampered = JSON.parse(signed(good));
+  tampered.payload = tampered.payload.replace('"size":123456789', '"size":123456788');
+  assert.equal(STEPS.verifyRelease(JSON.stringify(tampered), keys), null, "a payload changed after it was signed");
+  const noSig = JSON.parse(signed(good));
+  for (const sig of ["", "AAAA", "not base64!", noSig.sig.slice(0, -4)]) assert.equal(STEPS.verifyRelease(JSON.stringify({ ...noSig, sig }), keys), null, `sig ${sig.slice(0, 8)}`);
+  // The payload, field by field.
+  const noReleased = { ...good };
+  delete noReleased.released;
+  const bad = {
+    kind: { ...good, kind: "bops-app" },
+    "version not its name's": { ...good, version: "0.0.56" },
+    "build not its name's": { ...good, buildId: "other" },
+    "another name": { ...good, name: "bops-server-0.0.55-abcDEF_12-x.tar" },
+    "version not x.y.z": { ...good, version: "0.0.55-rc1", name: "bops-server-0.0.55-rc1-abcDEF_12-x.tgz" },
+    "sha256 not hex": { ...good, sha256: "A".repeat(64) },
+    "sha256 short": { ...good, sha256: "a".repeat(63) },
+    "size 0": { ...good, size: 0 },
+    "size over 400 MB": { ...good, size: STEPS.RELEASE_MAX_SIZE + 1 },
+    "size not whole": { ...good, size: 1.5 },
+    "size as text": { ...good, size: "123" },
+    "state level 0": { ...good, stateLevel: 0 },
+    "state level 10000": { ...good, stateLevel: 10_000 },
+    "state level as text": { ...good, stateLevel: "42" },
+    "released not a time": { ...good, released: "soon" },
+    "no released": noReleased,
+  };
+  for (const [what, p] of Object.entries(bad)) assert.equal(STEPS.verifyRelease(signed(p), keys), null, what);
+  for (const p of ["[]", "null", "not json", JSON.stringify([good])]) assert.equal(STEPS.verifyRelease(signed(p), keys), null, p);
+  // The text around it.
+  for (const text of ["", "nope", "null", "[]", JSON.stringify({ payload: good, sig: "x", keyId: "t1" }), `${signed(good)}${" ".repeat(STEPS.RELEASE_MAX_TEXT)}`]) assert.equal(STEPS.verifyRelease(text, keys), null, text.slice(0, 20));
+  assert.equal(STEPS.verifyRelease(undefined, keys), null);
+});
+
 await check("every command it sends is shell that parses, and the wrapper too", () => {
   const scripts = [
     I.installScript({ name: BUNDLE, sha256: SHA, version: "0.0.29", buildId: "buildA1" }, I.wrapperScript({ computerId: C1, timeZone: "America/New_York", orgo: "https://orgo.example", cloud: "https://bops.example/api" })),
+    I.installScript({ name: BUNDLE, sha256: SHA, version: "0.0.29", buildId: "buildA1" }, I.wrapperScript({ computerId: C1, orgo: "https://orgo.example", cloud: "https://bops.example/api" }), { keep: "0.0.28-old", pin: true }),
+    I.installScript({ name: BUNDLE, sha256: SHA, version: "0.0.29", buildId: "buildA1" }, I.wrapperScript({ computerId: C1, orgo: "https://orgo.example", cloud: "https://bops.example/api" }), { pin: false }),
     I.HEALTH_SCRIPT,
     I.UNINSTALL_SCRIPT,
     I.probeScript("0.0.29-buildA1"),

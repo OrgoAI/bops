@@ -1,4 +1,5 @@
 import "server-only";
+import { loopHere } from "./persist";
 import { checkIdentity, IDENTITY_EVERY_MS, runnerComputer, startRunsOn, watchIdentity, WHO_AM_I_EVERY_MS } from "./runner";
 
 /**
@@ -9,11 +10,12 @@ import { checkIdentity, IDENTITY_EVERY_MS, runnerComputer, startRunsOn, watchIde
  * when the Mac sets the runner up on one without it: orgo-auth.ts runnerKey; none yet, it waits for one),
  * a look that it's on its own computer (again while a task of its own runs, and before it runs anything:
  * runner.ts checkIdentity; on identity, its VMM asked every minute too), the user's state from Bops
- * Cloud, then the routines timer, asking Orgo where the bots work, and saying its computer is in use
- * while a task of its own runs. Its threads and the mirror of its own routines
- * start from the timer, as they do on the Mac. The look comes before the state: a copy of the computer
- * (a clone starts its runner as the original's) that loaded the state would take the original runner's
- * live threads for its own and fail them (store.ts migrate), and save that.
+ * Cloud, then the routines timer, asking Orgo where the bots work, saying its computer is in use while a
+ * task of its own runs, and beating RUNNER_WORKING while one goes (so its keeper, or the Mac, never swaps
+ * its files under it: runner-chat.ts startWorkingBeat). Its threads and the mirror of its own routines
+ * start from the timer, as they do on the Mac. The look comes before the state: a copy of the computer (a
+ * clone starts its runner as the original's) that loaded the state would take the original runner's live
+ * threads for its own and fail them (store.ts migrate), and save that.
  */
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -96,8 +98,11 @@ export async function startRunner() {
   const { startActivityBeat } = await import("./free-hours");
   startActivityBeat();
   // The chat turns Bops Cloud owes this computer, in a workspace whose chat goes through it (runner-chat.ts).
-  const { startRunnerChat } = await import("./runner-chat");
+  const { startRunnerChat, startWorkingBeat } = await import("./runner-chat");
   startRunnerChat();
+  // While a thread of its own goes (not one paused for an OK), RUNNER_WORKING is touched every 30 seconds: an update
+  // of this runner waits for it (vm/runner-steps.mjs installScript).
+  if (loopHere("sessions")) startWorkingBeat();
   // Its bots' browsers, for the owner and the members who may watch them (browser-runner.ts).
   const { startBrowserRelay } = await import("./browser-runner");
   startBrowserRelay();

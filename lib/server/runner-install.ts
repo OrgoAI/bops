@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { RUNNER_HOLD, RUNNER_TURNS_DIR } from "@/cloud/protocol";
 import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, workspaceOf, type AppState, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { forgetGoneMembers, othersCanUse } from "./members";
@@ -15,19 +14,19 @@ import { orgoOrigin } from "./orgo-auth";
 import { loopHere } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
 import { mendRoutineCopies, routineChanged } from "./routine-sync";
-import { heardRunsOn, noteDown, overdueOn, RUNNER_CONF, RUNNER_WRAPPER, runnerRunsOn, runsOnMissing } from "./runner";
-import { ORGO_KEY_FILES, ORGO_KEY_LINE, RUNNER_AUTH_FILE } from "./runner-key";
+import { heardRunsOn, noteDown, overdueOn, runnerRunsOn, runsOnMissing } from "./runner";
 import { computerGone, endSessionOf, endSessionsOf } from "./sessions";
 import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNew, update } from "./store";
+import { AUTH_LINE, BUNDLE_NAME, BUSY_LINE, HEALTH_SCRIPT, installScript, KEEPER_HOLD, KEY_LINE, ROOT, SUPERVISOR_CONF, UNINSTALL_SCRIPT, wrapperScript } from "@/vm/runner-steps.mjs";
 
 /**
- * Bops runners on the bots' computers (runner.ts says what one is), set up and stopped from the Mac and
- * only from there. While the bots work in the Cloud (Orgo's word, runner.ts), each computer some bot
- * works on gets one: a computer as Orgo's map of the workspace has it (GET /api/projects/{id}/bops, which
- * answers only live Bops computers of the user's) and as this Mac has it too. Each step is in
- * AppState.runners, which every Mac and runner of the user's reads: Setting up, then Running once its
- * health check passed (only then does the Mac leave that computer's routines to it), or Couldn't start
- * and why (they stay on the Mac).
+ * Bops runners on the bots' computers (runner.ts says what one is), set up and stopped from the Mac (and
+ * set up and updated by the computer's own keeper too: below). While the bots work in the Cloud (Orgo's
+ * word, runner.ts), each computer some bot works on gets one: a computer as Orgo's map of the workspace has
+ * it (GET /api/projects/{id}/bops, which answers only live Bops computers of the user's) and as this Mac
+ * has it too. Each step is in AppState.runners, which every Mac and runner of the user's reads: Setting up,
+ * then Running once its health check passed (only then does the Mac leave that computer's routines to it),
+ * or Couldn't start and why (they stay on the Mac).
  *
  * Setting one up: the server bundle this app ships (scripts/server-bundle.sh: in the app's Resources, or
  * on a dev Mac the newest in dist-runner) goes up through Orgo's file uploads into the computer's
@@ -45,17 +44,27 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
  * set up again (a new release) stays up, with its routines, until the new one starts in its place
  * (RunnerState.upgrading); a try that doesn't get that far leaves it as it was.
  *
+ * A computer's own keeper (vm/bin/bops-runner-keeper.mjs, with these same steps: vm/runner-steps.mjs) also sets up
+ * and updates its runner, for owners whose Mac is at CLOUD_SELF_MIN_VERSION, when Bops Cloud says it may (a signed
+ * release, never in the middle of a reply or a run). This loop stays as it is, with three guards so the two never
+ * fight: while the keeper holds the computer (KEEPER_HOLD) nothing is done here and it's looked at again in a minute;
+ * a runner of this bundle's very build that's up already is adopted, after the key checks, with no files sent, no
+ * restart and no key step; and a dev Mac's own build pins the computer (KEEPER_DIR/pin), which the keeper never
+ * replaces (a packaged one takes the pin off). Taking a runner off tells the keeper so (KEEPER_DIR/off) and leaves
+ * the keeper running.
+ *
  * A workspace someone else can use whose chat goes through Bops Cloud (Workspace.chatOn "cloud"), or that Bops Cloud
  * may move there by itself (Workspace.chatAuto: nobody chose the Mac), keeps its computers' runners, so the bots
- * answer there with no Mac open (Bops Cloud moves it once that runner connects): only a computer whose bots are all of
- * that one workspace (sharedRunnerOk: one that also serves a private workspace never is), and only on the computer's
- * own Orgo identity (an hour long, held to its bots by Bops Cloud), never the account's key. A computer with a key on
- * it, or whose identity doesn't answer, has none (install), a runner it had on a key is stopped first and its key
- * revoked, and the way back never gives it a key (stillRuns; RunnerState.shared keeps that past a restart of the
- * Mac). Runners are set up only by an owner's Mac (this look is a Mac loop, and the bundle ships inside the Mac app):
- * the owner's Mac must open a Bops with this change once before any computer of a shared workspace gets its runner,
- * and again for each newer runner. A Mac from before this change (0.0.36, 0.0.37) keeps one only while the chat goes
- * through Bops Cloud, and takes one down otherwise: this Mac waits a while before it sets that one up again.
+ * answer there with no Mac open (Bops Cloud moves it once that runner connects): only a computer whose bots are all
+ * of that one workspace (sharedRunnerOk: one that also serves a private workspace never is), and only on the
+ * computer's own Orgo identity (an hour long, held to its bots by Bops Cloud), never the account's key. A computer
+ * with a key on it, or whose identity doesn't answer, has none (install), a runner it had on a key is stopped first
+ * and its key revoked, and the way back never gives it a key (stillRuns; RunnerState.shared keeps that past a
+ * restart of the Mac). With no keeper, runners are set up only by an owner's Mac (this look is a Mac loop, and the
+ * bundle ships inside the Mac app): the owner's Mac must open a Bops with this change once before any computer of a
+ * shared workspace gets its runner, and again for each newer runner. A Mac from before this change (0.0.36, 0.0.37)
+ * keeps one only while the chat goes through Bops Cloud, and takes one down otherwise: this Mac waits a while before
+ * it sets that one up again.
  *
  * Its computer's Orgo identity (vm-identity.ts) comes first on the runner, and its key is the fallback
  * wherever identity doesn't reach. This release (the identity spec's phase 1) gives every computer its
@@ -82,8 +91,6 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
  * a runner that's up.
  */
 
-const ROOT = "/opt/bops/runner";
-const PORT = 3210;
 const NO_BUNDLE = "no server bundle";
 /** orgo-web's 409 full_access_member says "Someone else can use this workspace." */
 const FULL_ACCESS = "someone else can use this workspace";
@@ -128,8 +135,6 @@ const IDENTITY_ONLY = false;
 /* ---------------- The bundle ---------------- */
 
 export type Bundle = { file: string; name: string; version: string; buildId: string; sha256: string };
-/** bops-server-<version>-<BUILD_ID>.tgz (Bops versions are x.y.z; Next's BUILD_ID is letters, digits, _ and -). */
-const BUNDLE_NAME = /^bops-server-(\d+\.\d+\.\d+)-([A-Za-z0-9_-]{1,64})\.tgz$/;
 
 /** The sha256 in a bundle's .sha256 file (`<hash>  <name>`, as shasum and sha256sum write it), when it's for that file. */
 function shaOf(file: string, name: string): string | null {
@@ -198,36 +203,34 @@ export function installPlan(x: RunnerState | undefined, mine: Pick<Bundle, "vers
 
 /* ---------------- On the computer ---------------- */
 
-const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+// The steps themselves (the install script, the program, the health check, taking it off) are vm/runner-steps.mjs:
+// one copy, which this Mac sends through Orgo and the computer's own keeper runs there.
+export { AUTH_LINE, BUSY_LINE, HEALTH_SCRIPT, installScript, SUPERVISOR_CONF, UNINSTALL_SCRIPT, wrapperScript };
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ZONE = /^[A-Za-z0-9_+/-]{1,64}$/;
 const ORIGIN = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
 const LOOPBACK_URL = /^https?:\/\/(?:localhost|127\.|\[::1\]|0\.0\.0\.0)/i;
 
-const KEY_LINE = `grep -qsE ${q(ORGO_KEY_LINE)} ${ORGO_KEY_FILES.join(" ")} && echo key=yes || echo key=no`;
 /**
  * The computer's Orgo identity asked as a program on it would (its VMM, from inside its own network):
  * the status code only (200, 403, 404, 503, 000 when nothing answered), never the token.
  */
 export const IDENT_LINE = `echo "ident=$(curl --noproxy '*' -s -m 3 -o /dev/null -w '%{http_code}' -H 'Metadata-Flavor: Orgo' http://169.254.169.254/orgo/v1/identity/token)"`;
-/**
- * What the runner last said it signs in with: the word in its auth file (RUNNER_AUTH_FILE, written at each
- * change), else its log's last `[runner] auth:` line (a runner from before the file; the log rotates at
- * 5 MB and the word is said only when it changes). The word only, as orgo-web logs a command's output.
- */
-export const AUTH_LINE = `echo "auth=$( (grep -sxE '(identity|key|none)' ${RUNNER_AUTH_FILE} || grep -E '^\\[runner\\] auth: (identity|key|none)$' /var/log/bops/runner.log 2>/dev/null | sed 's/^.*: //') | tail -n 1)"`;
 /** The word an `auth=` line says, if it says one. */
 const authIn = (output: string): RunnerState["auth"] => (/^auth=(identity|key|none)$/m.exec(output)?.[1] as RunnerState["auth"]) ?? undefined;
 
+/** hold=yes while the computer's own keeper is setting its runner up or updating it (KEEPER_HOLD, touched under 5 minutes ago). */
+export const HOLD_LINE = `[ -n "$(find ${KEEPER_HOLD} -mmin -5 2>/dev/null)" ] && echo hold=yes || echo hold=no`;
+/** running=yes while supervisord runs the runner's program (or is starting it): only such a runner is adopted (install). */
+export const RUNNING_LINE = `supervisorctl status bops-runner 2>/dev/null | grep -qE 'RUNNING|STARTING' && echo running=yes || echo running=no`;
 /**
  * Where it stands on the computer: the build `current` points at, whether the computer has its Orgo key
  * (a line that sets ORGO_API_KEY in one of the files Orgo writes it in: grep alone, never printed), whether
- * this build is there, and supervisord; in phase 2 (`ident`) what its identity answers too (IDENT_LINE).
+ * this build is there, and supervisord; in phase 2 (`ident`) what its identity answers too (IDENT_LINE);
+ * whether the runner is answering a reply (BUSY_LINE), whether its program runs (RUNNING_LINE), and whether
+ * its keeper is at work on it (HOLD_LINE).
  */
-/** In the install script: a reply the runner marks (RUNNER_TURNS_DIR, touched in the last 2 minutes) ends it as busy. */
-const BUSY_EXIT = `if [ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ]; then echo __BOPS_BUSY__; exit 0; fi`;
-/** busy=yes while the runner there marks a reply it's answering (RUNNER_TURNS_DIR, touched in the last 2 minutes). */
-export const BUSY_LINE = `[ -n "$(find ${RUNNER_TURNS_DIR} -type f -mmin -2 2>/dev/null | head -1)" ] && echo busy=yes || echo busy=no`;
 export const probeScript = (dirName: string, { ident = false }: { ident?: boolean } = {}) =>
   [
     `c=$(readlink ${ROOT}/current 2>/dev/null | sed 's#.*/##')`,
@@ -237,139 +240,9 @@ export const probeScript = (dirName: string, { ident = false }: { ident?: boolea
     `[ -f ${ROOT}/${dirName}/server.js ] && echo have=yes || echo have=no`,
     `command -v supervisorctl >/dev/null 2>&1 && echo sup=yes || echo sup=no`,
     BUSY_LINE,
+    RUNNING_LINE,
+    HOLD_LINE,
   ].join("; ");
-
-/**
- * The script supervisord starts: the runner's settings (none of them secret), a window token made fresh,
- * then the server. Never its key: the runner reads that from its computer's files itself (runner-key.ts),
- * again when Orgo has written a new one. TZ is the user's zone when it's set up; it follows the user's
- * zone after that (routines.ts keepZone).
- */
-export function wrapperScript(o: { computerId: string; timeZone?: string; orgo: string; cloud: string }): string {
-  return [
-    "#!/bin/sh",
-    "# The Bops runner on this computer, set up by the Bops app on the user's Mac (lib/server/runner-install.ts).",
-    "# Its window token is made fresh each start and kept nowhere: nothing on this computer needs it.",
-    "BOPS_UI_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')",
-    "export BOPS_UI_TOKEN",
-    `export HOME=/root HOSTNAME=127.0.0.1 PORT=${PORT} NODE_ENV=production NEXT_MANUAL_SIG_HANDLE=true`,
-    `export BOPS_RUNNER=1 BOPS_RUNNER_COMPUTER=${q(o.computerId)} BOPS_DEVICE_SEED=${q(o.computerId)}`,
-    `export BOPS_ORGO_ORIGIN=${q(o.orgo)} BOPS_CLOUD_URL=${q(o.cloud)}`,
-    ...(o.timeZone ? [`export TZ=${q(o.timeZone)}`] : []),
-    `cd ${ROOT}/current || exit 1`,
-    "exec /usr/bin/node server.js",
-    "",
-  ].join("\n");
-}
-
-/** Its supervisord program: started with the computer, again whenever it stops, its log in /var/log/bops. */
-export const SUPERVISOR_CONF = [
-  "[program:bops-runner]",
-  `command=${RUNNER_WRAPPER}`,
-  `directory=${ROOT}`,
-  "user=root",
-  "autostart=true",
-  "autorestart=true",
-  "startsecs=10",
-  "startretries=5",
-  "stopsignal=TERM",
-  "stopwaitsecs=15",
-  "redirect_stderr=true",
-  "stdout_logfile=/var/log/bops/runner.log",
-  "stdout_logfile_maxbytes=5MB",
-  "stdout_logfile_backups=2",
-  "",
-].join("\n");
-
-/**
- * One command, under the runners' lock: the bundle checked against its sha256 and unpacked beside the
- * other builds (when it was just uploaded: a build already unpacked there, as on a copy of a computer
- * with a runner or a try again after it was unpacked, is used as it is), `current` switched to it in one
- * rename, older builds gone, the program and its script written, and it (re)started. Says
- * __BOPS_INSTALLED__ when it got that far, __BOPS_NO_FILES__ when neither the upload nor the build is there.
- */
-export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "buildId">, wrapper: string): string {
-  const dirName = `${b.version}-${b.buildId}`;
-  return [
-    "set -e",
-    `d=${ROOT}`,
-    `mkdir -p "$d/incoming" /var/log/bops /etc/supervisor/conf.d`,
-    `exec 9>"$d/.lock"`,
-    "flock -w 120 9",
-
-    `cd "$d/incoming"`,
-    `if [ -f ${q(b.name)} ]; then`,
-    `  printf '%s  %s\\n' ${q(b.sha256)} ${q(b.name)} | sha256sum -c --status`,
-    `  rm -rf "$d/${dirName}.part"`,
-    `  mkdir "$d/${dirName}.part"`,
-    `  tar -xzf ${q(b.name)} -C "$d/${dirName}.part" --no-same-owner`,
-    `  test -f "$d/${dirName}.part/server.js"`,
-    `  rm -rf "$d/${dirName}"`,
-    `  mv "$d/${dirName}.part" "$d/${dirName}"`,
-    `  rm -f ${q(b.name)}`,
-    `elif [ ! -f "$d/${dirName}/server.js" ]; then`,
-    "  echo __BOPS_NO_FILES__",
-    "  exit 3",
-    "fi",
-    // The runner is held (RUNNER_HOLD: it starts no new reply; a resume waits), then a reply it's answering stops the
-    // upgrade before any file of the runner is swapped (restarting it would cut the reply off); tried again later. From
-    // here to the restart is only the swap and the program's files, kept short. The hold goes when the script ends.
-    `mkdir -p ${RUNNER_TURNS_DIR} && touch ${RUNNER_HOLD} && trap 'rm -f ${RUNNER_HOLD}' EXIT`,
-    BUSY_EXIT,
-    `ln -sfn ${q(dirName)} "$d/current.next"`,
-    `mv -Tf "$d/current.next" "$d/current"`,
-    `cat > ${RUNNER_WRAPPER} <<'BOPS_EOF'\n${wrapper}BOPS_EOF`,
-    `chmod 700 ${RUNNER_WRAPPER}`,
-    `cat > ${RUNNER_CONF} <<'BOPS_EOF'\n${SUPERVISOR_CONF}BOPS_EOF`,
-    // Its log and its auth file start over, so the health check reads this start's.
-    ": > /var/log/bops/runner.log",
-    `rm -f ${RUNNER_AUTH_FILE}`,
-    "supervisorctl reread >/dev/null 2>&1 || true",
-    "supervisorctl update >/dev/null 2>&1 || true",
-    "supervisorctl restart bops-runner >/dev/null 2>&1 || true",
-    // The builds before this one go only once it runs: the one restarted may have read its own files till then.
-    `for v in "$d"/*/; do v="\${v%/}"; case "\${v##*/}" in incoming|current|${dirName}) ;; *) rm -rf "$v" ;; esac; done`,
-    "echo __BOPS_INSTALLED__",
-  ].join("\n");
-}
-
-/**
- * The health check: the runner answers on 127.0.0.1:PORT within a minute or so, listens there only
- * (never on an address another computer could reach), and has the user's state (its log says it's
- * running the routines: runner-start.ts). Nothing of the log is sent back, only whether it says so, and
- * what it signs in with (`auth=identity`, `key` or `none`: the word alone).
- */
-export const HEALTH_SCRIPT = [
-  "command -v ss >/dev/null 2>&1 || { echo __BOPS_NO_SS__; exit 0; }",
-  'up=""',
-  "for i in $(seq 1 45); do",
-  `  if curl -fsS --max-time 3 -o /dev/null http://127.0.0.1:${PORT}/api/health; then`,
-  "    up=1",
-  `    l=$(ss -ltnH 'sport = :${PORT}' | awk '{print $4}')`,
-  '    if [ -z "$l" ]; then echo __BOPS_NO_SS__; exit 0; fi',
-  "    if printf '%s\\n' \"$l\" | grep -qv '^127\\.0\\.0\\.1:'; then echo __BOPS_EXPOSED__; exit 0; fi",
-  `    if grep -q '^\\[runner\\] running the routines' /var/log/bops/runner.log 2>/dev/null; then ${AUTH_LINE}; echo __BOPS_HEALTHY__; exit 0; fi`,
-  "  fi",
-  "  sleep 2",
-  "done",
-  'if [ -n "$up" ]; then echo __BOPS_NO_STATE__; else echo __BOPS_DOWN__; fi',
-].join("\n");
-
-/**
- * Taking it off a computer: its program stopped and gone, its script and its builds, under the lock.
- * Never the computer's Orgo key: the one Bops gave it comes off with its revoke (stop), and one it came
- * with is the computer's.
- */
-export const UNINSTALL_SCRIPT = [
-  "supervisorctl stop bops-runner >/dev/null 2>&1",
-  `rm -f ${RUNNER_CONF} ${RUNNER_WRAPPER}`,
-  "supervisorctl update >/dev/null 2>&1",
-  `mkdir -p ${ROOT}`,
-  `exec 9>${ROOT}/.lock`,
-  "flock -w 120 9",
-  `find ${ROOT} -mindepth 1 -maxdepth 1 ! -name .lock -exec rm -rf {} +`,
-  "echo __BOPS_OFF__",
-].join("\n");
 
 /**
  * Whether a runner marked up is still there (stillRuns): supervisord's word, then whether its computer
@@ -445,6 +318,16 @@ function keptAsIs(id: string, error: string) {
   if (x?.status === "running") mark(id, { ...x, upgrading: undefined });
   console.warn(`[runner-install] ${id}: kept as it was (${error})`);
   later(id);
+}
+/**
+ * The computer's own keeper is at work on its runner (KEEPER_HOLD): the runner's state put back as it was before this
+ * try (`before`), with no failure and no longer wait, and the computers looked at again in a minute.
+ */
+function keeperAtWork(id: string, before: RunnerState | undefined) {
+  if (before) mark(id, before);
+  else forget(id);
+  console.info(`[runner-install] ${id}: its keeper is setting its runner up; looked at again in a minute`);
+  runnersSoon(CHECK_MS);
 }
 /** The key Bops gave the computer, carried over to its next state (an entry from before keyMade, with a keyId, counts: runnerKeyMade). */
 const keyOf = (x: RunnerState | undefined): Pick<RunnerState, "keyMade" | "keyId"> => (runnerKeyMade(x) ? { keyMade: true, ...(x?.keyId ? { keyId: x.keyId } : {}) } : {});
@@ -735,6 +618,9 @@ async function install(id: string, bundle: Bundle, key: string, me: string, shar
   if (!probe) return fail("its computer didn't answer");
   const said = (k: string) => new RegExp(`^${k}=(.*)$`, "m").exec(probe.output)?.[1]?.trim() ?? "";
   if (said("sup") !== "yes") return fail("its computer can't keep a runner going (no supervisord)");
+  // Its own keeper is setting its runner up or updating it right now (KEEPER_HOLD): nothing done here, the runner's
+  // state left as it was, and looked at again in a minute (by then the keeper's runner is there to keep or adopt).
+  if (said("hold") === "yes") return keeperAtWork(id, before);
   // A reply its runner is answering now: set up again once it's over (a restart now would cut it off).
   if (upgrade && said("busy") === "yes") return keptAsIs(id, BUSY);
   // A newer one is there already (another Mac's): never replaced by this older one.
@@ -757,6 +643,21 @@ async function install(id: string, bundle: Bundle, key: string, me: string, shar
   if (ident === "403") return fail(FULL_ACCESS);
   // Someone else can use it: never a key on it (theirs to read as root), and nothing without its identity.
   if (shared && (hadKey || ident !== "200")) return fail(FULL_ACCESS);
+  // This bundle's very build is there, current and running already (its own keeper set it up, or another Mac), where
+  // this Mac's record doesn't say it runs it: adopted as it is when its health check passes, with no files sent, no
+  // restart and no key step. Only after the key checks above: a computer someone else can use never keeps a runner
+  // that a key on it could serve. Not healthy, or its program not running (a copy of a computer, whose runner was
+  // taken off: RUNNER_SCRUB): set up as any other.
+  if (there && there[1] === bundle.version && there[2] === bundle.buildId && said("running") === "yes" && !(before?.status === "running" && before.by === me)) {
+    const up = await health(id);
+    if (up.up === "ok") {
+      // Whoever set it up stays its `by` (none known: this Mac), with the key Bops gave it, if any.
+      box.retry.delete(id);
+      mark(id, { status: "running", version: bundle.version, buildId: bundle.buildId, by: before?.by ?? me, at: Date.now(), ...keyOf(runnerOf(id)), ...authOf(up.auth), ...(shared ? { shared: true } : {}) });
+      void flushState().catch(() => {});
+      return;
+    }
+  }
   const onIdentity = ident === "200";
   if (!hadKey && !onIdentity) {
     const given = await giveKey(id, key);
@@ -771,7 +672,9 @@ async function install(id: string, bundle: Bundle, key: string, me: string, shar
   }
   const wrapper = wrapperScript({ computerId: id, timeZone: ZONE.test(s.owner?.timeZone ?? "") ? s.owner?.timeZone : undefined, orgo: orgoAt, cloud: cloudAt });
   touched = true;
-  const put = await orgo.bash(id, installScript(bundle, wrapper), 240).catch(() => null);
+  // A dev Mac's own build (no packaged server: findBundle took it from dist-runner) pins the computer, so its keeper
+  // never replaces it; a packaged one takes the pin off.
+  const put = await orgo.bash(id, installScript(bundle, wrapper, { pin: !process.env.BOPS_SERVER_JS }), 240).catch(() => null);
   if (upgrade && put?.output.includes("__BOPS_BUSY__")) return keptAsIs(id, BUSY);
   if (!put?.output.includes("__BOPS_INSTALLED__")) return fail(put?.output.includes("__BOPS_NO_FILES__") ? "its files weren't on its computer" : "its files couldn't be put in place");
   const up = await health(id);
@@ -1066,6 +969,8 @@ export const runnerInstallForTests = {
     box.identityOnly = undefined;
   },
   retryAt: (id: string) => box.retry.get(id)?.at,
+  /** Whether a look is coming soon (runnersSoon). */
+  lookSoon: () => !!box.soon,
   /** One turn of the minute timer (checkNow), with the last full look `lookedAgo` ms back. */
   check: (lookedAgo?: number) => {
     if (lookedAgo !== undefined) {
