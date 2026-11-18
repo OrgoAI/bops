@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import { appVersionOf, olderThan } from "./app-version.ts";
+import { freeJobLease, jobLeaseKind, renewJobLease, sweepAppLeases, takeJobLease } from "./app-lease.ts";
 import type { CloudUser } from "./auth.ts";
 import { appHomeHere, hostingScope, same, workBotOf } from "./computer-scope.ts";
 import { config } from "./config.ts";
@@ -13,6 +14,7 @@ import { hub, sse, stateWritten } from "./live.ts";
 import { GITHUB_KEY_NAME } from "./github-config.ts";
 import { appsLevelOf, hasPower, levelOf, noUseNote, permits } from "./member-access.ts";
 import {
+  APP_CLAIM_BUSY,
   CHAT_AUTO_MIN_VERSION,
   CHAT_AUTO_OFF,
   CHAT_NEEDS_UPDATE,
@@ -68,8 +70,10 @@ import { computerUseOf, HOSTNAME, list, viewerAccess, wsOfBot, type SliceViewer 
  *   hour is woken only when the owner allowed it (chat_routing.allow_hourly); one that can't be woken (stopped,
  *   deleted, out of Free hours, out of AI credit) fails its turns with a note saying so.
  * - **Running it**: the runner claims a turn (only one meant for its own device, and only the oldest of its chat while
- *   none of that chat runs: one answer at a time per chat), and gets Bops Cloud's clock to stamp its answer by (a
- *   computer's own lags after a nap). The claim checks again that the bot still works there and that a member still may.
+ *   none of that chat runs: one answer at a time per chat, and one app job at a time beside it, CHAT_LANE), and gets Bops
+ *   Cloud's clock to stamp its answer by (a computer's own lags after a nap). The claim checks again that the bot still
+ *   works there and that a member still may; an app's job takes its app's lease there too (app-lease.ts), and waits,
+ *   offered again, while one of the owner's Macs, a runner or another job holds it.
  *   It beats every TURN_BEAT_MS (phase "tools" once it did something that can't be done twice) and says it's done,
  *   paused for an OK (no lease then) or failed. A paused turn goes on only through resume, for the request its pause
  *   named, on the runner that paused it (a beat never wakes it). Every beat, pause and resume checks the member again,
@@ -159,6 +163,13 @@ type RawTurn = {
   min_version: string | null;
 };
 const COLS = "user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, phase, claimed_by, attempts, deadline, approval_id, note, human_at, is_group, min_version";
+/**
+ * Which lane of its chat a turn waits in, as SQL on a chat_turns row (true: the chat's own): an app's job (TurnMember.job
+ * with an app) in a lane of its own, every other turn (an answer, a chat's compact) in the chat's. One at a time in each
+ * (claim), oldest first, so a job waiting on its app's lease (app-lease.ts) never holds the chat's answers, and an
+ * answer never holds a job.
+ */
+const CHAT_LANE = "((member -> 'job' -> 'app') IS NULL)";
 const turnOf = (r: RawTurn): TurnRow => ({
   userId: r.user_id,
   id: r.id,
@@ -1287,7 +1298,8 @@ export type AppJobTaken = { where: "computer"; turn: TurnRow; fresh: boolean } |
  * down is refused outside `cloud` (as before), but with `cloud` the job is owed and its wake says why it can't run
  * (JOB_NOTES). Else, once by its id (a retry finds it and changes nothing): a note in the app's bot's chat (Bops', with
  * what `words` says), its "going" act on the app, and a turn owed to that computer with the job on its member
- * (TurnMember.job), given out and woken as a chat turn is, one at a time in that chat, until its deadline (jobDeadline).
+ * (TurnMember.job), given out and woken as a chat turn is, one at a time among that chat's app jobs (CHAT_LANE), until
+ * its deadline (jobDeadline). No lease on the app yet: its claim takes that.
  * `still` false right before it's kept takes it all back (an orgo-web notice landed).
  */
 export async function takeAppJob(o: {
@@ -1553,10 +1565,13 @@ async function owedTo(userId: string, device: string): Promise<TurnRow[]> {
   return r.rows.map(turnOf);
 }
 
-/** A chat's next turn after one ended: to its runner. */
+/** A chat's next turn after one ended, the oldest owed in each of its lanes (CHAT_LANE): to its runner. */
 async function nextOf(userId: string, chatId: string) {
-  const r = await query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND chat_id = $2 AND state IN ('owed', 'waking') ORDER BY created_at LIMIT 1`, [userId, chatId]);
-  if (r.rows[0]) await dispatch(turnOf(r.rows[0]));
+  const r = await query<RawTurn>(
+    `SELECT DISTINCT ON (${CHAT_LANE}) ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND chat_id = $2 AND state IN ('owed', 'waking') ORDER BY ${CHAT_LANE}, created_at`,
+    [userId, chatId],
+  );
+  for (const t of r.rows.map(turnOf)) await dispatch(t);
 }
 
 /* ---------------- Waking a computer ---------------- */
@@ -1878,10 +1893,12 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
     if (t.state !== "owed" && t.state !== "waking") throw new HttpError(410, "That turn isn't waiting.", { code: "over" });
     if (t.deadline < Date.now()) throw new HttpError(410, "That turn ran out of time.", { code: "over" });
     // One answer at a time in a chat, oldest first (a lease run out still holds it until the sweep owes it again). One
-    // paused for an OK doesn't: it may wait a day, and the chat goes on meanwhile.
+    // paused for an OK doesn't: it may wait a day, and the chat goes on meanwhile. An app's job waits only for the chat's
+    // other app jobs, and an answer only for the chat's other turns (CHAT_LANE).
     const busy = await db.query(
       `SELECT 1 FROM bops.chat_turns WHERE user_id = $1 AND chat_id = $2 AND id <> $3
          AND (state = 'claimed' OR (state IN ('owed', 'waking') AND created_at < (SELECT created_at FROM bops.chat_turns WHERE user_id = $1 AND id = $3)))
+         AND ${CHAT_LANE} = (SELECT ${CHAT_LANE} FROM bops.chat_turns WHERE user_id = $1 AND id = $3)
        LIMIT 1`,
       [user.id, t.chatId, t.id],
     );
@@ -1928,6 +1945,10 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
       await db.query("UPDATE bops.chat_turns SET state = 'failed', note = 'old', updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id]);
       return { refused: { ...t, state: "failed", note: "old" }, words: NOTES.old(ownerOf(blob), nameOf(blob, t.botId)) };
     }
+    // An app's job holds its app's lease (app-lease.ts) from here to its end. Held by another (one of the owner's Macs, a
+    // runner, another job): nothing changes, and the sweep offers it again until it's free or the job's deadline.
+    const app = job ? jobApp(job) : null;
+    if (job && app && (await takeJobLease(db, user.id, t.wsId, app, t.id, c.device, jobLeaseKind(job))) !== true) throw new HttpError(409, APP_CLAIM_BUSY, { code: "busy" });
     await db.query(
       `UPDATE bops.chat_turns SET state = 'claimed', claimed_by = $3, lease_until = now() + make_interval(secs => $4), attempts = attempts + 1, phase = 'model', updated_at = now()
        WHERE user_id = $1 AND id = $2`,
@@ -2018,6 +2039,9 @@ async function beat(user: CloudUser, id: string, body: unknown) {
   );
   if (!r.rows[0]) throw new HttpError(409, "That turn isn't this runner's any more.", { code: "over" });
   const t = turnOf(r.rows[0]);
+  // An app's job keeps its app's lease as long as it beats.
+  const job = t.member?.job;
+  if (job && jobApp(job) && !(await renewJobLease(null, user.id, t.id))) console.warn(`[turns] ${t.id}: its app's lease went to another meanwhile`);
   if (!(await stillMay(t))) throw new HttpError(409, "That turn isn't to be answered any more.", { code: "over" });
   shown(t, "thinking");
 }
@@ -2117,6 +2141,8 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
        WHERE user_id = $1 AND id = $2 RETURNING ${COLS}`,
       [user.id, id, state, approvalId, PAUSED_MS / 1000, note],
     );
+    // An app's job's lease goes with its end (a pause keeps the turn, so not then).
+    if (state !== "paused" && raw.member?.job && jobApp(raw.member.job)) await freeJobLease(db, user.id, id);
     // Its tapbacks on the message: a person's row is Bops Cloud's to write, never a computer's. Its own bot's (`react`),
     // and a group's bots' (`reacts`): each a bot of the chat that works on this turn's computer, else left out.
     const tapbacks = react ? [{ botId: raw.bot_id, type: react }] : [];
@@ -2428,8 +2454,8 @@ export async function sweepTurns() {
   }
   // Owed a while to a runner that listens (its first offer missed: not ready yet, its claim lost on the way): again.
   const waiting = await query<RawTurn>(
-    // The oldest of each chat only: the rest wait for it anyway.
-    `SELECT DISTINCT ON (user_id, chat_id) ${COLS} FROM bops.chat_turns WHERE state IN ('owed', 'waking') AND deadline > now() AND updated_at < now() - make_interval(secs => $1) ORDER BY user_id, chat_id, created_at LIMIT 500`,
+    // The oldest of each chat's lane only (CHAT_LANE): the rest wait for it anyway.
+    `SELECT DISTINCT ON (user_id, chat_id, ${CHAT_LANE}) ${COLS} FROM bops.chat_turns WHERE state IN ('owed', 'waking') AND deadline > now() AND updated_at < now() - make_interval(secs => $1) ORDER BY user_id, chat_id, ${CHAT_LANE}, created_at LIMIT 500`,
     [OFFER_AGAIN_S],
   );
   for (const t of waiting.rows.map(turnOf)) if (runnerOn(t.userId, t.targetDevice)) toRunner(t.userId, t.targetDevice, "turn", await eventOf(t));
@@ -2437,6 +2463,8 @@ export async function sweepTurns() {
     `UPDATE bops.chat_turns SET state = 'expired', note = CASE WHEN state = 'paused' THEN NULL ELSE 'late' END, claimed_by = NULL, updated_at = now()
      WHERE state IN ('owed', 'waking', 'paused') AND deadline < now() RETURNING ${COLS}`,
   );
+  // Leases of jobs no longer claimed (lost, ended, owed again), and any that ran out over an hour ago (app-lease.ts).
+  await sweepAppLeases();
   for (const t of late.rows.map(turnOf))
     if (t.note) {
       failed.push(t);

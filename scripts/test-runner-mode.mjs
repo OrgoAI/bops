@@ -360,6 +360,7 @@ const ALLOWED = {
   "channels.ts": "one link's (the listeners are startChannels')",
   "browser-runner.ts": "the runner's browser loop (loopHere(\"browser\")): what each screen's browser is doing, said to Bops Cloud as it changes",
   "permission.ts": "reading the state while one of its own requests for the user's OK is unanswered and it's up (listenForAnswers), so their reply reaches the paused run; and a brain's held call looking for its reply (heldAsk)",
+  "app-lease.ts": "one app's lease renewed while its own work on that app runs (holdApp, under withApp), stopped as it's freed",
 };
 await check("every loop and timer in lib/server is the Mac's behind its gate, or one a runner runs", () => {
   const dir = `${root}/lib/server`;

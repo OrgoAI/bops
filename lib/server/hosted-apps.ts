@@ -104,6 +104,7 @@ import { SshError, sshTunnel } from "./computer-ssh";
 import { sharedOpen } from "./shared";
 import { sharePreviewPassword } from "./preview-password-share";
 import { APP_JOB_KINDS, PREVIEW_PASSWORD_ABC, PREVIEW_PASSWORD_LENGTH, type AppJob } from "@/cloud/protocol";
+import { holdApp, type AppLease } from "./app-lease";
 
 /**
  * Apps a workspace builds and runs on the web (lib/hosted-apps.ts). Each one is an Ingot repo in the
@@ -306,7 +307,8 @@ const removing = (k: AppWork) => k === "remove" || k === "removeSite";
  * variables, waits for the one before it (each makes a site's deploy project when it has none, and two at
  * once would make two); a removal is refused while any of them is under way, and any of them while it's
  * being removed (a deploy sent as it goes would leave a site on the web that nothing here keeps). What's
- * under way is this Mac's, kept as the server runs.
+ * under way is this Mac's, kept as the server runs; and while it works, the app's lease (app-lease.ts holdApp)
+ * holds it to the same between this Bops, the owner's other Macs, its computer's runner and Bops Cloud's jobs.
  */
 async function withApp<T>(wsId: string, name: string, kind: AppWork, fn: () => Promise<T>): Promise<T> {
   const key = `${wsId}/${name}`;
@@ -316,9 +318,12 @@ async function withApp<T>(wsId: string, name: string, kind: AppWork, fn: () => P
   }
   let done = () => {};
   underWay.set(key, { kind, done: new Promise<void>((r) => (done = r)) });
+  let lease: AppLease | null = null;
   try {
+    lease = await holdApp(wsId, name, kind);
     return await fn();
   } finally {
+    lease?.free();
     underWay.delete(key);
     // (It may have made or removed deploy projects or links: each computer's room is read again.)
     roomsMoved();
@@ -6119,7 +6124,8 @@ export async function restoreApp(wsId: string, name: string, to: unknown): Promi
   if (restoring.has(key)) throw new HostedAppError(`${name} is being restored already.`, 409);
   restoring.add(key);
   try {
-    return await restoreTo(wsId, name, h, want, ours);
+    // One at a time with its deploys, here and wherever else (withApp: its pull and Locals' restart are a change to it).
+    return await withApp(wsId, name, "deploy", () => restoreTo(wsId, name, h, want, ours));
   } finally {
     restoring.delete(key);
   }
