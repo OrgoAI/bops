@@ -296,10 +296,13 @@ await test("what Bops Cloud doesn't do yet is refused in words (409 cloud_not_ye
   const renamed = A.applyChange(fixture(), WS, wsCall({ name: "  Acme Two " }), SAM, "k-rename", 1, { renamed: { name: "Acme Two", orgoName: "Acme Two", updatedAt: "2026-11-18T00:00:00Z" } });
   assert.deepEqual([ws(renamed.blob).name, ws(renamed.blob).orgoName, ws(renamed.blob).orgoUpdatedAt], ["Acme Two", "Acme Two", "2026-11-18T00:00:00Z"]);
   assert.equal(renamed.said.text, "Sam renamed the workspace");
-  // Where its chat is answered: only once Bops Cloud's switch was set (cloud/members.ts setRouting), "mac" or "auto".
+  // Where its chat is answered: only once Bops Cloud's switch was set (cloud/members.ts setRouting), "cloud" or "mac"
+  // as the switch sends it ("auto" from an older window).
   assert.equal(inCloud(fixture(), wsCall({ chat: "mac" }), "k-chat").refused.status, 400);
   const chat = A.applyChange(fixture(), WS, wsCall({ chat: "mac" }), SAM, "k-chat", 1, { chatDone: true });
   assert.equal(chat.said.text, "Sam changed where the chat is answered");
+  assert.equal(A.applyChange(fixture(), WS, wsCall({ chat: "cloud" }), SAM, "k-chat2", 1, { chatDone: true }).said.text, "Sam changed where the chat is answered");
+  assert.throws(() => A.applyChange(fixture(), WS, wsCall({ chat: "elsewhere" }), SAM, "k-chat3", 1, { chatDone: true }), /"cloud" or "mac"/);
 });
 
 await test("with the owner's Mac closed, a new name or call voice says what follows once its Bops opens, for a bot with a phone or channels; nothing more with it on, or without them", () => {

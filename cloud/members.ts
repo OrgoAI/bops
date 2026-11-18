@@ -1602,7 +1602,8 @@ function recheck(blob: Record<string, unknown>, o: CloudActOpts): boolean {
     // A chat's Compact runs on one of its bots' computers here (turns.ts takeChatJob), never on the owner's Mac.
     if (chat && !mayUse && bots.some((id) => !!computerFor(blob, id, true))) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
   }
-  if (!mayUse && computerAct(blob, slice, act)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
+  // Everything goes through the cloud here (cloudAct), so a bot set to work on the Mac answers on its own computer.
+  if (!mayUse && computerAct(blob, slice, act, true)) throw new HttpError(403, NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
   return mayUse;
 }
 
@@ -1645,7 +1646,8 @@ async function cloudAct(res: ServerResponse, o: CloudActOpts): Promise<boolean> 
   if (act.act === "change" && act.path === "/api/workspaces") {
     const b = act.body;
     if (b.chat !== undefined) {
-      if (b.chat !== "mac" && b.chat !== "auto") throw new HttpError(400, 'Say which workspace, and "mac" or "auto".');
+      // As the owner's Mac's route takes it: "cloud" or "mac" (the switch), or "auto" from an older window.
+      if (b.chat !== "mac" && b.chat !== "cloud" && b.chat !== "auto") throw new HttpError(400, 'Say which workspace, and "cloud" or "mac".');
       await setRouting(account, target.ws, { mode: b.chat }, "admin").catch((e: unknown) => {
         if (e instanceof HttpError && e.extra?.code === CHAT_AUTO_OFF) throw new HttpError(e.status, "Bops Cloud can't answer this workspace by itself yet, so the owner's Mac keeps answering it.", e.extra);
         throw e;

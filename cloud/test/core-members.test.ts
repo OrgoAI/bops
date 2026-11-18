@@ -3204,6 +3204,9 @@ test("everything through the cloud: changes: a bot's settings, refusals for what
   const ws = ((await stateOf(owner)).state.workspaces as Record<string, Json>[]).find((w) => w.id === "ws_all")!;
   assert.deepEqual([ws.name, ws.orgoName, ws.orgoUpdatedAt], ["All Hands", "All Hands", "2026-11-18T00:00:00Z"]);
   assert.equal((await noteIn(owner, "msg_change_all-tom_key-chg-ws001"))?.text, "tom renamed the workspace");
+  // The switch as a window sends it now ("cloud" or "mac"): "cloud" kept, as an Admin's choice.
+  assert.equal((await change("key-chg-chat0", "/api/workspaces", { id: "@ws", chat: "cloud" })).status, 202);
+  assert.deepEqual({ ...(await query<{ mode: string; set_by: string }>("SELECT mode, set_by FROM bops.chat_routing WHERE user_id = $1 AND ws_id = 'ws_all'", [owner])).rows[0] }, { mode: "cloud", set_by: "admin" });
   // Back to the owner's Mac: the switch moves, as an Admin's choice.
   assert.equal((await change("key-chg-chat1", "/api/workspaces", { id: "@ws", chat: "mac" })).status, 202);
   assert.equal((await query<{ mode: string; set_by: string }>("SELECT mode, set_by FROM bops.chat_routing WHERE user_id = $1 AND ws_id = 'ws_all'", [owner])).rows[0].mode, "mac");

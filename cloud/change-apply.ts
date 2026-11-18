@@ -276,7 +276,7 @@ export function applyChange(blob: Blob, wsId: string, call: ChangeCall, who: Cha
     // As the route takes them: where its chat is answered, else a computer's name, else the org chart, else its name.
     if (body.chat !== undefined) {
       // (Set by the caller already: turns.ts setRouting, which takes the owner's lock itself.)
-      if (!o.chatDone || (body.chat !== "mac" && body.chat !== "auto")) throw new HttpError(400, 'Say which workspace, and "mac" or "auto".');
+      if (!o.chatDone || (body.chat !== "mac" && body.chat !== "cloud" && body.chat !== "auto")) throw new HttpError(400, 'Say which workspace, and "cloud" or "mac".');
     } else if (body.computerName !== undefined) out = nameComputer(out, wsId, body.computerName);
     else if (body.chain !== undefined) {
       const bots = list(out.bots).filter((b) => wsOfBot(b) === wsId) as { id: string; isMain?: boolean; workspaceId?: string }[];
