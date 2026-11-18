@@ -884,8 +884,10 @@ const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
  * The Bops a computer's runner runs, or null for no runner: the newer of what the owner's Mac recorded (AppState.runners,
  * while it says "running") and what the runner itself said as it last connected (bops.runner_seen, runnerLive), so a
  * runner's own word counts with the Mac shut. No runner when the Mac has no record of one there (it forgets one only
- * after taking it down: lib/server/runner-install.ts), or its record says it failed or is being stopped since the runner
- * last said. `desktop`: the Orgo computer id, any case. `c`: the transaction to read in, if any.
+ * after taking it down: lib/server/runner-install.ts), or its record says anything but "running" (being set up again,
+ * failed, being stopped) and the runner hasn't connected since. What the kinds from CLOUD_ALL_MIN_VERSION on read: a
+ * GitHub job keeps its rule from before (takeAppJob). `desktop`: the Orgo computer id, any case. `c`: the transaction to
+ * read in, if any.
  */
 export async function runnerVersionOf(c: pg.PoolClient | null, userId: string, blob: Record<string, unknown>, desktop: string): Promise<string | null> {
   const d = desktop.toLowerCase();
@@ -895,9 +897,9 @@ export async function runnerVersionOf(c: pg.PoolClient | null, userId: string, b
   type Raw = { version: string; seen_at: Date };
   const row = (c ? await c.query<Raw>(sql, [userId, d]) : await query<Raw>(sql, [userId, d])).rows[0];
   const seen = row && VERSION.test(row.version) ? { version: row.version, at: row.seen_at.getTime() } : null;
-  // (A record with no time is taken as newer: no runner.)
+  // A record that isn't "running" is no runner, unless the runner connected after it. (A record with no time is taken as newer.)
   const recordAt = typeof r.at === "number" ? r.at : Infinity;
-  if ((r.status === "failed" || r.status === "stopping") && (!seen || recordAt > seen.at)) return null;
+  if (r.status !== "running" && (!seen || recordAt >= seen.at)) return null;
   const mac = r.status === "running" && typeof r.version === "string" && VERSION.test(r.version) ? r.version : null;
   if (!mac || !seen) return mac ?? seen?.version ?? null;
   return olderThan(mac, seen.version) ? seen.version : mac;
@@ -918,9 +920,9 @@ export type AppJobTaken = { where: "computer"; turn: TurnRow; fresh: boolean } |
  * app's own computer, which has both what it needs there: Ingot (its runner's token for the workspace) and the GitHub
  * key (its own sign in, which Orgo's broker lets call only the keys given to a bot on it). Under the owner's lock, on
  * their state as it is then: `check` (throwing to refuse: still theirs to do), then the app's home (not lost, on the
- * computer its bot works on), a runner there (runnerVersionOf: the owner's Mac's record or its own word) at the version
- * its kind needs (GITHUB_ACTS_MIN_VERSION for a GitHub job, else CLOUD_ALL_MIN_VERSION) on a computer the Mac didn't find
- * down, and a bot of the workspace on it given the GitHub key. Any missing: "mac", and why, for the owner's Mac to do it instead. Else, once by its id (a retry finds it and
+ * computer its bot works on), a runner there at the version its kind needs on a computer the Mac didn't find down (a
+ * GitHub job: one the owner's Mac's record says is running, as before, at GITHUB_ACTS_MIN_VERSION; else runnerVersionOf,
+ * the Mac's record or its own word, at CLOUD_ALL_MIN_VERSION), and a bot of the workspace on it given the GitHub key. Any missing: "mac", and why, for the owner's Mac to do it instead. Else, once by its id (a retry finds it and
  * changes nothing): a note in the app's bot's chat (Bops', with what `words` says), its "going" act on the app, and a turn
  * owed to that computer with the job on its member (TurnMember.job), given out and woken as a chat turn is, one at a time
  * in that chat, until its deadline (jobDeadline). `still` false right before it's kept takes it all back (an orgo-web notice landed).
@@ -948,11 +950,15 @@ export async function takeAppJob(o: {
     const bot = botId ? nameOf(blob, botId) : "The bot";
     const desktop = botId ? computerFor(blob, botId) : null;
     if (!botId || !desktop || h.lost !== undefined || typeof h.computerId !== "string" || h.computerId.toLowerCase() !== desktop) return { where: "mac", why: "home", bot };
-    // Its runner, as the owner's Mac recorded it or as it said itself (runnerVersionOf), at the version its kind needs; a
-    // computer the Mac found down is left to the Mac, as before.
-    const v = await runnerVersionOf(c, o.account, blob, desktop);
-    const min = isGithubJob(o.job) ? GITHUB_ACTS_MIN_VERSION : CLOUD_ALL_MIN_VERSION;
-    if (!v || runnerAt(blob, desktop)?.down || olderThan(v, min)) return { where: "mac", why: "runner", bot };
+    // Its runner at the version its kind needs; a computer the Mac found down is left to the Mac, as before. A GitHub job
+    // keeps the rule from before: the owner's Mac's record says it's running (never one being set up again, failed or
+    // being stopped, whatever the runner said before), its version the newer of that record's and the runner's own word.
+    // The rest: runnerVersionOf, the Mac's record or the runner's own word.
+    const r = runnerAt(blob, desktop);
+    const github = isGithubJob(o.job);
+    const asBefore = r?.status === "running" && typeof r.version === "string" && VERSION.test(r.version);
+    const v = !r || r.down || (github && !asBefore) ? null : await runnerVersionOf(c, o.account, blob, desktop);
+    if (!v || olderThan(v, github ? GITHUB_ACTS_MIN_VERSION : CLOUD_ALL_MIN_VERSION)) return { where: "mac", why: "runner", bot };
     const keyed = list(blob.bots).some((b) => typeof b.id === "string" && wsOfBot(b) === o.wsId && computerFor(blob, b.id) === desktop && Array.isArray(b.keys) && b.keys.includes(GITHUB_KEY_NAME));
     if (!keyed) return { where: "mac", why: "key", bot };
     const at = Date.now();

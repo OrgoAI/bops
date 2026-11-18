@@ -1059,7 +1059,7 @@ test("a runner's own word on its Bops is kept as it connects and stays once it g
   assert.equal((await seenOf(s.owner)).length, 1);
 });
 
-test("runnerVersionOf: the newer of the owner's Mac's record and the runner's own word; a record that failed or is being stopped since it last said is no runner, and so is no record", async () => {
+test("runnerVersionOf: the newer of the owner's Mac's record and the runner's own word; a record that isn't running (being set up again, failed, being stopped) since it last said is no runner, and so is no record", async () => {
   const s = await setupGithub({ runner: "0.0.53" });
   const DESKTOP = s.desktop.toUpperCase();
   const blob = await blobOf(s.owner);
@@ -1078,10 +1078,17 @@ test("runnerVersionOf: the newer of the owner's Mac's record and the runner's ow
   // The Mac's record says it failed, or is being stopped, after the runner last said: no runner.
   assert.equal(await runnerVersionOf(null, s.owner, record("failed", seenAt + 60_000), s.desktop), null, "a failed record newer than its word");
   assert.equal(await runnerVersionOf(null, s.owner, record("stopping", seenAt + 60_000), s.desktop), null);
-  // One that failed before the runner said it runs: its word.
+  // Being set up again after the runner last said (a retry after it failed, or a reinstall after a stop): no runner either.
+  assert.equal(await runnerVersionOf(null, s.owner, record("installing", seenAt + 60_000), s.desktop), null, "an installing record newer than its word");
+  // At the same moment, or with no time on it: taken as newer, so no runner.
+  assert.equal(await runnerVersionOf(null, s.owner, record("installing", seenAt), s.desktop), null);
+  assert.equal(await runnerVersionOf(null, s.owner, { ...blob, runners: { [DESKTOP]: { status: "failed", version: "0.0.53", buildId: "b1", by: "mac-o" } } }, s.desktop), null, "a record with no time");
+  // One that failed, was being stopped or set up before the runner said it runs: its word.
   assert.equal(await runnerVersionOf(null, s.owner, record("failed", seenAt - 60_000), s.desktop), CLOUD_ALL_MIN_VERSION, "a failed record older than its word");
-  // Being set up again: its word.
-  assert.equal(await runnerVersionOf(null, s.owner, record("installing", seenAt + 60_000), s.desktop), CLOUD_ALL_MIN_VERSION);
+  assert.equal(await runnerVersionOf(null, s.owner, record("stopping", seenAt - 60_000), s.desktop), CLOUD_ALL_MIN_VERSION);
+  assert.equal(await runnerVersionOf(null, s.owner, record("installing", seenAt - 60_000), s.desktop), CLOUD_ALL_MIN_VERSION);
+  // A record that says running, whenever: the newer of the two.
+  assert.equal(await runnerVersionOf(null, s.owner, record("running", seenAt + 60_000), s.desktop), CLOUD_ALL_MIN_VERSION);
   // No record of a runner there (the Mac forgets one only after taking it down): none, whatever it said before.
   assert.equal(await runnerVersionOf(null, s.owner, { ...blob, runners: {} }, s.desktop), null);
   // No word and no record: none.
@@ -1098,6 +1105,33 @@ test("an app's GitHub job goes to its computer when the runner there said it run
   assert.equal(r.status, 202, await r.clone().text());
   assert.deepEqual(await r.json(), { ok: true, macOn: true, stored: true, computer: true, turn: `turn_msg_job_${s.sam}_key-seen-0001` });
   assert.deepEqual(await pendingFor(s.owner), [], "nothing waits for the owner's Mac");
+});
+
+test("an app's GitHub job keeps the rule from before: the owner's Mac's record of the runner must say running, so one being set up again, failed or being stopped leaves it to the Mac, whatever the runner said before or since", async () => {
+  /** A runner on Max's computer that said 0.0.53 as it connected and went, then the owner's Mac's record of it as `status`, `ago` ms after it said (less than 0: before). */
+  const after = async (status: string, ago: number) => {
+    const s = await setupGithub();
+    const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": "0.0.53" });
+    await until(async () => (await seenOf(s.owner)).length === 1, "its word kept");
+    box.close();
+    await until(async () => (await query("SELECT 1 FROM bops.runner_presence WHERE user_id = $1", [s.owner])).rowCount === 0, "the runner gone");
+    const seenAt = (await query<{ at: Date }>("SELECT seen_at AS at FROM bops.runner_seen WHERE user_id = $1", [s.owner])).rows[0].at.getTime();
+    const runners = { [s.desktop.toUpperCase()]: { status, version: "0.0.53", buildId: "b2", by: "mac-o", at: seenAt + ago } };
+    await ownerChanges(s.owner, (st) => void ((st as unknown as { runners: unknown }).runners = runners), own(s.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+    return s;
+  };
+  for (const [status, ago] of [["installing", 60_000], ["installing", -60_000], ["failed", -60_000], ["stopping", -60_000]] as const) {
+    const s = await after(status, ago);
+    const r = await act(s.sam, s.project, "key-asbefore-01", { act: "githubPull", app: "site" });
+    assert.equal(r.status, 202, await r.clone().text());
+    assert.deepEqual(await r.json(), { ok: true, macOn: false }, `${status} ${ago > 0 ? "after" : "before"} its word: the owner's Mac does it when it opens`);
+    assert.deepEqual((await pendingFor(s.owner)).map((p) => [p.act, p.key]), [[{ act: "githubPull", app: "site" }, "key-asbefore-01"]]);
+    assert.equal((await turnsOf(s.owner)).length, 0, "nothing owed to a computer whose runner isn't running");
+  }
+  // Running again (the Mac's record says so): its computer, as before.
+  const s = await after("running", 60_000);
+  const r = await act(s.sam, s.project, "key-asbefore-02", { act: "githubPull", app: "site" });
+  assert.equal(((await r.json()) as { computer?: boolean }).computer, true);
 });
 
 test("how long a job waits for its computer, by kind: what's removed, goes on Published or reaches GitHub keeps a chat turn's ten minutes; the rest half an hour", () => {

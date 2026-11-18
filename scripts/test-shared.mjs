@@ -1859,11 +1859,36 @@ await check("Write, with everything through the cloud: an act Bops Cloud does wi
   assert.equal(CLOUD_ACT_MS, 35 * 60_000);
   // The Mac's own expiry stays as it was for the rest.
   assert.equal(ACT_EXPIRED, "The workspace's Mac didn't open in time, so this didn't go.");
-  // Every pending line in the window has a plain one for "cloud" (Your Apps' too), never the Mac's.
+  // An answer Bops Cloud takes: its ask is pending as "cloud", and both its cards, in the chat and under its bot in the
+  // sidebar, say it's on its way, never the Mac's line.
+  const answering = new SharedCopy(fakeRead({ status: 200, body: writeState() }).read);
+  await answering.open(listed);
+  await actWith(answering, { act: "answer", askId: "apr-boppy", reply: "once" }, "key_cloud_002", sam, async () => ({ status: 202, body: { ok: true, macOn: true, stored: true, cloud: true } }));
+  const asked = viewState(own(), answering.openNow(), answering.data(), {}, answering.acts());
+  assert.deepEqual(asked.appApprovals.find((a) => a.id === "apr-boppy").memberSend, { state: "cloud", key: "key_cloud_002" });
+  const answerCard = renderToStaticMarkup(h(ChatView, chatProps(asked, "bot:boppy")));
+  assert.match(text(answerCard), /Sending…/);
+  assert.deepEqual(macWords(answerCard), [], "the chat's card: never the Mac's words");
+  const was = globalThis.localStorage.getItem;
+  globalThis.localStorage.getItem = (k) => (/^bops\.threads\.open\..*\.boppy$/.test(k) ? "1" : null);
+  try {
+    const props = { chatId: null, onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
+    const bar = renderToStaticMarkup(h(Sidebar, { ...props, state: asked }));
+    const at = bar.indexOf('data-need="ask:apr-boppy"');
+    assert.ok(at > 0, "its card under Boppy in the sidebar");
+    const card = bar.slice(at, bar.indexOf("data-need=", at + 1) > 0 ? bar.indexOf("data-need=", at + 1) : undefined);
+    assert.match(text(card), /Sending…/);
+    assert.deepEqual(macWords(bar), [], "the sidebar's card: never the Mac's words");
+  } finally {
+    globalThis.localStorage.getItem = was;
+  }
+  // Every pending line in the window has a plain one for "cloud" (Your Apps' and the sidebar's too), never the Mac's.
   const apps = readFileSync(`${root}/components/app/shared-apps.tsx`, "utf8");
   assert.match(apps, /going\.state === "cloud" \? "Sending…"/);
   const chat = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
   assert.equal((chat.match(/state === "sending" \|\| [a-z?.]*state === "cloud" \? "Sending…"/g) ?? []).length, 4, "a message's, a reply's and both answers'");
+  const side = readFileSync(`${root}/components/app/sidebar-sections.tsx`, "utf8");
+  assert.equal((side.match(/state === "sending" \|\| [a-z?.]*state === "cloud" \? "Sending…"/g) ?? []).length, 1, "the sidebar's ask card");
 });
 
 await check("Write: an answer keeps its card saying it's on its way, a stop says Stopping, and the owner taking Write away marks what's waiting as not gone, with why", async () => {
