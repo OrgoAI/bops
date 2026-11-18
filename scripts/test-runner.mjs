@@ -257,7 +257,7 @@ const I = await import(`${root}/lib/server/runner-install.ts`);
 const Sync = await import(`${root}/lib/server/routine-sync.ts`);
 const Rt = await import(`${root}/lib/server/routines.ts`);
 const V = await import(`${root}/lib/server/vault.ts`);
-const { computerWait, DISPLAYS, onceDone, pausedForOk } = await import(`${root}/lib/types.ts`);
+const { computerWait, DISPLAYS, MAC_WORDS, needsNoComputer, onceDone, pausedForOk, routineHome, routineOnMac, workBot } = await import(`${root}/lib/types.ts`);
 globalThis.__pausedForOk = pausedForOk;
 const tick = () => globalThis.__bopsRoutineTick();
 const T = Sync.routineSyncForTests;
@@ -2088,6 +2088,189 @@ await check("an idle runner's timer asks nothing: no command on its computer (th
   assert.equal(orgo.bash.length, 1, "its computer looked at");
   assert.equal(fake.pulls, 1);
   R.runnerForTests.reset();
+});
+
+/* ---------------- What Bops Cloud does (Workspace.cloudDoes): routineHome ---------------- */
+
+/** routineOnMac as it was in 0.0.54, before Bops Cloud did any part of a workspace: what routineHome gives with no cloudDoes. */
+function onMac054(st, r, b) {
+  if (needsNoComputer(r)) return true;
+  if (r.deliverTo?.kind === "channel" || r.procedure) return true;
+  const bot = st.bots.find((x) => x.id === r.botId);
+  const w = bot && st.workspaces.find((x) => x.id === (bot.workspaceId ?? "ws_main"));
+  const skills = !!bot && [...(w?.skills ?? []), ...(w?.apps ?? [])].some((x) => x.status === "published" && (!x.botIds?.length || x.botIds.includes(bot.id)));
+  if (skills) return true;
+  if (r.where === "mac") return true;
+  if (r.where === "cloud") return false;
+  const leftToBops = b?.runsOn !== "mac" && b?.runsOn !== "cloud";
+  return b?.runsOn === "mac" || MAC_WORDS.test(r.goal) || (leftToBops && r.macPick?.where === "mac" && r.macPick.goal === r.goal);
+}
+/** Every kind of routine the table tells apart, for each bot: where it's set, its words, how it runs, where its result goes, a procedure, the Mac's pick. */
+function everyRoutine() {
+  const out = [];
+  const goals = ["Check the news", "Tidy the Downloads folder on my Mac", "Back up my photos locally"];
+  const kinds = [{}, { reminder: "Stand up" }, { run: "chat" }, { run: "task" }, { run: "chat", fromOutside: "an email from desk@hotel.example" }];
+  const deliveries = [undefined, { kind: "text" }, { kind: "email" }, { kind: "channel", linkId: "ch_slack" }, { kind: "channel", linkId: "ch_tg" }, { kind: "channel", linkId: "ch_dc" }, { kind: "channel", linkId: "ch_gone" }];
+  let n = 0;
+  for (const bot of state.bots)
+    for (const where of [undefined, "auto", "cloud", "mac"])
+      for (const goal of goals)
+        for (const kind of kinds)
+          for (const deliverTo of deliveries)
+            for (const extra of [{}, { procedure: "invoice-export" }, { macPick: { goal, where: "mac" } }, { macPick: { goal: "another goal", where: "mac" } }, { macPick: { goal, where: "cloud" } }])
+              out.push(routine(`r_all_${++n}`, bot.id, { ...(where ? { where } : {}), goal, ...kind, ...(deliverTo ? { deliverTo } : {}), ...extra }));
+  return out;
+}
+const CHANNELS = [
+  { id: "ch_slack", kind: "slack", botId: "boppy", handle: "Acme", pairCode: "1", status: "live", at: 0 },
+  { id: "ch_tg", kind: "telegram", botId: "boppy", handle: "@boppy_bot", pairCode: "2", status: "live", at: 0 },
+  { id: "ch_dc", kind: "discord", botId: "boppy", handle: "Boppy#1", pairCode: "3", status: "live", at: 0 },
+];
+
+await check("routineHome with no part of cloudDoes is exactly 0.0.54's routineOnMac (\"mac\", else \"computer\"), on every kind of routine of every bot, skills or none; routineOnMac and pinnedToMac follow it", () => {
+  reset();
+  state.channels = CHANNELS;
+  const skill = { kind: "skill", slug: "weekly-report", name: "Weekly report", description: "How", status: "published", version: "1.0.0", botIds: ["rook"] };
+  let n = 0;
+  for (const skills of [undefined, [skill]]) {
+    if (skills) state.workspaces[0].skills = skills;
+    else delete state.workspaces[0].skills;
+    // An empty cloudDoes, and parts that aren't about routines, are none.
+    for (const does of [undefined, {}, { texts: true, slack: true, calls: true, plans: true, digest: true, watches: true, desktop: true }]) {
+      for (const w of state.workspaces) {
+        if (does) w.cloudDoes = does;
+        else delete w.cloudDoes;
+      }
+      for (const r of everyRoutine()) {
+        const b = state.bots.find((x) => x.id === r.botId);
+        const was = onMac054(state, r, b);
+        const what = JSON.stringify({ r, does, skills: !!skills });
+        assert.equal(routineHome(state, r, b), was ? "mac" : "computer", what);
+        assert.equal(routineOnMac(state, r, b), was, what);
+        assert.equal(R.pinnedToMac(r, b), was, what);
+        n++;
+      }
+    }
+  }
+  assert.ok(n > 10_000, `${n} routines`);
+  for (const w of state.workspaces) delete w.cloudDoes;
+  delete state.workspaces[0].skills;
+  delete state.channels;
+});
+
+await check("routineHome with the mirror: a reminder Bops Cloud's with `reminders`; with `routines`, Telegram, Discord, set to the Mac or its words the Mac's, the rest its bot's computer, or Bops Cloud's for a bot with none", () => {
+  reset();
+  state.channels = CHANNELS;
+  const main = state.workspaces[0];
+  const home = (r) => routineHome(state, r, state.bots.find((b) => b.id === r.botId));
+  const r = (botId, o = {}) => routine("r_x", botId, o);
+  // A reminder: Bops Cloud's clock with `reminders`, the Mac's with only `routines`, as before with neither.
+  main.cloudDoes = { reminders: true };
+  assert.equal(home(r("boppy", { reminder: "Stand up" })), "cloud");
+  assert.equal(home(r("boppy", { reminder: "Stand up", deliverTo: { kind: "channel", linkId: "ch_tg" } })), "cloud", "a reminder to Telegram too: Bops Cloud says it can't send it");
+  assert.equal(home(r("boppy", { run: "chat" })), "mac", "a chat run: `reminders` alone is no part of it");
+  assert.equal(home(r("boppy")), "computer", "a task: as before");
+  assert.equal(home(r("nova", { reminder: "Stand up" })), "mac", "another workspace's: as before");
+  main.cloudDoes = { routines: true };
+  assert.equal(home(r("boppy", { reminder: "Stand up" })), "mac", "`routines` alone: a reminder stays the Mac's");
+  main.cloudDoes = { reminders: true, routines: true };
+  // A chat run: its bot's computer, or Bops Cloud's (which records a skip) for a bot with none.
+  assert.equal(home(r("boppy", { run: "chat" })), "computer");
+  assert.equal(home(r("otto", { run: "chat" })), "computer", "Otto works on Boppy's C1");
+  state.bots.push({ id: "ivy", name: "Ivy", isMain: false, computer: "own", computerStatus: "none" });
+  assert.equal(home(r("ivy", { run: "chat" })), "cloud", "Ivy has no computer");
+  assert.equal(home(r("ivy")), "cloud", "nor for a task: nothing could run it");
+  // Where its result goes: Slack from the computer (Bops Cloud posts it); Telegram and Discord from the Mac alone.
+  assert.equal(home(r("boppy", { deliverTo: { kind: "channel", linkId: "ch_slack" } })), "computer");
+  assert.equal(home(r("boppy", { run: "chat", deliverTo: { kind: "channel", linkId: "ch_slack" } })), "computer");
+  assert.equal(home(r("boppy", { deliverTo: { kind: "channel", linkId: "ch_tg" } })), "mac");
+  assert.equal(home(r("boppy", { run: "chat", deliverTo: { kind: "channel", linkId: "ch_dc" } })), "mac");
+  assert.equal(home(r("boppy", { deliverTo: { kind: "channel", linkId: "ch_gone" } })), "mac", "a link it can't tell: as before");
+  assert.equal(home(r("boppy", { deliverTo: { kind: "text" } })), "computer");
+  // A procedure, or skills: the runner reads published skills.
+  assert.equal(home(r("boppy", { procedure: "invoice-export" })), "computer");
+  main.skills = [{ kind: "skill", slug: "weekly-report", name: "Weekly report", description: "How", status: "published", version: "1.0.0", botIds: [] }];
+  assert.equal(home(r("boppy")), "computer");
+  delete main.skills;
+  // Set to run on the Mac, or saying so: the Mac's.
+  assert.equal(home(r("boppy", { where: "mac" })), "mac");
+  assert.equal(home(r("boppy", { goal: "Tidy the Downloads folder on my Mac" })), "mac");
+  assert.equal(home(r("boppy", { run: "chat", goal: "Back up my photos locally" })), "mac");
+  // A bot set to the Mac, or the Mac's pick: its computer.
+  assert.equal(home(r("penny")), "computer", "Penny, set to the Mac, works on C1");
+  assert.equal(home(r("boppy", { macPick: { goal: "Check the news", where: "mac" } })), "computer");
+  assert.equal(home(r("boppy", { where: "cloud" })), "computer");
+  // Another workspace's: as before.
+  assert.equal(home(r("nova", { run: "chat" })), "mac");
+  // What waits for a computer: never one Bops Cloud does.
+  state.runners[C1] = up("running", { down: { status: "stopped", at: NOW } });
+  assert.equal(computerWait(state, r("boppy", { run: "chat" })), "Boppy's computer is stopped");
+  assert.equal(computerWait(state, r("boppy", { reminder: "Stand up" })), undefined);
+  assert.equal(computerWait(state, r("ivy", { run: "chat" })), undefined);
+  for (const b of state.bots) assert.equal(!!workBot(b, state.bots).computerId || b.id === "ivy" || b.id === "nova", true);
+  delete main.cloudDoes;
+  delete state.channels;
+});
+
+await check("runsHere with the mirror: the Mac never runs one Bops Cloud does nor one its computer's runner does, up or not; once the mirror goes (a kill switch) it takes them back, after the hand-over for one that was Bops Cloud's", () => {
+  reset();
+  seedRoutines();
+  R.runnerForTests.hear("u1", "cloud");
+  // No mirror: as before. Rook's computer has no runner, so the Mac runs Rook's task; the reminder and chat run are the Mac's.
+  assert.deepEqual(["r_rook", "r_otto_reminder", "r_otto_chat", "r_boppy", "r_boppy_mac"].map(here), [true, true, true, false, true]);
+  state.workspaces[0].cloudDoes = { reminders: true, routines: true };
+  assert.deepEqual(["r_rook", "r_otto_reminder", "r_otto_chat", "r_boppy", "r_boppy_mac", "r_penny", "r_nova"].map(here), [false, false, false, false, true, false, true], "Rook's task waits for C2; Nova's workspace has none");
+  // On C1's runner: its own computer's tasks and chat runs, never a reminder, never C2's.
+  asRunner(C1);
+  assert.deepEqual(["r_otto_chat", "r_otto_task", "r_penny", "r_otto_reminder", "r_rook", "r_boppy_mac"].map((id) => R.runnerRoutine(byId(id))), [true, true, true, false, false, false]);
+  asRunner(C2);
+  assert.equal(R.runnerRoutine(byId("r_rook")), true, "C2's runner: Rook's");
+  asMac();
+  // The kill switch: the Mac takes them back. Rook's at once (no runner had it); the reminder after the hand-over (Bops Cloud may have just run it).
+  delete state.workspaces[0].cloudDoes;
+  assert.equal(here("r_rook"), true);
+  assert.equal(R.runsHere(byId("r_otto_reminder")), false, "waits the hand-over");
+  R.runnerForTests.seen("r_otto_reminder", R.HANDOVER_MS + 1);
+  assert.equal(here("r_otto_reminder"), true, "then the Mac's");
+  R.runnerForTests.reset();
+});
+
+await check("a runner runs a reminder or a chat run only where its home is its computer: else skipped, saying who runs it", async () => {
+  reset();
+  seedRoutines();
+  const turns = [];
+  const was = globalThis.__fake.chat.backgroundTurn;
+  globalThis.__fake.chat.backgroundTurn = async (botId, o) => (turns.push(o.routineId), { text: "Two new emails from Dana." });
+  try {
+    asRunner(C1);
+    assert.deepEqual(await Rt.runRoutine("r_otto_chat"), { at: (await Rt.runRoutine("r_otto_chat")).at, status: "skipped", error: "Bops on your Mac runs it." });
+    state.workspaces[0].cloudDoes = { reminders: true };
+    assert.equal((await Rt.runRoutine("r_otto_reminder")).error, "Bops Cloud runs it.");
+    assert.deepEqual(turns, []);
+    state.workspaces[0].cloudDoes = { reminders: true, routines: true };
+    await Rt.runRoutine("r_otto_chat");
+    assert.deepEqual(turns, ["r_otto_chat"], "its home is C1: C1's runner runs it");
+  } finally {
+    globalThis.__fake.chat.backgroundTurn = was;
+    delete state.workspaces[0].cloudDoes;
+    asMac();
+  }
+});
+
+await check("Orgo's copy with the mirror: one whose home is its computer wakes it, its runner up or not; one Bops Cloud does, or the Mac, never does", () => {
+  reset();
+  seedRoutines();
+  state.channels = CHANNELS;
+  const onMac = (r) => Sync.routinePayload(r).onMac;
+  assert.deepEqual([onMac(byId("r_rook")), onMac(byId("r_otto_chat")), onMac(byId("r_boppy"))], [true, true, false], "no mirror: as before");
+  state.workspaces[0].cloudDoes = { reminders: true, routines: true };
+  assert.equal(onMac(byId("r_rook")), false, "C2 is woken for it: its runner comes with its keeper");
+  assert.equal(onMac(byId("r_otto_chat")), false, "C1 for a chat run");
+  assert.equal(onMac(byId("r_otto_reminder")), true, "Bops Cloud's: nothing woken");
+  assert.equal(onMac(routine("r_tg", "boppy", { deliverTo: { kind: "channel", linkId: "ch_tg" } })), true, "the Mac's");
+  assert.equal(onMac(byId("r_nova")), true, "another workspace: as before");
+  delete state.workspaces[0].cloudDoes;
+  delete state.channels;
 });
 
 rmSync(nonceDir, { recursive: true, force: true });

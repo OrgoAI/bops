@@ -1,7 +1,7 @@
 import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
-import { botChatId, lastWorkOf, levelIn, live, pausedForOk, workspaceOf, type Bot, type Delivery, type Message, type ReplyDraft, type Routine, type SkillProposal, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
+import { botChatId, lastWorkOf, levelIn, live, pausedForOk, routineHome, workspaceOf, type Bot, type Delivery, type Message, type ReplyDraft, type Routine, type SkillProposal, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
 import { appNameFor, CHECK_TEMPLATE, tagsOf } from "@/lib/routine-catalog";
 import { draftsText } from "@/lib/reply-drafts";
 import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, sameWallTime, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
@@ -520,8 +520,12 @@ async function run(routineId: string, opts: RunOpts): Promise<RoutineRun> {
   const r = routine(routineId);
   const at = Date.now();
   if (!r) return { at, status: "skipped", error: "No such routine." };
-  // A reminder or a chat run is never run on a computer (chat is the backend's: runner.ts needsNoComputer): Bops on the Mac runs it, and nothing here records it.
-  if (onRunner() && needsNoComputer(r)) return { at, status: "skipped", error: "Bops on your Mac runs it." };
+  // A reminder or a chat run is run on a computer only where Bops Cloud has its workspace's routines run there (routineHome
+  // "computer"): else Bops on the Mac runs it (or Bops Cloud: "cloud"), and nothing here records it.
+  if (onRunner() && needsNoComputer(r)) {
+    const home = routineHome(getState(), r, bot(r.botId));
+    if (home !== "computer") return { at, status: "skipped", error: home === "cloud" ? "Bops Cloud runs it." : "Bops on your Mac runs it." };
+  }
   const b = bot(r.botId);
   if (!b) return record(r.id, { at, status: "skipped", error: "Its bot isn't there anymore." });
   if (opts.manual) update(() => (r.lastRunAt = at));

@@ -21,6 +21,8 @@ import {
   CHAT_NOT_IN_CLOUD,
   CLOUD_ALL_MIN_VERSION,
   CLOUD_CHAT_MIN_VERSION,
+  CLOUD_DOES_PARTS,
+  CLOUD_SELF_MIN_VERSION,
   COMPUTER_NOT_READY,
   GITHUB_ACTS_MIN_VERSION,
   isGithubJob,
@@ -39,6 +41,7 @@ import {
   type RunnerResume,
   type RunnerTurnEvent,
   type AppJob,
+  type CloudDoes,
   type TurnJob,
   type TurnMember,
   type TurnShown,
@@ -285,37 +288,80 @@ export function mirrorOf(
   };
 }
 
+/** What Bops Cloud does for a workspace (cloudDoesFor) as the mirror carries it: its parts in order, or nothing when it does none. */
+function doesMirror(d: CloudDoes | undefined): { cloudDoes?: CloudDoes } {
+  const parts = CLOUD_DOES_PARTS.filter((p) => d?.[p] === true);
+  return parts.length ? { cloudDoes: Object.fromEntries(parts.map((p) => [p, true])) as CloudDoes } : {};
+}
+
 /**
  * The switch as the table has it, put on every workspace of the blob (mirrorOf): Workspace.chatOn, chatAuto and
  * chatAutoOff are a mirror, and a Bops from before (or a restore) that drops them would turn the owner stamp rule and the runners off
- * while members' messages still go through Bops Cloud. Returns the blob, changed or not.
+ * while members' messages still go through Bops Cloud. So is what Bops Cloud does for each workspace (`does`, from
+ * cloudDoesFor: Workspace.cloudDoes), which only Bops Cloud writes: put back where a Bops from before dropped it, so a
+ * Mac from CLOUD_SELF_MIN_VERSION on keeps leaving those parts to Bops Cloud, and taken off where Bops Cloud does none
+ * (`does` without it: none by default), so every Bops does them again. Returns the blob, changed or not.
  */
-export function keepChatOn(blob: Record<string, unknown>, rows: Map<string, RoutingRow>, on: boolean): Record<string, unknown> {
+export function keepChatOn(blob: Record<string, unknown>, rows: Map<string, RoutingRow>, on: boolean, does: Map<string, CloudDoes> = new Map()): Record<string, unknown> {
   const was = list(blob.workspaces);
   let changed = false;
   const workspaces = was.map((w) => {
-    const want = typeof w.id === "string" ? mirrorOf(rows.get(w.id), on) : {};
-    if (w.chatOn === want.chatOn && w.chatAuto === want.chatAuto && w.chatAutoOff === want.chatAutoOff && same(w.chatTrouble, want.chatTrouble)) return w;
+    const want = typeof w.id === "string" ? { ...mirrorOf(rows.get(w.id), on), ...doesMirror(does.get(w.id)) } : {};
+    if (
+      w.chatOn === want.chatOn &&
+      w.chatAuto === want.chatAuto &&
+      w.chatAutoOff === want.chatAutoOff &&
+      same(w.chatTrouble, want.chatTrouble) &&
+      same(w.cloudDoes, want.cloudDoes)
+    )
+      return w;
     changed = true;
     const rest = { ...w };
     delete rest.chatOn;
     delete rest.chatAuto;
     delete rest.chatAutoOff;
     delete rest.chatTrouble;
+    delete rest.cloudDoes;
     return { ...rest, ...want };
   });
   return changed ? { ...blob, workspaces } : blob;
 }
 
 /**
- * Under the owner's lock, after their rows changed: the mirror put right on the state (keepChatOn), written by Bops
- * Cloud when it changed, so every Bops of theirs reads it at once. The blob written, or null when nothing changed.
+ * Under the owner's lock, after their rows changed (or what Bops Cloud does for them may have: remirror): the mirror put
+ * right on the state (keepChatOn, with cloudDoesFor in the same transaction), written by Bops Cloud when it changed, so
+ * every Bops of theirs reads it at once. The blob written, or null when nothing changed.
  */
 async function mirrorAfter(c: pg.PoolClient, userId: string, blob: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  const next = keepChatOn(blob, await routedWorkspaces(c, userId), chatAutoFor(userId));
+  const next = keepChatOn(blob, await routedWorkspaces(c, userId), chatAutoFor(userId), await cloudDoesFor(c, userId, blob));
   if (next === blob) return null;
   await writeOwnerState(c, userId, next);
   return next;
+}
+
+/**
+ * The mirror put right on the owner's state now (mirrorAfter), under their lock, and told to every viewer when it changed:
+ * as one of their runners connects at a Bops it didn't run before (runnerLive: a part may need every runner of a
+ * workspace new enough), and for every owner with a cloudDoes as Bops Cloud starts (its settings, the kill switches,
+ * change only with a restart). Whether it changed.
+ */
+export async function remirror(userId: string): Promise<boolean> {
+  const next = await tx(async (c) => {
+    await lockUser(c, userId);
+    return await mirrorAfter(c, userId, await lockedState(c, userId));
+  });
+  if (!next) return false;
+  announce(userId);
+  stateWritten(userId, next, "cloud");
+  return true;
+}
+
+/** As Bops Cloud starts: every owner whose state says Bops Cloud does a part for a workspace (Workspace.cloudDoes) re-mirrored (remirror). How many changed. */
+export async function remirrorAll(): Promise<number> {
+  const r = await query<{ user_id: string }>(`SELECT user_id FROM bops.app_state WHERE state -> 'workspaces' @> '[{"cloudDoes": {}}]'::jsonb`);
+  let changed = 0;
+  for (const { user_id } of r.rows) if (await remirror(user_id).catch((e: Error) => (console.warn(`[turns] re-mirror of ${user_id}: ${e.message}`), false))) changed++;
+  return changed;
 }
 
 /**
@@ -391,6 +437,46 @@ export async function macNewEnough(userId: string, min = CLOUD_CHAT_MIN_VERSION,
  */
 export async function allCloud(owner: string, ws: string, c?: pg.PoolClient): Promise<boolean> {
   return (await routingOf(owner, ws, c)).cloud && (await macNewEnough(owner, CLOUD_ALL_MIN_VERSION, c));
+}
+
+/**
+ * Whether this round's new paths run for the owner's workspace `ws` (protocol.ts CLOUD_SELF_MIN_VERSION): everything in it
+ * goes through the cloud (allCloud), and the owner's last Mac is at CLOUD_SELF_MIN_VERSION (macNewEnough). Until that Mac
+ * says so, the workspace behaves exactly as before. Each feature of this round then reads its own gate: the runner's
+ * version or the caller's, never the owner's Mac again.
+ */
+export async function cloudSelf(owner: string, ws: string, c?: pg.PoolClient): Promise<boolean> {
+  return (await allCloud(owner, ws, c)) && (await macNewEnough(owner, CLOUD_SELF_MIN_VERSION, c));
+}
+
+/** What a part's condition is given (CloudDoesCheck): the owner, the workspace (cloudSelf already), their state as it stands, and the transaction to read in. */
+export type CloudDoesAsk = { c: pg.PoolClient | null; owner: string; ws: string; blob: Record<string, unknown> };
+/** Whether Bops Cloud does a part (CloudDoes) for a workspace now: its kill switch (config.ts), and what else it needs (its runners' versions). */
+export type CloudDoesCheck = (ask: CloudDoesAsk) => boolean | Promise<boolean>;
+/**
+ * Each part of CloudDoes Bops Cloud may do, with its condition. None in this release: each later one adds its own, and a
+ * part not here is never Bops Cloud's. Tests set their own (resetTurns `does`).
+ */
+const CLOUD_DOES_CHECKS: Partial<Record<keyof CloudDoes, CloudDoesCheck>> = {};
+let doesChecks: Partial<Record<keyof CloudDoes, CloudDoesCheck>> = CLOUD_DOES_CHECKS;
+
+/**
+ * What Bops Cloud does for each of the owner's workspaces now (Workspace.cloudDoes), by workspace id: the parts whose
+ * condition holds (CLOUD_DOES_CHECKS), only in a workspace where cloudSelf holds, so an owner whose last Mac is older than
+ * CLOUD_SELF_MIN_VERSION never has one. A workspace with none isn't in it. Read in `c`, the owner's lock held, where the
+ * mirror is written (keepChatOn: state.ts on every save, mirrorAfter).
+ */
+export async function cloudDoesFor(c: pg.PoolClient | null, owner: string, blob: Record<string, unknown>): Promise<Map<string, CloudDoes>> {
+  const out = new Map<string, CloudDoes>();
+  const checks = CLOUD_DOES_PARTS.flatMap((p) => (doesChecks[p] ? [[p, doesChecks[p]] as const] : []));
+  if (!checks.length) return out;
+  for (const w of list(blob.workspaces)) {
+    if (typeof w.id !== "string" || !(await cloudSelf(owner, w.id, c ?? undefined))) continue;
+    const d: CloudDoes = {};
+    for (const [p, check] of checks) if (await check({ c, owner, ws: w.id, blob })) d[p] = true;
+    if (Object.keys(d).length) out.set(w.id, d);
+  }
+  return out;
 }
 
 /* ---------------- The switch, by itself ---------------- */
@@ -1797,6 +1883,8 @@ const runnerLive: Route = {
       proved.set(k, { version: said, at: Date.now() });
       provedUsers.add(userId);
     }
+    // What it ran as it last connected (null: never seen): a Bops new to it may change what Bops Cloud does for its workspaces.
+    const before = said && VERSION.test(said) ? await query<{ version: string }>("SELECT version FROM bops.runner_seen WHERE user_id = $1 AND desktop_id = $2", [userId, c.desktopId.toLowerCase()]).then((r) => r.rows[0]?.version ?? null, () => undefined) : undefined;
     // And kept, past its going (runnerVersionOf): what it runs is what it ran, whether it naps or the owner's Mac is shut.
     if (said && VERSION.test(said))
       await query(
@@ -1804,6 +1892,8 @@ const runnerLive: Route = {
          ON CONFLICT (user_id, desktop_id) DO UPDATE SET device_id = $3, version = $4, seen_at = now()`,
         [userId, c.desktopId.toLowerCase(), c.device, said],
       ).catch((e: Error) => console.warn(`[turns] runner seen: ${e.message}`));
+    // At a Bops it didn't run before: the mirror of what Bops Cloud does (cloudDoesFor) put right, under the owner's lock.
+    if (before !== undefined && before !== said && !done) void remirror(userId).catch((e: Error) => console.warn(`[turns] re-mirror: ${e.message}`));
     // Its computer answers again: what was said of it on its cloud workspaces goes (an "old" one only once it's new enough).
     if (!done) await clearTrouble(userId, { desktop: c.desktopId, version: said && VERSION.test(said) ? said : null }).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
     // A wake waiting for it carries on now, and what it's owed goes to it.
@@ -2488,6 +2578,8 @@ export async function sweepTurns() {
 export function startTurns(): () => void {
   void query("DELETE FROM bops.runner_presence").catch(() => {});
   void revertAuto().catch((e: Error) => console.warn(`[turns] moving chat back: ${e.message}`));
+  // A kill switch changed with this start: every owner whose state says Bops Cloud does a part takes it back at once (remirror).
+  void remirrorAll().catch((e: Error) => console.warn(`[turns] re-mirror at start: ${e.message}`));
   let running = false;
   const t = setInterval(() => {
     if (running) return;
@@ -2511,9 +2603,13 @@ export async function turnById(userId: string, id: string): Promise<TurnRow | nu
   return r.rows[0] ? turnOf(r.rows[0]) : null;
 }
 
-/** For tests: this way to ask orgo-web to wake a computer (unset: the real one), and the runners known forgotten, as at a start. */
-export function resetTurns(opts: { wake?: AskWake } = {}) {
+/**
+ * For tests: this way to ask orgo-web to wake a computer (unset: the real one), the parts Bops Cloud does with their
+ * conditions (`does`, unset: CLOUD_DOES_CHECKS), and the runners known forgotten, as at a start.
+ */
+export function resetTurns(opts: { wake?: AskWake; does?: Partial<Record<keyof CloudDoes, CloudDoesCheck>> } = {}) {
   askWake = opts.wake ?? askOrgo;
+  doesChecks = opts.does ?? CLOUD_DOES_CHECKS;
   proved.clear();
   provedUsers.clear();
   broken.clear();

@@ -2,7 +2,7 @@ import "server-only";
 import { normalizeSchedule } from "@/cloud/schedule";
 import { templateById } from "@/lib/routine-catalog";
 import { QUIET_SUMMARY, recordedRun, RUNS_MAX, SUMMARY_MAX, type RecordedRun } from "@/lib/routine-reports";
-import { waitingAsks, workspaceOf, type Routine, type RoutineRun } from "@/lib/types";
+import { cloudDoesOf, routineHome, waitingAsks, workspaceOf, type Routine, type RoutineRun } from "@/lib/types";
 import { onRunner, runnerRoutine, runnerRuns } from "./runner";
 import { bot, getState, pullState } from "./store";
 import { outbox } from "./sync-outbox";
@@ -32,7 +32,8 @@ import { outbox } from "./sync-outbox";
  *
  * Orgo wakes a computer for its runner by these (runner.ts): each routine says how it runs (`run`) and
  * whether the Mac runs it (`onMac`: it needs the Mac, runner.ts pinnedToMac, as a reminder and a chat run
- * always do, or its computer has no runner up: runnerRuns), and every new next time is sent (routines.ts),
+ * do until Bops Cloud does them, or its computer has no runner up: runnerRuns; where Bops Cloud does the
+ * workspace's routines, only routineHome), and every new next time is sent (routines.ts),
  * as is every change to whether a computer's runner is up (runner-install.ts). A one-off that fired is off,
  * with no next time: nothing wakes a computer for it again; nor while its run waits for the user's OK, which
  * goes with no next time until they answer or Stop (routinePayload). A computer's runner sends only its own routines
@@ -130,9 +131,12 @@ export function routinePayload(r: Routine) {
     bopsId: r.id,
     botId: r.botId,
     kind: kind === "monitor" ? "monitor" : "schedule",
-    // How it runs (routines.ts run): someone else's is never a chat run. Orgo wakes no computer for one the Mac runs, as a reminder and a chat run always are.
+    // How it runs (routines.ts run): someone else's is never a chat run. Orgo wakes no computer for one the Mac runs, as a
+    // reminder and a chat run are until Bops Cloud does them, nor for one Bops Cloud does (routineHome "cloud"). Where Bops
+    // Cloud has the workspace's routines run on their computers, every one whose home is its computer wakes it, its runner
+    // marked up or not: it never goes to the Mac.
     run: r.reminder ? "reminder" : r.run === "chat" && !r.fromOutside ? "chat" : "task",
-    onMac: !runnerRuns(r),
+    onMac: cloudDoesOf(getState(), r.botId).routines ? routineHome(getState(), r, bot(r.botId)) !== "computer" : !runnerRuns(r),
     title: cleanText(r.title.trim(), 200).trim() || cleanText(r.goal.trim(), 200).trim() || "Routine",
     goal: cleanText(r.goal, 8000),
     enabled: r.enabled,

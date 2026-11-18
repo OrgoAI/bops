@@ -5,8 +5,8 @@ import { after, before, test } from "node:test";
 import { closeDb, query } from "../db.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import { CLOUD_ALL_MIN_VERSION } from "../protocol.ts";
-import { autoRoute, closeRunners, resetTurns, revertAuto, sweepTurns, turnTiming } from "../turns.ts";
+import { CLOUD_ALL_MIN_VERSION, CLOUD_SELF_MIN_VERSION } from "../protocol.ts";
+import { autoRoute, closeRunners, remirrorAll, resetTurns, revertAuto, sweepTurns, turnTiming } from "../turns.ts";
 import { dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
@@ -105,7 +105,7 @@ const own = (userId: string, version = macAt, device = "mac-o") => ({
 const vm = (userId: string, desktop: string) => `orgo_vm_${userId}~${desktop}`;
 const runnerState = (version = "0.0.37", more: Record<string, unknown> = {}) => ({ status: "running", version, buildId: "b1", by: "mac-o", at: 1, auth: "identity", ...more });
 
-type Ws = { id: string; chatOn?: string; chatAuto?: boolean; chatTrouble?: { note: string; botId?: string; at: number } };
+type Ws = { id: string; chatOn?: string; chatAuto?: boolean; chatTrouble?: { note: string; botId?: string; at: number }; cloudDoes?: Record<string, true> };
 type State = { workspaces: Ws[]; runners?: Record<string, unknown>; bots: Record<string, unknown>[] };
 
 /** An owner with Acme: Max on its own computer (the Mac set up its runner unless `runner` is false), a member at Write with Use its computer. */
@@ -562,5 +562,79 @@ test("an owner whose Mac is older than CLOUD_ALL_MIN_VERSION, as before: moved b
     assert.ok(!all.some((m) => /can't answer chats yet|didn't wake up/.test(m.json?.text ?? "")), "no failure note");
   } finally {
     wakeAnswers.delete(s.desktop);
+  }
+});
+
+test("what Bops Cloud does for a workspace (cloudDoes) is on the owner's state only where cloudSelf holds: put back over a save that drops it, taken off a Mac's own and once Bops Cloud does none (its start), and put right as a runner connects at a Bops new to it", async () => {
+  const macSays = async (owner: string, v: string) => void (await query("UPDATE bops.cloud_accounts SET app_version = $2 WHERE user_id = $1", [owner, v]));
+  const ws = async (owner: string, id: string) => (await stateOf(owner)).state.workspaces.find((w) => w.id === id)!;
+  // Two parts Bops Cloud does for this test: texts everywhere it may, the digest in Acme alone.
+  resetTurns({ does: { texts: () => true, digest: ({ ws }) => ws === "ws_acme" } });
+  let box: { close: () => void } | null = null;
+  // The owner's Mac says CLOUD_SELF_MIN_VERSION on every call here (its reads too), unless a step says otherwise.
+  macAt = CLOUD_SELF_MIN_VERSION;
+  try {
+    const s = await setup();
+    assert.equal((await routeAs(s.owner, { mode: "cloud" })).status, 200);
+    // The owner's last Mac at CLOUD_ALL_MIN_VERSION, below CLOUD_SELF_MIN_VERSION: exactly as before, nothing.
+    macAt = CLOUD_ALL_MIN_VERSION;
+    await macSays(s.owner, CLOUD_ALL_MIN_VERSION);
+    await ownerChanges(s.owner, (st) => void (st.bots[0].name = "Boppy One"));
+    assert.equal((await ws(s.owner, "ws_acme")).cloudDoes, undefined, "an older owner's Mac: none");
+    macAt = CLOUD_SELF_MIN_VERSION;
+    // At CLOUD_SELF_MIN_VERSION: written on Acme (in the cloud), never on Main (on the Mac).
+    await macSays(s.owner, CLOUD_SELF_MIN_VERSION);
+    const at = own(s.owner, CLOUD_SELF_MIN_VERSION);
+    await ownerChanges(s.owner, (st) => void (st.bots[0].name = "Boppy Two"), at);
+    assert.deepEqual((await ws(s.owner, "ws_acme")).cloudDoes, { texts: true, digest: true });
+    assert.equal((await ws(s.owner, "ws_main")).cloudDoes, undefined);
+    // A save from an older Bops that drops it: put back, one more version (Bops Cloud's) so the Mac reads it.
+    const head = await stateOf(s.owner);
+    const answered = await ownerChanges(s.owner, (st) => void delete st.workspaces.find((w) => w.id === "ws_acme")!.cloudDoes, at);
+    const now = await stateOf(s.owner);
+    assert.deepEqual([answered, now.version], [head.version + 1, head.version + 2]);
+    assert.deepEqual((await ws(s.owner, "ws_acme")).cloudDoes, { texts: true, digest: true });
+    // A Mac's own write of it (no part is a Mac's to write): taken off, and one it changed put back as it should be.
+    await ownerChanges(s.owner, (st) => {
+      st.workspaces.find((w) => w.id === "ws_main")!.cloudDoes = { routines: true };
+      st.workspaces.find((w) => w.id === "ws_acme")!.cloudDoes = { texts: true, desktop: true };
+    }, at);
+    assert.equal((await ws(s.owner, "ws_main")).cloudDoes, undefined);
+    assert.deepEqual((await ws(s.owner, "ws_acme")).cloudDoes, { texts: true, digest: true });
+    // Another Mac of the owner's at an older Bops says so: taken off at its save, back once the newer one is the last again.
+    macAt = CLOUD_ALL_MIN_VERSION;
+    await macSays(s.owner, CLOUD_ALL_MIN_VERSION);
+    await ownerChanges(s.owner, (st) => void (st.bots[0].name = "Boppy Three"), own(s.owner, CLOUD_ALL_MIN_VERSION, "mac-old"));
+    assert.equal((await ws(s.owner, "ws_acme")).cloudDoes, undefined);
+    macAt = CLOUD_SELF_MIN_VERSION;
+    await macSays(s.owner, CLOUD_SELF_MIN_VERSION);
+    await ownerChanges(s.owner, (st) => void (st.bots[0].name = "Boppy Four"), at);
+    assert.deepEqual((await ws(s.owner, "ws_acme")).cloudDoes, { texts: true, digest: true });
+    // A kill switch (Bops Cloud does none now, its settings changed with a restart): taken off as it starts.
+    resetTurns();
+    assert.ok((await remirrorAll()) >= 1);
+    assert.equal((await ws(s.owner, "ws_acme")).cloudDoes, undefined);
+    // A part that needs its runners new enough: put right as the runner connects at a Bops it didn't run before.
+    resetTurns({ does: { watches: () => true } });
+    let live = await listenAs(s.owner, s.desktop, CLOUD_SELF_MIN_VERSION);
+    box = live;
+    await until(async () => !!(await ws(s.owner, "ws_acme")).cloudDoes?.watches, "re-mirrored as the runner connected");
+    assert.deepEqual((await ws(s.owner, "ws_acme")).cloudDoes, { watches: true });
+    live.close();
+    // The same Bops again: nothing to put right (its state as it was, even with Bops Cloud doing none now).
+    resetTurns();
+    live = await listenAs(s.owner, s.desktop, CLOUD_SELF_MIN_VERSION);
+    box = live;
+    await new Promise((r) => setTimeout(r, 400));
+    assert.deepEqual((await ws(s.owner, "ws_acme")).cloudDoes, { watches: true }, "not re-mirrored");
+    live.close();
+    // A newer one: put right.
+    live = await listenAs(s.owner, s.desktop, "0.0.56");
+    box = live;
+    await until(async () => (await ws(s.owner, "ws_acme")).cloudDoes === undefined, "re-mirrored at a new Bops");
+  } finally {
+    box?.close();
+    resetTurns();
+    macAt = "0.0.38";
   }
 });

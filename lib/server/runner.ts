@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { deviceIdOf } from "@/cloud/device";
-import { MAC_WORDS, needsNoComputer, routineOnMac, workBot, type Bot, type Routine, type RunnerState } from "@/lib/types";
+import { cloudDoesOf, MAC_WORDS, needsNoComputer, routineHome, workBot, type Bot, type Routine, type RunnerState } from "@/lib/types";
 import { appVersion } from "./app-version";
 import { sleptSince } from "./awake";
 import { olderVersion } from "./orgo";
@@ -71,12 +71,12 @@ export const RUNNER_SCRUB = `supervisorctl stop bops-runner >/dev/null 2>&1; rm 
 export { MAC_WORDS, needsNoComputer };
 
 /**
- * Whether a routine's runs need the user's Mac, decided before a run starts (lib/types.ts routineOnMac, which
- * the app shows by too), with the state as this Bops has it. The Mac runs these (runsHere), and Orgo never
- * wakes a computer for them (the routines mirror's onMac).
+ * Whether a routine's runs are never a computer's runner's, decided before a run starts (lib/types.ts routineHome, which
+ * the app shows by too: not "computer"), with the state as this Bops has it. The Mac runs these (runsHere), or Bops Cloud
+ * does (home "cloud"), and Orgo never wakes a computer for them (the routines mirror's onMac).
  */
 export function pinnedToMac(r: Pick<Routine, "botId" | "where" | "goal" | "reminder" | "run" | "fromOutside" | "deliverTo" | "procedure" | "macPick">, b: Pick<Bot, "runsOn"> | undefined): boolean {
-  return routineOnMac(getState(), r, b);
+  return routineHome(getState(), r, b) !== "computer";
 }
 
 /**
@@ -86,6 +86,8 @@ export function pinnedToMac(r: Pick<Routine, "botId" | "where" | "goal" | "remin
  */
 export function needsMacPick(r: Routine): boolean {
   if (onRunner() || heard()?.runsOn !== "cloud" || !r.enabled || r.reminder || r.fromOutside || (r.where ?? "auto") !== "auto") return false;
+  // Bops Cloud has the workspace's routines run on their bots' computers (routineHome): no pick of the Mac's counts there.
+  if (cloudDoesOf(getState(), r.botId).routines) return false;
   const b = getState().bots.find((x) => x.id === r.botId);
   // A bot set to work in the cloud: its tasks go there whatever the Mac would say (chooseWhere), until it's set otherwise.
   if (r.macPick?.goal === r.goal || !computerOf(r) || b?.runsOn === "cloud") return false;
@@ -512,7 +514,7 @@ export function onRunnerComputer(r: Pick<Routine, "botId">): boolean {
   return !!here && computerOf(r) === here;
 }
 
-/** On a runner: the routine is this one's, its bot working on this computer and the Mac not needed (never a reminder or a chat run), whether or not it may run it right now. */
+/** On a runner: the routine is this one's, its bot working on this computer and its home a computer (routineHome: never a reminder, nor a chat run until Bops Cloud does routines there), whether or not it may run it right now. */
 export function runnerRoutine(r: Routine): boolean {
   return onRunnerComputer(r) && !pinnedToMac(r, getState().bots.find((x) => x.id === r.botId));
 }
@@ -526,12 +528,15 @@ export type CameHere = { since: number };
 
 /**
  * Whether this server runs the routine when it comes due (the routines timer, routines.ts tick).
- * - A runner: one of its own (runnerRoutine), while the bots work in the Cloud as Orgo said under a
- *   minute ago and its computer's runner is marked up (the Mac has stopped taking its routines).
+ * - A runner: one of its own (runnerRoutine: routineHome "computer", its bot working on this computer), while
+ *   the bots work in the Cloud as Orgo said under a minute ago and its computer's runner is marked up (the Mac
+ *   has stopped taking its routines).
  * - The Mac: the rest. One that needs the Mac, one whose bot has no computer, and one whose computer has
  *   no runner up (none, being set up, couldn't start, or stopped, or the switch to This Mac is
  *   HANDOVER_MS old). Until Orgo answers, a computer whose runner is up keeps its routines, asleep or down
- *   too: they wait for it (RunnerState.down). A reminder or a chat run is always the Mac's.
+ *   too: they wait for it (RunnerState.down). A reminder or a chat run is the Mac's until Bops Cloud does
+ *   reminders or routines for its workspace (Workspace.cloudDoes). Then never one Bops Cloud does (routineHome
+ *   "cloud"), nor one its computer's runner does ("computer"), up or not: it waits for that computer.
  * Either way, one that just came from another Bops waits HANDOVER_MS first (handedOver). On the Mac, one
  * that was a runner's says since when it's the Mac's (CameHere).
  */
@@ -542,7 +547,15 @@ export function runsHere(r: Routine, now = Date.now()): boolean | CameHere {
     const h = heard();
     return !!computer && runnerRoutine(r) && h?.runsOn === "cloud" && fresh(h.at, MODE_FRESH_MS, now) && s.runners?.[computer]?.status === "running" && !handedOver(r, now);
   }
-  if (computer && !pinnedToMac(r, s.bots.find((x) => x.id === r.botId)) && runnerMayRun(s.runners?.[computer], now)) {
+  const b = s.bots.find((x) => x.id === r.botId);
+  const home = routineHome(s, r, b);
+  // Bops Cloud's (or, where it has the workspace's routines run on their computers, a computer's): never this Mac's.
+  // Seen so, it waits HANDOVER_MS here once it isn't (a kill switch), while the one that had it hears.
+  if (home === "cloud" || (home === "computer" && cloudDoesOf(s, r.botId).routines)) {
+    (box.seen ??= new Map()).set(r.id, { at: now, ...(home === "computer" && computer ? { from: computer } : {}) });
+    return false;
+  }
+  if (computer && home === "computer" && runnerMayRun(s.runners?.[computer], now)) {
     (box.seen ??= new Map()).set(r.id, { at: now, from: computer });
     return false;
   }

@@ -1,6 +1,6 @@
 /** Shared shapes for the Bops app state, used by both the server and the UI. */
 
-import type { SharedKey } from "@/cloud/protocol";
+import type { CloudDoes as ProtocolCloudDoes, SharedKey } from "@/cloud/protocol";
 import type { AddedFile } from "./added-files";
 import type { AppHosting, AppRemoval, AppsForMembers, IngotToken } from "./hosted-apps";
 import type { Chain } from "./chain";
@@ -220,6 +220,19 @@ export const keptPersona = (text: string) => text.trim().slice(0, MAX_PERSONA_CH
 export const personaOf = (b: Pick<Bot, "persona" | "personaBy">, mac = false): { text?: string; by?: string } =>
   !b.personaBy ? { text: b.persona } : mac ? { text: b.personaBy.ownerText } : { text: b.persona, by: b.personaBy.name };
 
+/**
+ * What Bops Cloud does for a workspace now, part by part (Workspace.cloudDoes): only Bops Cloud writes it (cloud/turns.ts
+ * keepChatOn). Kept in cloud/protocol.ts, whose words say what each part leaves to it, as Bops Cloud reads it too.
+ */
+export type CloudDoes = ProtocolCloudDoes;
+
+/** What Bops Cloud does for bot `botId`'s workspace (Workspace.cloudDoes): nothing ({}) for a bot that isn't there, or a workspace with none. */
+export function cloudDoesOf(state: Pick<AppState, "bots" | "workspaces">, botId: string): CloudDoes {
+  const b = state.bots?.find((x) => x.id === botId);
+  if (!b) return {};
+  return state.workspaces?.find((w) => w.id === workspaceOf(b))?.cloudDoes ?? {};
+}
+
 /** A workspace: one team with its own main bot, bots, chats and work. The user switches between them. */
 export type Workspace = {
   id: string;
@@ -323,6 +336,12 @@ export type Workspace = {
    */
   chatOn?: "cloud" | "mac";
   /**
+   * What Bops Cloud does for this workspace now, part by part (CloudDoes): each part set here is Bops Cloud's, and every
+   * Mac and runner from CLOUD_SELF_MIN_VERSION on leaves it alone. Only Bops Cloud writes it, as a mirror (cloud/turns.ts
+   * keepChatOn), and puts it back on every save; unset or empty, every Bops does what it did before.
+   */
+  cloudDoes?: CloudDoes;
+  /**
    * Bops Cloud moves this workspace's chat by itself (cloud/turns.ts autoRoute): to it once every computer its bots
    * work on has a runner that answers, back to the Mac whenever one can't. Unset: it doesn't (someone chose, or it
    * isn't on for this account). Bops Cloud writes it; a computer someone else can use gets a runner for it too
@@ -338,7 +357,7 @@ export type Workspace = {
   chatAutoOff?: boolean;
   /**
    * Why this workspace, switched to the cloud (chatOn "cloud"), can't answer now: a key of CHAT_TROUBLE
-   * (components/app/chat-switch.tsx: stopped, deleted, noHours, hourly, noCredit, paused, cant, noRunner, old), the bot
+   * (components/app/chat-switch.tsx: stopped, deleted, noHours, hourly, noCredit, paused, cant, noRunner, old, accountMac), the bot
    * whose computer it is, and since when. Bops Cloud writes it in place of moving the workspace back to the Mac
    * (cloud/turns.ts noteTrouble) and takes it off once that computer answers again; Settings, General says it under the
    * switch to the owner and Admins. Unset: nothing wrong it knows of.
@@ -1896,15 +1915,15 @@ export type RunnerState = {
   shared?: boolean;
 };
 
-/** A new task's words that put it on the user's Mac (lib/server/where.ts chooseWhere), and a routine's (routineOnMac). */
+/** A new task's words that put it on the user's Mac (lib/server/where.ts chooseWhere), and a routine's (routineHome). */
 export const MAC_WORDS = /\b(on|from|using|use|with) my (mac|macbook|laptop|computer)\b|\blocally\b|\bon this mac\b/i;
 
 /**
  * A routine that needs no computer: a reminder, or a chat run (a turn with the bot's tools; someone else's
- * routine is never one: lib/server/routines.ts run). It's always the Mac's (routineOnMac), as before runners:
- * a runner never runs one, whether a Mac is up or not, and Orgo never wakes a computer for one nor keeps one up
- * for it (the routines mirror's onMac). Bops Cloud can't run a turn with the bot's tools yet (cloud/agent.ts
- * answers the phone with none), so one due while no Mac is up runs once a Mac is up again, late.
+ * routine is never one: lib/server/routines.ts run). It's the Mac's (routineHome "mac"), as before runners, until
+ * Bops Cloud does reminders or routines for its workspace (Workspace.cloudDoes): a runner never runs one, whether a Mac
+ * is up or not, and Orgo never wakes a computer for one nor keeps one up for it (the routines mirror's onMac), so one due
+ * while no Mac is up runs once a Mac is up again, late.
  */
 export const needsNoComputer = (r: Pick<Routine, "reminder" | "run" | "fromOutside">) => !!r.reminder || (r.run === "chat" && !r.fromOutside);
 
@@ -1920,10 +1939,15 @@ function skillsOnMac(s: Pick<AppState, "bots" | "workspaces">, botId: string): b
   return [...(w?.skills ?? []), ...(w?.apps ?? [])].some((x) => x.status === "published" && botHasSkill(x, b));
 }
 
+/** What routineHome reads of a routine. */
+export type RoutineWhere = Pick<Routine, "botId" | "where" | "goal" | "reminder" | "run" | "fromOutside" | "deliverTo" | "procedure" | "macPick">;
+/** What routineHome reads of the state: the bots, their workspaces (skills, cloudDoes) and the channel links routines deliver to. */
+export type RoutineHomeState = Pick<AppState, "bots" | "workspaces"> & Partial<Pick<AppState, "channels">>;
+
 /**
- * Whether a routine's runs need the user's Mac (lib/server/runner.ts pinnedToMac), decided before a run starts
- * from what every Bops of theirs sees alike in the state (never a Mac's own rules, state.mac, but what a Mac
- * picked and kept with the routine), and never changed by how a run went:
+ * Whether a routine's runs needed the user's Mac before Bops Cloud did any part of them (Workspace.cloudDoes), decided
+ * before a run starts from what every Bops of theirs sees alike in the state (never a Mac's own rules, state.mac, but
+ * what a Mac picked and kept with the routine), and never changed by how a run went:
  * - a reminder or a chat run (needsNoComputer), always for now: chat is the backend's, and a bot's computer
  *   is only for work that needs one (a chat run that needs a computer starts a task, which runs on its bot's);
  * - any whose result goes to Slack, Telegram or Discord (a runner can't post there: their tokens are in
@@ -1938,11 +1962,7 @@ function skillsOnMac(s: Pick<AppState, "bots" | "workspaces">, botId: string): b
  * A task that reaches something only the user can give on its computer (their OK, a sign in) waits for it
  * there, its status saying so: it's never the Mac's for that.
  */
-export function routineOnMac(
-  state: Pick<AppState, "bots" | "workspaces">,
-  r: Pick<Routine, "botId" | "where" | "goal" | "reminder" | "run" | "fromOutside" | "deliverTo" | "procedure" | "macPick">,
-  b: Pick<Bot, "runsOn"> | undefined,
-): boolean {
+function onMacBefore(state: Pick<AppState, "bots" | "workspaces">, r: RoutineWhere, b: Pick<Bot, "runsOn"> | undefined): boolean {
   if (needsNoComputer(r)) return true;
   if (r.deliverTo?.kind === "channel" || r.procedure) return true;
   if (skillsOnMac(state, r.botId)) return true;
@@ -1953,17 +1973,49 @@ export function routineOnMac(
 }
 
 /**
+ * Where a routine's runs are done (lib/server/runner.ts pinnedToMac, runsHere; routines.ts run), from what every Bops of
+ * the user's and Bops Cloud see alike in the state, decided before a run starts:
+ * - "mac": the user's Mac runs it;
+ * - "computer": its bot's computer's runner runs it while that runner is up (none up and no part of cloudDoes: the Mac, as
+ *   before runners left anything to Bops Cloud);
+ * - "cloud": Bops Cloud does (a reminder on its clock; one whose bot has no computer, which it records as skipped with the
+ *   noComputer words).
+ * It reads Workspace.cloudDoes of the routine's bot's workspace. With neither `reminders` nor `routines` there, it's exactly
+ * as before (onMacBefore): "mac" where the Mac was needed, else "computer". With them:
+ * - a reminder: "cloud" with `reminders` (else "mac", as before);
+ * - with `routines`, the rest: "mac" for a result that goes to Telegram or Discord (posted from the Mac alone), one set to
+ *   run there (where "mac") or whose job says so (MAC_WORDS); otherwise "computer" (a chat run, a result to Slack, a
+ *   procedure or skills: the runner reads published skills; a bot set to the Mac, or the Mac's pick of it) for a bot with
+ *   a computer, and "cloud" for one with none.
+ */
+export function routineHome(state: RoutineHomeState, r: RoutineWhere, b: Pick<Bot, "runsOn"> | undefined): "mac" | "computer" | "cloud" {
+  const does = cloudDoesOf(state, r.botId);
+  if (r.reminder) return does.reminders ? "cloud" : "mac";
+  if (!does.routines) return onMacBefore(state, r, b) ? "mac" : "computer";
+  const d = r.deliverTo;
+  if (d?.kind === "channel" && state.channels?.find((l) => l.id === d.linkId)?.kind !== "slack") return "mac";
+  if (r.where === "mac" || MAC_WORDS.test(r.goal)) return "mac";
+  const bot = state.bots?.find((x) => x.id === r.botId);
+  return bot && workBot(bot, state.bots).computerId ? "computer" : "cloud";
+}
+
+/** Whether a routine's runs need the user's Mac (routineHome "mac"): what the app shows, and the Mac runs these (lib/server/runner.ts runsHere). */
+export function routineOnMac(state: RoutineHomeState, r: RoutineWhere, b: Pick<Bot, "runsOn"> | undefined): boolean {
+  return routineHome(state, r, b) === "mac";
+}
+
+/**
  * Why a routine's runs wait for its bot's computer, in a few words ("Max's computer is stopped"), when a
  * Mac's look found that computer down or asleep with its routines overdue (RunnerState.down) while its
  * runner runs them: they run there once it's up, never moved to the Mac. Undefined when nothing holds them
- * up, and for one the Mac runs (routineOnMac).
+ * up, and for one the Mac or Bops Cloud runs (routineHome).
  */
-export function computerWait(state: Pick<AppState, "bots" | "runners" | "workspaces">, r: Pick<Routine, "botId" | "enabled" | "where" | "goal" | "reminder" | "run" | "fromOutside" | "deliverTo" | "procedure" | "macPick">): string | undefined {
+export function computerWait(state: RoutineHomeState & Pick<AppState, "runners">, r: RoutineWhere & Pick<Routine, "enabled">): string | undefined {
   const b = state.bots.find((x) => x.id === r.botId);
   const w = b && workBot(b, state.bots);
   const id = w?.computerId?.toLowerCase();
   const x = id ? Object.entries(state.runners ?? {}).find(([k]) => k.toLowerCase() === id)?.[1] : undefined;
-  if (!r.enabled || !w || x?.status !== "running" || !x.down || routineOnMac(state, r, b)) return undefined;
+  if (!r.enabled || !w || x?.status !== "running" || !x.down || routineHome(state, r, b) !== "computer") return undefined;
   const st = x.down.status;
   return `${w.name}'s computer is ${st === "error" ? "broken" : st === "suspended" ? "asleep" : st}`;
 }
@@ -2506,6 +2558,18 @@ export const quietNothing = (s: Session) => !!s.routineId && s.status === "done"
 
 /** A watch on a bot's screen (not a window on the user's Mac, not a web page with no screen). */
 export const isScreenWatch = (w: Watch) => !w.mac && !w.page;
+
+/**
+ * Who looks at a watch: "computer", its bot's computer (the runner there), where Bops Cloud has the bot's workspace's
+ * watches looked at there (Workspace.cloudDoes.watches), for a page or screen watch of a bot that works on a computer;
+ * else "mac", the user's Mac, as before (a window on the Mac always). Every Bops reads the same state, so a watch has
+ * one home.
+ */
+export function watchHome(state: Pick<AppState, "bots" | "workspaces">, w: Pick<Watch, "botId" | "mac">): "mac" | "computer" {
+  if (w.mac || !cloudDoesOf(state, w.botId).watches) return "mac";
+  const b = state.bots?.find((x) => x.id === w.botId);
+  return b && workBot(b, state.bots).computerId ? "computer" : "mac";
+}
 
 /** How often a web page watch is fetched, in minutes: the default, and the least. */
 export const PAGE_WATCH_DEFAULT_MIN = 30;

@@ -1,5 +1,5 @@
 import "server-only";
-import { botChatId, isScreenWatch, live, sharesComputer, workspaceOf, type Bot } from "@/lib/types";
+import { botChatId, cloudDoesOf, isScreenWatch, live, sharesComputer, workspaceOf, type Bot } from "@/lib/types";
 import { bot, getState, update } from "./store";
 import { botsNamedInDeleted } from "./deleted";
 import { botIdsWaiting } from "./memory-deletes";
@@ -103,8 +103,9 @@ export function followRename(b: Bot) {
   void ensureInbox(botId).catch((e: Error) => console.warn(`[rename] ${botId} email: ${e.message}`));
   void import("./phone").then(({ renameAgents }) => renameAgents(botId)).catch((e: Error) => console.warn(`[rename] ${botId} phone: ${e.message}`));
   void import("./channels").then(({ renameInChannels }) => renameInChannels(botId)).catch((e: Error) => console.warn(`[rename] ${botId} channels: ${e.message}`));
-  // Just the name on the desktop: Chrome keeps running.
-  if (b.computerId) void import("./desktop").then(({ applyDesktop }) => applyDesktop(b, { restartChrome: false })).catch((e: Error) => console.warn(`[rename] ${botId} desktop: ${e.message}`));
+  // Just the name on the desktop: Chrome keeps running. Not where Bops Cloud dresses the workspace's desktops (Workspace.cloudDoes.desktop): its computer does.
+  if (b.computerId && !cloudDoesOf(getState(), botId).desktop)
+    void import("./desktop").then(({ applyDesktop }) => applyDesktop(b, { restartChrome: false })).catch((e: Error) => console.warn(`[rename] ${botId} desktop: ${e.message}`));
 }
 
 /**

@@ -56,7 +56,12 @@ export const CHAT_TROUBLE: Record<string, (bot: string, owner: string) => string
   old: (bot) => `${bot}'s computer runs an older Bops. The owner's Bops updates it the next time it opens.`,
   noComputer: (bot) => `${bot} has no computer, so ${bot} can't answer in the cloud. Give ${bot} a computer in ${bot}'s settings.`,
   split: () => "A group's bots work on different computers, so that group can't answer in the cloud yet.",
+  // The owner's account is set to This Mac (Settings): the computer's own keeper won't set up its Bops (cloud/turns.ts, from its report).
+  accountMac: (bot) => `Your bots work on This Mac in Settings, so ${bot}'s computer doesn't answer in the cloud. Set Settings to Cloud.`,
 };
+
+/** Said instead of turning the switch on, sending nothing, while the owner's account is set to This Mac (/api/runs-on: "mac"). */
+export const ACCOUNT_MAC = "Your bots work on This Mac in Settings. Set Settings to Cloud first, then turn this on.";
 
 /** The hint under a bot's "Your Mac" choice, which a workspace in the cloud doesn't take (bot-settings-ai.tsx, bot-panel.tsx). */
 export const MAC_OFF_HINT = "This workspace runs in the cloud, so its bots work on their own computers.";
@@ -105,9 +110,20 @@ export function chatSwitchOf(state: AppState): ChatSwitchView | null {
   return { wsId, on: false, line: closed ? lines.closed : lines.mac, closed };
 }
 
-/** Turn it on ("cloud": everything there, a choice) or off (the Mac, chosen). Bops' words when it didn't go, else null. */
+/**
+ * Turn it on ("cloud": everything there, a choice) or off (the Mac, chosen). Bops' words when it didn't go, else null. The
+ * owner's own turned on while their account is set to This Mac (Settings: /api/runs-on says "mac") sends nothing and says
+ * so (ACCOUNT_MAC): their bots' computers wouldn't set up their Bops to answer. Not known (no answer): sent as before.
+ */
 export async function setChat(wsId: string, on: boolean, shared = false): Promise<string | null> {
   const chat = on ? "cloud" : "mac";
+  if (on && !shared) {
+    const runsOn = await fetch("/api/runs-on", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { runsOn?: unknown } | null) => j?.runsOn)
+      .catch(() => undefined);
+    if (runsOn === "mac") return ACCOUNT_MAC;
+  }
   // (An Admin's, of a shared workspace: through Bops Cloud, kept as an Admin's choice: lib/server/shared-people.ts.)
   const res = await (shared ? post("/api/workspaces/shared/settings", { chat }, "PATCH") : post("/api/workspaces", { id: wsId, chat }, "PATCH")).catch(() => null);
   if (res?.ok) return null;

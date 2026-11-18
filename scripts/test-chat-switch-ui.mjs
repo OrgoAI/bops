@@ -4,8 +4,9 @@
 // for a workspace whose bots have no computer; on while everything goes through the cloud or will once the computers
 // are ready, off once someone chose the Mac, each with its own line; on, what keeps it from answering now
 // (CHAT_TROUBLE); a click sends "cloud" or "mac" to the Bops server, turning it off always asks first, and it shows
-// Bops' words when it refuses. A bot's "Your Mac" choice is off in such a workspace, with why. Last, the words: no
-// dashes, and never "Orbit".
+// Bops' words when it refuses. The owner's turned on while their account is set to This Mac sends nothing and says so
+// (ACCOUNT_MAC). A bot's "Your Mac" choice is off in such a workspace, with why. Last, the words: no dashes, and never
+// "Orbit".
 //
 // Nothing reaches a server (fetch is a fake). The .tsx files are compiled with the TypeScript in node_modules as they load.
 // Usage: node scripts/test-chat-switch-ui.mjs   (not with --conditions=react-server: these are client components)
@@ -123,7 +124,9 @@ await test("on, what keeps it from answering: what Bops Cloud said (chatTrouble)
   assert.equal(troubled("noComputer"), "Max has no computer, so Max can't answer in the cloud. Give Max a computer in Max's settings.");
   assert.equal(troubled("split"), "A group's bots work on different computers, so that group can't answer in the cloud yet.");
   assert.equal(troubled("something new"), undefined, "a note this window doesn't know: nothing said");
-  assert.deepEqual(Object.keys(S.CHAT_TROUBLE).sort(), ["cant", "deleted", "hourly", "noComputer", "noCredit", "noHours", "noRunner", "old", "paused", "split", "stopped"]);
+  // The owner's account set to This Mac (Settings): Bops Cloud says it from the computer's own keeper's report.
+  assert.equal(troubled("accountMac"), "Your bots work on This Mac in Settings, so Max's computer doesn't answer in the cloud. Set Settings to Cloud.");
+  assert.deepEqual(Object.keys(S.CHAT_TROUBLE).sort(), ["accountMac", "cant", "deleted", "hourly", "noComputer", "noCredit", "noHours", "noRunner", "old", "paused", "split", "stopped"]);
   // Off, nothing is said of it.
   assert.equal(S.chatSwitchOf(stateWith({ chatOn: "mac", chatTrouble: { note: "stopped", botId: "max", at: 1 } }))?.trouble, undefined);
   // What the owner's state shows: Ivy with no computer, or a group across computers.
@@ -154,6 +157,39 @@ await test("a click sends the choice: on is \"cloud\", off is the Mac; refused, 
   answer = { ok: false, status: 502, body: {} };
   assert.equal(await S.setChat("ws_acme", true), "Couldn't reach Bops. Try again.");
   answer = { ok: true, status: 200, body: { ok: true } };
+});
+
+await test("turning it on while the account is set to This Mac (/api/runs-on says \"mac\") sends nothing and says so; Cloud, or no answer, sends it as before; off and an Admin's never ask", async () => {
+  const sent = [];
+  let runsOn = { ok: true, body: { runsOn: "mac" } };
+  globalThis.fetch = async (url, init = {}) => {
+    sent.push([String(url), init.method ?? "GET", init.body ? JSON.parse(init.body) : undefined]);
+    if (String(url) === "/api/runs-on") return { ok: runsOn.ok, status: runsOn.ok ? 200 : 502, json: async () => runsOn.body };
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  try {
+    assert.equal(await S.setChat("ws_acme", true), S.ACCOUNT_MAC);
+    assert.equal(S.ACCOUNT_MAC, "Your bots work on This Mac in Settings. Set Settings to Cloud first, then turn this on.");
+    assert.deepEqual(sent, [["/api/runs-on", "GET", undefined]], "nothing sent to the workspace");
+    for (const [said, why] of [[{ ok: true, body: { runsOn: "cloud" } }, "Cloud"], [{ ok: true, body: { runsOn: null } }, "Orgo didn't answer"], [{ ok: false, body: {} }, "no answer"]]) {
+      sent.length = 0;
+      runsOn = said;
+      assert.equal(await S.setChat("ws_acme", true), null, why);
+      assert.deepEqual(sent.at(-1), ["/api/workspaces", "PATCH", { id: "ws_acme", chat: "cloud" }], why);
+    }
+    runsOn = { ok: true, body: { runsOn: "mac" } };
+    sent.length = 0;
+    assert.equal(await S.setChat("ws_acme", false), null);
+    assert.deepEqual(sent, [["/api/workspaces", "PATCH", { id: "ws_acme", chat: "mac" }]], "off: never asked");
+    sent.length = 0;
+    assert.equal(await S.setChat("ws_acme", true, true), null);
+    assert.deepEqual(sent, [["/api/workspaces/shared/settings", "PATCH", { chat: "cloud" }]], "an Admin's: the owner's account isn't theirs to read");
+  } finally {
+    globalThis.fetch = async (url, init = {}) => {
+      asked.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined });
+      return { ok: answer.ok, status: answer.status, json: async () => answer.body };
+    };
+  }
 });
 
 /** Words as the markup has them (React escapes ' and "). */
@@ -204,7 +240,7 @@ await test("the words, as given: every key kept, no dashes, never Orbit", () => 
   assert.deepEqual(S.OFF_ASK_SHARED, { title: "Turn off the cloud?", line: "The owner's Mac does the work again, and the team waits for it while that Mac is closed." });
   assert.equal(S.MAC_OFF_HINT, "This workspace runs in the cloud, so its bots work on their own computers.");
   const trouble = Object.values(S.CHAT_TROUBLE).map((f) => f("Max", "Tara"));
-  const words = [...Object.values(S.CHAT_LINES), ...Object.values(S.CHAT_LINES_SHARED), ...Object.values(S.OFF_ASK), ...Object.values(S.OFF_ASK_SHARED), ...trouble, S.CHAT_TITLE, S.CHAT_LABEL, S.MAC_OFF_HINT].join("\n");
+  const words = [...Object.values(S.CHAT_LINES), ...Object.values(S.CHAT_LINES_SHARED), ...Object.values(S.OFF_ASK), ...Object.values(S.OFF_ASK_SHARED), ...trouble, S.CHAT_TITLE, S.CHAT_LABEL, S.MAC_OFF_HINT, S.ACCOUNT_MAC].join("\n");
   assert.ok(!/[-–—]/.test(words), words);
   assert.ok(!/orbit/i.test(readFileSync(`${root}/components/app/chat-switch.tsx`, "utf8")));
 });
@@ -292,9 +328,29 @@ await test("off: a press turns it on at once, sending \"cloud\", even where Bops
     assert.equal(switchOf(v.box).hasAttribute("disabled"), false, JSON.stringify(acme));
     await click(switchOf(v.box));
     assert.ok(!v.box.textContent.includes(S.OFF_ASK.title), "nothing asked");
-    assert.deepEqual(asked.map((a) => a.body), [{ id: "ws_acme", chat: "cloud" }]);
+    // (Where the owner's bots work is read first: /api/runs-on, which says nothing of This Mac here.)
+    assert.deepEqual(asked.filter((a) => a.url !== "/api/runs-on").map((a) => a.body), [{ id: "ws_acme", chat: "cloud" }]);
     assert.ok(!v.box.querySelector('[role="alert"]'));
     await v.done();
+  }
+});
+
+await test("off, with the account set to This Mac: a press sends nothing and shows why, and the switch stays off", async () => {
+  const was = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url) => {
+    sent.push(String(url));
+    return { ok: true, status: 200, json: async () => (String(url) === "/api/runs-on" ? { runsOn: "mac" } : { ok: true }) };
+  };
+  try {
+    const v = await mount(h(S.ChatSwitch, { state: stateWith({ chatOn: "mac" }) }));
+    await click(switchOf(v.box));
+    assert.deepEqual(sent, ["/api/runs-on"]);
+    assert.equal(v.box.querySelector('[role="alert"]')?.textContent, S.ACCOUNT_MAC);
+    assert.equal(switchOf(v.box).getAttribute("aria-checked"), "false");
+    await v.done();
+  } finally {
+    globalThis.fetch = was;
   }
 });
 

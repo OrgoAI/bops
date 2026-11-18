@@ -433,6 +433,35 @@ const until = async (check, what, ms = 5000) => {
   agentPhone = null;
 }
 
+/* ---------------- Catching up texts, never where Bops Cloud takes them ---------------- */
+
+{
+  // AgentPhone lists the line's latest messages: one text that came in while Bops was away.
+  const at = new Date(Date.now() + 1000).toISOString();
+  agentPhone = (got) => (got.method === "GET" && got.path === "/v1/numbers/num_ws/messages" ? [200, { data: [{ id: "ap_missed", body: "are you there", from_: OWNER, to: LINE, direction: "inbound", channel: "sms", receivedAt: at }] }] : [404, {}]);
+  const listed = () => apGot.filter((g) => g.path === "/v1/numbers/num_ws/messages").length;
+  const ws = () => S.getState().workspaces.find((w) => w.line?.numberId === "num_ws");
+  try {
+    // Bops Cloud takes this workspace's texts (Workspace.cloudDoes.texts): it catches them up itself, so the Mac never asks.
+    S.update(() => (ws().cloudDoes = { texts: true }));
+    const before = listed();
+    assert.deepEqual(await P.phoneCatchUp(), []);
+    assert.equal(listed(), before, "AgentPhone isn't asked");
+    // Other parts are no part of it.
+    S.update(() => (ws().cloudDoes = { slack: true, digest: true }));
+    assert.deepEqual(await P.phoneCatchUp(), ["ap_missed are you there"]);
+    assert.equal(listed(), before + 1);
+    await until(() => messages().some((m) => m.role === "user" && m.text === "are you there"), "the missed text to reach the chat");
+    // No mirror: as before (handled already, so nothing again).
+    S.update(() => delete ws().cloudDoes);
+    assert.deepEqual(await P.phoneCatchUp(), []);
+    assert.equal(listed(), before + 2);
+  } finally {
+    S.update(() => delete ws().cloudDoes);
+    agentPhone = null;
+  }
+}
+
 console.log(`all phone voice tests passed (${asked.length} fake OpenAI calls, none to the network)`);
 fake.close();
 rmSync(scratch, { recursive: true, force: true });
