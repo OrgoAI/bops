@@ -1,4 +1,7 @@
-import { APP_VERSION_HEADER, BOPS_STATE_LEVEL_HEADER, STATE_LEVEL, TELEMETRY_HEADER } from "@/cloud/protocol";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { APP_VERSION_HEADER, BOPS_STATE_LEVEL_HEADER, RUNNER_BUILD_HEADER, STATE_LEVEL, TELEMETRY_HEADER } from "@/cloud/protocol";
+import { onRunner } from "./persist";
 
 /**
  * This app's version: package.json's, set in the build (next.config.ts). Undefined when it isn't
@@ -17,14 +20,36 @@ export function telemetryHere(): boolean {
   return env.NODE_ENV === "production" || env.BOPS_TELEMETRY === "1";
 }
 
+/** This build's id (Next's .next/BUILD_ID beside the server), read once; undefined when there's none or it isn't one. */
+let buildId: string | null | undefined;
+export const buildIdHere = (): string | undefined => {
+  if (buildId === undefined) {
+    try {
+      const v = readFileSync(join(process.cwd(), ".next/BUILD_ID"), "utf8").trim();
+      buildId = /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : null;
+    } catch {
+      buildId = null;
+    }
+  }
+  return buildId ?? undefined;
+};
+
 /**
  * What tells Bops Cloud which app is calling, for every call to it (cloud/app-version.ts), which state
  * it may be given (STATE_LEVEL: once it has written a user's state, older Macs are kept out of it), and,
- * on a Mac that sends no usage events, that the cloud should send none for what it does either.
+ * on a Mac that sends no usage events, that the cloud should send none for what it does either. A
+ * computer's runner says its build too (RUNNER_BUILD_HEADER): Bops Cloud keeps the owner's record of a
+ * runner only for a version and build of a signed release (cloud/turns.ts recordRunner).
  */
 export const appHeaders = (): Record<string, string> => {
   const v = appVersion();
-  return { ...(v ? { [APP_VERSION_HEADER]: v } : {}), [BOPS_STATE_LEVEL_HEADER]: String(STATE_LEVEL), ...(telemetryHere() ? {} : { [TELEMETRY_HEADER]: "off" }) };
+  const build = onRunner() ? buildIdHere() : undefined;
+  return {
+    ...(v ? { [APP_VERSION_HEADER]: v } : {}),
+    [BOPS_STATE_LEVEL_HEADER]: String(STATE_LEVEL),
+    ...(telemetryHere() ? {} : { [TELEMETRY_HEADER]: "off" }),
+    ...(build ? { [RUNNER_BUILD_HEADER]: build } : {}),
+  };
 };
 
 /**

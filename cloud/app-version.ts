@@ -7,12 +7,15 @@ import { APP_CLIENT_HEADER, APP_UPDATE_REQUIRED, APP_VERSION_HEADER, IOS_CLIENT,
  * Which Bops app each user is on, and keeping old ones out. Every call from the app says its version
  * (APP_VERSION_HEADER, lib/server/app-version.ts); apps before 0.0.18 say nothing. The latest is kept
  * with the user's account: bops.cloud_accounts.app_version (NULL for an app that didn't say) and
- * app_seen_at, written when it changes and otherwise at most every few minutes.
+ * app_seen_at, written when it changes and otherwise at most every few minutes, with the state that Mac
+ * may be given (state_level: state.ts stateLevelOf), which a runner is never updated past. A Mac's alone:
+ * a computer's runner never says either for the Mac (server.ts appCheck).
  *
  * With bops.app_policy's block_below set (Orgo's scripts/notices.sh (OrgoAI/bops-secrets) block 0.0.18), an app older than
  * that, or one that doesn't say, is answered 426 (APP_UPDATE_REQUIRED) on every call but its state's
  * (/v1/state, /v1/messages): those still go through, so nothing the old app holds is lost, and the updated
- * app picks it up. Read again every minute, so it takes effect without a deploy.
+ * app picks it up. A computer's keeper asking whether it may update its runner (/v1/runner/keeper) goes
+ * through too: it's how an old runner gets new. Read again every minute, so it takes effect without a deploy.
  *
  * Bops for iPhone says so (APP_CLIENT_HEADER "ios") with its own version numbers. Those never touch the
  * Mac's: they're kept in cloud_accounts.ios_version and ios_seen_at (only for a user the cloud has set up
@@ -44,25 +47,29 @@ export function olderThan(a: string, b: string): boolean {
 }
 
 const NOTE_MS = 5 * 60_000;
-const noted = new Map<string, { version: string | null; at: number }>();
+const noted = new Map<string, { said: string; at: number }>();
 
-/** Keep the version a user's app said (and when), on the side: a failure to keep it never fails the call. */
-export function noteAppVersion(userId: string, version: string | null): void {
-  note(`mac:${userId}`, version, "UPDATE bops.cloud_accounts SET app_version = $2, app_seen_at = now() WHERE user_id = $1", userId);
+/**
+ * Keep the version a user's Mac said (and when), and the state it may be given (`stateLevel`, state.ts stateLevelOf), on
+ * the side: a failure to keep them never fails the call. Never a computer's runner's (server.ts appCheck).
+ */
+export function noteAppVersion(userId: string, version: string | null, stateLevel: number): void {
+  note(`mac:${userId}`, [version, stateLevel], "UPDATE bops.cloud_accounts SET app_version = $2, state_level = $3, app_seen_at = now() WHERE user_id = $1", userId);
 }
 
 /** The same for Bops for iPhone: its own columns, so the Mac's version stays the Mac's. */
 export function noteIphoneVersion(userId: string, version: string | null): void {
-  note(`ios:${userId}`, version, "UPDATE bops.cloud_accounts SET ios_version = $2, ios_seen_at = now() WHERE user_id = $1", userId);
+  note(`ios:${userId}`, [version], "UPDATE bops.cloud_accounts SET ios_version = $2, ios_seen_at = now() WHERE user_id = $1", userId);
 }
 
 /** Written when it changes, and otherwise at most every few minutes. */
-function note(key: string, version: string | null, sql: string, userId: string) {
+function note(key: string, values: (string | number | null)[], sql: string, userId: string) {
+  const said = JSON.stringify(values);
   const last = noted.get(key);
-  if (last && last.version === version && Date.now() - last.at < NOTE_MS) return;
+  if (last && last.said === said && Date.now() - last.at < NOTE_MS) return;
   if (noted.size > 50_000) noted.clear();
-  noted.set(key, { version, at: Date.now() });
-  void query(sql, [userId, version]).catch((e: Error) => {
+  noted.set(key, { said, at: Date.now() });
+  void query(sql, [userId, ...values]).catch((e: Error) => {
     noted.delete(key);
     console.warn(`[cloud] app version: ${e.message}`);
   });
@@ -72,8 +79,11 @@ export const UPDATE_BOPS = "This version of Bops is too old to keep working. Upd
 /** What an iPhone app too old for the cloud is told (it shows its own words, with a way to the App Store). */
 export const UPDATE_BOPS_IPHONE = "This version of Bops for iPhone is too old to keep working. Update it to keep going.";
 
-/** Calls an old app still makes: its state's, so nothing it holds is lost. */
-const OPEN_TO_OLD_APPS = /^\/v1\/(state|messages)(\/|$)/;
+/**
+ * Calls an old app still makes: its state's, so nothing it holds is lost; and a computer's keeper asking whether it may
+ * update its runner (POST /v1/runner/keeper), as a raised block_below must never stop what brings a runner up to date.
+ */
+const OPEN_TO_OLD_APPS = /^\/v1\/(state|messages|runner\/keeper)(\/|$)/;
 
 /** The oldest app the cloud serves (bops.app_policy.block_below), as last read; null: every app. */
 let blockBelow: string | null = null;

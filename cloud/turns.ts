@@ -20,6 +20,7 @@ import {
   CHAT_NEEDS_UPDATE,
   CHAT_NOT_IN_CLOUD,
   CLOUD_ALL_MIN_VERSION,
+  CLOUD_BY,
   CLOUD_CHAT_MIN_VERSION,
   CLOUD_DOES_PARTS,
   CLOUD_SELF_MIN_VERSION,
@@ -30,6 +31,9 @@ import {
   jobApp,
   MEMBER_MAX_TEXT,
   MESSAGE_TAKEN,
+  RUNNER_BUILD_HEADER,
+  RUNNER_FULL_ACCESS,
+  RUNNER_OWNER_ONLY,
   STORED_ACT_MS,
   TURN_LEASE_MS,
   type ChatSendAnswer,
@@ -47,7 +51,8 @@ import {
   type TurnShown,
 } from "./protocol.ts";
 import { announce, checkUser, loadState, lockedState, lockUser, toJson, writeMessages } from "./state.ts";
-import { noRunnerWords, oldRunnerWords } from "./thread-acts.ts";
+import { latestRelease, releaseOf } from "./runner-release.ts";
+import { noRunnerWords, oldRunnerWords, settingUpWords, updatingWords } from "./thread-acts.ts";
 import { deliverWaitingTo, isConnected } from "./tunnel.ts";
 import { computerUseOf, HOSTNAME, list, viewerAccess, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 
@@ -224,7 +229,8 @@ export async function routingOf(userId: string, wsId: string, c?: pg.PoolClient)
 export type RoutingRow = { mode: "mac" | "cloud"; setBy: string | null; setAt: number; trouble?: Trouble };
 /**
  * Why a workspace switched to the cloud can't answer now (chat_routing.trouble*): a key of the chat's notes (NOTES:
- * stopped, deleted, noHours, hourly, noCredit, paused, cant, noRunner, old), the bot whose computer it is, that computer
+ * stopped, deleted, noHours, hourly, noCredit, paused, cant, noRunner, old, and for an owner at CLOUD_SELF_MIN_VERSION
+ * settingUp, updating and sharedOff: selfNote), the bot whose computer it is, that computer
  * (lowercased), and since when. Said on the workspace (Workspace.chatTrouble) in place of moving it back to the Mac.
  */
 export type Trouble = { note: string; botId: string | null; desktop: string | null; at: number };
@@ -557,7 +563,7 @@ export async function noteTrouble(userId: string, desktop: string, note: string,
  * Whether trouble `t` said on workspace `ws` goes, on the owner's state `blob`: it names a computer none of the
  * workspace's bots works on any more (computerFor `cloud`: a bot moved, or given a new computer), so it says nothing
  * true; or `answered` (a computer whose runner connected, or a turn there ended done) is its computer, or the one its
- * bot works on now. One for an older Bops ("old") stays while what answered is still older than CLOUD_ALL_MIN_VERSION
+ * bot works on now. One for an older Bops ("old", or "updating" while its keeper updates it) stays while what answered is still older than CLOUD_ALL_MIN_VERSION
  * (`version`: what it says it runs; none: not known, so it stays).
  */
 export function troubleGoes(blob: Record<string, unknown>, ws: string, t: Pick<Trouble, "note" | "botId" | "desktop">, answered: { desktop: string; version: string | null } | null): boolean {
@@ -565,7 +571,7 @@ export function troubleGoes(blob: Record<string, unknown>, ws: string, t: Pick<T
   if (t.desktop && !list(blob.bots).some((b) => wsOfBot(b) === ws && on(b) === t.desktop)) return true;
   if (!answered) return false;
   const d = answered.desktop.toLowerCase();
-  if (t.note === "old" && (!answered.version || olderThan(answered.version, CLOUD_ALL_MIN_VERSION))) return false;
+  if ((t.note === "old" || t.note === "updating") && (!answered.version || olderThan(answered.version, CLOUD_ALL_MIN_VERSION))) return false;
   return t.desktop === d || (!!t.botId && computerFor(blob, t.botId, true) === d);
 }
 
@@ -942,6 +948,11 @@ export const NOTES = {
   groupNoComputer: (_owner: string, bot: string) => `${bot} has no computer, so ${bot} can't answer in the cloud. Give ${bot} a computer in ${bot}'s settings.`,
   // Its runner runs a Bops from before group turns (CLOUD_ALL_MIN_VERSION).
   old: (_owner: string, bot: string) => `${bot}'s computer runs an older Bops. The owner's Bops updates it the next time it opens.`,
+  // For an owner whose Mac is at CLOUD_SELF_MIN_VERSION (selfNote): noRunner and old while its computer's keeper is live,
+  // and a computer whose runner couldn't be set up because someone else can use it (RUNNER_FULL_ACCESS).
+  settingUp: (_owner: string, bot: string) => `${bot}'s computer is setting up its Bops, so ${bot} can't answer yet. Send it again in a few minutes.`,
+  updating: (_owner: string, bot: string) => `${bot}'s computer is updating its Bops. Send it again in a few minutes.`,
+  sharedOff: (_owner: string, bot: string) => `${bot}'s computer is shared with the team, and Orgo doesn't let Bops run on it yet, so ${bot} can't answer in the cloud.`,
 };
 
 /** A note from Bops in the chat about a message (role system, its bot named so a member who sees the bot sees it), right after it. */
@@ -996,7 +1007,7 @@ export async function takeMessage(o: {
   /** False: never as everything through the cloud (the owner's Bops from before, which didn't say ChatSendBody.all). */
   cloudAll?: boolean;
 }): Promise<Taken> {
-  const taken = await tx(async (c): Promise<Taken & { old?: { desktop: string; bot: string } }> => {
+  const taken = await tx(async (c): Promise<Taken & { old?: { desktop: string; bot: string; note: "old" | SelfNote } }> => {
     await lockUser(c, o.account);
     const blob = await lockedState(c, o.account);
     const routed = !o.byRow || (await routingOf(o.account, o.wsId, c)).cloud;
@@ -1015,16 +1026,18 @@ export async function takeMessage(o: {
     let own: string | null = null;
     let desktop: string | null = null;
     let none: string | null = null;
-    let old: { desktop: string; bot: string } | undefined;
+    let old: { desktop: string; bot: string; note: "old" | SelfNote } | undefined;
     if (all && group) {
       const g = groupComputer(blob, o.chatId);
       if ("desktop" in g) {
         // Its runner, by its own word or the owner's Mac's record (runnerVersionOf): one from before group turns would
         // answer nothing. None known yet: owed, and it ends with noRunner if none comes.
+        // (Said as updating while its keeper is live, for an owner at CLOUD_SELF_MIN_VERSION: selfNote.)
         const v = await runnerVersionOf(c, o.account, blob, g.desktop);
         if (v && olderThan(v, CLOUD_ALL_MIN_VERSION)) {
-          none = NOTES.old(owner, nameOf(blob, botId));
-          old = { desktop: g.desktop, bot: botId };
+          const said = await selfNote(c, o.account, blob, g.desktop, "old");
+          none = NOTES[said](owner, nameOf(blob, botId));
+          old = { desktop: g.desktop, bot: botId, note: said };
         } else desktop = g.desktop;
       } else none = g.why === "split" ? NOTES.groupSplit() : NOTES.groupNoComputer(owner, g.bot ? nameOf(blob, g.bot) : nameOf(blob, botId));
     } else if (all) {
@@ -1095,8 +1108,10 @@ export async function takeMessage(o: {
       shown(taken.turn, "owed");
       void dispatch(taken.turn);
     }
-    // A runner too old for this: said on the workspace too (its own transaction, after this one).
-    if (taken.old) void noteTrouble(o.account, taken.old.desktop, "old", taken.old.bot).catch((e: Error) => console.warn(`[turns] trouble: ${e.message}`));
+    // A runner too old for this: said on the workspace too (its own transaction, after this one), and while its keeper is
+    // live, told to look for its update now.
+    if (taken.old?.note === "updating") nudgeUpdate(o.account, deviceIdOf(o.account, taken.old.desktop));
+    if (taken.old) void noteTrouble(o.account, taken.old.desktop, taken.old.note, taken.old.bot).catch((e: Error) => console.warn(`[turns] trouble: ${e.message}`));
   }
   return { message: taken.message, turn: taken.turn, fresh: taken.fresh, where: taken.where };
 }
@@ -1109,6 +1124,8 @@ const APP_ACTS_KEPT = 10;
 const cleanSaid = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 600) : null);
 /** A job turn done with no result: a runner from before GitHub jobs took it, read a note of Bops' and answered nothing. */
 export const JOB_OLD_RUNNER = "The app's computer needs a newer Bops first. Try again once its computer's Bops is updated.";
+/** The same, while its computer's own keeper updates its Bops (keeperLive): told to look for the update now (nudgeUpdate). */
+export const JOB_UPDATING = "The app's computer is updating its Bops. Try again in a few minutes.";
 export const JOB_STOPPED = "That stopped before it was done. Try again.";
 /** A job whose computer wrote its note but whose end never came back (sweepTurns): how it went isn't known. */
 const JOB_LOST = "The computer's answer got lost on the way. Look at the app before you try again.";
@@ -1241,6 +1258,10 @@ const JOB_NOTES: Record<string, (owner: string, bot: string) => string> = {
   midway: (_o, bot) => `${bot}'s computer stopped partway through. Look at the app, then try again.`,
   // A runner from before CLOUD_ALL_MIN_VERSION claimed a job only newer ones know (claim): it did nothing.
   oldRunner: (_o, bot) => `${bot}'s computer took this on an older Bops. Try again once it's updated.`,
+  // NOTES' settingUp, updating and sharedOff (selfNote), for a job.
+  settingUp: (_o, bot) => settingUpWords(bot),
+  updating: (_o, bot) => updatingWords(bot),
+  sharedOff: (_o, bot) => `${bot}'s computer is shared with the team, and Orgo doesn't let Bops run on it yet.`,
 };
 /** One of the words a job's end is said with (JOB_NOTES' keys), or null for a key that has none. */
 export const jobNote = (key: string, owner: string, bot: string): string | null => (Object.hasOwn(JOB_NOTES, key) ? JOB_NOTES[key](owner, bot) : null);
@@ -1367,7 +1388,7 @@ export const jobDeadline = (job: TurnJob): number => (isGithubJob(job) || isRemo
  * one too old, no bot there given the GitHub key, another job still going on the app, or (a remove) a copy left on
  * another computer ("behind", said before "lost": the copy is what keeps it from going).
  */
-export type AppJobRefusal = "lost" | "noBot" | "moved" | "noComputer" | "runner" | "old" | "key" | "busy" | "behind";
+export type AppJobRefusal = "lost" | "noBot" | "moved" | "noComputer" | "runner" | "old" | "key" | "busy" | "behind" | SelfNote;
 export type AppJobTaken = { where: "computer"; turn: TurnRow; fresh: boolean } | { where: "refused"; why: AppJobRefusal; bot: string };
 
 /**
@@ -1407,7 +1428,7 @@ export async function takeAppJob(o: {
   const min = o.min ?? (isGithubJob(o.job) ? GITHUB_ACTS_MIN_VERSION : CLOUD_ALL_MIN_VERSION);
   const needsKey = o.needsKey ?? isGithubJob(o.job);
   const cloud = !!o.cloud;
-  const taken = await tx(async (c): Promise<AppJobTaken & { written?: Record<string, unknown> }> => {
+  const taken = await tx(async (c): Promise<AppJobTaken & { written?: Record<string, unknown>; nudge?: string }> => {
     await lockUser(c, o.account);
     let blob = await lockedState(c, o.account);
     o.check(blob);
@@ -1434,8 +1455,14 @@ export async function takeAppJob(o: {
     const r = runnerAt(blob, desktop);
     const asBefore = r?.status === "running" && typeof r.version === "string" && VERSION.test(r.version);
     const v = !r || (!cloud && r.down) || (isGithubJob(o.job) && !asBefore) ? null : await runnerVersionOf(c, o.account, blob, desktop);
-    if (!v) return { where: "refused", why: "runner", bot };
-    if (olderThan(v, min)) return { where: "refused", why: cloud ? "old" : "runner", bot };
+    // With `cloud`, for an owner at CLOUD_SELF_MIN_VERSION: said as what its own computer does about it (selfNote), and a
+    // runner too old while its keeper is live is told to look for its update now (after: nudgeUpdate).
+    if (!v || olderThan(v, min)) {
+      const why = !v || !cloud ? ("runner" as const) : ("old" as const);
+      const self = cloud ? await selfNote(c, o.account, blob, desktop, why === "old" ? "old" : "noRunner") : null;
+      if (self === "settingUp" || self === "updating" || self === "sharedOff") return { where: "refused", why: self, bot, ...(self === "updating" ? { nudge: desktop } : {}) };
+      return { where: "refused", why, bot };
+    }
     if (needsKey) {
       // A bot that works on this computer itself (never one set to work on the owner's Mac, even with `cloud`): the only
       // bot Orgo's broker lets this computer call GitHub for, as its runner checks it (lib/server/hosted-apps.ts githubKeyHere).
@@ -1468,6 +1495,7 @@ export async function takeAppJob(o: {
     void dispatch(taken.turn);
   }
   if (taken.where === "computer") return { where: "computer", turn: taken.turn, fresh: taken.fresh };
+  if (taken.nudge) nudgeUpdate(o.account, deviceIdOf(o.account, taken.nudge));
   return { where: "refused", why: taken.why, bot: taken.bot };
 }
 
@@ -1592,6 +1620,140 @@ function toRunner(userId: string, device: string, type: string, data: unknown): 
 export function nudgeRunners(userId: string) {
   const prefix = `${userId}\0`;
   for (const [k, set] of runners) if (k.startsWith(prefix)) for (const s of set) s.write("state", {});
+}
+
+/* ---------------- Runners that set up and update themselves (protocol.ts CLOUD_SELF_MIN_VERSION) ---------------- */
+
+/**
+ * Every runner listening hears "update" once: a signed release Bops Cloud hadn't seen is out (runner-release.ts
+ * checkReleases), so its computer's keeper looks for it now rather than at its next look. A runner from before reads
+ * nothing in it.
+ */
+export function nudgeUpdates() {
+  for (const set of runners.values()) for (const s of set) s.write("update", {});
+}
+/** The runner of `device` hears "update" (something it's too old for was refused while its keeper is live). Whether one listens. */
+export const nudgeUpdate = (userId: string, device: string) => toRunner(userId, device, "update", {});
+
+/** How long after its keeper last asked (bops.runner_keeper.asked_at) a computer counts as setting up and updating its own Bops. */
+export const KEEPER_LIVE_MS = 2 * 3600_000;
+
+/**
+ * Whether computer `desktop` of the owner's sets up and updates its own Bops now: its keeper asked Bops Cloud within
+ * KEEPER_LIVE_MS (POST /v1/runner/keeper), and the owner's last Mac is at CLOUD_SELF_MIN_VERSION. Only then is a computer
+ * with no runner said to be setting up its Bops, and one too old to be updating it (selfNote); else today's words.
+ */
+export async function keeperLive(userId: string, desktop: string, c?: pg.PoolClient | null): Promise<boolean> {
+  if (!(await macNewEnough(userId, CLOUD_SELF_MIN_VERSION, c ?? undefined))) return false;
+  const sql = "SELECT 1 FROM bops.runner_keeper WHERE user_id = $1 AND desktop_id = $2 AND asked_at > now() - make_interval(secs => $3)";
+  const args = [userId, desktop.toLowerCase(), KEEPER_LIVE_MS / 1000];
+  return ((c ? await c.query(sql, args) : await query(sql, args)).rowCount ?? 0) > 0;
+}
+
+/** The notes selfNote may give in place of today's. */
+export type SelfNote = "settingUp" | "updating" | "sharedOff";
+
+/**
+ * What a computer that can't do something now is said to be doing about it (a NOTES and JOB_NOTES key), for an owner whose
+ * last Mac is at CLOUD_SELF_MIN_VERSION (older: `note` as it is, exactly as before): no runner ("noRunner") on a computer
+ * whose runner the owner's record says couldn't be set up because someone else can use it (RUNNER_FULL_ACCESS) is
+ * "sharedOff"; else, with its keeper live (keeperLive), no runner is "settingUp" and one too old ("old", "oldRunner")
+ * "updating". `blob`: the owner's state (read when not given), `c`: the transaction to read in, if any.
+ */
+export async function selfNote<N extends string>(c: pg.PoolClient | null, userId: string, blob: Record<string, unknown> | null, desktop: string, note: N): Promise<N | SelfNote> {
+  const none = note === "noRunner";
+  if (!none && note !== "old" && note !== "oldRunner") return note;
+  if (!(await macNewEnough(userId, CLOUD_SELF_MIN_VERSION, c ?? undefined))) return note;
+  if (none) {
+    const b = blob ?? (((await loadState(userId))?.state ?? {}) as Record<string, unknown>);
+    const r = runnerAt(b, desktop.toLowerCase());
+    if (r?.status === "failed" && r.error === RUNNER_FULL_ACCESS) return "sharedOff";
+  }
+  if (!(await keeperLive(userId, desktop, c))) return note;
+  return none ? "settingUp" : "updating";
+}
+
+/** What a runner said of itself as it connected (runnerLive): its version and build, and what it signed in with. */
+export type RunnerSaid = { version: string; buildId: string; auth: "identity" | "key" };
+
+/**
+ * The owner's record of the runner on computer `desktop` (AppState.runners, lib/types.ts RunnerState) as Bops Cloud would
+ * have it now that its runner connected saying `said` (at `at`), or null to leave it as it is. Only for a computer a bot of
+ * theirs works on (computerFor `cloud`: a bot set to work on the Mac too, as its computer answers it where everything goes
+ * through the cloud):
+ *
+ * - none: running, by CLOUD_BY, with `shared` where a workspace whose bots work there has members (memberAccess entries);
+ * - running but older, or (one Bops Cloud wrote) the same version with another build: caught up (version, buildId, at,
+ *   auth), keeping who set it up, its key and `shared`, and dropping `upgrading` once that's at or below the new version;
+ * - failed, but not as someone else can use it or only the owner may (RUNNER_FULL_ACCESS, RUNNER_OWNER_ONLY), and before
+ *   this connect: running, by CLOUD_BY, keeping its key and `shared`;
+ * - being set up, being stopped, or failed for those two: as it is.
+ *
+ * The key is the record's own (any case), else the bot's computer id as the state has it (the runner looks it up so).
+ */
+export function cloudRecord(blob: Record<string, unknown>, desktop: string, said: RunnerSaid, at: number): { key: string; record: Record<string, unknown> } | null {
+  const d = desktop.toLowerCase();
+  const bots = list(blob.bots).filter((b) => typeof b.id === "string");
+  const on = bots.filter((b) => computerFor(blob, b.id as string, true) === d);
+  if (!on.length) return null;
+  const all = isObject(blob.runners) ? blob.runners : {};
+  const had = Object.keys(all).find((k) => k.toLowerCase() === d);
+  const r = had && isObject(all[had]) ? (all[had] as Record<string, unknown>) : undefined;
+  const id = workBotOf(on[0], bots).computerId;
+  const key = had ?? (typeof id === "string" && id.toLowerCase() === d ? id : d);
+  const wss = new Set(on.map(wsOfBot));
+  const team = list(blob.workspaces).some((w) => wss.has(w.id as string) && isObject(w.memberAccess) && Object.keys(w.memberAccess).length > 0);
+  const fresh = (keep: Record<string, unknown> = {}) => ({
+    status: "running",
+    version: said.version,
+    buildId: said.buildId,
+    ...(keep.keyMade !== undefined ? { keyMade: keep.keyMade } : {}),
+    ...(typeof keep.keyId === "string" ? { keyId: keep.keyId } : {}),
+    auth: said.auth,
+    by: CLOUD_BY,
+    at,
+    ...(team || keep.shared === true ? { shared: true } : {}),
+  });
+  if (!r) return { key, record: fresh() };
+  if (r.status === "running") {
+    const v = typeof r.version === "string" && VERSION.test(r.version) ? r.version : null;
+    const older = !v || olderThan(v, said.version);
+    const rebuilt = v === said.version && r.buildId !== said.buildId && r.by === CLOUD_BY;
+    if (!older && !rebuilt) return null;
+    const record: Record<string, unknown> = { ...r, version: said.version, buildId: said.buildId, at, auth: said.auth };
+    const up = isObject(r.upgrading) && typeof r.upgrading.version === "string" ? r.upgrading.version : null;
+    if (r.upgrading !== undefined && (!up || !VERSION.test(up) || !olderThan(said.version, up))) delete record.upgrading;
+    return { key, record };
+  }
+  if (r.status === "failed" && r.error !== RUNNER_FULL_ACCESS && r.error !== RUNNER_OWNER_ONLY && typeof r.at === "number" && r.at < at) return { key, record: fresh(r) };
+  return null;
+}
+
+/**
+ * Write the owner's record of the runner on computer `desktop` that just connected saying `said` (cloudRecord), so a runner
+ * that set itself up, or updated itself, is one the owner's Bops, its own routines and its app jobs count as up (as a
+ * record the owner's Mac wrote: runner.ts runsHere, takeAppJob). Only for an owner whose last Mac is at
+ * CLOUD_SELF_MIN_VERSION, and only for a version and build of a signed release (runner-release.ts releaseOf): one that
+ * says anything else is never written. Under the owner's lock, and only on a change; every viewer hears it. Whether it
+ * wrote. Never throws for a write that didn't happen: the caller's stream goes on either way.
+ */
+export async function recordRunner(userId: string, desktop: string, said: RunnerSaid): Promise<boolean> {
+  if (releaseOf(said.version)?.buildId !== said.buildId) return false;
+  if (!(await macNewEnough(userId, CLOUD_SELF_MIN_VERSION))) return false;
+  const at = Date.now();
+  const next = await tx(async (c) => {
+    await lockUser(c, userId);
+    const blob = await lockedState(c, userId);
+    const got = cloudRecord(blob, desktop, said, at);
+    if (!got) return null;
+    const out = { ...blob, runners: { ...(isObject(blob.runners) ? blob.runners : {}), [got.key]: got.record } };
+    await writeOwnerState(c, userId, out);
+    return out;
+  });
+  if (!next) return false;
+  announce(userId);
+  stateWritten(userId, next, "cloud");
+  return true;
 }
 
 /** How often one computer is asked to share its apps' view at most (nudgeAppViews), and how old the newest view must be first. */
@@ -1775,7 +1937,8 @@ async function wakeLoop(userId: string, desktopId: string) {
     let wait: number;
     running = a.state === "running" ? running + 1 : a.state === "retry" ? running : 0;
     if (running >= RUNNING_WITHOUT_RUNNER) {
-      await endWaiting(userId, desktopId, "noRunner");
+      // (For an owner at CLOUD_SELF_MIN_VERSION: said as its keeper setting it up, or as a shared computer Bops can't run on.)
+      await endWaiting(userId, desktopId, await selfNote(null, userId, null, desktopId, "noRunner"));
       return;
     }
     if (a.state === "running" || a.state === "woke" || a.state === "storage" || a.state === "retry") {
@@ -1829,6 +1992,23 @@ const computerOnly = (user: CloudUser | null) => {
   if (!user?.computer) throw new HttpError(403, "Only a computer's runner does this.");
   return user.computer;
 };
+
+/** The build a runner says it runs (RUNNER_BUILD_HEADER), or null: none, or not one. */
+const buildOf = (req: IncomingMessage): string | null => {
+  const h = req.headers[RUNNER_BUILD_HEADER];
+  const v = (Array.isArray(h) ? h[0] : h)?.trim();
+  return v && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : null;
+};
+/** When each computer last said it runs a version newer than any signed release (runnerLive), so it's said once a day. */
+const tooNewSaid = new Map<string, number>();
+function tooNew(desktop: string, said: string, newest: string) {
+  const now = Date.now();
+  const last = tooNewSaid.get(desktop);
+  if (last !== undefined && now - last < 24 * 3600_000) return;
+  if (tooNewSaid.size > 10_000) tooNewSaid.clear();
+  tooNewSaid.set(desktop, now);
+  console.warn(`[turns] the runner on ${desktop} says it runs ${said}, newer than the newest signed release (${newest}): not kept`);
+}
 
 /** GET /v1/runner/live: a computer's runner listens for its turns (and its state changing) while it's up. */
 const runnerLive: Route = {
@@ -1885,15 +2065,25 @@ const runnerLive: Route = {
     }
     // What it ran as it last connected (null: never seen): a Bops new to it may change what Bops Cloud does for its workspaces.
     const before = said && VERSION.test(said) ? await query<{ version: string }>("SELECT version FROM bops.runner_seen WHERE user_id = $1 AND desktop_id = $2", [userId, c.desktopId.toLowerCase()]).then((r) => r.rows[0]?.version ?? null, () => undefined) : undefined;
-    // And kept, past its going (runnerVersionOf): what it runs is what it ran, whether it naps or the owner's Mac is shut.
-    if (said && VERSION.test(said))
+    // And kept, past its going (runnerVersionOf): what it runs is what it ran, whether it naps or the owner's Mac is shut;
+    // with its build (RUNNER_BUILD_HEADER, none from a runner before CLOUD_SELF_MIN_VERSION) and what it signs in with. A
+    // version newer than the newest signed release Bops Cloud knows is no runner's own word: nothing new is kept of it.
+    const build = buildOf(req);
+    const auth = c.kind === "vm_identity" ? "identity" : "key";
+    const top = latestRelease();
+    const capped = !!said && VERSION.test(said) && !!top && olderThan(top.version, said);
+    if (capped) tooNew(c.desktopId, said!, top!.version);
+    else if (said && VERSION.test(said)) {
       await query(
-        `INSERT INTO bops.runner_seen (user_id, desktop_id, device_id, version) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (user_id, desktop_id) DO UPDATE SET device_id = $3, version = $4, seen_at = now()`,
-        [userId, c.desktopId.toLowerCase(), c.device, said],
+        `INSERT INTO bops.runner_seen (user_id, desktop_id, device_id, version, build_id, auth) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (user_id, desktop_id) DO UPDATE SET device_id = $3, version = $4, build_id = $5, auth = $6, seen_at = now()`,
+        [userId, c.desktopId.toLowerCase(), c.device, said, build, auth],
       ).catch((e: Error) => console.warn(`[turns] runner seen: ${e.message}`));
+      // A runner of a signed release: the owner's record of it written or caught up (an owner at CLOUD_SELF_MIN_VERSION).
+      if (build && !done) await recordRunner(userId, c.desktopId, { version: said, buildId: build, auth }).catch((e: Error) => console.warn(`[turns] runner record: ${e.message}`));
+    }
     // At a Bops it didn't run before: the mirror of what Bops Cloud does (cloudDoesFor) put right, under the owner's lock.
-    if (before !== undefined && before !== said && !done) void remirror(userId).catch((e: Error) => console.warn(`[turns] re-mirror: ${e.message}`));
+    if (!capped && before !== undefined && before !== said && !done) void remirror(userId).catch((e: Error) => console.warn(`[turns] re-mirror: ${e.message}`));
     // Its computer answers again: what was said of it on its cloud workspaces goes (an "old" one only once it's new enough).
     if (!done) await clearTrouble(userId, { desktop: c.desktopId, version: said && VERSION.test(said) ? said : null }).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
     // A wake waiting for it carries on now, and what it's owed goes to it.
@@ -1974,7 +2164,7 @@ const botsOfChat = (blob: Record<string, unknown>, chatId: string): string[] => 
 
 async function claim(user: CloudUser, id: string, version: string | null): Promise<RunnerClaim> {
   const c = user.computer!;
-  const out = await tx(async (db): Promise<{ ok: RunnerClaim; t: TurnRow } | { refused: Ended; words?: string }> => {
+  const out = await tx(async (db): Promise<{ ok: RunnerClaim; t: TurnRow } | { refused: Ended; words?: string; nudge?: true }> => {
     await lockUser(db, user.id);
     const raw = (await db.query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND id = $2 FOR UPDATE`, [user.id, id])).rows[0];
     if (!raw || raw.target_device !== c.device) throw new HttpError(404, "No such turn");
@@ -2024,16 +2214,20 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
     }
     // A job only runners from CLOUD_ALL_MIN_VERSION on know, claimed by an older one (by its own word, this call's): it
     // would read Bops' note and do nothing, or worse, so it ends here and the app (or chat) says why.
+    // While its computer's keeper is live (an owner at CLOUD_SELF_MIN_VERSION: selfNote), said as updating, and the
+    // runner told to look for its update now (after: nudgeUpdate).
     const job = t.member?.job;
     if (job && !isGithubJob(job) && (!version || olderThan(version, CLOUD_ALL_MIN_VERSION))) {
-      await db.query("UPDATE bops.chat_turns SET state = 'failed', note = 'oldRunner', updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id]);
-      return { refused: { ...t, state: "failed", note: "oldRunner" }, words: JOB_NOTES.oldRunner(ownerOf(blob), nameOf(blob, t.botId)) };
+      const note = await selfNote(db, user.id, blob, t.desktopId, "oldRunner");
+      await db.query("UPDATE bops.chat_turns SET state = 'failed', note = $3, updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id, note]);
+      return { refused: { ...t, state: "failed", note }, words: JOB_NOTES[note](ownerOf(blob), nameOf(blob, t.botId)), ...(note === "updating" ? { nudge: true as const } : {}) };
     }
     // A turn only runners from its min_version on run (a group's), claimed by an older one (by its own word, this call's):
     // it would answer nothing, so it ends here with the chat's note, and the workspace says so too.
     if (t.minVersion && (!version || olderThan(version, t.minVersion))) {
-      await db.query("UPDATE bops.chat_turns SET state = 'failed', note = 'old', updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id]);
-      return { refused: { ...t, state: "failed", note: "old" }, words: NOTES.old(ownerOf(blob), nameOf(blob, t.botId)) };
+      const note = await selfNote(db, user.id, blob, t.desktopId, "old");
+      await db.query("UPDATE bops.chat_turns SET state = 'failed', note = $3, updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id, note]);
+      return { refused: { ...t, state: "failed", note }, words: NOTES[note](ownerOf(blob), nameOf(blob, t.botId)), ...(note === "updating" ? { nudge: true as const } : {}) };
     }
     // An app's job holds its app's lease (app-lease.ts) from here to its end. Held by another (one of the owner's Macs, a
     // runner, another job): nothing changes, and the sweep offers it again until it's free or the job's deadline.
@@ -2051,8 +2245,10 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
     };
   });
   if ("refused" in out) {
+    if (out.nudge) nudgeUpdate(user.id, c.device);
     await afterRevoked(out.refused);
-    if (out.refused.note === "old") await noteTrouble(user.id, out.refused.desktopId, "old", out.refused.botId).catch((e: Error) => console.warn(`[turns] trouble: ${e.message}`));
+    if (out.refused.note === "old" || (out.refused.note === "updating" && !out.refused.member?.job))
+      await noteTrouble(user.id, out.refused.desktopId, out.refused.note, out.refused.botId).catch((e: Error) => console.warn(`[turns] trouble: ${e.message}`));
     throw new HttpError(410, out.words ?? "That turn isn't to be answered any more.", { code: "over" });
   }
   shown(out.t, "thinking");
@@ -2222,6 +2418,7 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
   }
   let wrote = false;
   let jobWritten: Record<string, unknown> | null = null;
+  let nudge = false;
   const t = await tx(async (db) => {
     await lockUser(db, user.id);
     const raw = (await db.query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND id = $2 FOR UPDATE`, [user.id, id])).rows[0];
@@ -2264,7 +2461,11 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
       const blob = await lockedState(db, user.id);
       const ok = state === "done" && res?.ok === true;
       const turn = turnOf(raw);
-      const old = chatJob(turn) ? JOB_NOTES.oldRunner(ownerOf(blob), nameOf(blob, turn.botId)) : JOB_OLD_RUNNER;
+      // (Where everything goes through the cloud, while its keeper is live, for an owner at CLOUD_SELF_MIN_VERSION: said as
+      // updating, and the runner told to look now. A GitHub job of a workspace on the Mac waits for the Mac's update, as before.)
+      const looked = !cleanSaid(res?.said) && !note && state === "done" && (await allCloud(user.id, raw.ws_id, db)) ? await selfNote(db, user.id, blob, raw.desktop_id, "oldRunner") : "oldRunner";
+      nudge = looked === "updating";
+      const old = chatJob(turn) ? JOB_NOTES[looked](ownerOf(blob), nameOf(blob, turn.botId)) : nudge ? JOB_UPDATING : JOB_OLD_RUNNER;
       const said = cleanSaid(res?.said) ?? (note ? note : state === "done" ? old : JOB_STOPPED);
       const removed = ok && (res?.removed === "app" || res?.removed === "site") ? res.removed : undefined;
       const job = raw.member.job;
@@ -2293,6 +2494,7 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
     announce(user.id);
     stateWritten(user.id, jobWritten, "cloud");
   }
+  if (nudge) nudgeUpdate(user.id, user.computer!.device);
   if (wrote) announce(user.id, { chats: [t.chatId], by: "cloud" });
   shown(t, state === "paused" ? "paused" : state === "failed" ? "failed" : "done", note ?? undefined);
   if (state !== "paused") void nextOf(user.id, t.chatId).catch(() => {});

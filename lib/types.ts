@@ -1897,7 +1897,8 @@ export type AppState = {
  * frozen, in error), or asleep with one of its routines well past its time (Orgo's waker didn't wake it:
  * Free hours used up, paused, unfunded), as Orgo said (`status`) at `at`: its routines wait for it, saying
  * why, and run on it once it's up again; the Mac never takes them over (runner-install.ts lookDown). A look
- * that finds it up clears it. Only a Mac writes it.
+ * that finds it up clears it. A Mac writes it. Bops Cloud writes one for a runner of a signed release that
+ * connects with none, and catches its version up after it updated itself (`by: "cloud"`, cloud/turns.ts recordRunner).
  */
 export type RunnerState = {
   status: "installing" | "running" | "failed" | "stopping";

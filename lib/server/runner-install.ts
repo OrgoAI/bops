@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { RUNNER_FULL_ACCESS, RUNNER_OWNER_ONLY } from "@/cloud/protocol";
 import { computerAsleep, computerStaysDown, live, pausedForOk, RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, workspaceOf, type AppState, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { forgetGoneMembers, othersCanUse } from "./members";
@@ -92,9 +93,9 @@ import { AUTH_LINE, BUNDLE_NAME, BUSY_LINE, HEALTH_SCRIPT, installScript, KEEPER
  */
 
 const NO_BUNDLE = "no server bundle";
-/** orgo-web's 409 full_access_member says "Someone else can use this workspace." */
-const FULL_ACCESS = "someone else can use this workspace";
-const OWNER_ONLY = "only the workspace's owner can set a runner up there";
+/** orgo-web's 409 full_access_member says "Someone else can use this workspace." Bops Cloud reads both (cloud/protocol.ts). */
+const FULL_ACCESS = RUNNER_FULL_ACCESS;
+const OWNER_ONLY = RUNNER_OWNER_ONLY;
 /** Why a runner marked up isn't any more: its program is gone or stopped on its computer (stillRuns). */
 const GONE_THERE = "it stopped on its computer";
 /** Why its threads ended, in each case. */

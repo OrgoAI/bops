@@ -213,7 +213,7 @@ const count = async (table: string, userId: string, column = "user_id") => Numbe
 /** Every table that names a user, and how many rows each has for this one. */
 async function rowsOf(userId: string) {
   const out: Record<string, number> = {};
-  for (const t of ["app_state", "app_state_backups", "chat_messages", "chat_routing", "chat_turns", "runner_presence", "runner_seen", "app_views", "app_leases", "cloud_accounts", "cloud_agents", "cloud_numbers", "cloud_objects", "cloud_pending", "cloud_usage", "mail_handles", "mail_inboxes", "notice_dismissals", "phone_lines", "plans", "slack_links"])
+  for (const t of ["app_state", "app_state_backups", "chat_messages", "chat_routing", "chat_turns", "runner_presence", "runner_seen", "runner_keeper", "app_views", "app_leases", "cloud_accounts", "cloud_agents", "cloud_numbers", "cloud_objects", "cloud_pending", "cloud_usage", "mail_handles", "mail_inboxes", "notice_dismissals", "phone_lines", "plans", "slack_links"])
     out[t] = await count(t, userId);
   out.owner_phones = await count("owner_phones", userId, "orgo_user_id");
   out.owner_emails = await count("owner_emails", userId, "orgo_user_id");
@@ -224,7 +224,7 @@ const nothingOf = (rows: Record<string, number>) => Object.fromEntries(Object.ke
 
 const ZERO = {
   app_state: 0, app_state_backups: 0, chat_messages: 0, chat_routing: 0, chat_turns: 0, cloud_accounts: 0, cloud_agents: 0, cloud_limits: 0, cloud_numbers: 0, cloud_objects: 0,
-  cloud_pending: 0, runner_presence: 0, runner_seen: 0, app_views: 0, app_leases: 0, cloud_usage: 0, mail_inboxes: 0, notice_dismissals: 0, owner_emails: 0, owner_phones: 0, phone_lines: 0, plans: 0, slack_links: 0,
+  cloud_pending: 0, runner_presence: 0, runner_seen: 0, runner_keeper: 0, app_views: 0, app_leases: 0, cloud_usage: 0, mail_inboxes: 0, notice_dismissals: 0, owner_emails: 0, owner_phones: 0, phone_lines: 0, plans: 0, slack_links: 0,
 };
 const NO_PROVIDERS = { agentphone: { numbers: 0 }, agentmail: { inboxes: 0, pods: 0 }, honcho: { workspaces: 0 }, openai: { responses: 0 }, composio: { connectedAccounts: 0 } };
 
@@ -250,14 +250,15 @@ async function fullUser() {
   await query("INSERT INTO bops.chat_messages (user_id, id, chat_id, at, json) VALUES ($1, 'm1', 'bot:boppy', 1, '{\"id\":\"m1\",\"text\":\"hi\"}'), ($1, 'm2', 'bot:boppy', 2, NULL)", [id]);
   await query("INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, desktop_id, target_device, state, deadline, human_at) VALUES ($1, 'turn_m1', 'm1', 'bot:boppy', 'boppy', 'ws_main', 'd1', 'dev1', 'owed', now(), 1)", [id]);
   await query("INSERT INTO bops.runner_presence (user_id, device_id, desktop_id) VALUES ($1, 'dev1', 'd1')", [id]);
-  await query("INSERT INTO bops.runner_seen (user_id, desktop_id, device_id, version) VALUES ($1, 'd1', 'dev1', '0.0.54')", [id]);
+  await query("INSERT INTO bops.runner_seen (user_id, desktop_id, device_id, version, build_id, auth) VALUES ($1, 'd1', 'dev1', '0.0.54', 'b54', 'identity')", [id]);
+  await query("INSERT INTO bops.runner_keeper (user_id, desktop_id, keeper, answer, why, asked_at) VALUES ($1, 'd1', '0.0.55', 'nothing', 'upToDate', now())", [id]);
   await query("INSERT INTO bops.app_views (user_id, ws_id, app, view, view_at) VALUES ($1, 'ws_main', 'demo-app', '{}'::jsonb, now())", [id]);
   await query("INSERT INTO bops.app_leases (user_id, ws_id, app, holder, device_id, kind, until) VALUES ($1, 'ws_main', 'demo-app', 'mac:dev1:aaaa0001', 'dev1', 'deploy', now() + interval '90 seconds')", [id]);
   await query("INSERT INTO bops.chat_routing (user_id, ws_id, mode) VALUES ($1, 'ws_main', 'cloud')", [id]);
   await query("INSERT INTO bops.app_state_backups (user_id, state) VALUES ($1, '{\"messages\":[]}')", [id]);
   await query("INSERT INTO bops.owner_phones (orgo_user_id, phone_e164, consent_at, verified_at) VALUES ($1, $2, now(), now())", [id, phone]);
   await query("INSERT INTO bops.owner_emails (orgo_user_id, email, verified_at) VALUES ($1, $2, now())", [id, `${id}@example.com`]);
-  await query("INSERT INTO bops.cloud_accounts (user_id, email, agentmail_pod_id, agentmail_key_sealed, agentphone_sub_account, app_version) VALUES ($1, $2, $3, $4, $5, '0.0.31')", [id, `${id}@example.com`, pod, seal("am_pod_key"), sub]);
+  await query("INSERT INTO bops.cloud_accounts (user_id, email, agentmail_pod_id, agentmail_key_sealed, agentphone_sub_account, app_version, state_level) VALUES ($1, $2, $3, $4, $5, '0.0.31', 4)", [id, `${id}@example.com`, pod, seal("am_pod_key"), sub]);
   await query("INSERT INTO bops.cloud_agents (agent_id, user_id, secret_sealed) VALUES ($1, $2, $3)", [`agent_${hex}`, id, seal("whsec")]);
   await query("INSERT INTO bops.cloud_numbers (digits, user_id, number_id, e164) VALUES ($1, $2, $3, $4)", [line.slice(-10), id, `num_${hex}`, line]);
   await query(
@@ -347,7 +348,7 @@ test("everything of the user's goes, here and at every provider, with counts; th
   const r = await deleteCall({ userId: u.id });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.deepEqual(r.json.deleted, {
-    ...ZERO, app_state: 1, app_state_backups: 1, chat_messages: 2, chat_routing: 1, chat_turns: 1, runner_presence: 1, runner_seen: 1, app_views: 1, app_leases: 1, cloud_accounts: 1, cloud_agents: 1, cloud_limits: 2, cloud_numbers: 1,
+    ...ZERO, app_state: 1, app_state_backups: 1, chat_messages: 2, chat_routing: 1, chat_turns: 1, runner_presence: 1, runner_seen: 1, runner_keeper: 1, app_views: 1, app_leases: 1, cloud_accounts: 1, cloud_agents: 1, cloud_limits: 2, cloud_numbers: 1,
     // An agent session and a code's hold at once; two responses and the connected account once their provider deleted them.
     cloud_objects: 5,
     cloud_pending: 1, cloud_usage: 1, mail_inboxes: 1, notice_dismissals: 1, owner_emails: 1, owner_phones: 1,
@@ -435,7 +436,7 @@ test("a provider that fails is 502 and keeps only what the retry needs; the retr
   const owner = newNumber();
   await query("INSERT INTO bops.app_state (user_id, state, version) VALUES ($1, '{\"installId\":\"i\"}', 2)", [id]);
   await query("INSERT INTO bops.chat_messages (user_id, id, chat_id, at, json) VALUES ($1, 'm1', 'bot:b', 1, '{\"id\":\"m1\"}')", [id]);
-  await query("INSERT INTO bops.cloud_accounts (user_id, email, agentmail_key_sealed, agentphone_sub_account) VALUES ($1, $2, $3, $4)", [id, `${id}@example.com`, seal("k"), sub]);
+  await query("INSERT INTO bops.cloud_accounts (user_id, email, agentmail_key_sealed, agentphone_sub_account, app_version, state_level) VALUES ($1, $2, $3, $4, '0.0.55', 4)", [id, `${id}@example.com`, seal("k"), sub]);
   await query("INSERT INTO bops.phone_lines (digits, user_id, number_id, e164, owner_number, claimed_at, claimed_via) VALUES ($1, $2, $3, $4, $5, now(), 'text')", [line.slice(-10), id, `num_${id}`, line, owner]);
   numbers.push({ id: `num_${id}`, phoneNumber: line, sub });
   breaks.agentphoneFails = true;
@@ -446,7 +447,7 @@ test("a provider that fails is 502 and keeps only what the retry needs; the retr
   assert.equal(first.json.deleted.chat_messages, 1);
   // What the retry needs stays (the line's number id, the sub-account), and nothing that names the person.
   assert.deepEqual((await query("SELECT number_id, owner_number, claimed_via FROM bops.phone_lines WHERE user_id = $1", [id])).rows, [{ number_id: `num_${id}`, owner_number: null, claimed_via: null }]);
-  assert.deepEqual((await query("SELECT email, agentmail_key_sealed, agentphone_sub_account FROM bops.cloud_accounts WHERE user_id = $1", [id])).rows, [{ email: null, agentmail_key_sealed: null, agentphone_sub_account: sub }]);
+  assert.deepEqual((await query("SELECT email, agentmail_key_sealed, agentphone_sub_account, app_version, state_level FROM bops.cloud_accounts WHERE user_id = $1", [id])).rows, [{ email: null, agentmail_key_sealed: null, agentphone_sub_account: sub, app_version: null, state_level: null }]);
   assert.deepEqual((await query("SELECT state, version FROM bops.app_state WHERE user_id = $1", [id])).rows, [{ state: {}, version: "0" }]);
   assert.equal(await count("chat_messages", id), 0);
   // A Mac's stale write in between is refused, under the row the delete left.

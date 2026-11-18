@@ -92,7 +92,7 @@ import { forgetUser } from "./turn-guard.ts";
  *   `owner_phones` and `owner_emails` (their own number and address: someone else may verify that
  *   number now), `cloud_pending` (texts, calls and events waiting for their Mac, and what they did as a
  *   member that waits for another owner's), `chat_turns` (answers owed to their computers, and owed in another owner's
- *   workspace for what they said there), `runner_presence`, `runner_seen`, `app_views`, `app_leases`, `chat_routing`, `slack_links`, `plans`
+ *   workspace for what they said there), `runner_presence`, `runner_seen`, `runner_keeper`, `app_views`, `app_leases`, `chat_routing`, `slack_links`, `plans`
  *   (orgo-web keeps the plan itself), `notice_dismissals`, `cloud_usage` (what they used, for their
  *   account page: what it cost is orgo-web's AI credit ledger, which orgo-web deletes or keeps itself),
  *   `cloud_limits` (the counts that name them; a verify count by recipient alone is no one's and goes
@@ -102,7 +102,8 @@ import { forgetUser } from "./turn-guard.ts";
  * - `app_state` (their whole state): emptied at once ('{}', version 0, as the row other tables need
  *   before a first upload), deleted last, as their account row hangs off it until the providers are done.
  * - `cloud_accounts` (their pod and its sealed key, their sub-account): their email, the pod key and the
- *   app versions go at once; the pod and sub-account ids stay until the providers are done.
+ *   app versions and the Mac's state level go at once; the pod and sub-account ids stay until the providers are done.
+ * - `runner_releases` isn't anyone's (the signed runner releases Bops Cloud read), so it stays.
  * - `phone_lines`, `cloud_numbers`: deleted as each number is given back, and none kept to say it was: a
  *   number AgentPhone gives out again must be free to be someone else's line, there's nobody left to tell,
  *   and a line names its owner's own phone, which goes at once from those still waiting.
@@ -153,6 +154,8 @@ const CONTENT: [string, string][] = [
   ["runner_presence", "DELETE FROM bops.runner_presence WHERE user_id = $1"],
   // The Bops each of their computers' runners last said it runs, and what their members saw of their apps (0019).
   ["runner_seen", "DELETE FROM bops.runner_seen WHERE user_id = $1"],
+  // What each of their computers' keepers last asked and did (0020).
+  ["runner_keeper", "DELETE FROM bops.runner_keeper WHERE user_id = $1"],
   ["app_views", "DELETE FROM bops.app_views WHERE user_id = $1"],
   // Who's changing each of their apps now (0021): a lease goes with them.
   ["app_leases", "DELETE FROM bops.app_leases WHERE user_id = $1"],
@@ -183,7 +186,7 @@ const KEPT: [string, string][] = [
 
 /** What only stays while the providers need it: whatever names the person goes at once (step 2). */
 const SCRUB = [
-  "UPDATE bops.cloud_accounts SET email = NULL, agentmail_key_sealed = NULL, app_version = NULL, app_seen_at = NULL, ios_version = NULL, ios_seen_at = NULL, updated_at = now() WHERE user_id = $1",
+  "UPDATE bops.cloud_accounts SET email = NULL, agentmail_key_sealed = NULL, app_version = NULL, app_seen_at = NULL, state_level = NULL, ios_version = NULL, ios_seen_at = NULL, updated_at = now() WHERE user_id = $1",
   "UPDATE bops.phone_lines SET owner_number = NULL, claimed_at = NULL, claimed_via = NULL, claim_until = NULL, bot_id = NULL, workspace_id = NULL, updated_at = now() WHERE user_id = $1",
   "UPDATE bops.app_state SET state = '{}'::jsonb, version = 0, writer = NULL, updated_at = now() WHERE user_id = $1",
 ];

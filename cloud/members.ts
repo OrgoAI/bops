@@ -138,7 +138,7 @@ import {
 } from "./turns.ts";
 import { cleanGithubMirror, GITHUB_KEY_NAME, keepsPoint, sameDestination, type GithubMirror } from "./github-config.ts";
 import { appVersionOf, olderThan } from "./app-version.ts";
-import { afterWake, answerIn, compactIn, dismissIn, noRunnerWords, NO_COMPUTER, oldRunnerWords, replyIn, stopIn, whereIn, type ActDone, type ActEnv, type ComputerFacts, type Wake } from "./thread-acts.ts";
+import { afterWake, answerIn, compactIn, dismissIn, noRunnerWords, NO_COMPUTER, oldRunnerWords, replyIn, settingUpWords, stopIn, updatingWords, whereIn, type ActDone, type ActEnv, type ComputerFacts, type Wake } from "./thread-acts.ts";
 import { applyChange, renameRefused, WS_NAME_MAX, type Renamed } from "./change-apply.ts";
 
 /**
@@ -2077,6 +2077,13 @@ export function jobRefusal(why: AppJobRefusal, o: { app: string; bot: string; ow
       return new HttpError(409, "Its computer is still on the last one. Try again once it's done.", { code: NOT_WAITING });
     case "behind":
       return new HttpError(409, `${o.app} still runs an old copy on another computer, so it can't be removed from here yet.`, { code: NOT_WAITING });
+    // An owner at CLOUD_SELF_MIN_VERSION (turns.ts selfNote): what the app's computer does about it.
+    case "settingUp":
+      return new HttpError(409, settingUpWords(o.bot), { code: COMPUTER_NOT_READY });
+    case "updating":
+      return new HttpError(409, updatingWords(o.bot), { code: COMPUTER_NOT_READY });
+    case "sharedOff":
+      return new HttpError(409, jobNote("sharedOff", o.owner, o.bot) ?? JOB_OFF(o.bot), { code: COMPUTER_NOT_READY });
   }
 }
 /**
