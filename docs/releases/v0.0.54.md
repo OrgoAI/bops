@@ -1,0 +1,4 @@
+- In the cloud, everything teammates do works with the owner's Mac off.
+- Admins can remove apps, and Members can when the owner allows.
+- Your Apps shows how many more apps each computer has room for.
+- Group chats whose bots share a computer are answered there.
