@@ -31,7 +31,11 @@ import type { OrgoMember } from "./orgo";
  * it; telling work on a computer more, or answering its asks, is refused (cloud/members.ts says so first). Bots with no
  * computer, or set to work on this Mac, answer as before. In a workspace whose chat goes through Bops Cloud, a message
  * for a bot on this Mac comes written already (MemberActPayload.stored): it's answered, never added; and this Mac never
- * adds a member's words there itself (only Bops Cloud stamps them).
+ * adds a member's words there itself (only Bops Cloud stamps them). In a workspace where everything goes through the
+ * cloud (cloud/turns.ts allCloud: its switch on, this Mac at CLOUD_ALL_MIN_VERSION), none of this comes here: Bops Cloud
+ * does a member's acts itself on this state (cloud/members.ts cloudAct, cloud/thread-acts.ts, cloud/change-apply.ts) and
+ * the bots' own computers carry them on, this Mac on or off; this Mac merges what Bops Cloud wrote as another Bops's
+ * (state-merge.ts keepBotFields for a bot's fields), and one queued before the switch moved is done as before.
  *
  * An Admin (Orgo's role, MemberActPayload.role) has every bot, Your Apps at Write and Use its computer, whatever this
  * state keeps for them (adminOf): Bops Cloud asked orgo-web afresh as it took the act. One older than MEMBER_ACT_MS (a

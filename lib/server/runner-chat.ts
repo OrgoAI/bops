@@ -38,9 +38,10 @@ import { runInTurn, type TurnContext } from "./turn-context";
  * answers here as any other (a workspace in the cloud): nothing it starts waits for the Mac.
  *
  * A turn that's a job (TurnMember.job, asked from a shared workspace and checked by Bops Cloud: cloud/turns.ts
- * takeAppJob) isn't words to answer: it's done here (runJob, through runnerJob: an app's GitHub job by hosted-apps.ts
- * githubJob), said in the bot's chat as Bops' own, and its result told with its end. No model sees it. A kind this
- * runner doesn't do yet is said so plainly, and nothing is done.
+ * takeAppJob, takeChatJob) isn't words to answer: it's done here (runJob, through runnerJob: an app's GitHub job by
+ * hosted-apps.ts githubJob, a chat's compact by chat-summary.ts compactChat), said in the bot's chat as Bops' own (a
+ * chat's compact by Bops Cloud instead, stamped as the teammate's), and its result told with its end. No model sees it
+ * but the compact's summary. A kind this runner doesn't do yet is said so plainly, and nothing is done.
  */
 
 const RECONNECT_MIN_MS = 2_000;
@@ -71,12 +72,17 @@ type Box = {
   holdPollMs?: number;
   /** Tests: what does an app's GitHub job (hosted-apps.ts githubJob), as runnerJob gives it one. */
   job?: (botId: string, job: GithubJob, by: string) => Promise<JobResult>;
+  /** Tests: what compacts a chat (chat-summary.ts compactChat), and whether Bops Cloud has its summary now (store.ts changeLanded). */
+  compact?: (chatId: string, member: undefined, opts: { line: false }) => Promise<{ ok: true } | { ok: false; error: string }>;
+  landed?: (has: (state: Record<string, unknown>) => boolean) => Promise<boolean>;
 };
 const g = globalThis as unknown as { __bopsRunnerChat?: Box };
 const box: Box = (g.__bopsRunnerChat ??= { running: new Map() });
 
 const answerOf = async () => box.answer ?? (await import("./chat")).answerMessage;
 const githubOf = async () => box.job ?? (await import("./hosted-apps")).githubJob;
+const compactOf = async () => box.compact ?? (await import("./chat-summary")).compactChat;
+const landedOf = async () => box.landed ?? (await import("./store")).changeLanded;
 const identityOf = async () => box.identity ?? (await import("./runner")).checkIdentity;
 
 /** A call to Bops Cloud as this computer: the answer's status and body (status 0 when it didn't answer). */
@@ -377,24 +383,47 @@ export const jobLine = (job: TurnJob, r: { ok: boolean; said: string }) => (r.ok
 
 /**
  * Do a job (TurnMember.job) on this computer, in `by`'s name, by its kind: an app's GitHub job by hosted-apps.ts
- * githubJob. A kind this runner doesn't do yet (one a newer Bops Cloud owes it) does nothing, and says so plainly.
+ * githubJob; compacting a chat (its turn's chat) by chat-summary.ts compactChat (chatJob). A kind this runner doesn't do
+ * yet (one a newer Bops Cloud owes it) does nothing, and says so plainly.
  */
 export async function runnerJob(ctx: TurnContext, job: TurnJob, by: string): Promise<JobResult> {
   switch (job.act) {
     case "githubLink":
     case "githubPull":
       return (await githubOf())(ctx.botId, job, by);
+    case "compactChat":
+      return chatJob(ctx.chatId);
     default:
       return { ok: false, said: JOB_UNKNOWN };
   }
+}
+
+/** What a chat's compact that this runner couldn't save says (chat-summary.ts's own words for one that didn't go). */
+const NOT_COMPACTED = "That didn't compact. Try again.";
+
+/**
+ * Compact a chat (the compactChat job), as the owner's Compact does (chat-summary.ts compactChat), with no line of its
+ * own: Bops Cloud writes it, stamped as the teammate's who asked (cloud/turns.ts finish), and it never comes from here.
+ * Said done only once Bops Cloud has the summary it wrote (store.ts changeLanded: its bots read the chat afresh from
+ * there), so the line never says it's compacted while nothing changed.
+ */
+async function chatJob(chatId: string): Promise<JobResult> {
+  const r = await (await compactOf())(chatId, undefined, { line: false });
+  if (!r.ok) return { ok: false, said: r.error };
+  const at = getState().chats?.find((c) => c.id === chatId)?.summary?.at;
+  const has = (st: Record<string, unknown>) =>
+    Array.isArray(st.chats) && st.chats.some((c: { id?: unknown; summary?: { at?: unknown } }) => c?.id === chatId && c.summary?.at === at);
+  if (at === undefined || !(await (await landedOf())(has))) return { ok: false, said: NOT_COMPACTED };
+  return { ok: true, said: "Compacted" };
 }
 
 /**
  * A job (TurnMember.job) as this turn: said at once to be doing what can't be done twice (it writes to Ingot, or Orgo),
  * so a runner gone quiet after never has it done again; then done (runnerJob) in `by`'s name, its words in the chat as
  * the bot's, marked Bops' own (bops) and, for an app's, about an app (Message.appNote), and its result told with the
- * turn's end (with what it removed), which Bops Cloud keeps on the app for Your Apps. Taken back first (409): nothing is
- * done.
+ * turn's end (with what it removed), which Bops Cloud keeps on the app for Your Apps. A chat's compact has no words of
+ * the bot's: Bops Cloud writes its line, done or why not, stamped as the teammate's (a bot's line would be something
+ * for the next Compact to fold in). Taken back first (409): nothing is done.
  */
 async function runJob(ctx: TurnContext, job: TurnJob, by: string) {
   ctx.acting = true;
@@ -405,7 +434,7 @@ async function runJob(ctx: TurnContext, job: TurnJob, by: string) {
     ctx,
     async () => {
       result = await runnerJob(ctx, job, by);
-      if (!ctx.cancelled) addMessage({ chatId: ctx.chatId, role: "bot", botId: ctx.botId, text: jobLine(job, result), ...(jobApp(job) ? { appNote: true } : {}), bops: true });
+      if (!ctx.cancelled && job.act !== "compactChat") addMessage({ chatId: ctx.chatId, role: "bot", botId: ctx.botId, text: jobLine(job, result), ...(jobApp(job) ? { appNote: true } : {}), bops: true });
       return null;
     },
     undefined,
@@ -442,9 +471,21 @@ async function resumeMarked<T extends { paused?: boolean }>(a: AppApproval, id: 
 }
 
 /** For tests: how the turn is run and how this runner makes sure it's on its own computer (unset: the real ones), and the beat. */
-export function runnerChatForTests(opts: { answer?: typeof box.answer; identity?: typeof box.identity; beatMs?: number; retryMs?: number[]; turnsDir?: string; holdPollMs?: number; job?: typeof box.job }) {
+export function runnerChatForTests(opts: {
+  answer?: typeof box.answer;
+  identity?: typeof box.identity;
+  beatMs?: number;
+  retryMs?: number[];
+  turnsDir?: string;
+  holdPollMs?: number;
+  job?: typeof box.job;
+  compact?: typeof box.compact;
+  landed?: typeof box.landed;
+}) {
   box.answer = opts.answer;
   box.job = opts.job;
+  box.compact = opts.compact;
+  box.landed = opts.landed;
   box.identity = opts.identity;
   box.beatMs = opts.beatMs;
   box.turnsDir = opts.turnsDir;

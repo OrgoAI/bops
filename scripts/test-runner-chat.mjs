@@ -599,11 +599,10 @@ await check("a job that doesn't go says why in the chat and with its end; one ta
 
 /* ---------------- Every kind of job ---------------- */
 
-await check("a job of a kind this runner doesn't do yet is said plainly in the chat and with its end, and nothing runs: an app's, a chat's, and one from a newer Bops Cloud", async () => {
+await check("a job of a kind this runner doesn't do yet is said plainly in the chat and with its end, and nothing runs: an app's, and one from a newer Bops Cloud", async () => {
   const kinds = [
     [{ act: "deploy", app: "site" }, "Couldn't deploy site: This computer's Bops doesn't know how to do that yet.", true],
     [{ act: "remove", app: "site", repo: true }, "Couldn't remove site: This computer's Bops doesn't know how to do that yet.", true],
-    [{ act: "compactChat" }, "Couldn't compact this chat: This computer's Bops doesn't know how to do that yet.", undefined],
     [{ act: "renameApp", app: "site", to: "shop" }, "Couldn't do that: This computer's Bops doesn't know how to do that yet.", true],
   ];
   for (const [job, line, appNote] of kinds) {
@@ -620,6 +619,47 @@ await check("a job of a kind this runner doesn't do yet is said plainly in the c
     assert.equal(R.JOB_UNKNOWN, "This computer's Bops doesn't know how to do that yet.");
     assert.deepEqual(sent.at(-1), { path: `/v1/runner/turns/t_${job.act}/done`, body: { state: "done", job: { ok: false, said: R.JOB_UNKNOWN } } }, job.act);
   }
+});
+
+await check("a chat's compact job folds its chat with no line of its own, and is done only once Bops Cloud has the summary", async () => {
+  const claimChat = (id) => ({
+    status: 200,
+    body: { ok: true, now: Date.now(), turn: { id, messageId: `m_${id}`, chatId: "chat_team", botId: "max", humanAt: Date.now(), seq: 0, member: { userId: "u-sam", name: "Sam", ref: `k_${id}`, job: { act: "compactChat" } } } },
+  });
+  const cases = [
+    // Compacted, and Bops Cloud has the summary it wrote: done.
+    [{ ok: true }, true, { ok: true, said: "Compacted" }],
+    // Compact said why not (a bot answering there, nothing new): that, as it said it.
+    [{ ok: false, error: "Nothing new to compact.", status: 409 }, true, { ok: false, said: "Nothing new to compact." }],
+    // Compacted here, but Bops Cloud never took the summary: not said as done.
+    [{ ok: true }, false, { ok: false, said: "That didn't compact. Try again." }],
+  ];
+  for (const [answer, landed, job] of cases) {
+    reset();
+    state.chats = [{ id: "chat_team", botIds: ["max", "sam"] }];
+    answers.set("claim", claimChat("t_cc"));
+    const calls = [];
+    let answered = 0;
+    let ran = 0;
+    R.runnerChatForTests({
+      identity: async () => "same",
+      answer: async () => (answered++, { text: "never" }),
+      job: async () => (ran++, { ok: true, said: "x" }),
+      compact: async (...a) => {
+        calls.push(a);
+        if (answer.ok) state.chats[0].summary = { text: "So far", through: 1, fresh: 1, at: 42 };
+        return answer;
+      },
+      landed: async (has) => landed && has({ chats: [{ id: "chat_team", summary: { at: 42 } }] }),
+    });
+    await R.answerTurn({ id: "t_cc", messageId: "m_t_cc", chatId: "chat_team", botId: "max", seq: 0 });
+    assert.deepEqual(calls, [["chat_team", undefined, { line: false }]], "compacted with no line of its own");
+    assert.deepEqual([answered, ran], [0, 0], "no answer, no app job");
+    assert.deepEqual(state.messages, [], "nothing said in the chat from here: Bops Cloud writes its line");
+    assert.deepEqual(paths(), ["claim", "beat", "done"]);
+    assert.deepEqual(sent.at(-1).body, { state: "done", job }, JSON.stringify(job));
+  }
+  delete state.chats;
 });
 
 await check("what a job removed goes with its end, as it said it; anything else it says there is dropped", async () => {

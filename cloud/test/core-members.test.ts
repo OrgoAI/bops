@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
@@ -8,7 +8,10 @@ import { accessSummary, adminMay, appsLevelOf, appsSummary, cleanAccess, cleanNa
 import { accessFor, adminGate, cleanAct, githubWhy, GITHUB_NOT_LINKED, GITHUB_NOT_SET, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange, THIS_WS } from "../change-routes.ts";
 import type { WakeRefusal } from "../turns.ts";
-import { ADMIN_POWERS_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
+import { closeDb, query } from "../db.ts";
+import { deviceIdOf } from "../device.ts";
+import { prepareDb } from "./core-fakes.ts";
+import { ADMIN_POWERS_MIN_VERSION, CLOUD_ALL_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
 import { groupKeyOf, roomKeyOf } from "../group-key.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
@@ -986,11 +989,18 @@ const owners: Record<string, Record<string, unknown>> = {
   },
 };
 const savedState = async (account: string) => owners[account] ?? {};
+/** Another route of the fake orgo-web a test answers itself (the key grants, a workspace's rename): true when it did. */
+let orgoExtra: ((req: IncomingMessage, res: ServerResponse, body: string) => boolean | Promise<boolean>) | null = null;
 
 before(async () => {
   process.env.BOPS_CLOUD_PLAN_SECRET = SECRET;
   // Orgo: the key "key-<id>" is <id>'s; its bops-role answers from `roles`.
-  orgo = createServer((req, res) => {
+  orgo = createServer(async (req, res) => {
+    if (orgoExtra && (req.method === "PUT" || req.method === "PATCH")) {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (await orgoExtra(req, res, body)) return;
+    }
     // A computer's identity token ("orgo_vm_<user>~<desktop>") is its user's too, as Orgo's profile says it (auth.ts).
     const id = /^Bearer (?:key-|orgo_vm_)([^~]+)/.exec(req.headers.authorization ?? "")?.[1];
     if (!id) return void res.writeHead(401).end();
@@ -2741,4 +2751,493 @@ test("the slice says what someone may change: an Admin every switch, a Member th
   // No switches: nothing said of them.
   const plain = sharedSlice(actOwner, "ws_act", { role: "member", id: "act-sam", email: "sam@example.com", joinedAt: 1_700_000_000_000, changes: true });
   assert.equal(plain.can, undefined);
+});
+
+/* ---------------- Everything through the cloud: a teammate's other acts, done by Bops Cloud ---------------- */
+
+/**
+ * In a workspace where everything goes through the cloud (turns.ts allCloud: its switch on, the owner's last Mac at
+ * CLOUD_ALL_MIN_VERSION), every act but an app's is done by Bops Cloud and the bots' own computers, the owner's Mac on or
+ * off: nothing is queued for that Mac (members.ts cloudAct). These run on the owner's state in Postgres (core-fakes.ts),
+ * with orgo-web the fake above.
+ */
+
+/** The owner's state as these tests read it back from Postgres: JSON of any shape. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any;
+const R_DESKTOP = "c-max";
+const MAC_DEV = "mac-alex";
+let allSeq = 0;
+/** Every act queued for an owner's Mac in these tests (none should be, in a workspace where everything goes through the cloud). */
+const macQueue: { owner: string; payload: MemberActPayload }[] = [];
+const allWakes: { desktop: string; names: { owner: string; bot: string } }[] = [];
+let allWakeSays: { ok: boolean; state: string; why?: string } = { ok: true, state: "running" };
+let macIsOn = false;
+/** What the fake orgo-web was asked for the key grants and renames, with the owner's state as it was then. */
+const orgoAsked: { path: string; method: string; body: Record<string, unknown>; auth: string; keys?: unknown }[] = [];
+
+/** An owner whose workspace "ws_all" goes through the cloud (or `mode` "mac"), their state in Postgres, Max's computer with a runner at `runner`. */
+async function allCloudOwner(o: { mode?: "cloud" | "mac"; runner?: string; listening?: boolean; macVersion?: string; edit?: (b: Record<string, unknown>) => void } = {}) {
+  await dbReady;
+  const n = ++allSeq;
+  const owner = `core-all-${n}-${Math.random().toString(36).slice(2, 8)}`;
+  const project = `proj-all-${owner.slice(-6)}-${n}`;
+  const r = deviceIdOf(owner, R_DESKTOP);
+  const blob: Record<string, unknown> = {
+    owner: { name: "Alex" },
+    macs: { [MAC_DEV]: { name: "Alex's Mac" } },
+    runners: { [R_DESKTOP]: { status: "running", version: o.runner ?? CLOUD_ALL_MIN_VERSION, at: 1 } },
+    workspaces: [
+      { id: "ws_main", name: "Main" },
+      { id: "ws_all", name: "All", orgoProjectId: project, orgoName: "All", memberAccess: { "sam@example.com": { others: "none", bots: { max: "write", ivy: "write" }, at: 1_700_000_001_000, computer: "use" } } },
+    ],
+    bots: [
+      { id: "boppy", name: "Boppy", isMain: true },
+      { id: "max", name: "Max", isMain: true, workspaceId: "ws_all", computerId: R_DESKTOP, permissions: [] },
+      // A computer of its own not made yet: none to work on.
+      { id: "ivy", name: "Ivy", workspaceId: "ws_all", computer: "own" },
+    ],
+    chats: [
+      { id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_all" },
+      { id: "bot:ivy", kind: "bot", botIds: ["ivy"], workspaceId: "ws_all" },
+    ],
+    sessions: [
+      { id: "t-live", botId: "max", chatId: "bot:max", title: "Book it", host: "orgo", status: "running", by: r, steps: [], replies: [] },
+      { id: "t-done", botId: "max", chatId: "bot:max", title: "Done one", host: "orgo", status: "done", by: r, steps: [], replies: [] },
+      { id: "t-run", botId: "max", chatId: "bot:max", title: "Find flights", host: "orgo", status: "running", by: r, steps: [], replies: [] },
+      { id: "t-mac", botId: "max", chatId: "bot:max", title: "On the Mac", host: "mac", runsOn: "mac", status: "running", by: MAC_DEV, steps: [], replies: [] },
+      { id: "t-where", botId: "max", chatId: "bot:max", title: "Plan a trip", host: "orgo", status: "queued", askWhere: true, steps: [], replies: [] },
+      { id: "t-brain", botId: "max", chatId: "bot:max", title: "Tidy the repo", host: "orgo", status: "done", by: r, brainRun: { brainId: "b1", kind: "claude", computerId: R_DESKTOP, cli: "claude", started: true }, steps: [], replies: [] },
+      { id: "t-ivy", botId: "ivy", chatId: "bot:ivy", title: "Ivy's", host: "orgo", status: "done", steps: [], replies: [] },
+    ],
+    appApprovals: [
+      { id: "ask-1", botId: "max", chatId: "bot:max", threadId: "t-live", askedBy: r, action: "Send an email", kind: "email", resume: { engine: "agents" } },
+      { id: "ask-2", botId: "max", chatId: "bot:max", askedBy: r, action: "Reply to a lead", kind: "email" },
+      { id: "ask-3", botId: "max", chatId: "bot:max", askedBy: r, action: "Reply to a lead", kind: "email" },
+      { id: "ask-mac", botId: "max", chatId: "bot:max", askedBy: MAC_DEV, action: "Look up a company", kind: "data" },
+      { id: "ask-routine", botId: "max", chatId: "bot:max", threadId: "t-live", routineId: "r1", askedBy: r, action: "Send the weekly report", kind: "email" },
+    ],
+  };
+  o.edit?.(blob);
+  await query("INSERT INTO bops.app_state (user_id, state, version) VALUES ($1, $2::jsonb, 1)", [owner, JSON.stringify(blob)]);
+  await query("INSERT INTO bops.cloud_accounts (user_id, app_version) VALUES ($1, $2)", [owner, o.macVersion ?? CLOUD_ALL_MIN_VERSION]);
+  await query("INSERT INTO bops.chat_routing (user_id, ws_id, mode, set_by) VALUES ($1, 'ws_all', $2, 'owner')", [owner, o.mode ?? "cloud"]);
+  if (o.listening !== false) await query("INSERT INTO bops.runner_presence (user_id, device_id, desktop_id, version) VALUES ($1, $2, $3, $4)", [owner, r, R_DESKTOP, o.runner ?? CLOUD_ALL_MIN_VERSION]);
+  roles[`all-sam ${project}`] = { role: "member", ownerUserId: owner, bopsWsId: "ws_all", name: "All", joinedAt: 1_700_000_000_000 };
+  roles[`all-tom ${project}`] = { role: "admin", ownerUserId: owner, bopsWsId: "ws_all", name: "All" };
+  emails["all-sam"] = "sam@example.com";
+  emails["all-tom"] = "tom@example.com";
+  allOwners.push(owner);
+  return { owner, project, r };
+}
+const allOwners: string[] = [];
+/** Wait for an async `check` to say yes (until's is sync). */
+async function untilAsync(check: () => Promise<unknown>, what: string) {
+  for (const end = Date.now() + 3000; Date.now() < end; await new Promise((r) => setTimeout(r, 20))) if (await check()) return;
+  assert.fail(`timed out waiting for ${what}`);
+}
+let dbReady: Promise<void> = Promise.resolve();
+
+/** The fakes for these tests: real state, switch and gates in Postgres; the Mac's queue, its tunnel and waking computers faked. */
+function allFakes(o: { allCloud?: (owner: string, ws: string) => Promise<boolean> } = {}) {
+  macQueue.length = 0;
+  allWakes.length = 0;
+  orgoAsked.length = 0;
+  allWakeSays = { ok: true, state: "running" };
+  orgoExtra = null;
+  resetMembers({
+    queue: async (owner, _kind, payload) => void macQueue.push({ owner, payload: payload as MemberActPayload }),
+    isOn: () => macIsOn,
+    drop: async () => {},
+    cancel: async () => {},
+    count: async () => {},
+    wake: async (_account, desktop, _ws, names) => (allWakes.push({ desktop, names }), allWakeSays as Awaited<ReturnType<NonNullable<Parameters<typeof resetMembers>[0]>["wake"] & {}>>),
+    ...(o.allCloud ? { allCloud: o.allCloud } : {}),
+  });
+}
+const actAll = (user: string, project: string, key: string, a: Record<string, unknown>) =>
+  fetch(`${base}/v1/ws/${project}/act`, { method: "POST", headers: { authorization: `Bearer key-${user}`, "content-type": "application/json" }, body: JSON.stringify({ key, act: a }) }).then(async (r) => ({ status: r.status, json: (await r.json().catch(() => ({}))) as Record<string, unknown> }));
+const stateOf = async (owner: string) => (await query<{ state: Record<string, Json>; version: number }>("SELECT state, version FROM bops.app_state WHERE user_id = $1", [owner])).rows[0];
+const threadIn = (st: Record<string, Json>, id: string) => (st.sessions as Record<string, Json>[]).find((s) => s.id === id)!;
+const noteIn = async (owner: string, id: string) => (await query<{ json: Record<string, unknown> }>("SELECT json FROM bops.chat_messages WHERE user_id = $1 AND id = $2", [owner, id])).rows[0]?.json;
+const CLOUD = { ok: true, macOn: true, stored: true, cloud: true };
+
+test("everything through the cloud: no act but an app's goes to the owner's Mac, with that Mac on or off; each is done here at once", async () => {
+  dbReady = prepareDb();
+  for (const on of [true, false]) {
+    allFakes();
+    macIsOn = on;
+    const { owner, project, r } = await allCloudOwner();
+    const acts: [string, string, Record<string, unknown>][] = [
+      ["all-sam", "key-reply-live", { act: "reply", sessionId: "t-live", text: "Use the window seat" }],
+      ["all-sam", "key-reply-done", { act: "reply", sessionId: "t-done", text: "Once more please" }],
+      ["all-sam", "key-stop-live1", { act: "stop", sessionIds: ["t-run"] }],
+      ["all-sam", "key-dismiss-01", { act: "dismiss", sessionId: "t-done" }],
+      ["all-sam", "key-compact-01", { act: "compact", sessionId: "t-brain" }],
+      ["all-tom", "key-where-0001", { act: "where", sessionId: "t-where", to: "cloud" }],
+      ["all-sam", "key-answer-001", { act: "answer", askId: "ask-2", reply: "once" }],
+      ["all-tom", "key-persona-01", { act: "persona", botId: "max", text: "Keep replies short.", was: "" }],
+      ["all-tom", "key-change-001", { act: "change", method: "PATCH", path: "/api/bots", body: { botId: "max", effort: "high" } }],
+    ];
+    for (const [user, key, a] of acts) {
+      const res = await actAll(user, project, key, a);
+      assert.deepEqual([res.status, res.json], [202, CLOUD], `${a.act} (Mac ${on ? "on" : "off"}): ${JSON.stringify(res.json)}`);
+    }
+    assert.deepEqual(macQueue, [], "nothing waits for the owner's Mac");
+    const st = (await stateOf(owner)).state;
+    const live = threadIn(st, "t-live");
+    assert.equal(live.replies[0].id, "rep_m_all-sam_key-reply-live");
+    assert.equal(threadIn(st, "t-run").stopAsked, "Stopped by sam", "its runner listens: asked to stop");
+    assert.deepEqual([threadIn(st, "t-done").status, threadIn(st, "t-done").by, threadIn(st, "t-done").dismissed], ["queued", r, true], "queued again for its computer, then dismissed (asked to stop: it's its runner's)");
+    assert.equal(threadIn(st, "t-brain").compact.by.ref, "key-compact-01");
+    assert.deepEqual([threadIn(st, "t-where").askWhere, threadIn(st, "t-where").by], [false, r]);
+    assert.equal((st.appApprovals as Record<string, Json>[]).find((a) => a.id === "ask-2")!.reply.by, "cloud");
+    const max = (st.bots as Record<string, Json>[]).find((b) => b.id === "max")!;
+    assert.deepEqual([max.persona, max.personaBy.name, max.effort], ["Keep replies short.", "tom", "high"]);
+    assert.deepEqual(((st.workspaces as Record<string, Json>[]).find((w) => w.id === "ws_all")!.changesDone as Record<string, unknown>[]).map((d) => [d.key, d.ok]), [["key-change-001", true]]);
+    assert.equal((await noteIn(owner, "msg_where_all-tom_key-where-0001"))?.text, "tom picked Max's computer for “Plan a trip”");
+    assert.equal((await noteIn(owner, "msg_change_all-tom_key-change-001"))?.text, "tom changed Max's settings");
+    // Every computer here listens: only the answer's runner is woken (as for an answer with the owner's Mac away), nothing for the threads.
+    assert.deepEqual(allWakes.map((w) => w.desktop), [R_DESKTOP]);
+  }
+  macIsOn = false;
+});
+
+test("everything through the cloud: a thread the owner's Mac ran goes on on the bot's computer only once that Mac is off, saying so; a bot with no computer keeps the words", async () => {
+  allFakes();
+  macIsOn = true;
+  const { owner, project, r } = await allCloudOwner({ edit: (b) => ((b.workspaces as Record<string, Json>[])[1].memberAccess["tom@example.com"] = undefined) });
+  assert.equal((await actAll("all-tom", project, "key-onmac-001", { act: "reply", sessionId: "t-mac", text: "Open the site" })).status, 202);
+  assert.deepEqual([threadIn((await stateOf(owner)).state, "t-mac").status, threadIn((await stateOf(owner)).state, "t-mac").by], ["running", MAC_DEV], "the Mac runs it now");
+  macIsOn = false;
+  assert.equal((await actAll("all-tom", project, "key-onmac-002", { act: "reply", sessionId: "t-mac", text: "And book it" })).status, 202);
+  const t = threadIn((await stateOf(owner)).state, "t-mac");
+  assert.deepEqual([t.status, t.by, t.runsOn, t.host], ["queued", r, "cloud", "orgo"]);
+  assert.equal(t.steps.at(-1).detail, "This thread moved to Max's computer. What it was doing on Alex's Mac isn't there.");
+  // Ivy has no computer: the reply stays, with a note, and nothing runs.
+  assert.equal((await actAll("all-sam", project, "key-ivy-00001", { act: "reply", sessionId: "t-ivy", text: "Hello" })).status, 202);
+  const ivy = threadIn((await stateOf(owner)).state, "t-ivy");
+  assert.deepEqual([ivy.status, ivy.replies.length, ivy.steps.at(-1).detail], ["done", 1, "Ivy has no computer, so this can't go on in the cloud. Give Ivy a computer in Ivy's settings."]);
+  assert.deepEqual(macQueue, []);
+});
+
+test("everything through the cloud: a computer asleep is woken for a reply, and one that won't wake says why on the thread; Stop there ends the thread when it won't wake", async () => {
+  allFakes();
+  const { owner, project } = await allCloudOwner({ listening: false });
+  allWakeSays = { ok: false, state: "no_hours", why: "Max's computer is out of Free hours for today, so Max can't answer this." };
+  assert.equal((await actAll("all-sam", project, "key-sleep-001", { act: "reply", sessionId: "t-done", text: "Again" })).status, 202);
+  await untilAsync(async () => threadIn((await stateOf(owner)).state, "t-done").steps.some((x: Record<string, unknown>) => String(x.detail).startsWith("Waiting for its computer to wake:")), "the wake's step");
+  assert.deepEqual(allWakes.map((w) => w.desktop), [R_DESKTOP]);
+  assert.equal((await actAll("all-sam", project, "key-sleep-002", { act: "stop", sessionIds: ["t-run"] })).status, 202);
+  await untilAsync(async () => threadIn((await stateOf(owner)).state, "t-run").status === "failed", "the stop to end it");
+  const t = threadIn((await stateOf(owner)).state, "t-run");
+  assert.deepEqual([t.error, t.by], ["Stopped by sam", "cloud"]);
+});
+
+test("everything through the cloud: no runner on the bot's computer, or an older one, is said; nothing is kept", async () => {
+  allFakes();
+  const old = await allCloudOwner({ runner: "0.0.30" });
+  const v = (await stateOf(old.owner)).version;
+  const res = await actAll("all-sam", old.project, "key-oldrun-01", { act: "reply", sessionId: "t-done", text: "Again" });
+  assert.deepEqual([res.status, res.json.code, res.json.error], [409, "computer_not_ready", "Max's computer needs a newer Bops before it can do this. It updates the next time Alex opens Bops."]);
+  assert.equal((await stateOf(old.owner)).version, v);
+  const none = await allCloudOwner({ edit: (b) => (b.runners = {}) });
+  const r2 = await actAll("all-sam", none.project, "key-norun-001", { act: "reply", sessionId: "t-done", text: "Again" });
+  assert.deepEqual([r2.status, r2.json.error], [409, "Max's computer isn't set up yet. Alex's Bops sets it up the next time it opens."]);
+  assert.deepEqual(macQueue, []);
+});
+
+test("mac mode is unchanged: with the switch on the Mac, or the owner's last Mac older, an act waits for the owner's Mac as before", async () => {
+  allFakes();
+  macIsOn = true;
+  const mac = await allCloudOwner({ mode: "mac" });
+  assert.deepEqual(await actAll("all-sam", mac.project, "key-macmode-1", { act: "reply", sessionId: "t-done", text: "Again" }), { status: 202, json: { ok: true, macOn: true } });
+  const older = await allCloudOwner({ macVersion: "0.0.53" });
+  assert.deepEqual((await actAll("all-sam", older.project, "key-macmode-2", { act: "reply", sessionId: "t-done", text: "Again" })).json, { ok: true, macOn: true });
+  assert.deepEqual(macQueue.map((q) => q.owner), [mac.owner, older.owner]);
+  assert.equal(threadIn((await stateOf(mac.owner)).state, "t-done").replies.length, 0, "Bops Cloud wrote nothing");
+  macIsOn = false;
+});
+
+test("everything through the cloud: the switch moved to the Mac a moment before, as read again under the owner's lock: the act waits for that Mac as before", async () => {
+  // Read once as on (a cache, a moment ago): the row under the lock says the Mac.
+  allFakes({ allCloud: async () => true });
+  const { owner, project } = await allCloudOwner({ mode: "mac" });
+  assert.deepEqual((await actAll("all-sam", project, "key-flip-0001", { act: "stop", sessionIds: ["t-run"] })).json, { ok: true, macOn: false });
+  assert.deepEqual(macQueue.map((q) => q.owner), [owner]);
+  assert.equal(threadIn((await stateOf(owner)).state, "t-run").stopAsked, undefined);
+});
+
+test("everything through the cloud: answers: Always allow saves the rule and answers the bot's other asks for it; an ask the Mac made is answered too; a routine's waits for a new enough runner; the same answer again is 202", async () => {
+  allFakes();
+  const { owner, project } = await allCloudOwner();
+  assert.deepEqual(await actAll("all-sam", project, "key-always-01", { act: "answer", askId: "ask-2", reply: "always" }), { status: 202, json: CLOUD });
+  let st = (await stateOf(owner)).state;
+  const asks = st.appApprovals as Record<string, Json>[];
+  assert.deepEqual([asks[1].reply.reply, asks[2].reply.reply, asks[2].reply.member.userId], ["always", "always", "all-sam"]);
+  assert.equal(asks[0].reply, undefined, "another action's ask waits");
+  assert.deepEqual((st.bots as Record<string, Json>[]).find((b) => b.id === "max")!.permissions, [{ action: "Reply to a lead", resource: "*", effect: "allow" }]);
+  // Sent again (a lost 202): their own reply is there, so it's done.
+  assert.deepEqual(await actAll("all-sam", project, "key-always-01", { act: "answer", askId: "ask-2", reply: "always" }), { status: 202, json: CLOUD });
+  // An ask the owner's Mac made, that Mac closed: written, the Mac reads it as it opens, and the chat says so; nothing woken.
+  const woken = allWakes.length;
+  assert.equal((await actAll("all-sam", project, "key-macask-01", { act: "answer", askId: "ask-mac", reply: "reject", message: "Not this one" })).status, 202);
+  st = (await stateOf(owner)).state;
+  assert.deepEqual((st.appApprovals as Record<string, Json>[]).find((a) => a.id === "ask-mac")!.reply.message, "Not this one");
+  const waits = await noteIn(owner, "msg_askmac_ask-mac");
+  assert.deepEqual([waits?.chatId, waits?.text, waits?.botId], ["bot:max", "Max asked for this on Alex's Mac, so it goes on once Alex opens Bops.", "max"]);
+  assert.equal(allWakes.length, woken, "nothing woken for it");
+  // A routine's run on a runner new enough: answered.
+  assert.equal((await actAll("all-sam", project, "key-routine-1", { act: "answer", askId: "ask-routine", reply: "once" })).status, 202);
+  // On an older runner: it couldn't send Orgo the routine's next time, so it's said.
+  const old = await allCloudOwner({ runner: "0.0.53" });
+  const res = await actAll("all-sam", old.project, "key-routine-2", { act: "answer", askId: "ask-routine", reply: "once" });
+  assert.deepEqual([res.status, res.json.code], [409, "computer_not_ready"]);
+  assert.equal(((await stateOf(old.owner)).state.appApprovals as Record<string, Json>[]).find((a) => a.id === "ask-routine")!.reply, undefined);
+  // An older runner's ask that isn't a routine's: answered.
+  assert.equal((await actAll("all-sam", old.project, "key-routine-3", { act: "answer", askId: "ask-1", reply: "once" })).status, 202);
+  assert.deepEqual(macQueue, []);
+});
+
+test("everything through the cloud: an Admin's How I work with the owner's Mac on is kept here at once", async () => {
+  allFakes();
+  macIsOn = true;
+  const { owner, project } = await allCloudOwner();
+  assert.deepEqual(await actAll("all-tom", project, "key-persona-02", { act: "persona", botId: "max", text: "Sign off as Max.", was: "" }), { status: 202, json: CLOUD });
+  assert.equal((st0((await stateOf(owner)).state)).persona, "Sign off as Max.");
+  assert.equal((await noteIn(owner, "msg_persona_all-tom_key-persona-02"))?.text, "tom changed how Max works");
+  assert.deepEqual(macQueue, []);
+  macIsOn = false;
+});
+const st0 = (st: Record<string, Json>) => (st.bots as Record<string, Json>[]).find((b) => b.id === "max")!;
+
+/** The fake orgo-web's key grants: what it answers each time, by turn; the owner's state is read as it's asked. */
+function keyOrgo(owner: string, answers: { status: number; json?: unknown }[], onAsk?: () => Promise<void>) {
+  orgoExtra = async (req, res, body) => {
+    if (!/\/bops-keys\/bots$/.test(req.url ?? "")) return false;
+    const keys = ((await stateOf(owner)).state.bots as Record<string, Json>[]).find((b) => b.id === "max")?.keys;
+    orgoAsked.push({ path: req.url ?? "", method: req.method ?? "", body: JSON.parse(body), auth: req.headers.authorization ?? "", keys });
+    await onAsk?.();
+    const a = answers[Math.min(orgoAsked.length - 1, answers.length - 1)];
+    res.writeHead(a.status, { "content-type": "application/json" }).end(JSON.stringify(a.json ?? {}));
+    return true;
+  };
+}
+
+test("everything through the cloud: a key turned on goes to orgo-web first with their own key, then the bot's keys; off goes to the state first, then orgo-web", async () => {
+  allFakes();
+  const { owner, project } = await allCloudOwner();
+  keyOrgo(owner, [{ status: 200, json: { bot: "max", name: "STRIPE_SECRET_KEY", on: true, changed: true } }]);
+  assert.deepEqual(await actAll("all-tom", project, "key-keyon-001", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: true }), { status: 202, json: CLOUD });
+  assert.deepEqual(orgoAsked.map((a) => [a.method, a.path, a.auth, a.body, a.keys]), [["PUT", `/api/projects/${project}/bops-keys/bots`, "Bearer key-all-tom", { name: "STRIPE_SECRET_KEY", bot: "max", on: true }, undefined]], "orgo-web first: the state didn't have it yet");
+  assert.deepEqual(st0((await stateOf(owner)).state).keys, ["STRIPE_SECRET_KEY"]);
+  assert.equal((await noteIn(owner, "msg_key_all-tom_key-keyon-001"))?.text, "tom let Max use STRIPE_SECRET_KEY");
+  orgoAsked.length = 0;
+  keyOrgo(owner, [{ status: 200, json: {} }]);
+  assert.deepEqual(await actAll("all-tom", project, "key-keyoff-01", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: false }), { status: 202, json: CLOUD });
+  assert.deepEqual(orgoAsked.map((a) => [a.body.on, a.keys]), [[false, undefined]], "the state first: off by the time orgo-web hears");
+  assert.equal((await noteIn(owner, "msg_key_all-tom_key-keyoff-01"))?.text, "tom stopped Max using STRIPE_SECRET_KEY");
+  assert.deepEqual(macQueue, []);
+});
+
+test("everything through the cloud: keys: an orgo-web without the route, a bot it doesn't know, a lock step that fails (sent back off), and off that orgo-web won't take", async () => {
+  allFakes();
+  const { owner, project } = await allCloudOwner();
+  const v = (await stateOf(owner)).version;
+  for (const status of [404, 405]) {
+    keyOrgo(owner, [{ status, json: status === 404 ? { error: "Not found" } : {} }]);
+    const r = await actAll("all-tom", project, `key-norte-${status}`, { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: true });
+    assert.deepEqual([r.status, r.json.code, r.json.error], [409, "cloud_not_yet", "Keys can't be changed from the cloud yet. Try again later."]);
+  }
+  assert.equal((await stateOf(owner)).version, v, "nothing written");
+  keyOrgo(owner, [{ status: 404, json: { error: "No bot with that id in this workspace.", code: "BOT_NOT_FOUND" } }]);
+  const unknown = await actAll("all-tom", project, "key-nobot-001", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: true });
+  assert.deepEqual([unknown.status, unknown.json.error], [409, "Orgo doesn't know Max yet, so it can't be given keys from here. Try again in a few minutes."]);
+  // orgo-web said yes, then the bot went from the owner's state before the lock: the grant is sent back off.
+  orgoAsked.length = 0;
+  keyOrgo(owner, [{ status: 200 }], async () => {
+    if (orgoAsked.length > 1) return;
+    const st = (await stateOf(owner)).state;
+    st.bots = (st.bots as Record<string, unknown>[]).filter((b) => b.id !== "max");
+    await query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1 WHERE user_id = $1", [owner, JSON.stringify(st)]);
+  });
+  const gone = await actAll("all-tom", project, "key-gone-0001", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: true });
+  assert.equal(gone.status, 404);
+  await untilAsync(async () => orgoAsked.length === 2, "the grant sent back");
+  assert.deepEqual(orgoAsked.map((a) => a.body.on), [true, false]);
+  // Off that orgo-web won't take (three tries): off in the state all the same, and said.
+  const two = await allCloudOwner({ edit: (b) => ((b.bots as Record<string, unknown>[])[1].keys = ["STRIPE_SECRET_KEY"]) });
+  orgoAsked.length = 0;
+  keyOrgo(two.owner, [{ status: 500 }]);
+  const off = await actAll("all-tom", two.project, "key-offfail-1", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: false });
+  assert.deepEqual([off.status, off.json.error], [502, "Orgo still lets Max use STRIPE_SECRET_KEY. Try again."]);
+  assert.equal(orgoAsked.length, 3);
+  assert.equal(st0((await stateOf(two.owner)).state).keys, undefined, "off here: the owner's Mac sends the whole set later");
+  // Every viewer is told orgo-web still grants it, in place of the "stopped" line.
+  assert.equal((await noteIn(two.owner, "msg_key_all-tom_key-offfail-1"))?.text, "tom turned off STRIPE_SECRET_KEY for Max, but Orgo still lets Max use it.");
+  // Sent again (Try again), orgo-web taking it now: the line says it stopped.
+  orgoAsked.length = 0;
+  keyOrgo(two.owner, [{ status: 200, json: { changed: true } }]);
+  assert.deepEqual(await actAll("all-tom", two.project, "key-offfail-1", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: false }), { status: 202, json: CLOUD });
+  assert.equal((await noteIn(two.owner, "msg_key_all-tom_key-offfail-1"))?.text, "tom stopped Max using STRIPE_SECRET_KEY");
+  // Off with no route: put back as it was.
+  keyOrgo(two.owner, [{ status: 405 }]);
+  const three = await allCloudOwner({ edit: (b) => ((b.bots as Record<string, unknown>[])[1].keys = ["STRIPE_SECRET_KEY"]) });
+  keyOrgo(three.owner, [{ status: 405 }]);
+  const back = await actAll("all-tom", three.project, "key-offback-1", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: false });
+  assert.deepEqual([back.status, back.json.code], [409, "cloud_not_yet"]);
+  assert.deepEqual(st0((await stateOf(three.owner)).state).keys, ["STRIPE_SECRET_KEY"]);
+  assert.deepEqual(macQueue, []);
+});
+
+test("everything through the cloud: a key turned off that orgo-web has no grant for (a bot or key it doesn't know) is done; another refusal is said once, in its words, and the chat says it's still granted", async () => {
+  allFakes();
+  for (const code of ["BOT_NOT_FOUND", "KEY_NOT_FOUND"]) {
+    const o = await allCloudOwner({ edit: (b) => ((b.bots as Record<string, unknown>[])[1].keys = ["STRIPE_SECRET_KEY"]) });
+    orgoAsked.length = 0;
+    keyOrgo(o.owner, [{ status: 404, json: { error: "Not here.", code } }]);
+    assert.deepEqual(await actAll("all-tom", o.project, `key-off-${code.slice(0, 3)}`, { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: false }), { status: 202, json: CLOUD }, code);
+    assert.equal(orgoAsked.length, 1, "asked once: nothing to take back there");
+    assert.equal(st0((await stateOf(o.owner)).state).keys, undefined);
+    assert.equal((await noteIn(o.owner, `msg_key_all-tom_key-off-${code.slice(0, 3)}`))?.text, "tom stopped Max using STRIPE_SECRET_KEY");
+  }
+  const o = await allCloudOwner({ edit: (b) => ((b.bots as Record<string, unknown>[])[1].keys = ["STRIPE_SECRET_KEY"]) });
+  orgoAsked.length = 0;
+  keyOrgo(o.owner, [{ status: 403, json: { error: "You can't change this workspace's keys." } }]);
+  const r = await actAll("all-tom", o.project, "key-off-403", { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: false });
+  assert.deepEqual([r.status, r.json.error], [403, "You can't change this workspace's keys."]);
+  assert.equal(orgoAsked.length, 1, "a refusal isn't tried again");
+  assert.equal((await noteIn(o.owner, "msg_key_all-tom_key-off-403"))?.text, "tom turned off STRIPE_SECRET_KEY for Max, but Orgo still lets Max use it.");
+  assert.deepEqual(macQueue, []);
+});
+
+test("everything through the cloud: a key turned on whose grant was there before (orgo-web says it didn't change, or, from an orgo-web that doesn't say, the bot had it already) is never taken back when the act can't be kept", async () => {
+  allFakes();
+  /** Max with the key on already, or not; orgo-web's answer; the bot gone from the owner's state as orgo-web is asked, so the act can't be kept. */
+  const tryOn = async (had: boolean, json: Record<string, unknown>, key: string) => {
+    const o = await allCloudOwner({ edit: (b) => had && ((b.bots as Record<string, unknown>[])[1].keys = ["STRIPE_SECRET_KEY"]) });
+    orgoAsked.length = 0;
+    keyOrgo(o.owner, [{ status: 200, json }], async () => {
+      if (orgoAsked.length > 1) return;
+      const st = (await stateOf(o.owner)).state;
+      st.bots = (st.bots as Record<string, unknown>[]).filter((b) => b.id !== "max");
+      await query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1 WHERE user_id = $1", [o.owner, JSON.stringify(st)]);
+    });
+    assert.equal((await actAll("all-tom", o.project, key, { act: "key", botId: "max", name: "STRIPE_SECRET_KEY", on: true })).status, 404);
+    await new Promise((r) => setTimeout(r, 150));
+    return orgoAsked.map((a) => a.body.on);
+  };
+  assert.deepEqual(await tryOn(true, { changed: false }, "key-had-0001"), [true], "orgo-web had it: left as it was");
+  assert.deepEqual(await tryOn(true, {}, "key-had-0002"), [true], "an orgo-web that doesn't say, and the bot had it: left");
+  assert.deepEqual(await tryOn(false, { changed: true }, "key-had-0003"), [true, false], "new: taken back");
+  assert.deepEqual(await tryOn(false, {}, "key-had-0004"), [true, false], "an orgo-web that doesn't say, the bot without it: taken back");
+});
+
+test("everything through the cloud: a Member with the Owner's Mac switch but not Use its computer can't hand a thread the owner's Mac ran to the bot's computer: 403, nothing written, nothing woken", async () => {
+  allFakes();
+  const { owner, project, r } = await allCloudOwner({
+    edit: (b) => {
+      const ws = (b.workspaces as Record<string, Json>[])[1];
+      ws.memberAccess["sam@example.com"] = { ...ws.memberAccess["sam@example.com"], computer: "none", can: { mac: true } };
+      (b.sessions as Record<string, Json>[]).push({ id: "t-macdone", botId: "max", chatId: "bot:max", title: "On the Mac, done", host: "mac", runsOn: "mac", status: "done", by: MAC_DEV, steps: [], replies: [] });
+    },
+  });
+  const v = (await stateOf(owner)).version;
+  for (const [key, id] of [["key-macuse-001", "t-macdone"], ["key-macuse-002", "t-mac"]] as const) {
+    const res = await actAll("all-sam", project, key, { act: "reply", sessionId: id, text: "And book it" });
+    assert.deepEqual([res.status, res.json.code, res.json.error], [403, "member_no_computer", "This runs on the bot's computer, and the owner hasn't let you use it."], id);
+  }
+  assert.equal((await stateOf(owner)).version, v, "nothing written");
+  assert.deepEqual([allWakes, macQueue], [[], []]);
+  // With Use its computer: handed to Max's computer.
+  await query("UPDATE bops.app_state SET state = jsonb_set(state, '{workspaces,1,memberAccess,sam@example.com,computer}', '\"use\"') WHERE user_id = $1", [owner]);
+  assert.equal((await actAll("all-sam", project, "key-macuse-003", { act: "reply", sessionId: "t-macdone", text: "And book it" })).status, 202);
+  assert.deepEqual([threadIn((await stateOf(owner)).state, "t-macdone").by, threadIn((await stateOf(owner)).state, "t-macdone").status], [r, "queued"]);
+});
+
+test("everything through the cloud: a chat's Compact needs Use its computer when a bot of the chat has a computer (it runs there, and may wake it): 403, nothing owed", async () => {
+  allFakes();
+  const { owner, project } = await allCloudOwner({ edit: (b) => ((b.workspaces as Record<string, Json>[])[1].memberAccess["sam@example.com"].computer = "none") });
+  const res = await actAll("all-sam", project, "key-ccuse-0001", { act: "compact", chatId: "bot:max" });
+  assert.deepEqual([res.status, res.json.code, res.json.error], [403, "member_no_computer", "This runs on the bot's computer, and the owner hasn't let you use it."]);
+  assert.equal((await query("SELECT 1 FROM bops.chat_turns WHERE user_id = $1", [owner])).rowCount, 0, "nothing owed");
+  // A chat none of whose bots has a computer: said as that.
+  const ivy = await actAll("all-sam", project, "key-ccuse-0002", { act: "compact", chatId: "bot:ivy" });
+  assert.deepEqual([ivy.status, ivy.json.error], [409, "No bot in this chat has a computer to compact it."]);
+  // An Admin always may.
+  const tom = await actAll("all-tom", project, "key-ccuse-0003", { act: "compact", chatId: "bot:max" });
+  assert.equal(tom.status, 202, JSON.stringify(tom.json));
+  await query("DELETE FROM bops.chat_turns WHERE user_id = $1", [owner]);
+});
+
+test("everything through the cloud: an answer to an ask the owner's Mac made, with that Mac on, says nothing more: it reads it now", async () => {
+  allFakes();
+  macIsOn = true;
+  const { owner, project } = await allCloudOwner();
+  assert.equal((await actAll("all-sam", project, "key-macask-02", { act: "answer", askId: "ask-mac", reply: "once" })).status, 202);
+  assert.equal(await noteIn(owner, "msg_askmac_ask-mac"), undefined);
+  macIsOn = false;
+});
+
+test("everything through the cloud: changes: a bot's settings, refusals for what isn't done here, a workspace renamed on orgo-web with their key, and where its chat is answered", async () => {
+  allFakes();
+  const { owner, project } = await allCloudOwner();
+  const change = (key: string, path: string, body: Record<string, unknown>) => actAll("all-tom", project, key, { act: "change", method: "PATCH", path, body });
+  assert.equal((await change("key-chg-name1", "/api/bots", { botId: "max", name: " Maxine ", autoApprove: true })).status, 202);
+  assert.deepEqual([st0((await stateOf(owner)).state).name, st0((await stateOf(owner)).state).autoApprove], ["Maxine", true]);
+  for (const [key, body, words] of [
+    ["key-chg-mac01", { botId: "max", runsOn: "mac" }, "This workspace runs in the cloud, so its bots work on their own computers."],
+    ["key-chg-comp1", { botId: "max", computer: "own" }, "A bot's own computer and email can't be set up from the cloud yet."],
+    ["key-chg-mail1", { botId: "max", email: true }, "A bot's own computer and email can't be set up from the cloud yet."],
+  ] as const) {
+    const r = await change(key, "/api/bots", body);
+    assert.deepEqual([r.status, r.json.code, r.json.error], [409, "cloud_not_yet", words], key);
+  }
+  orgoExtra = async (req, res, body) => {
+    if (req.method !== "PATCH" || req.url !== `/api/projects/${project}`) return false;
+    orgoAsked.push({ path: req.url, method: "PATCH", body: JSON.parse(body), auth: req.headers.authorization ?? "" });
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: project, name: "All Hands", updated_at: "2026-11-18T00:00:00Z" }));
+    return true;
+  };
+  assert.equal((await change("key-chg-ws001", "/api/workspaces", { id: "@ws", name: "All Hands" })).status, 202);
+  assert.deepEqual(orgoAsked.map((a) => [a.body, a.auth]), [[{ name: "All Hands" }, "Bearer key-all-tom"]]);
+  const ws = ((await stateOf(owner)).state.workspaces as Record<string, Json>[]).find((w) => w.id === "ws_all")!;
+  assert.deepEqual([ws.name, ws.orgoName, ws.orgoUpdatedAt], ["All Hands", "All Hands", "2026-11-18T00:00:00Z"]);
+  assert.equal((await noteIn(owner, "msg_change_all-tom_key-chg-ws001"))?.text, "tom renamed the workspace");
+  // The switch as a window sends it now ("cloud" or "mac"): "cloud" kept, as an Admin's choice.
+  assert.equal((await change("key-chg-chat0", "/api/workspaces", { id: "@ws", chat: "cloud" })).status, 202);
+  assert.deepEqual({ ...(await query<{ mode: string; set_by: string }>("SELECT mode, set_by FROM bops.chat_routing WHERE user_id = $1 AND ws_id = 'ws_all'", [owner])).rows[0] }, { mode: "cloud", set_by: "admin" });
+  // Back to the owner's Mac: the switch moves, as an Admin's choice.
+  assert.equal((await change("key-chg-chat1", "/api/workspaces", { id: "@ws", chat: "mac" })).status, 202);
+  assert.equal((await query<{ mode: string; set_by: string }>("SELECT mode, set_by FROM bops.chat_routing WHERE user_id = $1 AND ws_id = 'ws_all'", [owner])).rows[0].mode, "mac");
+  assert.deepEqual(macQueue, []);
+});
+
+test("everything through the cloud: a chat's Compact is a job for one of its bots' computers, once by key; none ready is said", async () => {
+  allFakes();
+  const { owner, project } = await allCloudOwner();
+  const res = await actAll("all-sam", project, "key-cchat-0001", { act: "compact", chatId: "bot:max" });
+  assert.equal(res.status, 202, JSON.stringify(res.json));
+  assert.deepEqual({ ...res.json, turn: undefined }, { ...CLOUD, turn: undefined });
+  const turns = (await query<{ id: string; chat_id: string; desktop_id: string; member: Record<string, Json> }>("SELECT id, chat_id, desktop_id, member FROM bops.chat_turns WHERE user_id = $1", [owner])).rows;
+  assert.deepEqual(turns.map((t) => [t.id, t.chat_id, t.desktop_id, t.member.job, t.member.ref, t.member.userId]), [[res.json.turn, "bot:max", R_DESKTOP, { act: "compactChat" }, "key-cchat-0001", "all-sam"]]);
+  assert.equal((await actAll("all-sam", project, "key-cchat-0001", { act: "compact", chatId: "bot:max" })).json.turn, res.json.turn, "the same act again: the same job");
+  const none = await allCloudOwner({ runner: "0.0.53" });
+  const r2 = await actAll("all-sam", none.project, "key-cchat-0002", { act: "compact", chatId: "bot:max" });
+  assert.deepEqual([r2.status, r2.json.code, r2.json.error], [409, "computer_not_ready", "Max's computer needs a newer Bops before it can do this. It updates the next time Alex opens Bops."]);
+  // A chat none of whose bots has a computer (Ivy's own isn't made yet).
+  const r3 = await actAll("all-sam", none.project, "key-cchat-0003", { act: "compact", chatId: "bot:ivy" });
+  assert.deepEqual([r3.status, r3.json.code, r3.json.error], [409, "computer_not_ready", "No bot in this chat has a computer to compact it."]);
+  assert.deepEqual(macQueue, []);
+  await query("DELETE FROM bops.chat_turns WHERE user_id = ANY($1::text[])", [[owner, none.owner]]);
+});
+
+after(async () => {
+  if (!allOwners.length) return;
+  await query("DELETE FROM bops.chat_messages WHERE user_id = ANY($1::text[])", [allOwners]).catch(() => {});
+  await query("DELETE FROM bops.chat_routing WHERE user_id = ANY($1::text[])", [allOwners]).catch(() => {});
+  await query("DELETE FROM bops.runner_presence WHERE user_id = ANY($1::text[])", [allOwners]).catch(() => {});
+  await query("DELETE FROM bops.app_state WHERE user_id = ANY($1::text[])", [allOwners]).catch(() => {});
+  await query("DELETE FROM bops.cloud_accounts WHERE user_id = ANY($1::text[])", [allOwners]).catch(() => {});
+  await closeDb();
 });

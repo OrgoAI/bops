@@ -22,6 +22,7 @@ import { giveAppsRead, retryHeldRenameOnStart, startProjectBinding } from "@/lib
 import { startMadeAppsSync } from "@/lib/server/made-apps-sync";
 import { startCrmSync } from "@/lib/server/crm-sync";
 import { startPrivacy } from "@/lib/server/privacy";
+import { startBotFollow } from "@/lib/server/bot-follow";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +36,8 @@ export const dynamic = "force-dynamic";
  * workspace (bops-sync.ts), the runners on the bots' computers (runner-install.ts), an Orgo project
  * for each workspace that has none yet (workspaces.ts startProjectBinding), and the apps the bots made
  * and the CRM's files in step with Orgo's record of them (made-apps-sync.ts, crm-sync.ts), the Keep chats
- * and calls sweep (privacy.ts), and once a start the default workspace's name held for the apps is tried
+ * and calls sweep (privacy.ts), following a bot's name, call voice or place to work changed on another Bops
+ * (bot-follow.ts), and once a start the default workspace's name held for the apps is tried
  * again (workspaces.ts retryDefaultRename), and everyone a workspace was shared with before Your Apps is given it at
  * Read, once (workspaces.ts giveAppsRead).
  * With a workspace shared with the user open, it's that workspace's state, read only (lib/server/shared.ts).
@@ -54,6 +56,7 @@ export async function GET(request: Request) {
   startMadeAppsSync();
   startCrmSync();
   startPrivacy();
+  startBotFollow();
   retryHeldRenameOnStart();
   // Your Apps at Read for everyone already shared with, once per workspace, as soon as the state is here: before the
   // People sheet can show them unset (workspaces.ts giveAppsRead; a look at a few workspaces once it's done).

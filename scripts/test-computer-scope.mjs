@@ -301,6 +301,55 @@ await check("a computer may make each change its runner's work makes, all at onc
   assert.deepEqual(C.writeDenials({}, { bots: [] }, scope), ["state"], "never a state of its own making");
 });
 
+await check("its bots' chats: only their running summary, of a chat one of them is in (chatsOn); nothing else of a chat, and never another's", () => {
+  const chatsState = () => {
+    const s = baseState();
+    s.chats.push({ id: "bot:iris", kind: "bot", botIds: ["iris"], createdAt: 1, typing: [] }, { id: "chat_team", kind: "group", name: "Team", botIds: ["main", "iris"], createdAt: 1, typing: [] });
+    return s;
+  };
+  const summary = { text: "So far: Ann asked for the report.", through: 5, fresh: 5, at: 6 };
+  const allowed = [(s) => (s.chats[0].summary = summary), (s) => (s.chats[2].summary = summary)];
+  const base = chatsState();
+  for (const change of allowed) {
+    const next = structuredClone(base);
+    change(next);
+    assert.deepEqual(C.writeDenials(base, next, scope), [], change.toString());
+    assert.ok(C.same(C.keepAllowed(base, next, scope).blob, next), `kept whole: ${change}`);
+  }
+  const refused = [
+    [(s) => (s.chats[0].typing = ["main"]), "chats.bot:main.typing"],
+    [(s) => (s.chats[2].botIds = ["main"]), "chats.chat_team.botIds"],
+    [(s) => (s.chats[2].name = "Ours"), "chats.chat_team.name"],
+    [(s) => (s.chats[1].summary = summary), "chats.bot:iris"],
+    [(s) => s.chats.push({ id: "chat_new", kind: "group", botIds: ["main"], createdAt: 2, typing: [] }), "chats.chat_new"],
+    [(s) => s.chats.pop(), "chats.chat_team"],
+  ];
+  for (const [change, path] of refused) {
+    const next = structuredClone(base);
+    change(next);
+    assert.ok(C.writeDenials(base, next, scope).includes(path), `${path}: ${JSON.stringify(C.writeDenials(base, next, scope))}`);
+    const kept = C.keepAllowed(base, next, scope);
+    assert.ok(kept.held.includes(path), path);
+    assert.ok(C.same(kept.blob, base), `${path}: put back as it was`);
+  }
+  // A summary with something else of the chat: the summary stays, the rest goes back.
+  const both = structuredClone(base);
+  both.chats[0].summary = summary;
+  both.chats[0].name = "Mine now";
+  const kept = C.keepAllowed(base, both, scope);
+  assert.deepEqual(kept.held, ["chats.bot:main.name"]);
+  assert.deepEqual(kept.blob.chats[0], { ...base.chats[0], summary });
+  // As a runner writes it: over what it read (forComputer, without the chat it isn't in), with that put back (withHeldBack).
+  const read = C.forComputer(base, scope);
+  assert.deepEqual(read.chats.map((c) => c.id), ["bot:main", "chat_team"]);
+  const wrote = structuredClone(read);
+  wrote.chats[1].summary = summary;
+  const whole = C.withHeldBack(base, wrote, scope);
+  assert.deepEqual(C.writeDenials(base, whole, scope), []);
+  assert.deepEqual(whole.chats.map((c) => c.id), ["bot:main", "bot:iris", "chat_team"]);
+  assert.deepEqual(whole.chats[2].summary, summary);
+});
+
 await check("whatever a runner's state becomes, what keepAllowed keeps is never refused, and keeps each allowed change in it (3000 mixes)", () => {
   const r = rng(11);
   for (let i = 0; i < 3000; i++) {

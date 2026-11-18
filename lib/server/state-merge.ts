@@ -82,7 +82,9 @@ export function fromShared(blob: Blob, device: string): Blob {
  *   a request for the user's OK keeps its reply, never back to unanswered (mergeApproval), and one taken
  *   out on either side stays out, whatever the other changed: only the Bops that asked takes one out, once
  *   it has read the reply, so a second reply or a Stop that crossed it never brings it back to be read again;
- *   a bot is this Mac's copy with its How I work the other side's where only that side changed it (keepHowIWork);
+ *   a bot is this Mac's copy with each field Bops Cloud writes for a teammate (its How I work, keys, permissions,
+ *   name, effort, where it runs, Just do it, data off, app access) the other side's where only that side changed
+ *   it (keepBotFields);
  *   a workspace goes field by field (each field changed on both is this Mac's), so a rename on one
  *   Mac and a names sync on the other (workspaces.ts noteOrgoName, which only notes when Orgo last
  *   changed its project) both stay, and the old name never comes back over the new one, and its
@@ -223,7 +225,7 @@ function mergeEither(key: string, b: unknown, m: unknown, t: unknown, top: boole
       : key === "sessions" ? (was: Blob, x: Blob, y: Blob) => mergeSession(was, x, y, me)
       : key === "appApprovals" ? mergeApproval
       : key === "workspaces" || (me?.older && key === "bots") ? (was: Blob, x: Blob, y: Blob) => mergeObject(was, x, y, false, me)
-      : key === "bots" ? keepHowIWork
+      : key === "bots" ? keepBotFields
       : undefined;
     return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], both, me?.older, top && key === "appApprovals");
   }
@@ -252,19 +254,30 @@ function githubWhole(base: unknown, mine: unknown, theirs: unknown, me?: Me): un
 
 /** A bot's "How I work" and who wrote it (Bot.persona, Bot.personaBy): one field, as one Save or an Admin's change writes both. */
 const HOW_I_WORK = ["persona", "personaBy"] as const;
+/**
+ * The fields of a bot Bops Cloud writes for a teammate in a workspace where everything goes through the cloud
+ * (cloud/members.ts: How I work, a key, an Always allow, a change from its settings), each one field (How I work two
+ * written as one): what keepBotFields merges one by one.
+ */
+const CLOUD_WRITES: readonly (readonly string[])[] = [HOW_I_WORK, ["keys"], ["permissions"], ["name"], ["effort"], ["runsOn"], ["autoApprove"], ["dataOff"], ["access"]];
 
 /**
- * A bot changed on both sides: this Mac's copy, with its How I work (HOW_I_WORK) the other side's where only that side
- * changed it: an Admin's change Bops Cloud kept while this Mac was away (cloud/members.ts personaHere) stands over this
- * Mac's older words, whatever else of the bot this Mac changed meanwhile. Changed on both, this Mac's as before.
+ * A bot changed on both sides: this Mac's copy, with each field Bops Cloud writes (CLOUD_WRITES) the other side's where
+ * only that side changed it: what a teammate changed through Bops Cloud while this Mac was away or busy (cloud/members.ts:
+ * an Admin's How I work, a key given or taken away, an Always allow, a setting) stands over this Mac's older copy,
+ * whatever else of the bot this Mac changed meanwhile (how its computer is doing, its RAM). Changed on both, this Mac's
+ * as before.
  */
-function keepHowIWork(base: Blob, mine: Blob, theirs: Blob): Blob {
-  const changed = (x: Blob) => HOW_I_WORK.some((k) => !same(x[k], base[k]));
-  if (changed(mine) || !changed(theirs)) return mine;
-  const out: Blob = { ...mine };
-  for (const k of HOW_I_WORK) {
-    if (theirs[k] === undefined) delete out[k];
-    else out[k] = theirs[k];
+function keepBotFields(base: Blob, mine: Blob, theirs: Blob): Blob {
+  let out = mine;
+  for (const field of CLOUD_WRITES) {
+    const changed = (x: Blob) => field.some((k) => !same(x[k], base[k]));
+    if (changed(mine) || !changed(theirs)) continue;
+    if (out === mine) out = { ...mine };
+    for (const k of field) {
+      if (theirs[k] === undefined) delete out[k];
+      else out[k] = theirs[k];
+    }
   }
   return out;
 }

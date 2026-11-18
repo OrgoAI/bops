@@ -7,9 +7,9 @@ import { closeDb, db, query } from "../db.ts";
 import { deviceIdOf } from "../device.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import { CLOUD_ALL_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
+import { CLOUD_ALL_MIN_VERSION, COMPUTER_NOT_READY, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, type MemberActPayload, type SharedWsState, type TurnJob, type TurnMember } from "../protocol.ts";
 import { howIWork } from "../style.ts";
-import { APP_JOB_DEADLINE_MS, closeRunners, JOB_OLD_RUNNER, jobDeadline, noteTrouble, resetTurns, runnerVersionOf, sweepTurns, takeAppJob, turnById, TURN_DEADLINE_MS, turnTiming } from "../turns.ts";
+import { APP_JOB_DEADLINE_MS, closeRunners, JOB_OLD_RUNNER, jobDeadline, NO_CHAT_COMPUTER, noteTrouble, resetTurns, runnerVersionOf, sweepTurns, takeAppJob, takeChatJob, turnById, TURN_DEADLINE_MS, turnTiming } from "../turns.ts";
 import { connectMac, dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
@@ -1586,4 +1586,216 @@ test("a member's message and a claim read the owner's Mac's version on their own
       for (const c of held) c.release();
     }
   });
+});
+
+/* ---------------- A teammate's compact of a chat, as a job on a bot's computer ---------------- */
+
+/**
+ * A workspace whose chats a teammate compacts on a bot's computer (takeChatJob): Max, the main bot, on its computer with a
+ * runner at CLOUD_ALL_MIN_VERSION; Lee, on a computer of its own whose runner is at `lee` (none: null); the group "team"
+ * with Lee first, then Max; Lee's own chat. An Admin (Ada), and Sam, a Member with Write on both. The owner's Mac is shut.
+ */
+async function setupChat(o: { lee?: string | null } = {}) {
+  const owner = user("owner");
+  const admin = user("admin");
+  const sam = user("writer");
+  const project = randomUUID();
+  const desktop = randomUUID();
+  const leeDesktop = randomUUID();
+  const said = { ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme" };
+  roles[`${owner} ${project}`] = { role: "owner", ...said };
+  roles[`${admin} ${project}`] = { role: "admin", ...said };
+  roles[`${sam} ${project}`] = { role: "member", ...said };
+  const [D, L] = [desktop.toUpperCase(), leeDesktop.toUpperCase()];
+  const record = (version: string) => ({ status: "running", version, buildId: "b1", by: "mac-o", at: 1 });
+  const state = {
+    owner: { name: "Tara" },
+    workspaces: [
+      { id: "ws_main", name: "Main" },
+      { id: "ws_acme", name: "Acme", memberAccess: { [`${sam}@example.com`]: { others: "none", bots: { max: "write", lee: "write" }, computer: "use" } } },
+    ],
+    bots: [
+      { id: "max", name: "Max", isMain: true, workspaceId: "ws_acme", computerId: D },
+      { id: "lee", name: "Lee", workspaceId: "ws_acme", computer: "own", computerId: L },
+    ],
+    chats: [
+      { id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_acme" },
+      { id: "bot:lee", kind: "bot", botIds: ["lee"], workspaceId: "ws_acme" },
+      { id: "team", kind: "group", botIds: ["lee", "max"], workspaceId: "ws_acme" },
+    ],
+    runners: { [D]: record(CLOUD_ALL_MIN_VERSION), ...(o.lee === null ? {} : { [L]: record(o.lee ?? "0.0.53") }) },
+  };
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: own(owner, "mac-o", GITHUB_ACTS_MIN_VERSION), body: JSON.stringify({ base: 0, state }) })).status, 200);
+  await macSaid(owner, CLOUD_ALL_MIN_VERSION);
+  const who = (u: string, name: string, key: string, role?: "admin"): TurnMember => ({ userId: u, email: `${u}@example.com`, name, ref: key, projectId: project, ...(role ? { role } : {}) });
+  /** A teammate's compact of a chat (Ada's, unless `as` says), as members.ts takes it. */
+  const compact = (key: string, chatId = "team", as = who(admin, "Ada", key, "admin")) =>
+    takeChatJob({ account: owner, wsId: "ws_acme", chatId, id: `msg_job_${as.userId}_${key}`, member: as, check: () => {} });
+  return { owner, admin, sam, project, desktop, leeDesktop, device: deviceIdOf(owner, desktop), who, compact };
+}
+/** A chat job's end line (finish, jobsOver), once it's there. */
+const lineOf = async (owner: string, messageId: string, ms = 5000) => {
+  await until(async () => (await messages(owner)).some((m) => m.id === `${messageId}_done`), `the line of ${messageId}`, ms);
+  return (await messages(owner)).find((m) => m.id === `${messageId}_done`)!;
+};
+const stateVersion = async (owner: string) => (await query<{ version: number }>("SELECT version FROM bops.app_state WHERE user_id = $1", [owner])).rows[0].version;
+
+test("a chat's compact goes to the first bot of the chat whose computer's runner is new enough: none is 409 with the words, a retry adds nothing, and it waits behind the chat's answers", async (t) => {
+  const s = await setupChat();
+  // A runner listens on Max's computer, so nothing owed wakes it meanwhile.
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  // An answer owed in the chat first.
+  await query(
+    `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at)
+     VALUES ($1, 'turn_first', 'msg_first', 'team', 'max', 'ws_acme', NULL, $2, $3, 'owed', now() + interval '10 minutes', $4)`,
+    [s.owner, s.desktop, s.device, Date.now()],
+  );
+  const before = await stateVersion(s.owner);
+  const taken = await s.compact("key-cc-0001");
+  assert.equal(taken.fresh, true);
+  // Lee comes first in the chat, but its runner is older than the gate: Max's computer.
+  assert.deepEqual([taken.turn.chatId, taken.turn.botId, taken.turn.desktopId, taken.turn.targetDevice, taken.turn.member?.job], ["team", "max", s.desktop, s.device, { act: "compactChat" }]);
+  const left = taken.turn.deadline - Date.now();
+  assert.ok(left > 29 * 60_000 && left <= 30 * 60_000, `about half an hour (${left} ms)`);
+  assert.equal(await stateVersion(s.owner), before, "nothing written on the owner's state");
+  // The same act again: the same turn, nothing more.
+  const again = await s.compact("key-cc-0001");
+  assert.deepEqual([again.fresh, again.turn.id], [false, taken.turn.id]);
+  assert.equal((await turnsOf(s.owner)).length, 2);
+  // One at a time in the chat: it waits behind the answer owed there first.
+  const busy = await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${taken.turn.id}/claim`, {});
+  assert.deepEqual([busy.status, ((await busy.json()) as { code: string }).code], [409, "busy"]);
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, "/v1/runner/turns/turn_first/claim", {})).status, 200);
+  assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, "/v1/runner/turns/turn_first/done", { state: "done" })).status, 200);
+  const ok = await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${taken.turn.id}/claim`, {});
+  assert.equal(ok.status, 200, await ok.clone().text());
+  const claimed = ((await ok.json()) as { turn: { chatId: string; botId: string; member: { job: unknown; ref: string } } }).turn;
+  assert.deepEqual([claimed.chatId, claimed.botId, claimed.member.job, claimed.member.ref], ["team", "max", { act: "compactChat" }, "key-cc-0001"]);
+  // None of a chat's bots has a runner new enough (Lee's own chat): 409, saying why of the first with a computer (its
+  // runner too old), as a thread's act says it, and nothing owed.
+  await assert.rejects(s.compact("key-cc-0002", "bot:lee"), { status: 409, message: "Lee's computer needs a newer Bops before it can do this. It updates the next time Tara opens Bops.", extra: { code: COMPUTER_NOT_READY } });
+  assert.equal(NO_CHAT_COMPUTER, "No bot in this chat has a computer to compact it.");
+  assert.equal((await turnsOf(s.owner)).length, 2, "nothing owed");
+  assert.deepEqual(await pendingFor(s.owner), [], "nothing waits for the owner's Mac");
+  // Lee's runner new enough: Lee's own computer, first in the chat.
+  const l = await setupChat({ lee: CLOUD_ALL_MIN_VERSION });
+  const lee = await stream("/v1/runner/live", vm(l.owner, l.leeDesktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => lee.close());
+  const onLee = await l.compact("key-cc-0003");
+  assert.deepEqual([onLee.turn.botId, onLee.turn.desktopId], ["lee", l.leeDesktop]);
+  // No runner there at all: the next bot with one; a chat of none of them: refused.
+  const none = await setupChat({ lee: null });
+  const mx = await stream("/v1/runner/live", vm(none.owner, none.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => mx.close());
+  assert.equal((await none.compact("key-cc-0004")).turn.botId, "max");
+  await assert.rejects(none.compact("key-cc-0005", "bot:lee"), { status: 409, message: "Lee's computer isn't set up yet. Tara's Bops sets it up the next time it opens.", extra: { code: COMPUTER_NOT_READY } });
+});
+
+test("a chat's compact none of whose bots can do it says why of the first with a computer (down, no runner, an older one), and that none has one only when none has", async () => {
+  const s = await setupChat();
+  const why = async (edit: Parameters<typeof ownerChanges>[1], key: string) => {
+    await ownerChanges(s.owner, edit, own(s.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+    return s.compact(key, "bot:max").then(
+      () => assert.fail("taken"),
+      (e: { status: number; message: string; extra?: { code?: string } }) => [e.status, e.extra?.code, e.message],
+    );
+  };
+  const D = s.desktop.toUpperCase();
+  const runners = (st: unknown) => st as { runners: Record<string, Record<string, unknown>> };
+  // Found down by the owner's Mac.
+  assert.deepEqual(await why((st) => void (runners(st).runners[D].down = { status: "stopped", at: 1 }), "key-cc-0301"), [409, COMPUTER_NOT_READY, "Max's computer isn't running, so it can't compact this chat. Tara can start it again."]);
+  // An older runner.
+  assert.deepEqual(await why((st) => void (runners(st).runners[D] = { status: "running", version: "0.0.53", buildId: "b1", by: "mac-o", at: 1 }), "key-cc-0302"), [
+    409,
+    COMPUTER_NOT_READY,
+    "Max's computer needs a newer Bops before it can do this. It updates the next time Tara opens Bops.",
+  ]);
+  // No runner yet.
+  assert.deepEqual(await why((st) => void delete runners(st).runners[D], "key-cc-0303"), [409, COMPUTER_NOT_READY, "Max's computer isn't set up yet. Tara's Bops sets it up the next time it opens."]);
+  // No computer at all.
+  assert.deepEqual(await why((st) => void (st as unknown as { bots: { computerId?: string }[] }).bots.forEach((b) => delete b.computerId), "key-cc-0304"), [409, COMPUTER_NOT_READY, NO_CHAT_COMPUTER]);
+  assert.equal((await turnsOf(s.owner)).length, 0, "nothing owed");
+});
+
+test("a chat's compact ends with its line in the chat, stamped as theirs so their window sees it land: Compacted by them, or why it didn't go; the owner's state is as it was", async (t) => {
+  const s = await setupChat();
+  const box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  const before = await stateVersion(s.owner);
+  const end = async (key: string, done: Record<string, unknown>) => {
+    const { turn } = await s.compact(key);
+    assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${turn.id}/claim`, {})).status, 200);
+    assert.equal((await runnerOn(s.owner, s.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${turn.id}/done`, done)).status, 200);
+    return turn;
+  };
+  const ok = await end("key-cc-0101", { state: "done", job: { ok: true, said: "Compacted" } });
+  const line = await lineOf(s.owner, ok.messageId);
+  assert.deepEqual(
+    { chatId: line.chatId, role: line.role, text: line.text, compacted: line.compacted, member: line.member },
+    { chatId: "team", role: "system", text: "Compacted by Ada", compacted: true, member: { userId: s.admin, email: `${s.admin}@example.com`, name: "Ada", ref: "key-cc-0101" } },
+  );
+  assert.ok(typeof line.at === "number" && line.at >= ok.humanAt);
+  // Ada reads it in the chat, by her act's key (her window's landed()).
+  const read = (await (await fetch(`${cloud.url}/v1/ws/${s.project}/state`, { headers: { Authorization: `Bearer ${keyOf(s.admin)}` } })).json()) as { messages: { id: string; member?: { ref: string } }[] };
+  assert.ok(read.messages.some((m) => m.id === line.id && m.member?.ref === "key-cc-0101"), "in Ada's view of the chat");
+  // Not compacted, as the computer said why.
+  const no = await end("key-cc-0102", { state: "done", job: { ok: false, said: "Nothing new to compact." } });
+  const noLine = await lineOf(s.owner, no.messageId);
+  assert.deepEqual([noLine.text, noLine.compacted, (noLine.member as { ref: string }).ref], ["Couldn't compact this chat: Nothing new to compact.", undefined, "key-cc-0102"]);
+  // Failed with a note: the line says it, and no other note goes in the chat.
+  const failed = await end("key-cc-0103", { state: "failed", note: "The model didn't answer." });
+  assert.equal((await lineOf(s.owner, failed.messageId)).text, "Couldn't compact this chat: The model didn't answer.");
+  assert.ok(!(await messages(s.owner)).some((m) => m.id === `${failed.messageId}_note`));
+  // Done with no result (a runner that answers as one from before): never said as compacted.
+  const old = await end("key-cc-0104", { state: "done" });
+  assert.equal((await lineOf(s.owner, old.messageId)).text, "Couldn't compact this chat: Max's computer took this on an older Bops. Try again once it's updated.");
+  // One line each, and plain words.
+  for (const id of [ok, no, failed, old].map((x) => `${x.messageId}_done`)) assert.equal((await messages(s.owner)).filter((m) => m.id === id).length, 1);
+  assert.ok((await messages(s.owner)).every((m) => !/[–—]| - |Orbit/.test(String(m.text ?? ""))));
+  assert.equal(await stateVersion(s.owner), before, "nothing on the owner's state: its summary is the runner's to write");
+});
+
+test("a chat's compact that ends without its computer saying is said in its line too: a computer that can't wake, a runner from before, and Write taken away meanwhile", async (t) => {
+  // A computer that can't wake (stopped): the line says why, and the chat's note of an answer doesn't go in.
+  const s = await setupChat();
+  wakeAnswers.set(s.desktop, () => ({ state: "stopped" }));
+  const a = await s.compact("key-cc-0201");
+  const stopped = await lineOf(s.owner, a.turn.messageId, 15_000);
+  assert.deepEqual([stopped.text, (stopped.member as { ref: string }).ref], ["Couldn't compact this chat: Max's computer is stopped. Tara can start it again.", "key-cc-0201"]);
+  assert.equal((await turnById(s.owner, a.turn.id))?.note, "stopped");
+  assert.ok(!(await messages(s.owner)).some((m) => m.id === `${a.turn.messageId}_note`), "no note of an answer");
+  // Claimed by a runner from before: 410, and the line says so.
+  const o = await setupChat();
+  const box = await stream("/v1/runner/live", vm(o.owner, o.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  const b = await o.compact("key-cc-0202");
+  assert.equal((await runnerOn(o.owner, o.desktop, "0.0.53", `/v1/runner/turns/${b.turn.id}/claim`, {})).status, 410);
+  assert.equal((await lineOf(o.owner, b.turn.messageId)).text, "Couldn't compact this chat: Max's computer took this on an older Bops. Try again once it's updated.");
+  // Sam's, and Sam taken down to Read on Lee before it ran: it ends, and the line says who may changed.
+  const c = await o.compact("key-cc-0203", "team", o.who(o.sam, "Sam", "key-cc-0203"));
+  await ownerChanges(o.owner, (st) => void (st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess![`${o.sam}@example.com`].bots = { max: "write", lee: "read" }), own(o.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+  const gone = await lineOf(o.owner, c.turn.messageId);
+  assert.deepEqual([gone.text, (gone.member as { name: string }).name, (gone.member as { ref: string }).ref], ["Couldn't compact this chat: Who can do this changed, so it didn't go.", "Sam", "key-cc-0203"]);
+  assert.equal((await turnById(o.owner, c.turn.id))?.state, "failed");
+});
+
+test("a chat's compact runs on a bot's computer, so it needs Use its computer: one taken without it (as orgo-web said) is refused at its claim, and one whose Use its computer the owner turned off meanwhile ends; each line says why", async (t) => {
+  const o = await setupChat();
+  const box = await stream("/v1/runner/live", vm(o.owner, o.desktop), "hello", { "x-bops-version": CLOUD_ALL_MIN_VERSION });
+  t.after(() => box.close());
+  // orgo-web said Sam may not use the bots' computers as it was taken: refused at the claim, the line says why, as theirs.
+  const a = await o.compact("key-cc-0401", "team", { ...o.who(o.sam, "Sam", "key-cc-0401"), computerUse: false });
+  assert.equal((await runnerOn(o.owner, o.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${a.turn.id}/claim`, {})).status, 410);
+  const refused = await lineOf(o.owner, a.turn.messageId);
+  assert.deepEqual([refused.text, (refused.member as { ref: string }).ref], ["Couldn't compact this chat: Tara hasn't let Sam use Max's computer.", "key-cc-0401"]);
+  assert.ok(!(await messages(o.owner)).some((m) => m.id === `${a.turn.messageId}_note`), "its own line, no other note");
+  // Allowed as it was taken, then the owner turned Use its computer off for Sam: it ends, saying why.
+  const b = await o.compact("key-cc-0402", "team", { ...o.who(o.sam, "Sam", "key-cc-0402"), computerUse: true });
+  await ownerChanges(o.owner, (st) => void (st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess![`${o.sam}@example.com`].computer = "none"), own(o.owner, "mac-o", GITHUB_ACTS_MIN_VERSION));
+  assert.equal((await lineOf(o.owner, b.turn.messageId)).text, "Couldn't compact this chat: Tara hasn't let Sam use Max's computer.");
+  assert.equal((await turnById(o.owner, b.turn.id))?.state, "failed");
+  // An Admin always may.
+  const c = await o.compact("key-cc-0403");
+  assert.equal((await runnerOn(o.owner, o.desktop, CLOUD_ALL_MIN_VERSION, `/v1/runner/turns/${c.turn.id}/claim`, {})).status, 200);
 });

@@ -243,7 +243,9 @@ export type MacToCloud =
  *   and an inbox the cloud set up for it, paused, or given back. The Mac takes them into its state.
  * - "member": something a member with Write did in the owner's workspace from their own Bops
  *   (MemberActPayload), checked by Bops Cloud and again by the Mac, which carries it out as the
- *   member's. Kept MEMBER_ACT_MS: an older one is dropped, never done late.
+ *   member's. Kept MEMBER_ACT_MS: an older one is dropped, never done late. Never for a workspace where
+ *   everything goes through the cloud (cloud/turns.ts allCloud): Bops Cloud and the bots' own computers
+ *   do those acts (cloud/members.ts cloudAct), the owner's Mac on or off.
  */
 export type PendingKind = "agentphone" | "call" | "slack" | "plan" | "member";
 
@@ -967,7 +969,11 @@ export const MESSAGES_PER_CHAT = 200;
  * from their own Bops: say something in a chat (a bot's 1:1 chat, or a group with every bot at Write),
  * reply in a thread, answer an ask (Allow once, Always allow, Deny with a note), stop threads, say
  * there's nothing to add, or Compact a chat or a thread (as saying something there takes). Ids are the
- * owner's, as the member's copy has them.
+ * owner's, as the member's copy has them. Who does each: the owner's Mac (lib/server/member-acts.ts) in a
+ * workspace on the Mac; in one where everything goes through the cloud (cloud/turns.ts allCloud), Bops Cloud
+ * itself (cloud/members.ts cloudAct: cloud/thread-acts.ts, cloud/change-apply.ts, orgo-web with the member's own
+ * key for a key and a rename), and the bots' own computers for what runs (a thread queued again, a chat's Compact
+ * as a job: TurnJob compactChat), the owner's Mac on or off; an app's acts go by Your Apps (MemberAppAct).
  */
 export type MemberAct =
   // `files`: put on the Desktop of the computer a bot of the chat works on first (MemberFile), with the owner's Bops at
@@ -988,15 +994,18 @@ export type MemberAct =
   // refused (NOT_WAITING, PERSONA_CHANGED) when the bot has others now.
   | { act: "persona"; botId: string; text: string; was: string }
   // Keys (SharedWsSlice.keys), with the owner's Bops at KEYS_MIN_VERSION (OWNER_BOPS_OLD): let a bot they see use a key the
-  // workspace sees, by its vault name, or stop it (`on` false). Done by the owner's Mac, named as them (lib/server/member-acts.ts).
+  // workspace sees, by its vault name, or stop it (`on` false). Done by the owner's Mac, named as them (lib/server/member-acts.ts);
+  // where everything goes through the cloud, by Bops Cloud: orgo-web's grant with their own Orgo key, and Bot.keys (CLOUD_NOT_YET
+  // until orgo-web has the route).
   // On is for the workspace's own keys alone: one it sees only as the owner's (scope "all", or `from`) is refused
   // (MEMBER_OWNER_ONLY, OWNERS_KEY_LINE); off goes for any.
   | { act: "key"; botId: string; name: string; on: boolean }
   // A change made as the owner's own window makes it (cloud/change-routes.ts CHANGE_ROUTES: which route, which power it
   // needs), by someone with that power (cloud/member-access.ts Power: an Admin has every one, a Member the ones turned on for them in
   // Team), with the owner's Bops at CHANGES_MIN_VERSION (OWNER_BOPS_OLD). The workspace's own id is "@ws" (THIS_WS) in it.
-  // Done by the owner's Mac through that route (lib/server/change-acts.ts); how it went comes back on the workspace
-  // (SharedWsSlice.changed).
+  // Done by the owner's Mac through that route (lib/server/change-acts.ts); where everything goes through the cloud, by Bops
+  // Cloud on the owner's state (cloud/change-apply.ts), but a bot's own computer, its email and its site (CLOUD_NOT_YET) and
+  // working on the owner's Mac (refused). How it went comes back on the workspace (SharedWsSlice.changed).
   | { act: "change"; method: "POST" | "PATCH" | "PUT" | "DELETE"; path: string; query?: Record<string, string>; body: Record<string, unknown> }
   // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
   | MemberAppAct;
@@ -1139,7 +1148,8 @@ export const KEYS_MIN_VERSION = "0.0.41";
 /**
  * The first Bops whose Mac keeps an Admin's change to a bot's "How I work" that Bops Cloud wrote while that Mac was away
  * (cloud/members.ts personaHere) when it merges a later write of its own to the same bot (lib/server/state-merge.ts
- * keepHowIWork): an older one would put the owner's words back over it, so for an owner whose last Mac is older, Bops
+ * keepBotFields, which from CLOUD_ALL_MIN_VERSION keeps every bot field Bops Cloud writes): an older one would put the
+ * owner's words back over it, so for an owner whose last Mac is older, Bops
  * Cloud never writes it and the act waits for that Mac as before. Set to the release that carries it.
  */
 export const CLOUD_PERSONA_MIN_VERSION = "0.0.42";

@@ -8,6 +8,7 @@ import { editBotSettings } from "@/lib/server/bot-settings";
 import { bot, update } from "@/lib/server/store";
 import { notReady } from "@/lib/server/ready";
 import { routineChanged } from "@/lib/server/routine-sync";
+import { followedHere } from "@/lib/server/bot-follow";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { GroupError, linkFrom, setBotSite } from "@/lib/server/bot-groups";
 import { sharedOpen } from "@/lib/server/shared";
@@ -146,6 +147,8 @@ export async function PATCH(request: Request) {
   if (body.callVoice !== undefined) void import("@/lib/server/phone").then(({ syncLineVoices }) => syncLineVoices(b.id)).catch((e: Error) => console.warn(`[bots] ${b.id} line voice: ${e.message}`));
   // Its routines that need the Mac follow where it works (runner.ts pinnedToMac): Orgo hears.
   if (body.runsOn && runsOnBefore !== b.runsOn) routineChanged(b.id);
+  // Followed here already: never again as another Bops's change (bot-follow.ts).
+  if (body.name !== undefined || body.callVoice !== undefined || body.runsOn) followedHere(b.id);
   return Response.json({ ok: true });
 }
 

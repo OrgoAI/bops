@@ -19,6 +19,7 @@ import {
   CHAT_NOT_IN_CLOUD,
   CLOUD_ALL_MIN_VERSION,
   CLOUD_CHAT_MIN_VERSION,
+  COMPUTER_NOT_READY,
   GITHUB_ACTS_MIN_VERSION,
   isGithubJob,
   isRemoveJob,
@@ -40,6 +41,7 @@ import {
   type TurnShown,
 } from "./protocol.ts";
 import { announce, checkUser, loadState, lockedState, lockUser, toJson, writeMessages } from "./state.ts";
+import { noRunnerWords, oldRunnerWords } from "./thread-acts.ts";
 import { deliverWaitingTo, isConnected } from "./tunnel.ts";
 import { computerUseOf, list, viewerAccess, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 
@@ -1086,11 +1088,13 @@ const jobWords = (t: TurnRow, owner: string, bot: string): string =>
   t.note && Object.hasOwn(JOB_NOTES, t.note) ? JOB_NOTES[t.note](owner, bot) : "Who can do this changed, so it didn't go.";
 
 /**
- * App jobs that ended without their computer saying how (a wake refused, too late, a lease lost partway, taken back): each
- * one's act on the app said not done, and why, so Your Apps never shows it going for good. Never throws.
+ * Jobs that ended without their computer saying how (a wake refused, too late, a lease lost partway, taken back): each
+ * app job's act on the app said not done, and why, so Your Apps never shows it going for good; each chat's job
+ * (compactChat) its line in the chat, stamped as theirs, saying why (chatJobsOver). Never throws.
  */
 async function jobsOver(turns: TurnRow[], why?: string) {
-  // Only an app's: a job with no app (compactChat) has no row to say it on.
+  const chats = turns.filter(chatJob);
+  if (chats.length) await chatJobsOver(chats, why);
   const jobs = turns.filter((t) => t.member?.job && jobApp(t.member.job));
   if (!jobs.length) return;
   const userId = jobs[0].userId;
@@ -1114,6 +1118,45 @@ async function jobsOver(turns: TurnRow[], why?: string) {
   } catch (e) {
     console.warn(`[turns] app jobs of ${userId}: ${(e as Error).message}`);
   }
+}
+
+/** Why a chat's job ended that its computer never said, by its turn's note: JOB_NOTES' words, or the chat's own where an app's don't fit. */
+const chatJobWords = (t: TurnRow, owner: string, bot: string): string =>
+  t.note === "noUse"
+    ? `${owner} hasn't let ${t.member?.name ?? "them"} use ${bot}'s computer.`
+    : t.note && Object.hasOwn(CHAT_JOB_NOTES, t.note)
+      ? CHAT_JOB_NOTES[t.note](owner, bot)
+      : jobWords(t, owner, bot);
+
+/** Chat jobs (compactChat) that ended without their computer saying how: each its line in its chat, why (`why`, else by its note), once. Never throws. */
+async function chatJobsOver(turns: TurnRow[], why?: string) {
+  const userId = turns[0].userId;
+  try {
+    const blob = ((await loadState(userId))?.state ?? {}) as Record<string, unknown>;
+    await writeChatJobLines(
+      userId,
+      turns.flatMap((t) => {
+        const line = chatJobLine(t, false, why ?? chatJobWords(t, ownerOf(blob), nameOf(blob, t.botId)));
+        return line ? [line] : [];
+      }),
+    );
+  } catch (e) {
+    console.warn(`[turns] chat jobs of ${userId}: ${(e as Error).message}`);
+  }
+}
+
+/** A chat job's end lines (chatJobLine) written once each: one there already (its other end) stays as it is. Every viewer of their chats hears it. */
+async function writeChatJobLines(userId: string, rows: Record<string, unknown>[], c?: pg.PoolClient) {
+  if (!rows.length) return;
+  const write = async (db: pg.PoolClient) => {
+    for (const m of rows) await db.query("INSERT INTO bops.chat_messages (user_id, id, chat_id, at, json) VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (user_id, id) DO NOTHING", [userId, m.id, m.chatId, m.at, toJson(m)]);
+  };
+  if (c) return write(c);
+  await tx(async (db) => {
+    await lockUser(db, userId);
+    await write(db);
+  });
+  announce(userId, { chats: [...new Set(rows.map((m) => String(m.chatId)))], by: "cloud" });
 }
 
 /** Where a runner is on a computer as the owner's Mac keeps it (AppState.runners, by Orgo computer id, any case). */
@@ -1228,6 +1271,105 @@ export async function takeAppJob(o: {
   }
   if (taken.where === "computer") return { where: "computer", turn: taken.turn, fresh: taken.fresh };
   return taken;
+}
+
+/* ---------------- A chat's compact, as a job ---------------- */
+
+/** 409 COMPUTER_NOT_READY for a chat's compact (takeChatJob): none of its bots has a computer. */
+export const NO_CHAT_COMPUTER = "No bot in this chat has a computer to compact it.";
+/** 409 COMPUTER_NOT_READY for a chat's compact (takeChatJob): its first bot with a computer can't do it, and why (a thread's act says the same: thread-acts.ts). */
+export const chatJobUnready = (bot: string, owner: string, why: "down" | "none" | "old") =>
+  why === "old" ? oldRunnerWords(bot, owner) : why === "none" ? noRunnerWords(bot, owner) : `${bot}'s computer isn't running, so it can't compact this chat. ${owner} can start it again.`;
+
+/**
+ * Compacting a chat (the "compact" act of a chat, in a workspace where everything goes through the cloud: members.ts)
+ * as a job (TurnJob compactChat) owed to the computer of one of its bots, which folds the chat into its summary there
+ * (lib/server/runner-chat.ts runnerJob, chat-summary.ts compactChat): no model runs anywhere else, and never on the
+ * owner's Mac. Under the owner's lock, on their state as it is then: `check` (throwing to refuse: still theirs to do),
+ * then the chat's first bot (in its order) whose computer, its own or the one it shares (computerFor, `cloud`: a bot set
+ * to the owner's Mac too), has a runner (runnerVersionOf) at CLOUD_ALL_MIN_VERSION on a computer the owner's Mac didn't
+ * find down; none is 409 COMPUTER_NOT_READY, and nothing is kept: why the first bot with a computer can't (chatJobUnready),
+ * or NO_CHAT_COMPUTER when none has one. Else, once by its id (a retry finds
+ * it and changes nothing): a turn in the chat itself, so it waits behind the answers there (one at a time per chat:
+ * claim), owed to that computer with the job on its member, given out and woken as a chat turn is, until its deadline
+ * (jobDeadline). No note in the chat: its end is the line (finish, jobsOver), stamped as theirs, done or why not. `still`
+ * false right before it's kept takes it back (an orgo-web notice landed).
+ */
+export async function takeChatJob(o: {
+  account: string;
+  wsId: string;
+  chatId: string;
+  id: string;
+  member: TurnMember;
+  check: (blob: Record<string, unknown>) => void;
+  still?: () => boolean;
+}): Promise<{ turn: TurnRow; fresh: boolean }> {
+  const job: TurnJob = { act: "compactChat" };
+  const taken = await tx(async (c): Promise<{ turn: TurnRow; fresh: boolean }> => {
+    await lockUser(c, o.account);
+    const blob = await lockedState(c, o.account);
+    o.check(blob);
+    const was = (await c.query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND message_id = $2`, [o.account, o.id])).rows[0];
+    if (was) return { turn: turnOf(was), fresh: false };
+    let on: { botId: string; desktop: string } | null = null;
+    // The first bot with a computer that can't do it, and why: what's said when none can.
+    let first: { botId: string; why: "down" | "none" | "old" } | null = null;
+    for (const botId of botsOfChat(blob, o.chatId)) {
+      const desktop = computerFor(blob, botId, true);
+      if (!desktop) continue;
+      if (runnerAt(blob, desktop)?.down) {
+        first ??= { botId, why: "down" };
+        continue;
+      }
+      const v = await runnerVersionOf(c, o.account, blob, desktop);
+      if (v && !olderThan(v, CLOUD_ALL_MIN_VERSION)) {
+        on = { botId, desktop };
+        break;
+      }
+      first ??= { botId, why: v ? "old" : "none" };
+    }
+    if (!on) throw new HttpError(409, first ? chatJobUnready(nameOf(blob, first.botId), ownerOf(blob), first.why) : NO_CHAT_COMPUTER, { code: COMPUTER_NOT_READY });
+    const ins = await c.query<RawTurn>(
+      `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 'owed', now() + make_interval(secs => $10), $11)
+       RETURNING ${COLS}`,
+      [o.account, `turn_${o.id}`, o.id, o.chatId, on.botId, o.wsId, JSON.stringify({ ...o.member, job }), on.desktop, deviceIdOf(o.account, on.desktop), jobDeadline(job) / 1000, Date.now()],
+    );
+    if (o.still && !o.still()) throw new HttpError(404, "No such workspace");
+    return { turn: turnOf(ins.rows[0]), fresh: true };
+  });
+  if (taken.fresh) {
+    shown(taken.turn, "owed");
+    void dispatch(taken.turn);
+  }
+  return taken;
+}
+
+/** Whether a turn is a chat's own job (compactChat): its end is a line in the chat, stamped as its member's, not a row on an app. */
+const chatJob = (t: Pick<TurnRow, "member">) => t.member?.job?.act === "compactChat";
+
+/** Why a chat's job ended that its computer never said, where an app's words don't fit (JOB_NOTES). */
+const CHAT_JOB_NOTES: Record<string, (owner: string, bot: string) => string> = {
+  midway: (_o, bot) => `${bot}'s computer stopped partway through. Try again.`,
+};
+
+/**
+ * The line a chat's job (compactChat) ends with, in its chat (Message.member: theirs, so their window sees the act land,
+ * and only Bops Cloud writes such a stamp): "Compacted by <name>" (Message.compacted, where the chat was compacted), or
+ * why it didn't go. One per turn, by its id (`<message id>_done`): a second end writes nothing.
+ */
+function chatJobLine(t: Pick<TurnRow, "messageId" | "chatId" | "member">, ok: boolean, said: string): Record<string, unknown> | null {
+  const m = t.member;
+  if (!m || !chatJob(t)) return null;
+  return {
+    id: `${t.messageId}_done`,
+    chatId: t.chatId,
+    role: "system",
+    text: ok ? `Compacted by ${m.name}` : `Couldn't compact this chat: ${said}`,
+    ...(ok ? { compacted: true } : {}),
+    member: { userId: m.userId, ...(m.email ? { email: m.email } : {}), name: m.name, ref: m.ref },
+    at: Date.now(),
+  };
 }
 
 /* ---------------- Runners listening ---------------- */
@@ -1438,13 +1580,16 @@ async function endWaiting(userId: string, desktopId: string, note: Exclude<keyof
 /** A turn that ended, and the bot its note names when that isn't the turn's own (`about`: a group's bot that says why). */
 type Ended = TurnRow & { about?: string };
 
-/** Turns that ended with a note (turn.note, a NOTES key): the note in each chat, and every viewer told. */
+/**
+ * Turns that ended with a note (turn.note, a NOTES key): the note in each chat, and every viewer told. A chat's job
+ * (compactChat) says why in its own line instead (jobsOver): NOTES speak of an answer.
+ */
 async function ended(turns: Ended[]) {
   if (!turns.length) return;
   const blob = ((await loadState(turns[0].userId))?.state ?? {}) as Record<string, unknown>;
   const rows: Record<string, unknown>[] = [];
   for (const t of turns) {
-    const say = t.note && t.note in NOTES && t.note !== "noUse" ? NOTES[t.note as Exclude<keyof typeof NOTES, "noUse">](ownerOf(blob), nameOf(blob, t.about ?? t.botId)) : undefined;
+    const say = t.note && t.note in NOTES && t.note !== "noUse" && !chatJob(t) ? NOTES[t.note as Exclude<keyof typeof NOTES, "noUse">](ownerOf(blob), nameOf(blob, t.about ?? t.botId)) : undefined;
     if (say) rows.push(noteRow(t, say));
     shown(t, "failed", say);
   }
@@ -1548,7 +1693,7 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
     ...(typeof t.member.computerUse === "boolean" ? { computerUse: t.member.computerUse } : {}),
   };
   // A job (takeAppJob): what its kind needs, for their membership now; never the bot's level or Use its computer (it runs
-  // no words of theirs), but for a chat's own job.
+  // no words of theirs), but for a chat's own job, which runs a model on its bot's computer and may wake it.
   if (t.member.job) return jobStill(blob, ws, viewer, t.member.job, t.chatId);
   const access = viewerAccess(ws, viewer);
   const bots = t.isGroup ? botsOfChat(blob, t.chatId) : [t.botId];
@@ -1560,9 +1705,9 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
  * Whether a job's member may still have it done, by its kind: an app's GitHub job needs Your Apps at Write and the power
  * of Publish (an Admin always, a Member with App secrets); a deploy, rollback, settings or domain Your Apps at Write, and
  * what goes on Published (env "prod") the power of Publish too; a remove an Admin; compacting a chat Write on every bot
- * of the chat.
+ * of the chat, and Use its computer ("noUse" without: it runs on one of its bots' computers).
  */
-function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | null, viewer: SliceViewer, job: TurnJob, chatId: string): "ok" | "gone" {
+function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | null, viewer: SliceViewer, job: TurnJob, chatId: string): "ok" | "gone" | "noUse" {
   const access = viewerAccess(ws, viewer);
   const appsWrite = appsLevelOf(access) === "write";
   const publish = hasPower("appSecrets", viewer.role, access.can);
@@ -1581,7 +1726,8 @@ function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | n
       return viewer.role === "admin" ? "ok" : "gone";
     case "compactChat": {
       const bots = botsOfChat(blob, chatId);
-      return bots.length && bots.every((id) => permits(levelOf(access, id), "write")) ? "ok" : "gone";
+      if (!bots.length || !bots.every((id) => permits(levelOf(access, id), "write"))) return "gone";
+      return computerUseOf(ws, viewer) ? "ok" : "noUse";
     }
   }
 }
@@ -1618,7 +1764,8 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
     // A group's: its bots all on this one computer still (groupComputer), else the note that says why (split, or the bot
     // with no computer, named). A bot set to work on the Mac counts as on it only where everything goes through the cloud
     // still, as for a bot's own turn. A bot's: still on it, as computerFor has it, or (a bot set to work on the Mac) as it
-    // has it where everything goes through the cloud.
+    // has it where everything goes through the cloud. A chat's job went to its bot's computer even with the bot set to the
+    // owner's Mac (takeChatJob), so it stays there as long as that's the computer the bot works on.
     let why: "moved" | "groupSplit" | "groupNoComputer" | null = null;
     let about: string | undefined;
     const g = t.isGroup ? groupComputer(blob, t.chatId) : null;
@@ -1634,7 +1781,7 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
           about = onMac;
         }
       }
-    } else if (computerFor(blob, t.botId) !== t.desktopId && (computerFor(blob, t.botId, true) !== t.desktopId || !(await allCloud(user.id, t.wsId, db)))) why = "moved";
+    } else if (computerFor(blob, t.botId) !== t.desktopId && (computerFor(blob, t.botId, true) !== t.desktopId || (!chatJob(t) && !(await allCloud(user.id, t.wsId, db))))) why = "moved";
     if (still !== "ok" || why) {
       const note = why ?? (still === "noUse" ? "noUse" : null);
       await db.query("UPDATE bops.chat_turns SET state = 'failed', note = $3, updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id, note]);
@@ -1676,7 +1823,8 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
 /** A turn that ended as its member may no longer have it run (or its bot moved): the note in its chat, every viewer told, the runner stopped, its chat's next. */
 async function afterRevoked(t: Ended) {
   toRunner(t.userId, t.targetDevice, "turn-cancel", { id: t.id });
-  if (t.note === "noUse") {
+  // (A chat's job ends with its own line, stamped as theirs, saying why: ended, by its note.)
+  if (t.note === "noUse" && !chatJob(t)) {
     const blob = ((await loadState(t.userId))?.state ?? {}) as Record<string, unknown>;
     const say = NOTES.noUse(ownerOf(blob), t.member?.name ?? "them", nameOf(blob, t.botId));
     await writeMessages(t.userId, [noteRow(t, say)]).catch(() => {});
@@ -1785,6 +1933,7 @@ function jobFinished(blob: Record<string, unknown>, t: TurnRow, res: JobResult):
     case "removeSite":
     case "removeLeftOver":
       return jobEnded(blob, t, res.ok, res.said);
+    // Nothing on the state: its runner wrote the chat's summary, and its line goes in the chat (finish, chatJobLine).
     case "compactChat":
       return null;
   }
@@ -1838,7 +1987,8 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
         wrote = true;
       }
     }
-    if (note) {
+    // (A chat's job says why in its own line, below.)
+    if (note && !chatJob(turnOf(raw))) {
       const n = noteRow(turnOf(raw), note);
       await db.query("INSERT INTO bops.chat_messages (user_id, id, chat_id, at, json) VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (user_id, id) DO NOTHING", [user.id, n.id, n.chatId, n.at, toJson(n)]);
       wrote = true;
@@ -1849,12 +1999,20 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
       const res = isObject(b.job) && typeof b.job.said === "string" ? b.job : null;
       const blob = await lockedState(db, user.id);
       const ok = state === "done" && res?.ok === true;
-      const said = cleanSaid(res?.said) ?? (note ? note : state === "done" ? JOB_OLD_RUNNER : JOB_STOPPED);
+      const turn = turnOf(raw);
+      const old = chatJob(turn) ? JOB_NOTES.oldRunner(ownerOf(blob), nameOf(blob, turn.botId)) : JOB_OLD_RUNNER;
+      const said = cleanSaid(res?.said) ?? (note ? note : state === "done" ? old : JOB_STOPPED);
       const removed = ok && (res?.removed === "app" || res?.removed === "site") ? res.removed : undefined;
-      const next = jobFinished(blob, turnOf(raw), { ok, said, ...(removed ? { removed } : {}) });
+      const next = jobFinished(blob, turn, { ok, said, ...(removed ? { removed } : {}) });
       if (next) {
         await writeOwnerState(db, user.id, next);
         jobWritten = next;
+      }
+      // A chat's (compactChat): its line in the chat, stamped as theirs, "Compacted by <name>" or why not (chatJobLine).
+      const line = chatJobLine(turn, ok, said);
+      if (line) {
+        await writeChatJobLines(user.id, [line], db);
+        wrote = true;
       }
     }
     return turnOf(r.rows[0]);
