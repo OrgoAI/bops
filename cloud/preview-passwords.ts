@@ -5,7 +5,8 @@ import { tx } from "./db.ts";
 import { HttpError, readJson, type Route } from "./http.ts";
 import { stateWritten } from "./live.ts";
 import { PREVIEW_PASSWORD, PREVIEW_PASSWORD_PATH, type PreviewPasswordPost } from "./protocol.ts";
-import { announce, checkUser, lockedState, lockUser, toJson } from "./state.ts";
+import { announce, checkUser, lockedState, lockUser } from "./state.ts";
+import { writeOwnerState } from "./turns.ts";
 
 /**
  * Each site's Preview password, kept by Bops Cloud for the people with Your Apps at Write (Workspace.previewPasswords).
@@ -111,7 +112,7 @@ const post: Route = {
       const blob = await lockedState(c, user!.id);
       const r = stateWith(blob, p, user!);
       if (!r || "unchanged" in r) return r;
-      await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [user!.id, toJson(r.next)]);
+      await writeOwnerState(c, user!.id, r.next);
       return r;
     });
     if (!out) throw new HttpError(403, NOT_YOURS);

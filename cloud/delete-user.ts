@@ -92,7 +92,7 @@ import { forgetUser } from "./turn-guard.ts";
  *   `owner_phones` and `owner_emails` (their own number and address: someone else may verify that
  *   number now), `cloud_pending` (texts, calls and events waiting for their Mac, and what they did as a
  *   member that waits for another owner's), `chat_turns` (answers owed to their computers, and owed in another owner's
- *   workspace for what they said there), `runner_presence`, `chat_routing`, `slack_links`, `plans`
+ *   workspace for what they said there), `runner_presence`, `runner_seen`, `app_views`, `chat_routing`, `slack_links`, `plans`
  *   (orgo-web keeps the plan itself), `notice_dismissals`, `cloud_usage` (what they used, for their
  *   account page: what it cost is orgo-web's AI credit ledger, which orgo-web deletes or keeps itself),
  *   `cloud_limits` (the counts that name them; a verify count by recipient alone is no one's and goes
@@ -151,6 +151,9 @@ const CONTENT: [string, string][] = [
   // (turns.ts): its member names them. Their runners' presence and their workspaces' chat switches go too.
   ["chat_turns", "DELETE FROM bops.chat_turns WHERE user_id = $1 OR member->>'userId' = $1"],
   ["runner_presence", "DELETE FROM bops.runner_presence WHERE user_id = $1"],
+  // The Bops each of their computers' runners last said it runs, and what their members saw of their apps (0019).
+  ["runner_seen", "DELETE FROM bops.runner_seen WHERE user_id = $1"],
+  ["app_views", "DELETE FROM bops.app_views WHERE user_id = $1"],
   ["chat_routing", "DELETE FROM bops.chat_routing WHERE user_id = $1"],
   ["slack_links", "DELETE FROM bops.slack_links WHERE user_id = $1"],
   ["plans", "DELETE FROM bops.plans WHERE user_id = $1"],

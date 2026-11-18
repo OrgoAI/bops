@@ -75,7 +75,7 @@ import {
   NOT_LINKED,
   type GithubSetting,
   type MemberGithubAct,
-  type TurnJob,
+  type GithubJob,
   type MemberAct,
   type MemberAppAct,
   type MemberActAnswer,
@@ -88,11 +88,30 @@ import {
   type WsAccess,
   type WsRole,
 } from "./protocol.ts";
-import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, toJson, writeMessages, type MessageRow } from "./state.ts";
+import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, writeMessages, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
 import { appBotsFor, appsFor, appsOpenFor, appThreadsFor, appThreadsOf, ownerAppsOpen, botsOf, chatIdsOf, handedByOthers, keyNamesOf, list, seesEveryBot, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, computerUseOf, wsOfBot, type SliceViewer } from "./ws-slice.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange } from "./change-routes.ts";
-import { appActKept, cancelMember, chatAutoFor, computerFor, macNewEnough, ownerOf, recheckTurns, routedWorkspaces, routingOf, setRouting, takeAppJob, takeMessage, wakeComputer, withAppAct, withHosting, type WakeRefusal } from "./turns.ts";
+import {
+  allCloud,
+  appActKept,
+  cancelMember,
+  chatAutoFor,
+  computerFor,
+  macNewEnough,
+  ownerOf,
+  recheckTurns,
+  routedWorkspaces,
+  routingOf,
+  setRouting,
+  takeAppJob,
+  takeMessage,
+  wakeComputer,
+  withAppAct,
+  withHosting,
+  writeOwnerState,
+  type WakeRefusal,
+} from "./turns.ts";
 import { cleanGithubMirror, GITHUB_KEY_NAME, keepsPoint, sameDestination, type GithubMirror } from "./github-config.ts";
 import { appVersionOf, olderThan } from "./app-version.ts";
 
@@ -941,6 +960,11 @@ let cancel: (projectId: string, userId: string) => Promise<void> = (...a) => can
 /** Whether the owner's workspace goes through Bops Cloud (turns.ts routingOf). */
 const realRouted = async (owner: string, ws: string) => (await routingOf(owner, ws)).cloud;
 let routed: (owner: string, ws: string) => Promise<boolean> = realRouted;
+/** Whether everything in the owner's workspace goes through the cloud (turns.ts allCloud: its switch, and their last Mac new enough). */
+const realAllCloud = (owner: string, ws: string) => allCloud(owner, ws);
+let cloudAll: (owner: string, ws: string) => Promise<boolean> = realAllCloud;
+/** Whether everything in the owner's workspace goes through the cloud, as members.ts goes by it (resetMembers allCloud). Never the owner's Mac then. */
+export const allCloudIn = (owner: string, ws: string) => cloudAll(owner, ws);
 /**
  * Whether a workspace still on the owner's Mac has its members' messages written by Bops Cloud first all the same
  * (cloudChat, then answered by the Mac): one that may move to Bops Cloud (turns.ts autoRoute) or back, or that someone
@@ -1155,7 +1179,7 @@ async function answerOnComputer(o: { target: LiveTarget; viewer: SliceViewer; ac
     if (!computerUseOf(slice.workspace, o.viewer) || !o.still()) return null;
     const reply = { reply: act.reply, ...(act.reply === "reject" && act.message ? { message: act.message.slice(0, MEMBER_MAX_NOTE) } : {}), by: "cloud", at: Date.now(), member: o.who };
     const written = { ...blob, appApprovals: asks.map((x) => (x === a ? { ...x, reply } : x)) };
-    await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+    await writeOwnerState(c, target.account, written);
     const ws = all.find((b) => b.id === a.botId);
     const thread = typeof a.threadId === "string" ? list(blob.sessions).find((x) => x.id === a.threadId) : undefined;
     const chatId = typeof a.chatId === "string" ? a.chatId : typeof thread?.chatId === "string" ? thread.chatId : null;
@@ -1201,7 +1225,7 @@ async function personaHere(o: { target: LiveTarget; viewer: SliceViewer; actor: 
     if (text) changed.persona = text;
     else delete changed.persona;
     const written = { ...blob, bots: all.map((x) => (x === b ? changed : x)) };
-    await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+    await writeOwnerState(c, target.account, written);
     // After the write, before it's kept: an orgo-web notice for them that landed meanwhile (even during it) takes it back.
     if (!o.still()) throw new HttpError(404, "No such workspace");
     return { written, bot: typeof b.name === "string" && b.name.trim() ? b.name.trim() : "the bot" };
@@ -1333,7 +1357,7 @@ const settingOf = (h: Record<string, unknown> | null) => (h?.github && typeof h.
 /** How a GitHub act on an app says where it publishes, in the app's bot's chat (the folder: "the whole repo" for ""). */
 const whereWords = (g: GithubSetting) => `GitHub ${g.repo}, ${g.branch}, ${g.path ? `folder ${g.path}` : "the whole repo"}`;
 /** What a "githubLink" or "githubPull" act says in the app's bot's chat as it goes to its computer. */
-export const jobAsked = (name: string, bot: string, act: TurnJob["act"], app: string) =>
+export const jobAsked = (name: string, bot: string, act: GithubJob["act"], app: string) =>
   act === "githubLink" ? `${name} asked ${bot}'s computer to link ${app} to GitHub.` : `${name} asked ${bot}'s computer to bring in GitHub's changes to ${app}.`;
 /** 409 GITHUB_NO_KEY: the app's computer can't call GitHub (no bot on it was given the key), and the owner's Mac isn't on to do it. */
 export const noGithubKey = (bot: string, saved: boolean) =>
@@ -1361,7 +1385,7 @@ async function githubAct(
     await githubHere({ target, viewer, act, who, key, ownKey, still: o.still });
     if (!act.link) return sendJson(res, 202, { ok: true, macOn: true, stored: true } satisfies MemberActAnswer);
   }
-  const job: TurnJob = { act: act.act === "github" ? "githubLink" : act.act, app: act.app };
+  const job: GithubJob = { act: act.act === "github" ? "githubLink" : act.act, app: act.app };
   const taken = await takeJob({
     account: target.account,
     wsId: target.ws,
@@ -1433,7 +1457,7 @@ async function githubHere(o: { target: LiveTarget; viewer: SliceViewer; act: Ext
     else delete next.github;
     const kept = withHosting(blob, target.ws, act.app, next);
     const written = withAppAct(kept, target.ws, act.app, { key, userId: who.userId, name: who.name, act: "github", ok: true, at: now() });
-    await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+    await writeOwnerState(c, target.account, written);
     // After the write, before it's kept: an orgo-web notice for them that landed meanwhile (even during it) takes it back.
     if (!o.still()) throw new HttpError(404, "No such workspace");
     return { written, botId: typeof h.botId === "string" ? h.botId : null };
@@ -1642,7 +1666,7 @@ const peopleWrite: Route = {
       const next = idKey && set && Object.hasOwn(set, idKey) ? withEntry(set, idKey, null) : set;
       if (next === map) return null;
       const written = { ...blob, workspaces: workspaces.map((w) => (w === ws ? { ...w, memberAccess: next ?? {} } : w)) };
-      await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [target.account, toJson(written)]);
+      await writeOwnerState(c, target.account, written);
       return written;
     });
     if (out) {
@@ -1807,6 +1831,8 @@ export function resetMembers(
     count?: (userId: string, what?: "act" | "file") => Promise<void>;
     cancel?: (projectId: string, userId: string) => Promise<void>;
     routed?: (owner: string, ws: string) => Promise<boolean>;
+    /** Whether everything in the workspace goes through the cloud (unset: turns.ts allCloud). A test that fakes the owner's state says no, unless it says. */
+    allCloud?: (owner: string, ws: string) => Promise<boolean>;
     storedFirst?: (owner: string, ws: string) => Promise<boolean>;
     /** Whether the owner's Bops takes an Admin's acts from `min` on (adminGate). A test that fakes the owner's state says no, unless it says. */
     adminGate?: (owner: string, min: string) => Promise<boolean>;
@@ -1836,5 +1862,6 @@ export function resetMembers(
   cancel = opts.cancel ?? ((...a) => cancelMember(...a));
   // A test that fakes the owner's state fakes the switch too: off, unless it says.
   routed = opts.routed ?? (opts.state ? async () => false : realRouted);
+  cloudAll = opts.allCloud ?? (opts.state ? async () => false : realAllCloud);
   storedFirst = opts.storedFirst ?? (opts.state ? async () => false : realStoredFirst);
 }

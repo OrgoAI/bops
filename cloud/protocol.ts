@@ -1091,9 +1091,11 @@ export type MemberActPayload = {
  * true, so an app from before says "Sending…" until it lands (as it does at once). So is an Admin's "persona" act there
  * while the owner's Mac is away (cloud/members.ts personaHere): `stored`, and `macOn` true, so their window says Saved.
  * A GitHub act (MemberGithubAct) Bops Cloud kept itself is `stored` too; `computer` when the app's own computer does the
- * rest (`turn`, its job's), the owner's Mac on or off.
+ * rest (`turn`, its job's), the owner's Mac on or off. `cloud`: Bops Cloud and the bots' computers do it, never the
+ * owner's Mac (a workspace where everything goes through the cloud: cloud/turns.ts allCloud), so the viewer's window
+ * shows it pending as "cloud", which never names the Mac and gives up after CLOUD_ACT_MS.
  */
-export type MemberActAnswer = { ok: true; macOn: boolean; stored?: true; messageId?: string; turn?: string; computer?: true };
+export type MemberActAnswer = { ok: true; macOn: boolean; stored?: true; messageId?: string; turn?: string; computer?: true; cloud?: true };
 /** 403: a bot the act touches is at Read for the caller (or a group has one that is). */
 export const MEMBER_READ_ONLY = "member_read_only";
 /**
@@ -1264,6 +1266,32 @@ export const CHAT_NEEDS_UPDATE = "chat_needs_update";
 /** The first Bops whose Mac keeps to chat through Bops Cloud (runners kept up on identity, Use its computer, stored messages). */
 export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
 /**
+ * The first Bops with which everything in a workspace switched to the cloud goes through the cloud (cloud/turns.ts
+ * allCloud): Your Apps on the app's own computer, a teammate's other acts done by Bops Cloud, and chats answered only off
+ * the Mac. Its runner does every kind of job (TurnJob, lib/server/runner-chat.ts runnerJob), and its window shows the
+ * pending state "cloud" (MemberActAnswer.cloud) and the Remove buttons. Set to the release that carries it. Who is
+ * checked against it:
+ *
+ * | Check | Reads | When older |
+ * |---|---|---|
+ * | allCloud (everything through the cloud) | the owner's last Mac (turns.ts macNewEnough, as members.ts adminGate) | today's behavior exactly |
+ * | Owing a runner job (app kinds, compactChat), replying to a routine's ask, a group turn | turns.ts runnerVersionOf: the newer of bops.runner_seen and the Mac's record | 409 COMPUTER_NOT_READY, or the note "old". Never the Mac. |
+ * | Claiming a non-GitHub job | the claiming runner's own version header | 410, note "oldRunner" |
+ * | Remove buttons, removal rows, the "cloud" pending state | the viewer's window version | not shown |
+ * | Remove kinds in mac mode | the owner's last Mac | 409 OWNER_BOPS_OLD |
+ * | GitHub acts | GITHUB_ACTS_MIN_VERSION | as today |
+ * | Setting chat to "cloud" | CLOUD_CHAT_MIN_VERSION | as today |
+ */
+export const CLOUD_ALL_MIN_VERSION = "0.0.54";
+/** 409: the computer that would do this has no runner, or one older than CLOUD_ALL_MIN_VERSION, and the owner's Mac never does it instead. */
+export const COMPUTER_NOT_READY = "computer_not_ready";
+/** 409: this can't be done from the cloud yet (a workspace where everything goes through the cloud), and the owner's Mac never does it instead. */
+export const CLOUD_NOT_YET = "cloud_not_yet";
+/** Who did it, on what Bops Cloud wrote itself (Session.by of a thread it ended): a stale copy never brings it back. */
+export const CLOUD_BY = "cloud";
+/** How long the viewer's window shows an act pending as "cloud" (MemberActAnswer.cloud) before it says it didn't go: a job's longest wait, and some. */
+export const CLOUD_ACT_MS = 35 * 60_000;
+/**
  * The first Bops with the owner's switch in Settings, General (components/app/chat-switch.tsx): Bops Cloud moves a
  * workspace to it by itself (cloud/turns.ts autoRoute) only for an owner whose last Mac is at this or newer, so an
  * owner it moves can always choose their Mac again in the app.
@@ -1279,13 +1307,42 @@ export type RunnerCancelEvent = { id: string };
 /** `computerUse`: what orgo-web said of their Use its computer when the message was taken (WsAccess.computerUse), which the turn goes by after. */
 /** `role`: "admin" when orgo-web said so as the message was taken (an Admin's turn needs no entry: cloud/turns.ts memberStill). None: a member. */
 /**
- * `job`: a turn that's an app's GitHub act (MemberGithubAct "githubLink" or "githubPull", cloud/turns.ts takeAppJob), not
- * words to answer: its runner does it (lib/server/runner-chat.ts) and no model ever sees it. Checked by Your Apps at Write
- * and the power of Publish, never by the bot's level or Use its computer (memberStill). A runner from before reads its
- * message, a note of Bops', and answers nothing.
+ * `job`: a turn that's a job for the computer (TurnJob, cloud/turns.ts takeAppJob), not words to answer: its runner does
+ * it (lib/server/runner-chat.ts runnerJob) and no model ever sees it. Checked by what each kind needs (cloud/turns.ts
+ * memberStill), never by the bot's level or Use its computer, except a chat's own job (compactChat: Write on every bot of
+ * the chat). A runner from before the GitHub jobs reads its message, a note of Bops', and answers nothing; one from
+ * before CLOUD_ALL_MIN_VERSION is refused any other kind as it claims it (410, note "oldRunner").
  */
 export type TurnMember = { userId: string; email?: string; name: string; ref: string; joinedAt?: number; projectId?: string; computerUse?: boolean; role?: "admin"; job?: TurnJob };
-export type TurnJob = { act: "githubLink" | "githubPull"; app: string };
+/**
+ * A job owed to a computer's runner, as a turn (TurnMember.job). An app's: its GitHub production (MemberGithubAct
+ * "githubLink" or "githubPull"), a deploy, a rollback, its settings, a domain (MemberAppAct's, done on the app's own
+ * computer), removing it (`repo`: its code in Ingot too), one of its sites, or a left over its computer has (`leftOver`:
+ * its Orgo project, by name, which Bops never deploys to). A chat's: compactChat, which has no app (jobApp null). Each
+ * runner from CLOUD_ALL_MIN_VERSION on knows every kind here; one it can't do yet it says so plainly and does nothing.
+ */
+export type TurnJob =
+  | { act: "githubLink" | "githubPull"; app: string }
+  | { act: "deploy"; app: string; site?: string; at?: string; env?: "prod" }
+  | { act: "rollback"; app: string; deployment: string; site?: string; env?: "prod" }
+  | { act: "settings"; app: string; site?: string; port?: number; install?: string; build?: string; start?: string; health?: string }
+  | { act: "domain"; app: string; site?: string; zone: string; subdomain?: string }
+  | { act: "remove"; app: string; repo?: true }
+  | { act: "removeSite"; app: string; site: string }
+  | { act: "removeLeftOver"; app: string; leftOver: string }
+  | { act: "compactChat" };
+/** A job about an app (every kind but compactChat), as cloud/turns.ts takeAppJob owes it. */
+export type AppJob = Exclude<TurnJob, { act: "compactChat" }>;
+/** A GitHub job (the kinds runners from GITHUB_ACTS_MIN_VERSION on do). */
+export type GithubJob = Extract<TurnJob, { act: "githubLink" | "githubPull" }>;
+/** A job that takes an app, or some of it, off the web (an Admin's, and a Member's with the power to). */
+export type RemoveJob = Extract<TurnJob, { act: "remove" | "removeSite" | "removeLeftOver" }>;
+/** Every kind of job that's about an app (all but compactChat). */
+export const APP_JOB_KINDS = ["githubLink", "githubPull", "deploy", "rollback", "settings", "domain", "remove", "removeSite", "removeLeftOver"] as const satisfies readonly AppJob["act"][];
+export const isGithubJob = (j: { act: string }): j is GithubJob => j.act === "githubLink" || j.act === "githubPull";
+export const isRemoveJob = (j: { act: string }): j is RemoveJob => j.act === "remove" || j.act === "removeSite" || j.act === "removeLeftOver";
+/** The app a job is about, or null for one that has none (compactChat). */
+export const jobApp = (j: TurnJob): string | null => ("app" in j && typeof j.app === "string" ? j.app : null);
 /**
  * POST /v1/runner/turns/<id>/claim, answered 200: the turn is this runner's until it stops beating. `now`: Bops Cloud's
  * clock, which the answer's times are taken from (a computer's own can lag after it wakes); `humanAt` the message's
@@ -1298,8 +1355,9 @@ export type RunnerBeat = { phase: "model" | "tools" };
  * POST /v1/runner/turns/<id>/done: how it ended. paused: waiting for an OK (`approvalId`); `react`: its tapback on the
  * message (only Bops Cloud writes on a person's row). `job`: a job turn's (TurnMember.job) result, done or why not, in
  * words, which Bops Cloud keeps on the app (SharedApp.acts); a job turn done without it went to a runner from before.
+ * `removed`: a remove job took the app ("app") or its site ("site") off the web, for Bops Cloud to drop from the state.
  */
-export type RunnerDone = { state: "done" | "paused" | "failed"; approvalId?: string; note?: string; react?: string; job?: { ok: boolean; said: string } };
+export type RunnerDone = { state: "done" | "paused" | "failed"; approvalId?: string; note?: string; react?: string; job?: { ok: boolean; said: string; removed?: "app" | "site" } };
 /**
  * POST /v1/runner/turns/<id>/resume {approvalId}: a turn paused for an OK goes on once the OK is answered, only for that
  * request (the one its pause named), only on the runner that paused it, and only while whoever said the message still

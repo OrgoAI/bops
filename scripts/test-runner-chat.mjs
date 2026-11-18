@@ -499,5 +499,62 @@ await check("a job that doesn't go says why in the chat and with its end; one ta
   assert.deepEqual([ran, paths(), state.messages.length], [0, ["claim", "beat"], 0]);
 });
 
+/* ---------------- Every kind of job ---------------- */
+
+await check("a job of a kind this runner doesn't do yet is said plainly in the chat and with its end, and nothing runs: an app's, a chat's, and one from a newer Bops Cloud", async () => {
+  const kinds = [
+    [{ act: "deploy", app: "site" }, "Couldn't deploy site: This computer's Bops doesn't know how to do that yet.", true],
+    [{ act: "remove", app: "site", repo: true }, "Couldn't remove site: This computer's Bops doesn't know how to do that yet.", true],
+    [{ act: "compactChat" }, "Couldn't compact this chat: This computer's Bops doesn't know how to do that yet.", undefined],
+    [{ act: "renameApp", app: "site", to: "shop" }, "Couldn't do that: This computer's Bops doesn't know how to do that yet.", true],
+  ];
+  for (const [job, line, appNote] of kinds) {
+    reset();
+    const T = Date.now();
+    answers.set("claim", claimed(`t_${job.act}`, `m_${job.act}`, T, 0, { userId: "u-ada", name: "Ada", ref: `k_${job.act}`, role: "admin", job }));
+    let ran = 0;
+    let answered = 0;
+    R.runnerChatForTests({ identity: async () => "same", answer: async () => (answered++, { text: "never" }), job: async () => (ran++, { ok: true, said: "x" }) });
+    await R.answerTurn(ev(`t_${job.act}`, `m_${job.act}`));
+    assert.deepEqual([ran, answered], [0, 0], `${job.act}: nothing ran`);
+    const rows = state.messages.filter((m) => m.role === "bot");
+    assert.deepEqual(rows.map((m) => [m.text, m.appNote, m.bops]), [[line, appNote, true]], job.act);
+    assert.equal(R.JOB_UNKNOWN, "This computer's Bops doesn't know how to do that yet.");
+    assert.deepEqual(sent.at(-1), { path: `/v1/runner/turns/t_${job.act}/done`, body: { state: "done", job: { ok: false, said: R.JOB_UNKNOWN } } }, job.act);
+  }
+});
+
+await check("what a job removed goes with its end, as it said it; anything else it says there is dropped", async () => {
+  for (const [removed, sentAs] of [["app", "app"], ["site", "site"], ["everything", undefined]]) {
+    reset();
+    answers.set("claim", claimed("t_rm", "m_rm", Date.now(), 0, { userId: "u-ada", name: "Ada", ref: "k_rm", role: "admin", job: { act: "githubLink", app: "site" } }));
+    R.runnerChatForTests({ identity: async () => "same", job: async () => ({ ok: true, said: "Done.", removed }) });
+    await R.answerTurn(ev("t_rm", "m_rm"));
+    assert.deepEqual(sent.at(-1).body, { state: "done", job: { ok: true, said: "Done.", ...(sentAs ? { removed: sentAs } : {}) } }, removed);
+  }
+});
+
+await check("a job's line in the chat, by kind: its own words when it went, and what didn't go, plainly, when it didn't", () => {
+  const no = { ok: false, said: "Orgo said no." };
+  const lines = [
+    [{ act: "githubLink", app: "site" }, "Couldn't link site to GitHub: Orgo said no."],
+    [{ act: "githubPull", app: "site" }, "Couldn't bring in GitHub's changes to site: Orgo said no."],
+    [{ act: "deploy", app: "site" }, "Couldn't deploy site: Orgo said no."],
+    [{ act: "deploy", app: "site", env: "prod" }, "Couldn't publish site: Orgo said no."],
+    [{ act: "rollback", app: "site", deployment: "d1" }, "Couldn't go back to an earlier deploy of site: Orgo said no."],
+    [{ act: "settings", app: "site", port: 3000 }, "Couldn't change site's settings: Orgo said no."],
+    [{ act: "domain", app: "site", zone: "z1" }, "Couldn't point a domain at site: Orgo said no."],
+    [{ act: "remove", app: "site" }, "Couldn't remove site: Orgo said no."],
+    [{ act: "removeSite", app: "site", site: "docs" }, "Couldn't remove docs from site: Orgo said no."],
+    [{ act: "removeLeftOver", app: "site", leftOver: "site-old" }, "Couldn't remove the left over site-old: Orgo said no."],
+    [{ act: "compactChat" }, "Couldn't compact this chat: Orgo said no."],
+  ];
+  for (const [job, line] of lines) {
+    assert.equal(R.jobLine(job, no), line, job.act);
+    assert.equal(R.jobLine(job, { ok: true, said: "It went." }), "It went.", job.act);
+    assert.ok(!/[\u2013\u2014]| - |Orbit/.test(line), `${job.act}: plain words`);
+  }
+});
+
 console.log(`runner chat: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

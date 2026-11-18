@@ -1,7 +1,7 @@
 import "server-only";
 import { mkdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnJob, type TurnMember } from "@/cloud/protocol";
+import { jobApp, RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type GithubJob, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnJob, type TurnMember } from "@/cloud/protocol";
 import { workspaceOf, type AppApproval, type MemberTurn } from "@/lib/types";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
@@ -32,9 +32,10 @@ import { runInTurn, type TurnContext } from "./turn-context";
  * the state now (an OK answered, a change of who may). A turn whose message it can't read fails with a note. The Mac
  * never runs this.
  *
- * A turn that's an app's GitHub job (TurnMember.job: Link, or Bring in GitHub's changes, asked from a shared workspace's
- * Your Apps and checked by Bops Cloud: cloud/turns.ts takeAppJob) isn't words to answer: it's done here (runJob, through
- * hosted-apps.ts githubJob), said in the bot's chat as Bops' own, and its result told with its end. No model sees it.
+ * A turn that's a job (TurnMember.job, asked from a shared workspace and checked by Bops Cloud: cloud/turns.ts
+ * takeAppJob) isn't words to answer: it's done here (runJob, through runnerJob: an app's GitHub job by hosted-apps.ts
+ * githubJob), said in the bot's chat as Bops' own, and its result told with its end. No model sees it. A kind this
+ * runner doesn't do yet is said so plainly, and nothing is done.
  */
 
 const RECONNECT_MIN_MS = 2_000;
@@ -63,14 +64,14 @@ type Box = {
   marks?: Map<string, number>;
   /** Tests: how often a resume looks again at an upgrade's hold. */
   holdPollMs?: number;
-  /** Tests: what does an app's GitHub job (hosted-apps.ts githubJob). */
-  job?: (botId: string, job: TurnJob, by: string) => Promise<{ ok: boolean; said: string }>;
+  /** Tests: what does an app's GitHub job (hosted-apps.ts githubJob), as runnerJob gives it one. */
+  job?: (botId: string, job: GithubJob, by: string) => Promise<JobResult>;
 };
 const g = globalThis as unknown as { __bopsRunnerChat?: Box };
 const box: Box = (g.__bopsRunnerChat ??= { running: new Map() });
 
 const answerOf = async () => box.answer ?? (await import("./chat")).answerMessage;
-const jobOf = async () => box.job ?? (await import("./hosted-apps")).githubJob;
+const githubOf = async () => box.job ?? (await import("./hosted-apps")).githubJob;
 const identityOf = async () => box.identity ?? (await import("./runner")).checkIdentity;
 
 /** A call to Bops Cloud as this computer: the answer's status and body (status 0 when it didn't answer). */
@@ -227,7 +228,7 @@ async function whileMarked<T>(id: string, run: () => Promise<T>, held?: () => T)
 const holding = () => stat(holdOf()).then((h) => Date.now() - h.mtimeMs < HOLD_STALE_MS, () => false);
 
 /** The turn's beats while `run` runs, then its end: done (with its tapback, or `result`: a job's), paused for an OK, or nothing (taken back). */
-async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }, result?: () => { ok: boolean; said: string }) {
+async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }, result?: () => JobResult) {
   box.running.set(ctx.id, ctx);
   // The beats on the way: the end waits for them, so one that lands after it can't say the turn runs still.
   const beats = new Set<Promise<void>>();
@@ -320,31 +321,78 @@ async function claimAndAnswer(ev: RunnerTurnEvent) {
   );
 }
 
+/** How a job went, as its end tells Bops Cloud (RunnerDone.job): `removed` when a remove took the app or its site off the web. */
+export type JobResult = { ok: boolean; said: string; removed?: "app" | "site" };
+/** What a job of a kind this runner doesn't do yet says (a newer Bops Cloud owes it): nothing was done. */
+export const JOB_UNKNOWN = "This computer's Bops doesn't know how to do that yet.";
+
+/** What a job that didn't go was, in the bot's chat ("Couldn't …"), by its kind. */
+function couldnt(job: TurnJob): string {
+  switch (job.act) {
+    case "githubLink":
+      return `Couldn't link ${job.app} to GitHub`;
+    case "githubPull":
+      return `Couldn't bring in GitHub's changes to ${job.app}`;
+    case "deploy":
+      return job.env === "prod" ? `Couldn't publish ${job.app}` : `Couldn't deploy ${job.app}`;
+    case "rollback":
+      return `Couldn't go back to an earlier deploy of ${job.app}`;
+    case "settings":
+      return `Couldn't change ${job.app}'s settings`;
+    case "domain":
+      return `Couldn't point a domain at ${job.app}`;
+    case "remove":
+      return `Couldn't remove ${job.app}`;
+    case "removeSite":
+      return `Couldn't remove ${job.site} from ${job.app}`;
+    case "removeLeftOver":
+      return `Couldn't remove the left over ${job.leftOver}`;
+    case "compactChat":
+      return "Couldn't compact this chat";
+    default:
+      // A kind from a newer Bops Cloud than this runner.
+      return "Couldn't do that";
+  }
+}
+
 /** How a job's result reads in the bot's chat (Bops' own words, as the bot). */
-export const jobLine = (job: TurnJob, r: { ok: boolean; said: string }) =>
-  r.ok ? r.said : `${job.act === "githubLink" ? `Couldn't link ${job.app} to GitHub` : `Couldn't bring in GitHub's changes to ${job.app}`}: ${r.said}`;
+export const jobLine = (job: TurnJob, r: { ok: boolean; said: string }) => (r.ok ? r.said : `${couldnt(job)}: ${r.said}`);
 
 /**
- * An app's GitHub job (TurnMember.job) as this turn: said at once to be doing what can't be done twice (it writes to
- * Ingot), so a runner gone quiet after never has it done again; then done by hosted-apps.ts githubJob in `by`'s name,
- * its words in the chat as the bot's, marked Bops' own and about an app (Message.appNote, bops), and its result told
- * with the turn's end, which Bops Cloud keeps on the app for Your Apps. Taken back first (409): nothing is done.
+ * Do a job (TurnMember.job) on this computer, in `by`'s name, by its kind: an app's GitHub job by hosted-apps.ts
+ * githubJob. A kind this runner doesn't do yet (one a newer Bops Cloud owes it) does nothing, and says so plainly.
+ */
+export async function runnerJob(ctx: TurnContext, job: TurnJob, by: string): Promise<JobResult> {
+  switch (job.act) {
+    case "githubLink":
+    case "githubPull":
+      return (await githubOf())(ctx.botId, job, by);
+    default:
+      return { ok: false, said: JOB_UNKNOWN };
+  }
+}
+
+/**
+ * A job (TurnMember.job) as this turn: said at once to be doing what can't be done twice (it writes to Ingot, or Orgo),
+ * so a runner gone quiet after never has it done again; then done (runnerJob) in `by`'s name, its words in the chat as
+ * the bot's, marked Bops' own (bops) and, for an app's, about an app (Message.appNote), and its result told with the
+ * turn's end (with what it removed), which Bops Cloud keeps on the app for Your Apps. Taken back first (409): nothing is
+ * done.
  */
 async function runJob(ctx: TurnContext, job: TurnJob, by: string) {
   ctx.acting = true;
   const first = await post(`/v1/runner/turns/${encodeURIComponent(ctx.id)}/beat`, { phase: "tools" });
   if (first.status === 409) return;
-  const doJob = await jobOf();
-  let result: { ok: boolean; said: string } = { ok: false, said: "That didn't go. Try again." };
+  let result: JobResult = { ok: false, said: "That didn't go. Try again." };
   await asTurn(
     ctx,
     async () => {
-      result = await doJob(ctx.botId, job, by);
-      if (!ctx.cancelled) addMessage({ chatId: ctx.chatId, role: "bot", botId: ctx.botId, text: jobLine(job, result), appNote: true, bops: true });
+      result = await runnerJob(ctx, job, by);
+      if (!ctx.cancelled) addMessage({ chatId: ctx.chatId, role: "bot", botId: ctx.botId, text: jobLine(job, result), ...(jobApp(job) ? { appNote: true } : {}), bops: true });
       return null;
     },
     undefined,
-    () => result,
+    () => ({ ok: result.ok, said: result.said, ...(result.removed === "app" || result.removed === "site" ? { removed: result.removed } : {}) }),
   );
 }
 

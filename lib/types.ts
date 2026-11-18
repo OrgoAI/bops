@@ -1180,8 +1180,12 @@ export function saidOf(m: MemberTurn): MemberSaid {
   delete said.role;
   return said;
 }
-/** How one of the viewer's own acts in a shared workspace stands, until the owner's Bops has written it (Message.memberSend). */
-export type MemberSend = { state: "sending" | "waiting" | "failed"; error?: string; key: string };
+/**
+ * How one of the viewer's own acts in a shared workspace stands, until the owner's Bops has written it (Message.memberSend):
+ * on its way to the owner's Bops ("sending"), waiting for it to open ("waiting"), done by Bops Cloud and the bots'
+ * computers with no Mac at all ("cloud": never shown with the Mac's words), or not gone and why ("failed").
+ */
+export type MemberSend = { state: "sending" | "waiting" | "cloud" | "failed"; error?: string; key: string };
 
 /** A session is a long-running task on one screen of a bot's computer, shown as a thread. */
 export type Session = {

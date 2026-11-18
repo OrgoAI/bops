@@ -17,8 +17,12 @@ import {
   CHAT_AUTO_OFF,
   CHAT_NEEDS_UPDATE,
   CHAT_NOT_IN_CLOUD,
+  CLOUD_ALL_MIN_VERSION,
   CLOUD_CHAT_MIN_VERSION,
   GITHUB_ACTS_MIN_VERSION,
+  isGithubJob,
+  isRemoveJob,
+  jobApp,
   MEMBER_MAX_TEXT,
   MESSAGE_TAKEN,
   STORED_ACT_MS,
@@ -30,6 +34,7 @@ import {
   type RunnerClaim,
   type RunnerResume,
   type RunnerTurnEvent,
+  type AppJob,
   type TurnJob,
   type TurnMember,
   type TurnShown,
@@ -159,6 +164,18 @@ const turnOf = (r: RawTurn): TurnRow => ({
   humanAt: Number(r.human_at),
 });
 
+/* ---------------- The owner's state, as Bops Cloud writes it ---------------- */
+
+/**
+ * Bops Cloud's own write of the owner's state (bops.app_state), under their lock (state.ts lockUser, in the same
+ * transaction `c`): `blob` whole, a version on, written by "cloud". The one place Bops Cloud writes it from outside
+ * state.ts (whose PUT is a device's) and delete-user.ts (which empties it). The caller tells every viewer after
+ * (state.ts announce, live.ts stateWritten).
+ */
+export async function writeOwnerState(c: pg.PoolClient, account: string, blob: Record<string, unknown>): Promise<void> {
+  await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [account, toJson(blob)]);
+}
+
 /* ---------------- The switch ---------------- */
 
 /** Whether workspace `wsId` of the user goes through Bops Cloud, and whether the owner lets a message wake a computer billed by the hour. */
@@ -245,7 +262,7 @@ export function keepChatOn(blob: Record<string, unknown>, rows: Map<string, Rout
 async function mirrorAfter(c: pg.PoolClient, userId: string, blob: Record<string, unknown>): Promise<Record<string, unknown> | null> {
   const next = keepChatOn(blob, await routedWorkspaces(c, userId), chatAutoFor(userId));
   if (next === blob) return null;
-  await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [userId, toJson(next)]);
+  await writeOwnerState(c, userId, next);
   return next;
 }
 
@@ -305,6 +322,16 @@ async function newEnoughFor(userId: string, version: string | null | undefined) 
 export async function macNewEnough(userId: string, min = CLOUD_CHAT_MIN_VERSION): Promise<boolean> {
   const v = (await query<{ v: string | null }>("SELECT app_version AS v FROM bops.cloud_accounts WHERE user_id = $1", [userId])).rows[0]?.v ?? null;
   return !!v && !olderThan(v, min);
+}
+
+/**
+ * Whether everything in the owner's workspace `ws` goes through the cloud (protocol.ts CLOUD_ALL_MIN_VERSION): its
+ * switch is on (routingOf), and the owner's last Mac is at CLOUD_ALL_MIN_VERSION (macNewEnough, the gate members.ts
+ * adminGate reads). Until that Mac says so, the workspace behaves exactly as before. members.ts reads it through a test
+ * seam (resetMembers allCloud).
+ */
+export async function allCloud(owner: string, ws: string, c?: pg.PoolClient): Promise<boolean> {
+  return (await routingOf(owner, ws, c)).cloud && (await macNewEnough(owner, CLOUD_ALL_MIN_VERSION));
 }
 
 /* ---------------- The switch, by itself ---------------- */
@@ -585,11 +612,15 @@ export async function revertAuto(): Promise<number> {
 
 /* ---------------- Which computer answers ---------------- */
 
-/** The computer bot `botId` works on (lib/types.ts workBot), lowercased; null for a bot with none, or set to work on the owner's Mac. */
-export function computerFor(blob: Record<string, unknown>, botId: string): string | null {
+/**
+ * The computer bot `botId` works on (lib/types.ts workBot), lowercased; null for a bot with none, or set to work on the
+ * owner's Mac. With `cloud` (a workspace where everything goes through the cloud: allCloud), a bot set to work on the
+ * owner's Mac is answered on its own computer all the same, so it has one too.
+ */
+export function computerFor(blob: Record<string, unknown>, botId: string, cloud = false): string | null {
   const bots = list(blob.bots).filter((b) => typeof b.id === "string");
   const b = bots.find((x) => x.id === botId);
-  if (!b || b.runsOn === "mac") return null;
+  if (!b || (b.runsOn === "mac" && !cloud)) return null;
   const id = workBotOf(b, bots).computerId;
   return typeof id === "string" && id ? id.toLowerCase() : null;
 }
@@ -733,7 +764,7 @@ const APP_ACTS_KEPT = 10;
 /** A job's words as kept on the app: one line, at most 600 characters. */
 const cleanSaid = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 600) : null);
 /** A job turn done with no result: a runner from before GitHub jobs took it, read a note of Bops' and answered nothing. */
-export const JOB_OLD_RUNNER = "The app's computer needs a newer Bops first. Try again once the owner's Mac has updated it.";
+export const JOB_OLD_RUNNER = "The app's computer needs a newer Bops first. Try again once its computer's Bops is updated.";
 export const JOB_STOPPED = "That stopped before it was done. Try again.";
 /** A job whose computer wrote its note but whose end never came back (sweepTurns): how it went isn't known. */
 const JOB_LOST = "The computer's answer got lost on the way. Look at the app before you try again.";
@@ -777,13 +808,17 @@ export function withAppAct(blob: Record<string, unknown>, ws: string, app: strin
   };
 }
 
-/** `blob` with a job's act (its "going" row) said done or not, with words; null when it isn't going any more (said already, or gone). */
+/**
+ * `blob` with an app job's act (its "going" row) said done or not, with words; null when it isn't going any more (said
+ * already, or gone), or for a job with no app (jobApp: compactChat), which has no row on an app to say it on.
+ */
 function jobEnded(blob: Record<string, unknown>, t: TurnRow, ok: boolean, said: string): Record<string, unknown> | null {
   const m = t.member;
-  if (!m?.job) return null;
-  const row = actsOf(blob, t.wsId, m.job.app).find((x) => x.key === m.ref);
+  const app = m?.job ? jobApp(m.job) : null;
+  if (!m?.job || !app) return null;
+  const row = actsOf(blob, t.wsId, app).find((x) => x.key === m.ref);
   if (!row || row.going !== true) return null;
-  return withAppAct(blob, t.wsId, m.job.app, { key: m.ref, userId: m.userId, name: m.name, act: m.job.act, ok, said, at: Date.now() });
+  return withAppAct(blob, t.wsId, app, { key: m.ref, userId: m.userId, name: m.name, act: m.job.act, ok, said, at: Date.now() });
 }
 
 /** Why a job ended that its computer never said, by its turn's note (NOTES' keys), as kept on the app. */
@@ -799,6 +834,8 @@ const JOB_NOTES: Record<string, (owner: string, bot: string) => string> = {
   noRunner: (owner, bot) => `${bot}'s computer is on, but its Bops isn't set up yet. ${owner} needs to open the updated Bops once.`,
   moved: (_o, bot) => `${bot} moved to another computer before this was done. Try again.`,
   midway: (_o, bot) => `${bot}'s computer stopped partway through. Look at the app, then try again.`,
+  // A runner from before CLOUD_ALL_MIN_VERSION claimed a job only newer ones know (claim): it did nothing.
+  oldRunner: (_o, bot) => `${bot}'s computer took this on an older Bops. Try again once it's updated.`,
 };
 /** Why a job ended that its computer never said (it couldn't wake, went quiet partway, their access changed), as kept on the app. */
 const jobWords = (t: TurnRow, owner: string, bot: string): string =>
@@ -809,7 +846,8 @@ const jobWords = (t: TurnRow, owner: string, bot: string): string =>
  * one's act on the app said not done, and why, so Your Apps never shows it going for good. Never throws.
  */
 async function jobsOver(turns: TurnRow[], why?: string) {
-  const jobs = turns.filter((t) => t.member?.job);
+  // Only an app's: a job with no app (compactChat) has no row to say it on.
+  const jobs = turns.filter((t) => t.member?.job && jobApp(t.member.job));
   if (!jobs.length) return;
   const userId = jobs[0].userId;
   try {
@@ -822,7 +860,7 @@ async function jobsOver(turns: TurnRow[], why?: string) {
         if (next) [blob, changed] = [next, true];
       }
       if (!changed) return null;
-      await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [userId, toJson(blob)]);
+      await writeOwnerState(c, userId, blob);
       return blob;
     });
     if (written) {
@@ -842,23 +880,57 @@ const runnerAt = (blob: Record<string, unknown>, desktop: string): Record<string
 };
 const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
 
+/**
+ * The Bops a computer's runner runs, or null for no runner: the newer of what the owner's Mac recorded (AppState.runners,
+ * while it says "running") and what the runner itself said as it last connected (bops.runner_seen, runnerLive), so a
+ * runner's own word counts with the Mac shut. No runner when the Mac has no record of one there (it forgets one only
+ * after taking it down: lib/server/runner-install.ts), or its record says anything but "running" (being set up again,
+ * failed, being stopped) and the runner hasn't connected since. What the kinds from CLOUD_ALL_MIN_VERSION on read: a
+ * GitHub job keeps its rule from before (takeAppJob). `desktop`: the Orgo computer id, any case. `c`: the transaction to
+ * read in, if any.
+ */
+export async function runnerVersionOf(c: pg.PoolClient | null, userId: string, blob: Record<string, unknown>, desktop: string): Promise<string | null> {
+  const d = desktop.toLowerCase();
+  const r = runnerAt(blob, d);
+  if (!r) return null;
+  const sql = "SELECT version, seen_at FROM bops.runner_seen WHERE user_id = $1 AND desktop_id = $2";
+  type Raw = { version: string; seen_at: Date };
+  const row = (c ? await c.query<Raw>(sql, [userId, d]) : await query<Raw>(sql, [userId, d])).rows[0];
+  const seen = row && VERSION.test(row.version) ? { version: row.version, at: row.seen_at.getTime() } : null;
+  // A record that isn't "running" is no runner, unless the runner connected after it. (A record with no time is taken as newer.)
+  const recordAt = typeof r.at === "number" ? r.at : Infinity;
+  if (r.status !== "running" && (!seen || recordAt >= seen.at)) return null;
+  const mac = r.status === "running" && typeof r.version === "string" && VERSION.test(r.version) ? r.version : null;
+  if (!mac || !seen) return mac ?? seen?.version ?? null;
+  return olderThan(mac, seen.version) ? seen.version : mac;
+}
+
+/** How long a job that changes nothing live waits for its computer and runs (a deploy to the Preview, settings, a domain, compactChat). */
+export const APP_JOB_DEADLINE_MS = 30 * 60_000;
+/**
+ * How long a job turn may wait for its computer: TURN_DEADLINE_MS for the GitHub kinds, the remove kinds and what goes on
+ * Published (env "prod"), so a role taken away meanwhile can't leave one waiting long; APP_JOB_DEADLINE_MS for the rest.
+ */
+export const jobDeadline = (job: TurnJob): number => (isGithubJob(job) || isRemoveJob(job) || ("env" in job && job.env === "prod") ? TURN_DEADLINE_MS : APP_JOB_DEADLINE_MS);
+
 export type AppJobTaken = { where: "computer"; turn: TurnRow; fresh: boolean } | { where: "mac"; why: "home" | "runner" | "key"; bot: string };
 
 /**
- * An app's GitHub job (protocol.ts MemberGithubAct "githubLink" or "githubPull") owed to the app's own computer, which
- * has both what it needs there: Ingot (its runner's token for the workspace) and the GitHub key (its own sign in, which
- * Orgo's broker lets call only the keys given to a bot on it). Under the owner's lock, on their state as it is then:
- * `check` (throwing to refuse: still theirs to do), then the app's home (not lost, on the computer its bot works on), a
- * runner the owner's Mac saw running there at GITHUB_ACTS_MIN_VERSION, and a bot of the workspace on it given the GitHub
- * key. Any missing: "mac", and why, for the owner's Mac to do it instead. Else, once by its id (a retry finds it and
+ * An app's job (protocol.ts AppJob; today the GitHub ones, MemberGithubAct "githubLink" or "githubPull") owed to the
+ * app's own computer, which has both what it needs there: Ingot (its runner's token for the workspace) and the GitHub
+ * key (its own sign in, which Orgo's broker lets call only the keys given to a bot on it). Under the owner's lock, on
+ * their state as it is then: `check` (throwing to refuse: still theirs to do), then the app's home (not lost, on the
+ * computer its bot works on), a runner there at the version its kind needs on a computer the Mac didn't find down (a
+ * GitHub job: one the owner's Mac's record says is running, as before, at GITHUB_ACTS_MIN_VERSION; else runnerVersionOf,
+ * the Mac's record or its own word, at CLOUD_ALL_MIN_VERSION), and a bot of the workspace on it given the GitHub key. Any missing: "mac", and why, for the owner's Mac to do it instead. Else, once by its id (a retry finds it and
  * changes nothing): a note in the app's bot's chat (Bops', with what `words` says), its "going" act on the app, and a turn
  * owed to that computer with the job on its member (TurnMember.job), given out and woken as a chat turn is, one at a time
- * in that chat. `still` false right before it's kept takes it all back (an orgo-web notice landed).
+ * in that chat, until its deadline (jobDeadline). `still` false right before it's kept takes it all back (an orgo-web notice landed).
  */
 export async function takeAppJob(o: {
   account: string;
   wsId: string;
-  job: TurnJob;
+  job: AppJob;
   id: string;
   member: TurnMember;
   words: (bot: string) => string;
@@ -878,8 +950,15 @@ export async function takeAppJob(o: {
     const bot = botId ? nameOf(blob, botId) : "The bot";
     const desktop = botId ? computerFor(blob, botId) : null;
     if (!botId || !desktop || h.lost !== undefined || typeof h.computerId !== "string" || h.computerId.toLowerCase() !== desktop) return { where: "mac", why: "home", bot };
+    // Its runner at the version its kind needs; a computer the Mac found down is left to the Mac, as before. A GitHub job
+    // keeps the rule from before: the owner's Mac's record says it's running (never one being set up again, failed or
+    // being stopped, whatever the runner said before), its version the newer of that record's and the runner's own word.
+    // The rest: runnerVersionOf, the Mac's record or the runner's own word.
     const r = runnerAt(blob, desktop);
-    if (!r || r.status !== "running" || r.down || typeof r.version !== "string" || !VERSION.test(r.version) || olderThan(r.version, GITHUB_ACTS_MIN_VERSION)) return { where: "mac", why: "runner", bot };
+    const github = isGithubJob(o.job);
+    const asBefore = r?.status === "running" && typeof r.version === "string" && VERSION.test(r.version);
+    const v = !r || r.down || (github && !asBefore) ? null : await runnerVersionOf(c, o.account, blob, desktop);
+    if (!v || olderThan(v, github ? GITHUB_ACTS_MIN_VERSION : CLOUD_ALL_MIN_VERSION)) return { where: "mac", why: "runner", bot };
     const keyed = list(blob.bots).some((b) => typeof b.id === "string" && wsOfBot(b) === o.wsId && computerFor(blob, b.id) === desktop && Array.isArray(b.keys) && b.keys.includes(GITHUB_KEY_NAME));
     if (!keyed) return { where: "mac", why: "key", bot };
     const at = Date.now();
@@ -890,10 +969,10 @@ export async function takeAppJob(o: {
       `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 'owed', now() + make_interval(secs => $10), $11)
        RETURNING ${COLS}`,
-      [o.account, `turn_${o.id}`, o.id, chatId, botId, o.wsId, JSON.stringify({ ...o.member, job: o.job }), desktop, deviceIdOf(o.account, desktop), TURN_DEADLINE_MS / 1000, at],
+      [o.account, `turn_${o.id}`, o.id, chatId, botId, o.wsId, JSON.stringify({ ...o.member, job: o.job }), desktop, deviceIdOf(o.account, desktop), jobDeadline(o.job) / 1000, at],
     );
     blob = withAppAct(blob, o.wsId, o.job.app, { key: o.member.ref, userId: o.member.userId, name: o.member.name, act: o.job.act, ok: true, going: true, at });
-    await c.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [o.account, toJson(blob)]);
+    await writeOwnerState(c, o.account, blob);
     if (o.still && !o.still()) throw new HttpError(404, "No such workspace");
     return { where: "computer", turn: turnOf(ins.rows[0]), fresh: true, written: blob };
   });
@@ -1185,6 +1264,13 @@ const runnerLive: Route = {
       proved.set(k, { version: said, at: Date.now() });
       provedUsers.add(userId);
     }
+    // And kept, past its going (runnerVersionOf): what it runs is what it ran, whether it naps or the owner's Mac is shut.
+    if (said && VERSION.test(said))
+      await query(
+        `INSERT INTO bops.runner_seen (user_id, desktop_id, device_id, version) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, desktop_id) DO UPDATE SET device_id = $3, version = $4, seen_at = now()`,
+        [userId, c.desktopId.toLowerCase(), c.device, said],
+      ).catch((e: Error) => console.warn(`[turns] runner seen: ${e.message}`));
     // A wake waiting for it carries on now, and what it's owed goes to it.
     for (const w of [...(waiters.get(k) ?? [])]) w();
     for (const t of await owedTo(userId, c.device)) if (!done) stream.write("turn", await eventOf(t));
@@ -1208,19 +1294,53 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
     ...(t.member.joinedAt !== undefined ? { joinedAt: t.member.joinedAt } : {}),
     ...(typeof t.member.computerUse === "boolean" ? { computerUse: t.member.computerUse } : {}),
   };
-  // An app's GitHub job (takeAppJob): Your Apps at Write and the power of Publish (an Admin always, a Member with App
-  // secrets), as the act was taken; never the bot's level or Use its computer: it runs no words of theirs.
-  if (t.member.job) {
-    const access = viewerAccess(ws, viewer);
-    return appsLevelOf(access) === "write" && hasPower("appSecrets", viewer.role, access.can) ? "ok" : "gone";
-  }
+  // A job (takeAppJob): what its kind needs, for their membership now; never the bot's level or Use its computer (it runs
+  // no words of theirs), but for a chat's own job.
+  if (t.member.job) return jobStill(blob, ws, viewer, t.member.job, t.chatId);
   if (!permits(levelOf(viewerAccess(ws, viewer), t.botId), "write")) return "gone";
   return computerUseOf(ws, viewer) ? "ok" : "noUse";
 }
 
-async function claim(user: CloudUser, id: string): Promise<RunnerClaim> {
+/**
+ * Whether a job's member may still have it done, by its kind: an app's GitHub job needs Your Apps at Write and the power
+ * of Publish (an Admin always, a Member with App secrets); a deploy, rollback, settings or domain Your Apps at Write, and
+ * what goes on Published (env "prod") the power of Publish too; a remove an Admin; compacting a chat Write on every bot
+ * of the chat.
+ */
+function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | null, viewer: SliceViewer, job: TurnJob, chatId: string): "ok" | "gone" {
+  const access = viewerAccess(ws, viewer);
+  const appsWrite = appsLevelOf(access) === "write";
+  const publish = hasPower("appSecrets", viewer.role, access.can);
+  switch (job.act) {
+    case "githubLink":
+    case "githubPull":
+      return appsWrite && publish ? "ok" : "gone";
+    case "deploy":
+    case "rollback":
+    case "settings":
+    case "domain":
+      return appsWrite && ("env" in job && job.env === "prod" ? publish : true) ? "ok" : "gone";
+    case "remove":
+    case "removeSite":
+    case "removeLeftOver":
+      return viewer.role === "admin" ? "ok" : "gone";
+    case "compactChat": {
+      const bots = botsOfChat(blob, chatId);
+      return bots.length && bots.every((id) => permits(levelOf(access, id), "write")) ? "ok" : "gone";
+    }
+  }
+}
+
+/** Every bot of a chat of the owner's (a bot's own chat: its bot), or none when there's no such chat. */
+const botsOfChat = (blob: Record<string, unknown>, chatId: string): string[] => {
+  const c = list(blob.chats).find((x) => x.id === chatId);
+  const ids = c ? (Array.isArray(c.botIds) ? c.botIds.filter((x): x is string => typeof x === "string") : []) : chatId.startsWith("bot:") ? [chatId.slice(4)] : [];
+  return ids.filter((id) => list(blob.bots).some((b) => b.id === id));
+};
+
+async function claim(user: CloudUser, id: string, version: string | null): Promise<RunnerClaim> {
   const c = user.computer!;
-  const out = await tx(async (db): Promise<{ ok: RunnerClaim; t: TurnRow } | { refused: TurnRow }> => {
+  const out = await tx(async (db): Promise<{ ok: RunnerClaim; t: TurnRow } | { refused: TurnRow; words?: string }> => {
     await lockUser(db, user.id);
     const raw = (await db.query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND id = $2 FOR UPDATE`, [user.id, id])).rows[0];
     if (!raw || raw.target_device !== c.device) throw new HttpError(404, "No such turn");
@@ -1246,6 +1366,13 @@ async function claim(user: CloudUser, id: string): Promise<RunnerClaim> {
       await db.query("UPDATE bops.chat_turns SET state = 'failed', note = $3, updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id, note]);
       return { refused: { ...t, state: "failed", note } };
     }
+    // A job only runners from CLOUD_ALL_MIN_VERSION on know, claimed by an older one (by its own word, this call's): it
+    // would read Bops' note and do nothing, or worse, so it ends here and the app (or chat) says why.
+    const job = t.member?.job;
+    if (job && !isGithubJob(job) && (!version || olderThan(version, CLOUD_ALL_MIN_VERSION))) {
+      await db.query("UPDATE bops.chat_turns SET state = 'failed', note = 'oldRunner', updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id]);
+      return { refused: { ...t, state: "failed", note: "oldRunner" }, words: JOB_NOTES.oldRunner(ownerOf(blob), nameOf(blob, t.botId)) };
+    }
     await db.query(
       `UPDATE bops.chat_turns SET state = 'claimed', claimed_by = $3, lease_until = now() + make_interval(secs => $4), attempts = attempts + 1, phase = 'model', updated_at = now()
        WHERE user_id = $1 AND id = $2`,
@@ -1259,7 +1386,7 @@ async function claim(user: CloudUser, id: string): Promise<RunnerClaim> {
   });
   if ("refused" in out) {
     await afterRevoked(out.refused);
-    throw new HttpError(410, "That turn isn't to be answered any more.", { code: "over" });
+    throw new HttpError(410, out.words ?? "That turn isn't to be answered any more.", { code: "over" });
   }
   shown(out.t, "thinking");
   return out.ok;
@@ -1354,6 +1481,34 @@ async function resume(user: CloudUser, id: string, body: unknown): Promise<Runne
   return { ok: true, now: Date.now(), humanAt: t.humanAt };
 }
 
+/** A job's end as its computer said it (RunnerDone.job, cleaned: `said` one line, `removed` only when it went). */
+export type JobResult = { ok: boolean; said: string; removed?: "app" | "site" };
+
+/**
+ * A job's end (finish), on the owner's state under their lock, by its kind: the state to write, or null for nothing to
+ * write. An app's kinds keep how it went on the app as theirs (SharedApp.acts), in place of its "going" row (jobEnded).
+ * A chat's job (compactChat) has no app to keep it on.
+ */
+function jobFinished(blob: Record<string, unknown>, t: TurnRow, res: JobResult): Record<string, unknown> | null {
+  const job = t.member?.job;
+  if (!job) return null;
+  switch (job.act) {
+    case "githubLink":
+    case "githubPull":
+      return jobEnded(blob, t, res.ok, res.said);
+    case "deploy":
+    case "rollback":
+    case "settings":
+    case "domain":
+    case "remove":
+    case "removeSite":
+    case "removeLeftOver":
+      return jobEnded(blob, t, res.ok, res.said);
+    case "compactChat":
+      return null;
+  }
+}
+
 async function finish(user: CloudUser, id: string, body: unknown) {
   const b = isObject(body) ? body : {};
   const state = b.state === "paused" || b.state === "failed" ? b.state : "done";
@@ -1391,16 +1546,17 @@ async function finish(user: CloudUser, id: string, body: unknown) {
       await db.query("INSERT INTO bops.chat_messages (user_id, id, chat_id, at, json) VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (user_id, id) DO NOTHING", [user.id, n.id, n.chatId, n.at, toJson(n)]);
       wrote = true;
     }
-    // An app's GitHub job: how it went, kept on the app as theirs (SharedApp.acts), in place of its "going" row. Done with
-    // no result is a runner from before (it read a note of Bops' and answered nothing): said so, never as done.
+    // A job: how it went, as its computer said (jobFinished). Done with no result is a runner from before (it read a note
+    // of Bops' and answered nothing): said so, never as done.
     if (raw.member?.job && state !== "paused") {
       const res = isObject(b.job) && typeof b.job.said === "string" ? b.job : null;
       const blob = await lockedState(db, user.id);
       const ok = state === "done" && res?.ok === true;
       const said = cleanSaid(res?.said) ?? (note ? note : state === "done" ? JOB_OLD_RUNNER : JOB_STOPPED);
-      const next = jobEnded(blob, turnOf(raw), ok, said);
+      const removed = ok && (res?.removed === "app" || res?.removed === "site") ? res.removed : undefined;
+      const next = jobFinished(blob, turnOf(raw), { ok, said, ...(removed ? { removed } : {}) });
       if (next) {
-        await db.query("UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [user.id, toJson(next)]);
+        await writeOwnerState(db, user.id, next);
         jobWritten = next;
       }
     }
@@ -1425,7 +1581,7 @@ const runnerTurn: Route = {
     const m = TURN_PATH.exec(url.pathname);
     if (!m) throw new HttpError(404, "Not found");
     const body = await readJson<unknown>(req, 8 * 1024).catch(() => ({}));
-    if (m[2] === "claim") return sendJson(res, 200, await claim(user!, m[1]));
+    if (m[2] === "claim") return sendJson(res, 200, await claim(user!, m[1], appVersionOf(req)));
     if (m[2] === "resume") return sendJson(res, 200, await resume(user!, m[1], body));
     if (m[2] === "beat") await beat(user!, m[1], body);
     else await finish(user!, m[1], body);

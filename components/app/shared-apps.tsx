@@ -297,7 +297,7 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { 
       </div>
       {(going || acts.some((x) => x.state === "failed") || said || newest) && (
         <div className="flex flex-col gap-0.5 px-4 pb-2.5 text-[12px] leading-4">
-          {going && <span className="text-[#6B6B6B]">{going.state === "waiting" ? W.waiting : W.sending}</span>}
+          {going && <span className="text-[#6B6B6B]">{going.state === "waiting" ? W.waiting : going.state === "cloud" ? "Sending…" : W.sending}</span>}
           {acts
             .filter((x) => x.state === "failed")
             .map((x) => (

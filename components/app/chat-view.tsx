@@ -1591,7 +1591,7 @@ function lasts(all: Message[]) {
 function MemberSendLine({ send, retry }: { send: NonNullable<Message["memberSend"]>; retry: (key: string) => void }) {
   return (
     <span className={`px-1 text-[11.5px] leading-4 ${send.state === "failed" ? "text-[#B42318]" : "text-[#9A9A98]"}`}>
-      {send.state === "sending" ? "Sending…" : send.state === "waiting" ? REPLY_WAITS_LINE : (send.error ?? "That didn't go.")}
+      {send.state === "sending" || send.state === "cloud" ? "Sending…" : send.state === "waiting" ? REPLY_WAITS_LINE : (send.error ?? "That didn't go.")}
       {send.state === "failed" && (
         <button onClick={() => retry(send.key)} className="ml-1.5 font-medium underline-offset-2 hover:underline">
           Try again
@@ -3339,7 +3339,7 @@ function NeedsYouCard({
       </div>
       )}
       {/* A reply or Dismiss waits only a while for the owner's Bops (then says it didn't go): never the answer line's promise. */}
-      {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : REPLY_WAITS_LINE}</span>}
+      {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" || sent?.state === "cloud" ? "Sending…" : REPLY_WAITS_LINE}</span>}
       {shownError && (
         <span role="alert" className="pl-1 text-[12px] leading-4 text-[#B42318]">
           {shownError}
@@ -3430,7 +3430,7 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
   if (a.kind === "key")
     return (
       <KeyAskCard state={state} approval={a} answerer={answerer} busy={busy} onAnswer={(reply) => void decide(reply)} className={className}>
-        {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
+        {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" || sent?.state === "cloud" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
         {shownError && (
           <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
             {shownError}
@@ -3513,7 +3513,7 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
       )}
       {/* What Always allow covers: this bot and this action from now on, whoever it's for (lib/permission.ts). */}
       {!telling && answerer === "you" && <span className="text-[12px] leading-4 text-[#6B6B6B]">{alwaysScope(name, a)}</span>}
-      {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
+      {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" || sent?.state === "cloud" ? "Sending…" : ANSWER_WAITS_LINE}</span>}
       {shownError && (
         <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
           {shownError}

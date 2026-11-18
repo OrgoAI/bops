@@ -67,7 +67,7 @@ globalThis.fetch = async (input, init = {}) => {
   return Response.json({ ok: true });
 };
 
-const { SharedCopy, viewState, GONE, actWith, ACT_EXPIRED, ACT_ACCESS_CHANGED, ACT_TOO_LONG } = await import(`${root}/lib/server/shared-core.ts`);
+const { SharedCopy, viewState, GONE, actWith, ACT_EXPIRED, ACT_ACCESS_CHANGED, ACT_TOO_LONG, CLOUD_ACT_EXPIRED } = await import(`${root}/lib/server/shared-core.ts`);
 const { needsYou, repliedSince } = await import(`${root}/lib/asks.ts`);
 const { duePings } = await import(`${root}/lib/pings.ts`);
 const { LiveSubscriber, RemoteMoods } = await import(`${root}/lib/server/live-core.ts`);
@@ -1826,6 +1826,69 @@ await check("Write: what the viewer did shows as theirs at once, says how it sta
   const v = shown(copy2);
   assert.deepEqual(v.messages.filter((m) => m.text === "Use the second list").map((m) => m.id), ["m9"]);
   assert.deepEqual(v.sessions[0].replies.map((x) => x.id), ["r9"]);
+});
+
+await check("Write, with everything through the cloud: an act Bops Cloud does without the Mac is pending as \"cloud\", never says the Mac, and gives up after CLOUD_ACT_MS in words of its own", async () => {
+  const { CLOUD_ACT_MS, MEMBER_ACT_MS } = await import(`${root}/cloud/protocol.ts`);
+  const L = await import(`${root}/lib/shared.ts`);
+  const copy = new SharedCopy(fakeRead({ status: 200, body: writeState() }).read);
+  await copy.open(listed);
+  let t = 1_000_000;
+  copy.now = () => t;
+  const r = await actWith(copy, { act: "chat", chatId: "bot:boppy", text: "Ship the second list" }, "key_cloud_001", sam, async () => ({ status: 202, body: { ok: true, macOn: true, stored: true, cloud: true } }));
+  assert.deepEqual(r, { ok: true, key: "key_cloud_001", macOn: true });
+  const shown = () => viewState(own(), copy.openNow(), copy.data(), {}, copy.acts());
+  const mine = () => shown().messages.find((m) => m.id === "acting_key_cloud_001");
+  assert.deepEqual(mine().memberSend, { state: "cloud", key: "key_cloud_001" });
+  // What's said under their words, and that no line of the Mac's (waiting for it, or it not opening) is anywhere.
+  const under = (html) => text(html).match(/Ship the second list (.*)$/)?.[1] ?? "";
+  const macWords = (html) => [L.REPLY_WAITS_LINE, L.ANSWER_WAITS_LINE, ACT_EXPIRED].filter((w) => text(html).includes(w));
+  const going = renderToStaticMarkup(h(ChatView, chatProps(shown(), "bot:boppy")));
+  assert.ok(under(going).startsWith("Sending… "), under(going).slice(0, 80));
+  assert.deepEqual(macWords(going), [], "never the Mac's words");
+  // Past a Mac act's wait it's still going: Bops Cloud and the computer have longer.
+  t += MEMBER_ACT_MS + 60_000;
+  assert.equal(mine().memberSend.state, "cloud");
+  // Past CLOUD_ACT_MS: it didn't go, in words that never name the Mac, with Try again.
+  t = 1_000_000 + CLOUD_ACT_MS + 1;
+  assert.deepEqual(mine().memberSend, { state: "failed", error: CLOUD_ACT_EXPIRED, key: "key_cloud_001" });
+  const late = renderToStaticMarkup(h(ChatView, chatProps(shown(), "bot:boppy")));
+  assert.ok(under(late).startsWith("That didn't go through in time. Try again. Try again "), under(late).slice(0, 80));
+  assert.deepEqual(macWords(late), []);
+  assert.equal(CLOUD_ACT_EXPIRED, "That didn't go through in time. Try again.");
+  assert.equal(CLOUD_ACT_MS, 35 * 60_000);
+  // The Mac's own expiry stays as it was for the rest.
+  assert.equal(ACT_EXPIRED, "The workspace's Mac didn't open in time, so this didn't go.");
+  // An answer Bops Cloud takes: its ask is pending as "cloud", and both its cards, in the chat and under its bot in the
+  // sidebar, say it's on its way, never the Mac's line.
+  const answering = new SharedCopy(fakeRead({ status: 200, body: writeState() }).read);
+  await answering.open(listed);
+  await actWith(answering, { act: "answer", askId: "apr-boppy", reply: "once" }, "key_cloud_002", sam, async () => ({ status: 202, body: { ok: true, macOn: true, stored: true, cloud: true } }));
+  const asked = viewState(own(), answering.openNow(), answering.data(), {}, answering.acts());
+  assert.deepEqual(asked.appApprovals.find((a) => a.id === "apr-boppy").memberSend, { state: "cloud", key: "key_cloud_002" });
+  const answerCard = renderToStaticMarkup(h(ChatView, chatProps(asked, "bot:boppy")));
+  assert.match(text(answerCard), /Sending…/);
+  assert.deepEqual(macWords(answerCard), [], "the chat's card: never the Mac's words");
+  const was = globalThis.localStorage.getItem;
+  globalThis.localStorage.getItem = (k) => (/^bops\.threads\.open\..*\.boppy$/.test(k) ? "1" : null);
+  try {
+    const props = { chatId: null, onOpenChat: noop, onOpenThread: noop, onCompose: noop, onSettings: noop, onAccount: noop, onSetup: noop, onVault: noop, onTeam: noop, onOpenWatch: noop, onOpenMemory: noop, onOpenAutopilot: noop, menuActions: {} };
+    const bar = renderToStaticMarkup(h(Sidebar, { ...props, state: asked }));
+    const at = bar.indexOf('data-need="ask:apr-boppy"');
+    assert.ok(at > 0, "its card under Boppy in the sidebar");
+    const card = bar.slice(at, bar.indexOf("data-need=", at + 1) > 0 ? bar.indexOf("data-need=", at + 1) : undefined);
+    assert.match(text(card), /Sending…/);
+    assert.deepEqual(macWords(bar), [], "the sidebar's card: never the Mac's words");
+  } finally {
+    globalThis.localStorage.getItem = was;
+  }
+  // Every pending line in the window has a plain one for "cloud" (Your Apps' and the sidebar's too), never the Mac's.
+  const apps = readFileSync(`${root}/components/app/shared-apps.tsx`, "utf8");
+  assert.match(apps, /going\.state === "cloud" \? "Sending…"/);
+  const chat = readFileSync(`${root}/components/app/chat-view.tsx`, "utf8");
+  assert.equal((chat.match(/state === "sending" \|\| [a-z?.]*state === "cloud" \? "Sending…"/g) ?? []).length, 4, "a message's, a reply's and both answers'");
+  const side = readFileSync(`${root}/components/app/sidebar-sections.tsx`, "utf8");
+  assert.equal((side.match(/state === "sending" \|\| [a-z?.]*state === "cloud" \? "Sending…"/g) ?? []).length, 1, "the sidebar's ask card");
 });
 
 await check("Write: an answer keeps its card saying it's on its way, a stop says Stopping, and the owner taking Write away marks what's waiting as not gone, with why", async () => {

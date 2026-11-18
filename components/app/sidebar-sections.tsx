@@ -299,7 +299,8 @@ function AskCard({ ask: a, botName, where, shared, onOpen }: { ask: AppApproval;
   const facts = a.kind === "api" && a.api ? apiFacts(a.api) : null;
   const scope = alwaysScope(botName, { ...a, action: undash(a.action) });
   const meta = [where ? `For ${undash(where)}` : shared ? "Waiting for an OK" : "Waiting for your OK", ago(a.at)].join(" · ");
-  const said = sent && sent.state !== "failed" ? (sent.state === "sending" ? "Sending…" : REPLY_WAITS_LINE) : null;
+  // Done by Bops Cloud with no Mac ("cloud"): never the Mac's line.
+  const said = sent && sent.state !== "failed" ? (sent.state === "sending" || sent.state === "cloud" ? "Sending…" : REPLY_WAITS_LINE) : null;
   const shownError = said ? null : (error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null));
   const btn = "rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
   return (
