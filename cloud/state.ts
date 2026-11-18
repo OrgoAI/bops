@@ -573,7 +573,7 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
       // An account with no row, that Bops Cloud doesn't move workspaces for, and with no mark of either left: nothing to put back.
       const rows = await routedWorkspaces(c, user.id);
       const on = chatAutoFor(user.id);
-      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && (w.chatAuto !== undefined || w.chatAutoOff !== undefined)) ? keepChatOn(written, rows, on) : written;
+      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && (w.chatAuto !== undefined || w.chatAutoOff !== undefined || w.chatTrouble !== undefined)) ? keepChatOn(written, rows, on) : written;
       if (kept !== written) {
         written = kept;
         json = toJson(blobOf(kept));

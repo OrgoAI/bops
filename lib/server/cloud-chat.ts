@@ -1,7 +1,7 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
-import { BOPS_DEVICE_HEADER, BOPS_PROTOCOL_HEADER, BOPS_USER_HEADER, CHAT_NOT_IN_CLOUD, STATE_PROTOCOL, type ChatSendAnswer } from "@/cloud/protocol";
-import { workBot, workspaceOf } from "@/lib/types";
+import { BOPS_DEVICE_HEADER, BOPS_PROTOCOL_HEADER, BOPS_USER_HEADER, CHAT_NOT_IN_CLOUD, STATE_PROTOCOL, type ChatSendAnswer, type ChatSendBody } from "@/cloud/protocol";
+import { workspaceOf } from "@/lib/types";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudUrl } from "./cloud";
 import { cloudKey } from "./orgo-auth";
@@ -14,27 +14,30 @@ import { chat, getState, pullState, stateDevice, stateUser } from "./store";
  * computer goes to Bops Cloud first, which writes it and owes its answer to that computer, as it does a member's: this
  * Mac runs nothing for it, and every viewer hears it and the answer at once.
  *
- * Offline still works, and nothing is answered twice: only when the request never went out (no route to Bops Cloud, it
- * refused the connection, its name didn't resolve) does this Mac answer it itself, as before (Bops Cloud never heard of
- * it). Sent and not answered (a timeout, Bops Cloud failing) it's sent again with the same key, which Bops Cloud takes
- * once; then the window says it didn't go. Anything else (pictures, an app open beside the chat, Select's picks, a
- * group, a bot with no computer or set to work on the Mac) stays this Mac's, as before.
+ * Everything goes through the cloud there (cloud/turns.ts allCloud): a group, a bot set to work on the Mac and a bot
+ * with no computer go too, with `all` (ChatSendBody.all), and Bops Cloud answers each on a computer or says in the chat
+ * why not. A Bops Cloud that says the chat isn't its (CHAT_NOT_IN_CLOUD: the owner's last Mac is older, or the switch was
+ * turned off meanwhile) has this Mac answer it, as before. Nothing is answered twice, and in a workspace in the cloud
+ * never on this Mac by itself: a request that never went out (no route to Bops Cloud, it refused the connection, its
+ * name didn't resolve) is "failed", and so is one sent and not answered (a timeout, Bops Cloud failing) after it's sent
+ * again with the same key, which Bops Cloud takes once; the window says it didn't go. Pictures, files, an app open
+ * beside the chat and Select's picks stay this Mac's for now.
  */
 
-/** The errors of a request that never reached Bops Cloud: safe to answer here, as Bops Cloud never had it. */
+/** The errors of a request that never reached Bops Cloud: Bops Cloud never had it, so it's sent again (and never answered here). */
 const NEVER_WENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "ENETDOWN"]);
 const TRIES = 3;
 
 const g = globalThis as unknown as { __bopsCloudChat?: { fetch?: typeof fetch } };
 
-/** Whether this message goes through Bops Cloud (see above). */
+/** Whether this message goes through Bops Cloud (see above): any chat of a workspace in the cloud, a group or a bot with no computer too. */
 export function sendsThroughCloud(chatId: string, extra: { images?: number; files?: number; lookingAt?: string; appNote?: boolean; picks?: boolean }): boolean {
   if (onRunner() || !cloudOn() || extra.images || extra.files || extra.lookingAt || extra.appNote || extra.picks) return false;
   const c = chat(chatId);
-  if (!c || c.kind === "group" || c.botIds.length !== 1) return false;
+  if (!c || !c.botIds.length) return false;
   const st = getState();
   const b = st.bots.find((x) => x.id === c.botIds[0]);
-  if (!b || b.runsOn === "mac" || !workBot(b, st.bots).computerId) return false;
+  if (!b) return false;
   const ws = c.workspaceId ?? workspaceOf(b);
   return !!st.workspaces?.some((w) => w.id === ws && w.chatOn === "cloud");
 }
@@ -47,8 +50,8 @@ const causeOf = (e: unknown) => {
 
 /**
  * Send the owner's message through Bops Cloud: "sent" (it's written there, and this Mac reads it now), "here" (this Mac
- * answers it itself: it never went out, or Bops Cloud says this chat isn't its), or "failed" (sent, and no answer
- * after TRIES: the window says it didn't go).
+ * answers it itself: Bops Cloud says this chat isn't its), or "failed" (it never went out, or no answer after TRIES: the
+ * window says it didn't go, and this Mac never answers it by itself).
  */
 export async function sendThroughCloud(chatId: string, text: string, replyTo?: string): Promise<"sent" | "here" | "failed"> {
   const key = randomBytes(12).toString("hex");
@@ -56,18 +59,20 @@ export async function sendThroughCloud(chatId: string, text: string, replyTo?: s
   const auth = cloudKey();
   if (!user || !auth) return "here";
   const f = g.__bopsCloudChat?.fetch ?? fetch;
+  let neverWent = 0;
   for (let i = 0; i < TRIES; i++) {
     let res: Response;
     try {
       res = await f(`${cloudUrl()}/v1/chats/${encodeURIComponent(chatId)}/send`, {
         method: "POST",
         headers: { Authorization: `Bearer ${auth}`, [BOPS_USER_HEADER]: user, [BOPS_PROTOCOL_HEADER]: String(STATE_PROTOCOL), [BOPS_DEVICE_HEADER]: stateDevice() ?? "", "content-type": "application/json", ...appHeaders() },
-        body: JSON.stringify({ key, text, ...(replyTo ? { replyTo } : {}) }),
+        body: JSON.stringify({ key, text, ...(replyTo ? { replyTo } : {}), all: true } satisfies ChatSendBody),
         signal: AbortSignal.timeout(15_000),
         cache: "no-store",
       });
     } catch (e) {
-      if (i === 0 && NEVER_WENT.has(causeOf(e))) return "here";
+      // It never went out: in a workspace in the cloud that's never this Mac's to answer, so it's sent again, then failed.
+      if (NEVER_WENT.has(causeOf(e))) neverWent++;
       continue;
     }
     const body = (await res.json().catch(() => null)) as (ChatSendAnswer & { code?: string }) | null;
@@ -79,18 +84,20 @@ export async function sendThroughCloud(chatId: string, text: string, replyTo?: s
     if (res.status === 409 && body?.code === CHAT_NOT_IN_CLOUD) return "here";
     if (res.status < 500 && res.status !== 429) return "failed";
   }
+  if (neverWent === TRIES) console.warn(`[cloud-chat] ${chatId}: Bops Cloud couldn't be reached, so the message didn't go`);
   return "failed";
 }
 
 /**
  * The owner's switch for a workspace's chat (Settings, General: components/app/chat-switch.tsx), to Bops Cloud (POST
- * /v1/chat-routing, cloud/turns.ts setRouting): "mac" chooses this Mac, and Bops Cloud never moves that workspace by
- * itself after; "auto" gives the choice back, so Bops Cloud moves it once its bots' computers answer there. Where Bops
- * Cloud doesn't move workspaces for this account, it refuses "auto" (409 chat_auto_off) and says so on the workspace
- * first (Workspace.chatAutoOff). The state is read again now: it carries the switch as Bops Cloud wrote it
- * (Workspace.chatOn, chatAuto, chatAutoOff). Refused: Bops Cloud's words (an older Bops on another Mac: 409).
+ * /v1/chat-routing, cloud/turns.ts setRouting): "cloud" runs everything there, and "mac" chooses this Mac, and Bops
+ * Cloud never moves that workspace by itself after either; "auto" (an older window's) gives the choice back, so Bops
+ * Cloud moves it once its bots' computers answer there. Where Bops Cloud doesn't move workspaces for this account, it
+ * refuses "auto" (409 chat_auto_off) and says so on the workspace first (Workspace.chatAutoOff). The state is read
+ * again now: it carries the switch as Bops Cloud wrote it (Workspace.chatOn, chatAuto, chatAutoOff, chatTrouble).
+ * Refused: Bops Cloud's words (an older Bops on another Mac: 409).
  */
-export async function setChatRouting(wsId: string, mode: "auto" | "mac"): Promise<{ ok: true } | { error: string; status: number }> {
+export async function setChatRouting(wsId: string, mode: "auto" | "mac" | "cloud"): Promise<{ ok: true } | { error: string; status: number }> {
   const user = stateUser();
   const auth = cloudKey();
   if (onRunner() || !cloudOn() || !user || !auth) return { error: "Sign in with Orgo to use Bops Cloud.", status: 409 };

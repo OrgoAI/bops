@@ -1097,6 +1097,8 @@ const actIn: Route = {
     if (body.act.act === "chat" && ((await routed(target.account, target.ws)) || (await storedFirst(target.account, target.ws)))) {
       const chatAct = body.act;
       if (slice.chats.some((c) => c.id === chatAct.chatId)) return cloudChat(res, { user: user!, role, target, viewer, projectId, key: body.key, act: chatAct, asked });
+      // Where everything goes through the cloud, never the owner's Mac's: a chat not theirs to see is none.
+      if (await cloudAll(target.account, target.ws)) throw new HttpError(404, "No such chat.");
     }
     // An Admin's How I work in a workspace whose chat goes through Bops Cloud, while the owner's Mac is away: kept here now,
     // so the bot's next turn there has it (personaHere), once the owner's Bops keeps it through its own later writes
@@ -1262,10 +1264,12 @@ export const wakeNote = (bot: string, why: string) => `${bot}'s computer couldn'
  * again under the owner's lock on the state as it is then (in their view, Write on the bot), written once by their key
  * with their stamp as orgo-web vouched for them, and its answer owed to the bot's computer when the owner let them use
  * it (else the message stays, with a note that the bot won't answer). An orgo-web notice for them that lands meanwhile
- * takes it back. A group, a bot with no computer, or a workspace still on the owner's Mac (its row, read under the lock:
- * storedFirst): the owner's Mac answers it (a "member" event for the message written), and while that Mac is away the
- * chat says so. 202 with the message's id, and macOn so an app from before says "Sending…"
- * until it lands, as it does at once.
+ * takes it back. Where everything goes through the cloud (turns.ts takeMessage: allCloud), never the owner's Mac: a
+ * group on one computer, and a bot set to work on the Mac, are answered on that computer, and a bot with no computer or
+ * a group across computers gets its note. Elsewhere a group, a bot with no computer, or a workspace still on the owner's
+ * Mac (its row, read under the lock: storedFirst): the owner's Mac answers it (a "member" event for the message
+ * written), and while that Mac is away the chat says so. 202 with the message's id, and macOn so an app from before
+ * says "Sending…" until it lands, as it does at once.
  */
 async function cloudChat(
   res: ServerResponse,
@@ -1292,20 +1296,22 @@ async function cloudChat(
       // An Admin's turn goes by that (turns.ts memberStill): every bot and its computer. A notice that they're not one ends it.
       ...(role.role === "admin" ? { role: "admin" as const } : {}),
     },
-    check: (locked) => {
+    wsId: target.ws,
+    check: (locked, cloud) => {
       const slice = sliceOf(locked, target.ws, viewer);
       if (!slice.workspace) throw new HttpError(404, "No such workspace");
       const bots = botsTouched(locked, slice, act);
       if (!writesChat(viewerAccess(slice.workspace, viewer), bots)) throw new HttpError(403, "You can watch this bot, not act for it. Ask the owner for Write.", { code: MEMBER_READ_ONLY });
       const group = bots.length !== 1 || slice.chats.find((c) => c.id === act.chatId)?.kind === "group";
-      // Use its computer gates the bots' computers only: bots with none (or on the owner's Mac) answer as before.
+      // Use its computer gates the bots' computers only: bots with none (or on the owner's Mac, but where everything goes
+      // through the cloud: its own computer answers) answer as before.
       use = computerUseOf(slice.workspace, viewer);
       // Files: on the computers as the state says now, and theirs to use (checked in actIn too, on the state before the lock).
       if (act.files) {
         filesFit(locked, bots, act.files);
         if (!use) throw new HttpError(403, FILES_NO_COMPUTER, { code: MEMBER_NO_COMPUTER });
       }
-      const mayUse = use || !bots.some((b) => computerFor(locked, b));
+      const mayUse = use || !bots.some((b) => computerFor(locked, b, cloud));
       return { botId: bots[0], wsId: target.ws, mayUse, group };
     },
     still: () => (noticed.get(keyOf(user.id, projectId))?.n ?? 0) <= o.asked,

@@ -56,8 +56,9 @@ export async function POST(request: Request) {
  * (setChain), only from the Bops window and never while a workspace shared with the user is open; what was kept
  * comes back. `computerName` (with `id`): { computer, name } names one of its computers, the one its bots' group in the
  * sidebar is called (lib/bot-groups.ts; an empty name gives it its default back), the owner's alone as the chart is;
- * answers { ok, name }. `chat` (with `id`): "mac" or "auto", the owner's switch for its chat through Bops Cloud
- * (lib/server/cloud-chat.ts setChatRouting), the owner's alone too; Bops Cloud's words when it refuses.
+ * answers { ok, name }. `chat` (with `id`): "cloud" or "mac" ("auto" from an older window), the owner's switch for
+ * running everything in the cloud (lib/server/cloud-chat.ts setChatRouting), the owner's alone too; Bops Cloud's words
+ * when it refuses.
  */
 export async function PATCH(request: Request) {
   const unready = notReady();
@@ -80,7 +81,7 @@ export async function PATCH(request: Request) {
   ensureMain();
   // Where its chat is answered is the owner's to say: from their own window, with their own workspace open.
   if (chat !== undefined) {
-    if (!id || (chat !== "mac" && chat !== "auto")) return Response.json({ error: 'Say which workspace, and "mac" or "auto".' }, { status: 400 });
+    if (!id || (chat !== "mac" && chat !== "cloud" && chat !== "auto")) return Response.json({ error: 'Say which workspace, and "cloud" or "mac".' }, { status: 400 });
     if (!fromBopsWindow(request) || sharedOpen()) return Response.json({ error: "Only the owner can change where the chat is answered." }, { status: 403 });
     const r = await setChatRouting(id, chat);
     if ("error" in r) return Response.json({ error: r.error }, { status: r.status });

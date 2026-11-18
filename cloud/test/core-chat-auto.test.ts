@@ -88,7 +88,44 @@ test("a choice the owner or staff made is never moved, either way", () => {
   }
 });
 
-test("one Bops Cloud moved goes back to the Mac when a computer can't answer, and never because a runner went quiet", () => {
+test("a cloud workspace whose computer can't answer stays in the cloud where the owner's Mac keeps to everything through the cloud, and says why (chatTrouble)", () => {
+  const moved = rows({ ws_acme: row("cloud", "auto"), ws_beta: row("cloud", null) });
+  const all = (s: AutoSeen) => ({ ...s, cloudAll: true });
+  const stays = (runners: Record<string, unknown>, s = seen()) => autoMoves(blob(runners), moved, all(s));
+  assert.deepEqual(stays({ [D2]: running() }), [], "no runner");
+  assert.deepEqual(stays({ [D1]: running("0.0.37", { status: "failed" }) }), [], "runner failed");
+  assert.deepEqual(stays({ [D1]: running("0.0.37", { status: "stopping" }) }), [], "runner stopping");
+  assert.deepEqual(stays({ [D1]: running("0.0.37", { down: { status: "asleep", at: 1 } }) }), [], "computer down");
+  assert.deepEqual(stays({ [D1]: running() }, seen({ broken: (c) => (c === D1 ? { at: NOW - 10, hold: true } : undefined) })), [], "a wake refused");
+  const none = { ...blob(), bots: [{ id: "max", isMain: true, workspaceId: "ws_acme", runsOn: "mac", computerId: D1 }] };
+  assert.deepEqual(autoMoves(none, moved, all(seen())), [], "its bots on the Mac");
+  // Why is said on the workspace instead (turns.ts noteTrouble): the mirror carries it, while the workspace is in the cloud.
+  const troubled = rows({ ws_acme: { ...row("cloud", "auto"), trouble: { note: "stopped", botId: "max", desktop: D1, at: NOW } } });
+  const kept = keepChatOn({ workspaces: [{ id: "ws_acme", chatOn: "cloud" }] }, troubled, true);
+  assert.deepEqual(kept.workspaces, [{ id: "ws_acme", chatOn: "cloud", chatAuto: true, chatTrouble: { note: "stopped", botId: "max", at: NOW } }]);
+  // Moving to the cloud there, a bot set to work on the Mac counts: its computer must be ready too.
+  const zedOwn = blob({ [D1]: running() }, [{ id: "zed2", workspaceId: "ws_acme", runsOn: "mac", computer: "own", computerId: D2 }]);
+  assert.ok(moves(zedOwn, rows(), seen({ live: [D1] })).includes("ws_acme:cloud"), "an older owner's: Zed2 isn't counted");
+  assert.ok(!moves(zedOwn, rows(), all(seen({ live: [D1] }))).includes("ws_acme:cloud"), "Zed2's computer has no runner yet");
+  assert.ok(moves(blob({ [D1]: running(), [D2]: running() }, [{ id: "zed2", workspaceId: "ws_acme", runsOn: "mac", computer: "own", computerId: D2 }]), rows(), all(seen())).includes("ws_acme:cloud"));
+});
+
+test("the mirror carries chatTrouble only while the workspace is in the cloud, puts it back on a save that drops it, and takes it off once it's gone", () => {
+  const t = { note: "noRunner", botId: "max", desktop: D1, at: NOW };
+  assert.deepEqual(mirrorOf({ ...row("cloud", "owner"), trouble: t }, true), { chatOn: "cloud", chatTrouble: { note: "noRunner", botId: "max", at: NOW } });
+  assert.deepEqual(mirrorOf({ ...row("cloud", "owner"), trouble: { ...t, botId: null } }, true), { chatOn: "cloud", chatTrouble: { note: "noRunner", at: NOW } });
+  assert.deepEqual(mirrorOf({ ...row("mac", "owner"), trouble: t }, true), { chatOn: "mac" }, "on the Mac: nothing to say");
+  const r = rows({ ws_acme: { ...row("cloud", "owner"), trouble: t } });
+  const dropped = keepChatOn({ workspaces: [{ id: "ws_acme", chatOn: "cloud" }] }, r, true);
+  assert.deepEqual(dropped.workspaces, [{ id: "ws_acme", chatOn: "cloud", chatTrouble: { note: "noRunner", botId: "max", at: NOW } }]);
+  // Keys in another order (the table's JSON): the same.
+  const reordered = { workspaces: [{ id: "ws_acme", chatOn: "cloud", chatTrouble: { at: NOW, botId: "max", note: "noRunner" } }] };
+  assert.equal(keepChatOn(reordered, r, true), reordered);
+  const cleared = keepChatOn(dropped, rows({ ws_acme: row("cloud", "owner") }), true);
+  assert.deepEqual(cleared.workspaces, [{ id: "ws_acme", chatOn: "cloud" }]);
+});
+
+test("an older owner's Mac keeps the old move back: one Bops Cloud moved goes back to the Mac when a computer can't answer, and never because a runner went quiet", () => {
   const moved = rows({ ws_acme: row("cloud", "auto"), ws_beta: row("cloud", null) });
   const back = (runners: Record<string, unknown>, s = seen()) => autoMoves(blob(runners), moved, s).filter((m) => m.wsId === "ws_acme");
   // Asleep, its runner not listening, moves off for everyone: it stays.

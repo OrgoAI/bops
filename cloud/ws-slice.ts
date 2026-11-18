@@ -65,6 +65,8 @@ export function keep(v: unknown, spec: Spec): unknown {
 
 // Where its chat is answered (turns.ts mirrorOf), so an Admin's Settings shows the switch as it stands.
 const WORKSPACE: Spec = { id: true, name: true, createdAt: true, chatOn: true, chatAuto: true, chatAutoOff: true };
+/** An Admin's, whose Settings has the switch: why it can't answer now too (turns.ts noteTrouble, Workspace.chatTrouble). */
+const ADMIN_WORKSPACE: Spec = { ...WORKSPACE, chatTrouble: { note: true, botId: true, at: true } };
 const BOT: Spec = { id: true, name: true, role: true, color: true, isMain: true, workspaceId: true, computer: true, computerStatus: true, phone: true, email: true, runsOn: true, effort: true };
 /**
  * With Bot settings (member-access.ts Power "bots": an Admin always): its "How I work" (Bot.persona, the "persona" act),
@@ -775,7 +777,7 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   const botSpec = settings ? (keys ? ADMIN_KEYS_BOT : ADMIN_BOT) : keys ? KEYS_BOT : BOT;
   const seesAll = !!access && seesEveryBot(access, list(blob.bots).flatMap((b) => (typeof b.id === "string" && wsOfBot(b) === ws ? [b.id] : [])));
   return {
-    workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
+    workspace: s.workspace ? (keep(s.workspace, viewer.role === "member" ? WORKSPACE : ADMIN_WORKSPACE) as Record<string, unknown>) : null,
     bots: all(s.bots, botSpec),
     chats: s.chats.map((c) => keepChat(c, bots)),
     sessions: s.sessions.map((x) => keepSession(x, bots, chats)),

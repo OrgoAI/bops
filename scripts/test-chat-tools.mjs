@@ -2706,6 +2706,97 @@ await check("a turn a computer's runner answers: the message Bops Cloud wrote is
   assert.equal(await runInTurn(ctx, () => Chat.answerMessage(chatId, "msg_nowhere")), null);
 });
 
+await check("on a computer's runner, a group whose bots all work on this computer is answered as the group does (its bots' rows carry the turn, their tapbacks land at once); one across computers isn't answered here", async () => {
+  const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
+  const gid = "chat_group_runner";
+  const T = Date.now() + 120_000;
+  const was = S.getState().bots.find((x) => x.id === "boppy").computerId;
+  S.update((st) => {
+    // Max shares Boppy's computer, this runner's.
+    st.bots.find((x) => x.id === "boppy").computerId = "comp_here";
+    st.chats.push({ id: gid, kind: "group", botIds: ["boppy", "max"], typing: [], title: "Here" });
+    st.messages.push({ id: "msg_grp_thanks", chatId: gid, role: "user", text: "thanks both", at: T }, { id: "msg_grp_plan", chatId: gid, role: "user", text: "Boppy, what's the plan?", at: T + 10 });
+  });
+  process.env.TYPESAFE_API_KEY = "ts-test-group-runner";
+  process.env.BOPS_RUNNER_COMPUTER = "COMP_HERE";
+  const choice = (c) => ({ type: "choice", choice: c, confidence: 1, probabilities: { [c]: 1 } });
+  const ctx = (id, humanAt) => ({ id, chatId: gid, botId: "boppy", botIds: ["boppy", "max"], offsetMs: 0, humanAt, acting: false, cancelled: false });
+  try {
+    // A thank you to both: their tapbacks, at once (the turn's end carries them to Bops Cloud: runner-chat.ts reacts).
+    jev.answer = (b) => (b.questions.need ? { need: choice("tapback"), reaction: choice("love"), boppy: { type: "noul", noul: 0.9 }, max: { type: "noul", noul: 0.9 } } : {});
+    const out = await runInTurn(ctx("turn_grp_1", T), () => Chat.answerMessage(gid, "msg_grp_thanks"));
+    assert.deepEqual(out, { text: null }, "answered as a group");
+    const thanked = S.getState().messages.find((m) => m.id === "msg_grp_thanks");
+    assert.deepEqual((thanked.reactions ?? []).map((r) => [r.by, r.type]).sort(), [["boppy", "love"], ["max", "love"]]);
+    // Words for Boppy: Boppy answers, and the row carries the turn.
+    jev.answer = (b) => (b.questions.need ? { need: choice("words"), reaction: choice("like"), boppy: { type: "noul", noul: 0.95 }, max: { type: "noul", noul: 0 } } : { reaction: choice("like"), max: { type: "noul", noul: 0 } });
+    answers.push(reply("Ship on Friday."));
+    await runInTurn(ctx("turn_grp_2", T + 10), () => Chat.answerMessage(gid, "msg_grp_plan"));
+    const said = S.getState().messages.find((m) => m.chatId === gid && m.role === "bot" && m.botId === "boppy");
+    assert.deepEqual([said?.text, said?.turn], ["Ship on Friday.", "turn_grp_2"]);
+    assert.ok(said.at >= T + 11);
+    // Max on a computer of his own: the group isn't this runner's.
+    S.update((st) => Object.assign(st.bots.find((x) => x.id === "max"), { computer: "own", computerId: "comp_else" }));
+    S.update((st) => st.messages.push({ id: "msg_grp_split", chatId: gid, role: "user", text: "and you two?", at: T + 20 }));
+    assert.equal(await runInTurn(ctx("turn_grp_3", T + 20), () => Chat.answerMessage(gid, "msg_grp_split")), null);
+    // Nor with no computer of this runner's said.
+    delete process.env.BOPS_RUNNER_COMPUTER;
+    S.update((st) => Object.assign(st.bots.find((x) => x.id === "max"), { computer: undefined, computerId: undefined }));
+    assert.equal(await runInTurn(ctx("turn_grp_4", T + 20), () => Chat.answerMessage(gid, "msg_grp_split")), null);
+  } finally {
+    jev.answer = null;
+    answers.length = 0;
+    delete process.env.TYPESAFE_API_KEY;
+    delete process.env.BOPS_RUNNER_COMPUTER;
+    S.update((st) => {
+      const b = st.bots.find((x) => x.id === "boppy");
+      if (was === undefined) delete b.computerId;
+      else b.computerId = was;
+      const m = st.bots.find((x) => x.id === "max");
+      delete m.computer;
+      delete m.computerId;
+      st.chats = st.chats.filter((c) => c.id !== gid);
+      st.messages = st.messages.filter((x) => x.chatId !== gid);
+    });
+  }
+});
+
+await check("on a computer's runner, a bot set to work on the Mac answers there: it's told work on the Mac isn't here while the workspace runs in the cloud, and a task it means for the Mac starts on its computer", async () => {
+  const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
+  const T = Date.now() + 130_000;
+  S.update((st) => {
+    st.bots.find((x) => x.id === "boppy").runsOn = "mac";
+    st.messages.push({ id: "msg_mac_bot_1", chatId, role: "user", text: "check the shared drive", at: T });
+  });
+  try {
+    answers.push(calling(toolCall("start_task", { title: "Shared drive", goal: "Check the shared drive", say: "On it.", where: "mac", then_on_mac: "open it in Finder" })), reply("Started."));
+    const n = asked.length;
+    const ctx = { id: "turn_msg_mac_bot_1", chatId, botId: "boppy", offsetMs: 0, humanAt: T, acting: false, cancelled: false };
+    await runInTurn(ctx, () => Chat.answerMessage(chatId, "msg_mac_bot_1"));
+    const note = asked[n].input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
+    assert.match(hear(note), /You're answering from your own computer\. Work on Alex's Mac isn't here while the workspace runs in the cloud\./);
+    const s = await (async () => {
+      for (let i = 0; i < 100; i++) {
+        const x = S.getState().sessions.find((y) => y.title === "Shared drive" && y.chatId === chatId);
+        if (x && !x.routing) return x;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      return S.getState().sessions.find((y) => y.title === "Shared drive" && y.chatId === chatId);
+    })();
+    assert.ok(s, "a task started");
+    assert.equal(s.thenOnMac, undefined, "nothing waits to go on on the Mac");
+    assert.notEqual(s.runsOn, "mac");
+    assert.notEqual(s.status, "failed", "never refused for the Mac");
+    assert.ok(!S.getState().messages.some((m) => m.chatId === chatId && /can't work on your Mac/.test(m.text ?? "")));
+  } finally {
+    answers.length = 0;
+    S.update((st) => {
+      delete st.bots.find((x) => x.id === "boppy").runsOn;
+      st.sessions = st.sessions.filter((x) => x.title !== "Shared drive");
+    });
+  }
+});
+
 await check("the owner's turn on the bot's computer: its apps on the web and its skills are there (never what keeps files on the Mac); create_skill saves a draft in Orgo with the computer's own sign in, said plainly when Orgo turns it down; update_skill is a proposal under the answer", async () => {
   const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
   // A stand in for orgo-web's skills route: what each POST asked, answered as the test says.

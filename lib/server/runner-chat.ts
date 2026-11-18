@@ -1,7 +1,7 @@
 import "server-only";
 import { mkdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { jobApp, RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type GithubJob, type RunnerClaim, type RunnerResume, type RunnerTurnEvent, type TurnJob, type TurnMember } from "@/cloud/protocol";
+import { jobApp, RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type GithubJob, type RunnerClaim, type RunnerDone, type RunnerResume, type RunnerTurnEvent, type TurnJob, type TurnMember } from "@/cloud/protocol";
 import { workspaceOf, type AppApproval, type MemberTurn } from "@/lib/types";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
@@ -22,8 +22,9 @@ import { runInTurn, type TurnContext } from "./turn-context";
  *    turn and Bops Cloud's clock, and the first thing it does that can't be done twice is said at once, so a runner that
  *    goes quiet after that never has it run again;
  * 4. beats every TURN_BEAT_MS while it runs (a 409 means Bops Cloud took it back: it stops and writes nothing more),
- *    then, once any beat on the way has landed, says it's done (with its tapback on the message, which Bops Cloud
- *    writes), or paused for an OK (sent again when Bops Cloud didn't answer: a lost done would have it answered again).
+ *    then, once any beat on the way has landed, says it's done (with its tapback on the message, or a group's bots'
+ *    tapbacks, which Bops Cloud writes), or paused for an OK (sent again when Bops Cloud didn't answer: a lost done would
+ *    have it answered again).
  *    The OK request carries the turn's id (AskResume.cloudTurn), so when the answer comes the turn goes on only as
  *    itself, through Bops Cloud (resumeAsTurn): one it ended meanwhile (its member's access taken away, past its day)
  *    never runs, on this runner or after a restart or an upgrade.
@@ -31,6 +32,10 @@ import { runInTurn, type TurnContext } from "./turn-context";
  * "turn-cancel" (its member removed or their access changed, its lease lost) stops a turn where it is. "state" reads
  * the state now (an OK answered, a change of who may). A turn whose message it can't read fails with a note. The Mac
  * never runs this.
+ *
+ * A group's turn (RunnerClaim.turn.group: Bops Cloud owes one only to a computer where every bot of the group works)
+ * runs as the group does (chat.ts groupTurn), each of its bots' rows carrying the turn. A bot set to work on the Mac
+ * answers here as any other (a workspace in the cloud): nothing it starts waits for the Mac.
  *
  * A turn that's a job (TurnMember.job, asked from a shared workspace and checked by Bops Cloud: cloud/turns.ts
  * takeAppJob) isn't words to answer: it's done here (runJob, through runnerJob: an app's GitHub job by hosted-apps.ts
@@ -266,9 +271,15 @@ async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } 
       return;
     }
   }
-  const react = after ? getState().messages.find((m) => m.id === after.messageId)?.reactions?.find((r) => r.by === ctx.botId)?.type : undefined;
-  await postSure(path, { state: "done", ...(react ? { react } : {}), ...(result ? { job: result() } : {}) });
+  const said = after ? getState().messages.find((m) => m.id === after.messageId)?.reactions : undefined;
+  const react = said?.find((r) => r.by === ctx.botId)?.type;
+  // A group's: each of its bots' tapback on the message (Bops Cloud writes them, after checking each is a bot of the chat here).
+  const reacts = ctx.botIds ? ctx.botIds.flatMap((botId) => said?.flatMap((r) => (r.by === botId && r.type ? [{ botId, type: r.type }] : [])) ?? []).slice(0, MAX_REACTS) : [];
+  await postSure(path, { state: "done", ...(react ? { react } : {}), ...(reacts.length ? { reacts } : {}), ...(result ? { job: result() } : {}) } satisfies RunnerDone);
 }
+
+/** The most tapbacks a turn's end carries (cloud/turns.ts MAX_REACTS). */
+const MAX_REACTS = 8;
 
 /** The OK request a chat turn just paused for: the one asked on this turn (AskResume.cloudTurn), unanswered, the newest. */
 function askOf(ctx: TurnContext): AppApproval | undefined {
@@ -301,7 +312,9 @@ async function claimAndAnswer(ev: RunnerTurnEvent) {
     await post(path, { state: "failed", note: "This computer couldn't read that message. Send it again." });
     return;
   }
-  const ctx: TurnContext = { id: t.id, chatId: t.chatId, botId: t.botId, offsetMs, humanAt: t.humanAt, acting: false, cancelled: false };
+  // A group's (RunnerClaim.turn.group): every bot of its chat answers here, each's rows carrying the turn.
+  const botIds = t.group ? (getState().chats.find((c) => c.id === t.chatId)?.botIds ?? [t.botId]) : undefined;
+  const ctx: TurnContext = { id: t.id, chatId: t.chatId, botId: t.botId, ...(botIds ? { botIds } : {}), offsetMs, humanAt: t.humanAt, acting: false, cancelled: false };
   const answer = await answerOf();
   await asTurn(
     ctx,

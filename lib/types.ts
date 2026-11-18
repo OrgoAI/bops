@@ -337,6 +337,14 @@ export type Workspace = {
    */
   chatAutoOff?: boolean;
   /**
+   * Why this workspace, switched to the cloud (chatOn "cloud"), can't answer now: a key of CHAT_TROUBLE
+   * (components/app/chat-switch.tsx: stopped, deleted, noHours, hourly, noCredit, paused, cant, noRunner, old), the bot
+   * whose computer it is, and since when. Bops Cloud writes it in place of moving the workspace back to the Mac
+   * (cloud/turns.ts noteTrouble) and takes it off once that computer answers again; Settings, General says it under the
+   * switch to the owner and Admins. Unset: nothing wrong it knows of.
+   */
+  chatTrouble?: { note: string; botId?: string; at: number };
+  /**
    * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
    * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
    * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain), for

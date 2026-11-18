@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import { appVersionOf, olderThan } from "./app-version.ts";
 import type { CloudUser } from "./auth.ts";
-import { workBotOf } from "./computer-scope.ts";
+import { same, workBotOf } from "./computer-scope.ts";
 import { config } from "./config.ts";
 import { query, tx } from "./db.ts";
 import { deviceIdOf } from "./device.ts";
@@ -48,9 +48,11 @@ import { computerUseOf, list, viewerAccess, wsOfBot, type SliceViewer } from "./
  *
  * In a workspace switched to it (bops.chat_routing: routingOf), a message someone says in a one bot chat is written here
  * first, by Bops Cloud alone, and its answer is owed as a turn (bops.chat_turns) that the runner on the bot's computer
- * runs. A workspace nobody chose for goes there by itself once every computer its bots work on has a runner that answers,
- * and back to the owner's Mac whenever one can't (autoRoute, BOPS_CHAT_AUTO); a choice the owner or Orgo's staff made
- * stands, either way:
+ * runs. A workspace nobody chose for goes there by itself once every computer its bots work on has a runner that answers
+ * (autoRoute, BOPS_CHAT_AUTO). Where everything goes through the cloud (allCloud: the owner's Mac at
+ * CLOUD_ALL_MIN_VERSION), nothing ever moves back to the owner's Mac by itself: a computer that can't answer is said on
+ * the workspace (chatTrouble) instead. For an owner whose Mac is older, one Bops Cloud moved goes back to the Mac whenever
+ * one can't, as before. A choice the owner, an Admin or Orgo's staff made stands, either way:
  *
  * - **Taking a message** (takeMessage): under the owner's row lock (state.ts lockUser), who said it is checked again on
  *   the owner's state as it is now (a member: Write on the bot; an answer only with Use its computer), the message is
@@ -82,7 +84,11 @@ import { computerUseOf, list, viewerAccess, wsOfBot, type SliceViewer } from "./
  * - **Viewers** hear where each turn stands as a LiveTurn, and the bot "thinking" while it's owed or running, on the
  *   stream they already watch (live.ts hub, held to each member's scope). Nothing of it goes in the message's row.
  *
- * A bot with no computer (or set to work on the owner's Mac) stays the owner's Mac's to answer (members.ts queues it).
+ * Where everything goes through the cloud (allCloud), every message is answered on a bot's own computer or ends with a
+ * note, never on the owner's Mac: a bot set to work on the Mac is answered on its own computer (computerFor `cloud`), a
+ * group whose bots all work on one computer is owed to it as one turn (groupComputer, is_group), and a bot with no
+ * computer, or a group across computers, gets its note (NOTES noComputer, groupNoComputer, groupSplit). Elsewhere a group,
+ * or a bot with no computer (or set to work on the owner's Mac), stays the owner's Mac's to answer (members.ts queues it).
  */
 
 /** How long a turn waits for its computer before it ends with a note. */
@@ -123,6 +129,10 @@ export type TurnRow = {
   approvalId: string | null;
   note: string | null;
   humanAt: number;
+  /** A group's turn (is_group): every bot of its chat answers on this one computer (groupComputer). */
+  isGroup: boolean;
+  /** The least Bops its runner must say it runs to claim it (min_version), or null for any. */
+  minVersion: string | null;
 };
 type RawTurn = {
   user_id: string;
@@ -142,8 +152,10 @@ type RawTurn = {
   approval_id: string | null;
   note: string | null;
   human_at: string;
+  is_group: boolean;
+  min_version: string | null;
 };
-const COLS = "user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, phase, claimed_by, attempts, deadline, approval_id, note, human_at";
+const COLS = "user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, phase, claimed_by, attempts, deadline, approval_id, note, human_at, is_group, min_version";
 const turnOf = (r: RawTurn): TurnRow => ({
   userId: r.user_id,
   id: r.id,
@@ -162,6 +174,8 @@ const turnOf = (r: RawTurn): TurnRow => ({
   approvalId: r.approval_id,
   note: r.note,
   humanAt: Number(r.human_at),
+  isGroup: r.is_group === true,
+  minVersion: r.min_version ?? null,
 });
 
 /* ---------------- The owner's state, as Bops Cloud writes it ---------------- */
@@ -190,22 +204,39 @@ export async function routingOf(userId: string, wsId: string, c?: pg.PoolClient)
  * by itself, either way; "auto" (or "auto-held") when Bops Cloud moved it (autoRoute); NULL when nobody chose (the
  * owner let Bops Cloud decide, or said only whether a message may wake a computer billed by the hour).
  */
-export type RoutingRow = { mode: "mac" | "cloud"; setBy: string | null; setAt: number };
+export type RoutingRow = { mode: "mac" | "cloud"; setBy: string | null; setAt: number; trouble?: Trouble };
+/**
+ * Why a workspace switched to the cloud can't answer now (chat_routing.trouble*): a key of the chat's notes (NOTES:
+ * stopped, deleted, noHours, hourly, noCredit, paused, cant, noRunner, old), the bot whose computer it is, that computer
+ * (lowercased), and since when. Said on the workspace (Workspace.chatTrouble) in place of moving it back to the Mac.
+ */
+export type Trouble = { note: string; botId: string | null; desktop: string | null; at: number };
 /** Chosen by the owner, an Admin of the workspace (members.ts setRoutingAsAdmin) or Orgo's staff: never moved by itself. */
 export const chosen = (r: RoutingRow | undefined) => !!r && (r.setBy === "owner" || r.setBy === "staff" || r.setBy === "admin");
 
 /** The owner's rows, by workspace (empty: none ever set). */
 export async function routedWorkspaces(c: pg.PoolClient | null, userId: string, lock = false): Promise<Map<string, RoutingRow>> {
-  const sql = `SELECT ws_id, mode, set_by, set_at FROM bops.chat_routing WHERE user_id = $1${lock ? " FOR UPDATE" : ""}`;
-  type Raw = { ws_id: string; mode: string; set_by: string | null; set_at: Date };
+  const sql = `SELECT ws_id, mode, set_by, set_at, trouble, trouble_bot, trouble_desktop, trouble_at FROM bops.chat_routing WHERE user_id = $1${lock ? " FOR UPDATE" : ""}`;
+  type Raw = { ws_id: string; mode: string; set_by: string | null; set_at: Date; trouble: string | null; trouble_bot: string | null; trouble_desktop: string | null; trouble_at: Date | null };
   const r = c ? await c.query<Raw>(sql, [userId]) : await query<Raw>(sql, [userId]);
-  return new Map(r.rows.map((x) => [x.ws_id, { mode: x.mode === "cloud" ? "cloud" : "mac", setBy: x.set_by, setAt: x.set_at.getTime() }]));
+  return new Map(
+    r.rows.map((x) => [
+      x.ws_id,
+      {
+        mode: x.mode === "cloud" ? "cloud" : "mac",
+        setBy: x.set_by,
+        setAt: x.set_at.getTime(),
+        ...(x.trouble ? { trouble: { note: x.trouble, botId: x.trouble_bot, desktop: x.trouble_desktop, at: x.trouble_at?.getTime() ?? 0 } } : {}),
+      },
+    ]),
+  );
 }
 
 /**
  * Whether Bops Cloud moves the owner's workspaces to it by itself (config.chatAuto, BOPS_CHAT_AUTO): "on" for everyone,
  * a list of Orgo user ids for theirs only (a canary). Unset, "off" or "revert": never. Moving back to the Mac doesn't
- * ask this: a workspace Bops Cloud moved goes back whenever its computers can't answer, whatever it says.
+ * ask this: for an owner whose Mac is older than CLOUD_ALL_MIN_VERSION, a workspace Bops Cloud moved goes back whenever
+ * its computers can't answer, whatever it says; one whose Mac is at it never moves back by itself (autoMoves cloudAll).
  */
 export function chatAutoFor(userId: string): boolean {
   const v = config.chatAuto();
@@ -221,16 +252,22 @@ export function chatAutoFor(userId: string): boolean {
  * The switch as each workspace of the owner's state carries it (Workspace.chatOn, chatAuto): chatOn "cloud" while its
  * chat goes through Bops Cloud, "mac" when the owner or Orgo's staff chose the Mac, unset otherwise; chatAuto while
  * Bops Cloud may move it by itself (`on`, and nobody chose); chatAutoOff where the switch shows (chatOn) but Bops Cloud
- * refuses "auto" for the owner (not `on`: setRouting, 409 CHAT_AUTO_OFF), so turned off it can't be turned back on
- * there. The owner's Bops reads them: its switch in Settings (components/app/chat-switch.tsx, which says so first), and
- * whether a computer someone else can use may get a runner (lib/server/runner-install.ts sharedRunnerOk).
+ * refuses "auto" for the owner (not `on`: setRouting, 409 CHAT_AUTO_OFF); chatTrouble, while it's "cloud", why it can't
+ * answer now (Trouble, without its computer). The owner's Bops reads them: its switch in Settings
+ * (components/app/chat-switch.tsx, which says so first), and whether a computer someone else can use may get a runner
+ * (lib/server/runner-install.ts sharedRunnerOk).
  */
-export function mirrorOf(row: RoutingRow | undefined, on: boolean): { chatOn?: "cloud" | "mac"; chatAuto?: true; chatAutoOff?: true } {
+export function mirrorOf(
+  row: RoutingRow | undefined,
+  on: boolean,
+): { chatOn?: "cloud" | "mac"; chatAuto?: true; chatAutoOff?: true; chatTrouble?: { note: string; botId?: string; at: number } } {
   const chatOn = row?.mode === "cloud" ? ("cloud" as const) : chosen(row) ? ("mac" as const) : undefined;
+  const t = chatOn === "cloud" ? row?.trouble : undefined;
   return {
     ...(chatOn ? { chatOn } : {}),
     ...(on && !chosen(row) ? { chatAuto: true as const } : {}),
     ...(chatOn && !on ? { chatAutoOff: true as const } : {}),
+    ...(t ? { chatTrouble: { note: t.note, ...(t.botId ? { botId: t.botId } : {}), at: t.at } } : {}),
   };
 }
 
@@ -244,12 +281,13 @@ export function keepChatOn(blob: Record<string, unknown>, rows: Map<string, Rout
   let changed = false;
   const workspaces = was.map((w) => {
     const want = typeof w.id === "string" ? mirrorOf(rows.get(w.id), on) : {};
-    if (w.chatOn === want.chatOn && w.chatAuto === want.chatAuto && w.chatAutoOff === want.chatAutoOff) return w;
+    if (w.chatOn === want.chatOn && w.chatAuto === want.chatAuto && w.chatAutoOff === want.chatAutoOff && same(w.chatTrouble, want.chatTrouble)) return w;
     changed = true;
     const rest = { ...w };
     delete rest.chatOn;
     delete rest.chatAuto;
     delete rest.chatAutoOff;
+    delete rest.chatTrouble;
     return { ...rest, ...want };
   });
   return changed ? { ...blob, workspaces } : blob;
@@ -297,6 +335,9 @@ export async function setRouting(
        RETURNING mode, allow_hourly`,
       [userId, wsId, mode === "auto" ? null : (mode ?? null), set.allowHourly ?? null, mode === "mac" || mode === "cloud" ? by : null, mode !== undefined],
     );
+    // Switched (either way): what it couldn't do before is said again only once it can't again.
+    if (mode !== undefined)
+      await c.query("UPDATE bops.chat_routing SET trouble = NULL, trouble_bot = NULL, trouble_desktop = NULL, trouble_at = NULL WHERE user_id = $1 AND ws_id = $2 AND trouble IS NOT NULL", [userId, wsId]);
     return { cloud: r.rows[0].mode === "cloud", allowHourly: r.rows[0].allow_hourly, next: await mirrorAfter(c, userId, blob) };
   });
   announce(userId);
@@ -356,10 +397,77 @@ const proved = new Map<string, { version: string; at: number }>();
 const provedUsers = new Set<string>();
 /** When each computer last couldn't answer a turn, by "<user>\0<device>", and whether that holds it on the Mac. */
 const broken = new Map<string, { at: number; hold: boolean }>();
-/** A computer that couldn't answer (a wake refused, no runner, too late): a workspace Bops Cloud moved goes back to the Mac. */
-function noteBroken(userId: string, device: string, note: string) {
-  broken.set(rkey(userId, device), { at: Date.now(), hold: HOLDING.has(note) });
+/**
+ * A computer that couldn't answer (a wake refused, no runner, too late): what it couldn't is said on the cloud
+ * workspaces whose bots work on it (noteTrouble), and kept for whether a workspace may move to the cloud (autoMoves).
+ * For an owner whose Mac is older than CLOUD_ALL_MIN_VERSION, one Bops Cloud moved goes back to the Mac, as before.
+ * `botId`: the bot whose turn it was, named first.
+ */
+function noteBroken(userId: string, desktop: string, note: string, botId?: string) {
+  broken.set(rkey(userId, deviceIdOf(userId, desktop)), { at: Date.now(), hold: HOLDING.has(note) });
+  void noteTrouble(userId, desktop, note, botId).catch((e: Error) => console.warn(`[turns] trouble of ${userId}'s ${desktop}: ${e.message}`));
   void autoRoute(userId);
+}
+
+/** The trouble a turn's note says (Trouble.note): late is a computer that couldn't wake up. */
+const troubleOf = (note: string) => (note === "late" ? "cant" : note);
+
+/**
+ * Say on each of the owner's workspaces switched to the cloud whose bots work on `desktop` (any of them, as computerFor
+ * `cloud` has it) why that computer can't answer now (chat_routing.trouble*, mirrored on the state: Workspace.chatTrouble),
+ * naming `botId` when it's one of that workspace's, else the first. Only for an owner whose Mac is at
+ * CLOUD_ALL_MIN_VERSION (theirs never moves back). Written once: the same trouble said already changes nothing. Under
+ * the owner's lock, in a transaction of its own: never called from inside one.
+ */
+export async function noteTrouble(userId: string, desktop: string, note: string, botId?: string): Promise<void> {
+  if (!(await macNewEnough(userId, CLOUD_ALL_MIN_VERSION))) return;
+  const d = desktop.toLowerCase();
+  const said = troubleOf(note);
+  const next = await tx(async (c) => {
+    await lockUser(c, userId);
+    const blob = await lockedState(c, userId);
+    const rows = await routedWorkspaces(c, userId, true);
+    const on = list(blob.bots).filter((b) => typeof b.id === "string" && computerFor(blob, b.id, true) === d);
+    let changed = false;
+    for (const [ws, r] of rows) {
+      if (r.mode !== "cloud") continue;
+      const here = on.filter((b) => wsOfBot(b) === ws);
+      if (!here.length) continue;
+      const bot = String((here.find((b) => b.id === botId) ?? here[0]).id);
+      const u = await c.query(
+        `UPDATE bops.chat_routing SET trouble = $3, trouble_bot = $4, trouble_desktop = $5, trouble_at = now()
+         WHERE user_id = $1 AND ws_id = $2 AND mode = 'cloud'
+           AND (trouble IS DISTINCT FROM $3 OR trouble_bot IS DISTINCT FROM $4 OR trouble_desktop IS DISTINCT FROM $5)`,
+        [userId, ws, said, bot, d],
+      );
+      if (u.rowCount) changed = true;
+    }
+    return changed ? await mirrorAfter(c, userId, blob) : null;
+  });
+  if (!next) return;
+  announce(userId);
+  stateWritten(userId, next, "cloud");
+}
+
+/**
+ * A computer answers again (its runner connected, or a turn there ended done): the trouble said of it goes. One for an
+ * older Bops ("old") stays while what connects is still older than CLOUD_ALL_MIN_VERSION (`version`: what it says it
+ * runs; none: not known, so it stays). One cheap read when there's none.
+ */
+export async function clearTrouble(userId: string, desktop: string, version: string | null): Promise<void> {
+  const d = desktop.toLowerCase();
+  const keepOld = !version || olderThan(version, CLOUD_ALL_MIN_VERSION);
+  const where = "user_id = $1 AND trouble_desktop = $2 AND (NOT $3::boolean OR trouble <> 'old')";
+  if (!(await query(`SELECT 1 FROM bops.chat_routing WHERE ${where} LIMIT 1`, [userId, d, keepOld])).rowCount) return;
+  const next = await tx(async (c) => {
+    await lockUser(c, userId);
+    const blob = await lockedState(c, userId);
+    const u = await c.query(`UPDATE bops.chat_routing SET trouble = NULL, trouble_bot = NULL, trouble_desktop = NULL, trouble_at = NULL WHERE ${where}`, [userId, d, keepOld]);
+    return u.rowCount ? await mirrorAfter(c, userId, blob) : null;
+  });
+  if (!next) return;
+  announce(userId);
+  stateWritten(userId, next, "cloud");
 }
 
 export type AutoSeen = {
@@ -367,6 +475,12 @@ export type AutoSeen = {
   on: boolean;
   /** The owner's last Mac runs CHAT_AUTO_MIN_VERSION or newer (it has the switch, so the owner can choose the Mac again). */
   appOk: boolean;
+  /**
+   * The owner's last Mac runs CLOUD_ALL_MIN_VERSION or newer: everything in a workspace switched to the cloud goes through
+   * the cloud, so one there never moves back to the Mac (its trouble is said instead: noteTrouble), and a bot set to work
+   * on the Mac is answered on its own computer, so that computer must be ready too.
+   */
+  cloudAll?: boolean;
   /** A computer's runner connected since this Bops Cloud started: its version and when, by lowercased computer id. */
   proved: (desktopId: string) => { version: string; at: number } | undefined;
   /** When a computer last couldn't answer, by lowercased computer id. */
@@ -378,10 +492,11 @@ export type AutoMove = { wsId: string; mode: "mac" | "cloud"; why: string; hold?
 /**
  * Which of the owner's workspaces Bops Cloud moves now (none it was told: chosen). To the cloud, only with moves on for
  * the owner and their last Mac new enough (CHAT_AUTO_MIN_VERSION), once every computer its bots work on (computerFor: not a bot with none, or
- * set to work on the Mac) has a runner the Mac set up and saw running (AppState.runners, as the Mac writes it), at
+ * set to work on the Mac, but where the owner's Mac keeps to everything through the cloud: cloudAll) has a runner the Mac set up and saw running (AppState.runners, as the Mac writes it), at
  * CLOUD_CHAT_MIN_VERSION or newer, with its computer not found down, that connected to Bops Cloud at that version since
  * it started and since that computer last couldn't answer; and not while one moved back for a wake refused waits
- * (AUTO_HOLD_MS). Each needn't be listening now: computers nap, and a turn wakes them. Back to the Mac, for one Bops
+ * (AUTO_HOLD_MS). Each needn't be listening now: computers nap, and a turn wakes them. Never back to the Mac where the
+ * owner's Mac keeps to everything through the cloud (cloudAll). Else back to the Mac, for one Bops
  * Cloud moved, whenever its bots have no computer any more, or one has no runner, a runner that failed or is being
  * stopped, is found down, or couldn't answer since its runner last connected; never because a runner just went quiet.
  */
@@ -393,7 +508,9 @@ export function autoMoves(blob: Record<string, unknown>, rows: Map<string, Routi
     if (typeof w.id !== "string") continue;
     const row = rows.get(w.id);
     if (chosen(row)) continue;
-    const computers = new Set(bots.filter((b) => wsOfBot(b) === w.id).flatMap((b) => computerFor(blob, b.id as string) ?? []));
+    // Never back to the Mac by itself: what its computers can't do is said instead (noteTrouble).
+    if (row?.mode === "cloud" && o.cloudAll) continue;
+    const computers = new Set(bots.filter((b) => wsOfBot(b) === w.id).flatMap((b) => computerFor(blob, b.id as string, !!o.cloudAll) ?? []));
     // Since its runner last connected, it couldn't answer.
     const failedSince = (c: string) => {
       const b = o.broken(c);
@@ -471,14 +588,18 @@ async function routeOnce(userId: string, written?: Record<string, unknown>) {
   const on = chatAutoFor(userId) && provedUsers.has(userId);
   const seenRows = await routedWorkspaces(null, userId);
   // Nothing to move back (none Bops Cloud moved to it), and nothing moves to it: no state read.
-  const movedHere = [...seenRows.values()].some((r) => r.mode === "cloud" && !chosen(r));
+  let movedHere = [...seenRows.values()].some((r) => r.mode === "cloud" && !chosen(r));
   if (!on && !movedHere) return;
+  // An owner whose Mac keeps to everything through the cloud: nothing ever moves back to it by itself.
+  const cloudAll = await macNewEnough(userId, CLOUD_ALL_MIN_VERSION);
+  if (cloudAll) movedHere = false;
   // Only for an owner whose Mac has the switch: one moved here can choose the Mac again in Settings.
   const appOk = on && (await macNewEnough(userId, CHAT_AUTO_MIN_VERSION));
   if (!appOk && !movedHere) return;
   const seen = (now: number): AutoSeen => ({
     on,
     appOk,
+    cloudAll,
     proved: (c) => proved.get(rkey(userId, deviceIdOf(userId, c))),
     broken: (c) => broken.get(rkey(userId, deviceIdOf(userId, c))),
     now,
@@ -501,8 +622,10 @@ async function routeOnce(userId: string, written?: Record<string, unknown>) {
       );
       if (r.rowCount) done.push(m);
     }
-    // What was owed to their computers goes to the Mac with them, in this same write: none waits on a computer that can't answer.
-    const back = await handBack(c, userId, locked, done.filter((m) => m.mode === "mac").map((m) => m.wsId));
+    // (An owner whose Mac is older only: theirs moves back.) What was owed to their computers goes to the Mac with
+    // them, in this same write: none waits on a computer that can't answer.
+    const toMac = done.filter((m) => m.mode === "mac").map((m) => m.wsId);
+    const back = toMac.length && !cloudAll ? await handBack(c, userId, locked, toMac) : NONE_BACK;
     return { done, back, next: done.length ? await mirrorAfter(c, userId, locked) : null };
   });
   for (const m of out.done) console.info(`[turns] chat of ${m.wsId} to ${m.mode === "cloud" ? "cloud (auto)" : `mac (auto: ${m.why})`}`);
@@ -513,9 +636,11 @@ async function routeOnce(userId: string, written?: Record<string, unknown>) {
 }
 
 type HandedBack = { members: TurnRow[]; owner: TurnRow[]; notes: string[] };
+const NONE_BACK: HandedBack = { members: [], owner: [], notes: [] };
 
 /**
- * Workspaces Bops Cloud moved back to the Mac (autoRoute, revertAuto), inside that move's transaction: the turns still
+ * Workspaces Bops Cloud moved back to the Mac (revertAuto, the staff's kill switch; and autoRoute for an owner whose Mac is
+ * older than CLOUD_ALL_MIN_VERSION, never one where everything goes through the cloud), inside that move's transaction: the turns still
  * owed to their computers (none taken yet) go to the Mac, which answers those workspaces now. A member's ends with no
  * note, and its message, written already, is queued for the Mac to answer (a stored member act, as members.ts
  * cloudChat queues one for a workspace on the Mac), with the chat saying the Mac answers it while that Mac is away.
@@ -625,6 +750,24 @@ export function computerFor(blob: Record<string, unknown>, botId: string, cloud 
   return typeof id === "string" && id ? id.toLowerCase() : null;
 }
 
+/**
+ * The one computer a group chat's bots all work on (computerFor `cloud`: a bot set to work on the Mac too), lowercased;
+ * else why not, and the bot that says so: "noComputer" for the first with none, "split" for the first on another
+ * computer than the first bot's. A chat with no bots is "noComputer" with none named.
+ */
+export function groupComputer(blob: Record<string, unknown>, chatId: string): { desktop: string } | { why: "split" | "noComputer"; bot: string | null } {
+  const bots = botsOfChat(blob, chatId);
+  if (!bots.length) return { why: "noComputer", bot: null };
+  let desktop: string | null = null;
+  for (const id of bots) {
+    const d = computerFor(blob, id, true);
+    if (!d) return { why: "noComputer", bot: id };
+    if (desktop && d !== desktop) return { why: "split", bot: id };
+    desktop = d;
+  }
+  return { desktop: desktop! };
+}
+
 const nameOf = (blob: Record<string, unknown>, botId: string) => {
   const n = list(blob.bots).find((b) => b.id === botId)?.name;
   return typeof n === "string" && n.trim() ? n.trim() : "The bot";
@@ -655,6 +798,12 @@ export const NOTES = {
   toMac: (owner: string, bot: string) => `${owner}'s Mac answers ${bot} for now, and ${bot} hadn't started on this yet. Send it again.`,
   noRunner: (owner: string, bot: string) => `${bot}'s computer is on, but it can't answer chats yet. ${owner} needs to open the updated Bops once to set it up.`,
   gone: (owner: string, bot: string) => `${owner} changed who can use ${bot}, so ${bot} stopped this answer.`,
+  // Where everything goes through the cloud (allCloud): never the owner's Mac, so said plainly instead.
+  noComputer: (_owner: string, bot: string) => `${bot} has no computer, so ${bot} can't answer in the cloud. Give ${bot} a computer in ${bot}'s settings.`,
+  groupSplit: () => "A group's bots work on different computers, so that group can't answer in the cloud yet.",
+  groupNoComputer: (_owner: string, bot: string) => `${bot} has no computer, so ${bot} can't answer in the cloud. Give ${bot} a computer in ${bot}'s settings.`,
+  // Its runner runs a Bops from before group turns (CLOUD_ALL_MIN_VERSION).
+  old: (_owner: string, bot: string) => `${bot}'s computer runs an older Bops. The owner's Bops updates it the next time it opens.`,
 };
 
 /** A note from Bops in the chat about a message (role system, its bot named so a member who sees the bot sees it), right after it. */
@@ -672,14 +821,23 @@ const noteRow = (t: { messageId: string; chatId: string; botId: string; humanAt:
 export type Taken = { message: Record<string, unknown>; turn: TurnRow | null; fresh: boolean; where: "computer" | "mac" | "none" };
 
 /**
- * Write a message someone said in a one bot chat once, and owe its answer (see above). `check` works out, from the
- * owner's state under the lock, which bot it's for, its workspace, and whether an answer may run on its computer
- * (throwing to refuse). `still`, right before it's kept: false takes it all back (a notice from orgo-web landed). With
- * `needComputer`, a bot with no computer is CHAT_NOT_IN_CLOUD (the owner's Mac answers its own). A message already
- * written by that key is answered as it is, with its turn. A bot with no computer is "mac" (the owner's Mac answers
- * it), and with `macAway` the chat says so meanwhile. `byRow`: a bot's computer answers only while the workspace goes
- * through Bops Cloud as its row says under the lock (else it's "mac", or CHAT_NOT_IN_CLOUD with `needComputer`), so a
- * move of it a moment before (autoRoute, under the same lock) is never missed.
+ * Write a message someone said in a chat once, and owe its answer (see above). `check` works out, from the owner's state
+ * under the lock, which bot it's for, its workspace, and whether an answer may run on its computer (throwing to refuse);
+ * `cloud` tells it whether everything there goes through the cloud (below), so a bot set to work on the Mac has its own
+ * computer too. `still`, right before it's kept: false takes it all back (a notice from orgo-web landed). A message
+ * already written by that key is answered as it is, with its turn.
+ *
+ * Where everything goes through the cloud (allCloud: workspace `wsId`'s row under the lock, and the owner's Mac at
+ * CLOUD_ALL_MIN_VERSION; and `cloudAll` not false: the owner's own Bops says it keeps to it, ChatSendBody.all), it is
+ * never the owner's Mac's: a bot's own computer answers (a bot set to work on the Mac too), a group whose bots all work
+ * on one computer is one turn there (groupComputer, is_group, for a runner at CLOUD_ALL_MIN_VERSION: an older one is
+ * NOTES.old and no turn), and a bot with no computer, or a group across computers, is its note ("none").
+ *
+ * Elsewhere, as before: a group or a bot with no computer is "mac" (the owner's Mac answers it), and with `macAway` the
+ * chat says so meanwhile; with `needComputer`, CHAT_NOT_IN_CLOUD instead (the owner's Mac answers its own). `byRow`: a
+ * bot's computer answers only while the workspace goes through Bops Cloud as its row says under the lock (else it's
+ * "mac", or CHAT_NOT_IN_CLOUD with `needComputer`), so a move of it a moment before (autoRoute, under the same lock) is
+ * never missed.
  */
 export async function takeMessage(o: {
   account: string;
@@ -691,15 +849,21 @@ export async function takeMessage(o: {
   files?: MemberFile[];
   member?: TurnMember;
   needComputer?: boolean;
-  check: (blob: Record<string, unknown>) => { botId: string; wsId: string; mayUse: boolean; group?: boolean };
+  /** The workspace it's said in, as the caller found it: its row is read under the lock. */
+  wsId: string;
+  check: (blob: Record<string, unknown>, cloud: boolean) => { botId: string; wsId: string; mayUse: boolean; group?: boolean };
   still?: () => boolean;
   macAway?: boolean;
   byRow?: boolean;
+  /** False: never as everything through the cloud (the owner's Bops from before, which didn't say ChatSendBody.all). */
+  cloudAll?: boolean;
 }): Promise<Taken> {
-  const taken = await tx(async (c): Promise<Taken & { note?: string }> => {
+  const taken = await tx(async (c): Promise<Taken & { old?: { desktop: string; bot: string } }> => {
     await lockUser(c, o.account);
     const blob = await lockedState(c, o.account);
-    const { botId, wsId, mayUse, group } = o.check(blob);
+    const routed = !o.byRow || (await routingOf(o.account, o.wsId, c)).cloud;
+    const all = o.cloudAll !== false && o.byRow === true && routed && (await macNewEnough(o.account, CLOUD_ALL_MIN_VERSION));
+    const { botId, wsId, mayUse, group } = o.check(blob, all);
     const was = (await c.query<{ json: Record<string, unknown> | null }>("SELECT json FROM bops.chat_messages WHERE user_id = $1 AND id = $2", [o.account, o.id])).rows[0];
     if (was) {
       const j = was.json;
@@ -708,10 +872,32 @@ export async function takeMessage(o: {
       const t = (await c.query<RawTurn>(`SELECT ${COLS} FROM bops.chat_turns WHERE user_id = $1 AND message_id = $2`, [o.account, o.id])).rows[0];
       return { message: j!, turn: t ? turnOf(t) : null, fresh: false, where: t ? "computer" : "none" };
     }
-    // A group's answer stays the owner's Mac's for now (one answerer per group: later).
-    const own = group ? null : computerFor(blob, botId);
-    const desktop = own && o.byRow && !(await routingOf(o.account, wsId, c)).cloud ? null : own;
-    if (o.needComputer && !desktop) throw new HttpError(409, "This chat's bot has no computer: your Bops answers it.", { code: CHAT_NOT_IN_CLOUD });
+    const owner = ownerOf(blob);
+    // Which computer answers it, or the note that says why none does (everything through the cloud: never the Mac).
+    let own: string | null = null;
+    let desktop: string | null = null;
+    let none: string | null = null;
+    let old: { desktop: string; bot: string } | undefined;
+    if (all && group) {
+      const g = groupComputer(blob, o.chatId);
+      if ("desktop" in g) {
+        // Its runner, by its own word or the owner's Mac's record (runnerVersionOf): one from before group turns would
+        // answer nothing. None known yet: owed, and it ends with noRunner if none comes.
+        const v = await runnerVersionOf(c, o.account, blob, g.desktop);
+        if (v && olderThan(v, CLOUD_ALL_MIN_VERSION)) {
+          none = NOTES.old(owner, nameOf(blob, botId));
+          old = { desktop: g.desktop, bot: botId };
+        } else desktop = g.desktop;
+      } else none = g.why === "split" ? NOTES.groupSplit() : NOTES.groupNoComputer(owner, g.bot ? nameOf(blob, g.bot) : nameOf(blob, botId));
+    } else if (all) {
+      desktop = computerFor(blob, botId, true);
+      if (!desktop) none = NOTES.noComputer(owner, nameOf(blob, botId));
+    } else {
+      // A group's answer stays the owner's Mac's here (one answerer per group: only where everything goes through the cloud).
+      own = group ? null : computerFor(blob, botId);
+      desktop = own && !routed ? null : own;
+    }
+    if (o.needComputer && !desktop && !all) throw new HttpError(409, "This chat's bot has no computer: your Bops answers it.", { code: CHAT_NOT_IN_CLOUD });
     // A reply to a reply joins the conversation it started from (chat.ts handleMessage).
     let root: string | undefined;
     if (o.replyTo) {
@@ -726,18 +912,36 @@ export async function takeMessage(o: {
     const rows: Record<string, unknown>[] = [message];
     let turn: TurnRow | null = null;
     let where: Taken["where"] = "none";
-    if (!mayUse) rows.push(noteRow({ messageId: o.id, chatId: o.chatId, botId, humanAt: at }, NOTES.noUse(ownerOf(blob), o.member?.name ?? "them", group ? undefined : nameOf(blob, botId))));
+    const note = (text: string) => rows.push(noteRow({ messageId: o.id, chatId: o.chatId, botId, humanAt: at }, text));
+    if (!mayUse) {
+      note(NOTES.noUse(owner, o.member?.name ?? "them", group ? undefined : nameOf(blob, botId)));
+      old = undefined;
+    } else if (none) note(none);
     else if (!desktop) {
       where = "mac";
-      const said = group ? NOTES.onMacGroup(ownerOf(blob)) : own ? NOTES.onMacNow(ownerOf(blob), nameOf(blob, botId)) : NOTES.onMac(ownerOf(blob), nameOf(blob, botId));
-      if (o.macAway) rows.push(noteRow({ messageId: o.id, chatId: o.chatId, botId, humanAt: at }, said));
-    }
-    else {
+      const said = group ? NOTES.onMacGroup(owner) : own ? NOTES.onMacNow(owner, nameOf(blob, botId)) : NOTES.onMac(owner, nameOf(blob, botId));
+      if (o.macAway) note(said);
+    } else {
       const r = await c.query<RawTurn>(
-        `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 'owed', now() + make_interval(secs => $10), $11)
+        `INSERT INTO bops.chat_turns (user_id, id, message_id, chat_id, bot_id, ws_id, member, desktop_id, target_device, state, deadline, human_at, is_group, min_version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, 'owed', now() + make_interval(secs => $10), $11, $12, $13)
          RETURNING ${COLS}`,
-        [o.account, `turn_${o.id}`, o.id, o.chatId, botId, wsId, o.member ? JSON.stringify(o.member) : null, desktop, deviceIdOf(o.account, desktop), TURN_DEADLINE_MS / 1000, at],
+        [
+          o.account,
+          `turn_${o.id}`,
+          o.id,
+          o.chatId,
+          botId,
+          wsId,
+          o.member ? JSON.stringify(o.member) : null,
+          desktop,
+          deviceIdOf(o.account, desktop),
+          TURN_DEADLINE_MS / 1000,
+          at,
+          // A group's turn is claimed only by a runner that runs one (claim: min_version).
+          all && !!group,
+          all && group ? CLOUD_ALL_MIN_VERSION : null,
+        ],
       );
       turn = turnOf(r.rows[0]);
       where = "computer";
@@ -745,7 +949,7 @@ export async function takeMessage(o: {
     for (const m of rows)
       await c.query("INSERT INTO bops.chat_messages (user_id, id, chat_id, at, json) VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (user_id, id) DO NOTHING", [o.account, m.id, o.chatId, m.at, toJson(m)]);
     if (o.still && !o.still()) throw new HttpError(404, "No such workspace");
-    return { message, turn, fresh: true, where };
+    return { message, turn, fresh: true, where, ...(old ? { old } : {}) };
   });
   if (taken.fresh) {
     announce(o.account, { chats: [o.chatId], by: "cloud" });
@@ -753,8 +957,10 @@ export async function takeMessage(o: {
       shown(taken.turn, "owed");
       void dispatch(taken.turn);
     }
+    // A runner too old for this: said on the workspace too (its own transaction, after this one).
+    if (taken.old) void noteTrouble(o.account, taken.old.desktop, "old", taken.old.bot).catch((e: Error) => console.warn(`[turns] trouble: ${e.message}`));
   }
-  return taken;
+  return { message: taken.message, turn: taken.turn, fresh: taken.fresh, where: taken.where };
 }
 
 /* ---------------- An app's GitHub job ---------------- */
@@ -1163,7 +1369,7 @@ async function wakeLoop(userId: string, desktopId: string) {
     let wait: number;
     running = a.state === "running" ? running + 1 : a.state === "retry" ? running : 0;
     if (running >= RUNNING_WITHOUT_RUNNER) {
-      await endWaiting(userId, device, "noRunner");
+      await endWaiting(userId, desktopId, "noRunner");
       return;
     }
     if (a.state === "running" || a.state === "woke" || a.state === "storage" || a.state === "retry") {
@@ -1172,22 +1378,23 @@ async function wakeLoop(userId: string, desktopId: string) {
       const s = a.state === "storage" ? (a.expectedSeconds ?? 30) : a.state === "retry" ? (a.retryAfterS ?? 10) : turnTiming.wakeAgainMs / 1000;
       wait = Math.min(60_000, Math.max(turnTiming.wakeAgainMs / 5, s * 1000));
     } else {
-      await endWaiting(userId, device, refusalNote(a));
+      await endWaiting(userId, desktopId, refusalNote(a));
       return;
     }
     await waitForRunner(userId, device, wait);
   }
 }
 
-/** Every turn waiting on a device that can't be woken ends with that note. */
-async function endWaiting(userId: string, device: string, note: Exclude<keyof typeof NOTES, "noUse">) {
+/** Every turn waiting on a computer that can't be woken ends with that note. */
+async function endWaiting(userId: string, desktopId: string, note: Exclude<keyof typeof NOTES, "noUse">) {
   const r = await query<RawTurn>(
     `UPDATE bops.chat_turns SET state = 'failed', note = $3, updated_at = now() WHERE user_id = $1 AND target_device = $2 AND state IN ('owed', 'waking') RETURNING ${COLS}`,
-    [userId, device, note],
+    [userId, deviceIdOf(userId, desktopId), note],
   );
-  await ended(r.rows.map(turnOf));
-  // A workspace Bops Cloud moved here goes back to the Mac (autoMoves): its computer can't answer now.
-  noteBroken(userId, device, note);
+  const turns = r.rows.map(turnOf);
+  await ended(turns);
+  // Its computer can't answer now: said on its cloud workspaces (an older owner's Bops Cloud moved goes back to the Mac).
+  noteBroken(userId, desktopId, note, turns[0]?.botId);
 }
 
 /** Turns that ended with a note (turn.note, a NOTES key): the note in each chat, and every viewer told. */
@@ -1271,6 +1478,8 @@ const runnerLive: Route = {
          ON CONFLICT (user_id, desktop_id) DO UPDATE SET device_id = $3, version = $4, seen_at = now()`,
         [userId, c.desktopId.toLowerCase(), c.device, said],
       ).catch((e: Error) => console.warn(`[turns] runner seen: ${e.message}`));
+    // Its computer answers again: what was said of it on its cloud workspaces goes (an "old" one only once it's new enough).
+    if (!done) await clearTrouble(userId, c.desktopId, said && VERSION.test(said) ? said : null).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
     // A wake waiting for it carries on now, and what it's owed goes to it.
     for (const w of [...(waiters.get(k) ?? [])]) w();
     for (const t of await owedTo(userId, c.device)) if (!done) stream.write("turn", await eventOf(t));
@@ -1281,7 +1490,10 @@ const runnerLive: Route = {
 
 const TURN_PATH = /^\/v1\/runner\/turns\/([A-Za-z0-9_.:-]{1,240})\/(claim|beat|resume|done)$/;
 
-/** Whether the turn's member may still have it answered on the computer, from the owner's state now: Write on the bot and Use its computer, for their membership now. */
+/**
+ * Whether the turn's member may still have it answered on the computer, from the owner's state now: Write on the bot (a
+ * group's: on every bot of its chat) and Use its computer, for their membership now.
+ */
 function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" | "noUse" {
   if (!t.member) return "ok";
   const ws = list(blob.workspaces).find((w) => w.id === t.wsId) ?? null;
@@ -1297,7 +1509,9 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
   // A job (takeAppJob): what its kind needs, for their membership now; never the bot's level or Use its computer (it runs
   // no words of theirs), but for a chat's own job.
   if (t.member.job) return jobStill(blob, ws, viewer, t.member.job, t.chatId);
-  if (!permits(levelOf(viewerAccess(ws, viewer), t.botId), "write")) return "gone";
+  const access = viewerAccess(ws, viewer);
+  const bots = t.isGroup ? botsOfChat(blob, t.chatId) : [t.botId];
+  if (!bots.length || !bots.every((id) => permits(levelOf(access, id), "write"))) return "gone";
   return computerUseOf(ws, viewer) ? "ok" : "noUse";
 }
 
@@ -1360,7 +1574,12 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
     // Checked again on the owner's state now: the bot still works here, and its member still may.
     const blob = await lockedState(db, user.id);
     const still = memberStill(blob, t);
-    const moved = computerFor(blob, t.botId) !== t.desktopId;
+    // A group's: its bots all on this one computer still (groupComputer). A bot's: still on it, as computerFor has it, or
+    // (a bot set to work on the Mac) as it has it where everything goes through the cloud.
+    const g = t.isGroup ? groupComputer(blob, t.chatId) : null;
+    const moved = g
+      ? !("desktop" in g) || g.desktop !== t.desktopId
+      : computerFor(blob, t.botId) !== t.desktopId && (computerFor(blob, t.botId, true) !== t.desktopId || !(await allCloud(user.id, t.wsId, db)));
     if (still !== "ok" || moved) {
       const note = moved ? "moved" : still === "noUse" ? "noUse" : null;
       await db.query("UPDATE bops.chat_turns SET state = 'failed', note = $3, updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id, note]);
@@ -1373,6 +1592,12 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
       await db.query("UPDATE bops.chat_turns SET state = 'failed', note = 'oldRunner', updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id]);
       return { refused: { ...t, state: "failed", note: "oldRunner" }, words: JOB_NOTES.oldRunner(ownerOf(blob), nameOf(blob, t.botId)) };
     }
+    // A turn only runners from its min_version on run (a group's), claimed by an older one (by its own word, this call's):
+    // it would answer nothing, so it ends here with the chat's note, and the workspace says so too.
+    if (t.minVersion && (!version || olderThan(version, t.minVersion))) {
+      await db.query("UPDATE bops.chat_turns SET state = 'failed', note = 'old', updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, t.id]);
+      return { refused: { ...t, state: "failed", note: "old" }, words: NOTES.old(ownerOf(blob), nameOf(blob, t.botId)) };
+    }
     await db.query(
       `UPDATE bops.chat_turns SET state = 'claimed', claimed_by = $3, lease_until = now() + make_interval(secs => $4), attempts = attempts + 1, phase = 'model', updated_at = now()
        WHERE user_id = $1 AND id = $2`,
@@ -1380,12 +1605,13 @@ async function claim(user: CloudUser, id: string, version: string | null): Promi
     );
     const seq = (await db.query<{ seq: string }>("SELECT seq FROM bops.chat_messages WHERE user_id = $1 AND id = $2", [user.id, t.messageId])).rows[0];
     return {
-      ok: { ok: true, now: Date.now(), turn: { id: t.id, messageId: t.messageId, chatId: t.chatId, botId: t.botId, humanAt: t.humanAt, seq: Number(seq?.seq ?? 0), ...(t.member ? { member: t.member } : {}) } },
+      ok: { ok: true, now: Date.now(), turn: { id: t.id, messageId: t.messageId, chatId: t.chatId, botId: t.botId, humanAt: t.humanAt, seq: Number(seq?.seq ?? 0), ...(t.member ? { member: t.member } : {}), ...(t.isGroup ? { group: true as const } : {}) } },
       t,
     };
   });
   if ("refused" in out) {
     await afterRevoked(out.refused);
+    if (out.refused.note === "old") await noteTrouble(user.id, out.refused.desktopId, "old", out.refused.botId).catch((e: Error) => console.warn(`[turns] trouble: ${e.message}`));
     throw new HttpError(410, out.words ?? "That turn isn't to be answered any more.", { code: "over" });
   }
   shown(out.t, "thinking");
@@ -1509,12 +1735,19 @@ function jobFinished(blob: Record<string, unknown>, t: TurnRow, res: JobResult):
   }
 }
 
-async function finish(user: CloudUser, id: string, body: unknown) {
+/** The most tapbacks one turn's end carries (RunnerDone.reacts: a group's bots on the message it answered). */
+export const MAX_REACTS = 8;
+
+async function finish(user: CloudUser, id: string, body: unknown, version: string | null = null) {
   const b = isObject(body) ? body : {};
   const state = b.state === "paused" || b.state === "failed" ? b.state : "done";
   const approvalId = typeof b.approvalId === "string" && b.approvalId.length <= 120 ? b.approvalId : null;
   if (state === "paused" && !approvalId) throw new HttpError(400, "A pause names its approvalId");
   const react = typeof b.react === "string" && TAPBACKS.has(b.react) ? b.react : null;
+  // A group's: each of its bots' tapback, at most MAX_REACTS, each checked below against the chat and this computer.
+  const reacts = (Array.isArray(b.reacts) ? b.reacts : [])
+    .slice(0, MAX_REACTS)
+    .flatMap((x) => (isObject(x) && typeof x.botId === "string" && typeof x.type === "string" && TAPBACKS.has(x.type) ? [{ botId: x.botId, type: x.type }] : []));
   const note = state === "failed" && typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 300) : null;
   // A pause waits on an OK that anyone at Write may answer: only while its member still may have it run.
   if (state === "paused") {
@@ -1532,11 +1765,20 @@ async function finish(user: CloudUser, id: string, body: unknown) {
        WHERE user_id = $1 AND id = $2 RETURNING ${COLS}`,
       [user.id, id, state, approvalId, PAUSED_MS / 1000, note],
     );
-    // Its tapback on the message: a person's row is Bops Cloud's to write, never a computer's.
-    if (react && state !== "paused") {
+    // Its tapbacks on the message: a person's row is Bops Cloud's to write, never a computer's. Its own bot's (`react`),
+    // and a group's bots' (`reacts`): each a bot of the chat that works on this turn's computer, else left out.
+    const tapbacks = react ? [{ botId: raw.bot_id, type: react }] : [];
+    if (reacts.length && state !== "paused") {
+      const blob = await lockedState(db, user.id);
+      const inChat = new Set(botsOfChat(blob, raw.chat_id));
+      for (const r of reacts) if (inChat.has(r.botId) && computerFor(blob, r.botId, true) === raw.desktop_id && !tapbacks.some((x) => x.botId === r.botId)) tapbacks.push(r);
+    }
+    if (tapbacks.length && state !== "paused") {
       const m = (await db.query<{ json: Record<string, unknown> | null }>("SELECT json FROM bops.chat_messages WHERE user_id = $1 AND id = $2", [user.id, raw.message_id])).rows[0]?.json;
       if (m) {
-        const reactions = [...(Array.isArray(m.reactions) ? m.reactions.filter((x) => isObject(x) && x.by !== raw.bot_id) : []), { by: raw.bot_id, type: react, at: Date.now() }];
+        const by = new Set(tapbacks.map((x) => x.botId));
+        const at = Date.now();
+        const reactions = [...(Array.isArray(m.reactions) ? m.reactions.filter((x) => isObject(x) && !by.has(String(x.by))) : []), ...tapbacks.map((x) => ({ by: x.botId, type: x.type, at }))];
         await db.query("UPDATE bops.chat_messages SET json = $3::jsonb, seq = nextval('bops.chat_seq'), updated_at = now() WHERE user_id = $1 AND id = $2", [user.id, raw.message_id, toJson({ ...m, reactions })]);
         wrote = true;
       }
@@ -1569,6 +1811,8 @@ async function finish(user: CloudUser, id: string, body: unknown) {
   if (wrote) announce(user.id, { chats: [t.chatId], by: "cloud" });
   shown(t, state === "paused" ? "paused" : state === "failed" ? "failed" : "done", note ?? undefined);
   if (state !== "paused") void nextOf(user.id, t.chatId).catch(() => {});
+  // Its computer answered: what was said of it on its cloud workspaces goes (noteTrouble).
+  if (state === "done") void clearTrouble(user.id, t.desktopId, version).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
 }
 
 const runnerTurn: Route = {
@@ -1584,7 +1828,7 @@ const runnerTurn: Route = {
     if (m[2] === "claim") return sendJson(res, 200, await claim(user!, m[1], appVersionOf(req)));
     if (m[2] === "resume") return sendJson(res, 200, await resume(user!, m[1], body));
     if (m[2] === "beat") await beat(user!, m[1], body);
-    else await finish(user!, m[1], body);
+    else await finish(user!, m[1], body, appVersionOf(req));
     sendJson(res, 200, { ok: true });
   },
 };
@@ -1609,7 +1853,10 @@ const sentChat = (pathname: string): string | undefined => {
 /**
  * POST /v1/chats/<chatId>/send (ChatSendBody): the owner's Bops says something in a one bot chat of a workspace whose
  * chat goes through Bops Cloud, and the bot's computer answers it (the owner always may). CHAT_NOT_IN_CLOUD for any
- * other chat: their Bops answers it as before.
+ * other chat: their Bops answers it as before. With `all` (a Bops that keeps to everything through the cloud), where
+ * everything goes through the cloud (takeMessage), a group, a bot set to work on the Mac and a bot with no computer are
+ * taken too: answered on a computer, or the chat's note says why not, never the Mac. Without it (a Bops from before), as
+ * before.
  */
 const send: Route = {
   method: "POST",
@@ -1629,6 +1876,7 @@ const send: Route = {
     const blob = ((await loadState(user!.id))?.state ?? {}) as Record<string, unknown>;
     const ws = wsOfChat(blob, chatId);
     if (!ws || !(await routingOf(user!.id, ws)).cloud) throw notHere();
+    const all = body?.all === true;
     const taken = await takeMessage({
       account: user!.id,
       chatId,
@@ -1637,10 +1885,16 @@ const send: Route = {
       ...(typeof replyTo === "string" ? { replyTo } : {}),
       needComputer: true,
       byRow: true,
-      check: (locked) => {
+      wsId: ws,
+      cloudAll: all,
+      check: (locked, cloud) => {
+        if (wsOfChat(locked, chatId) !== ws) throw notHere();
         const bot = oneBotOf(locked, chatId);
-        if (!bot || wsOfChat(locked, chatId) !== ws) throw notHere();
-        return { botId: bot, wsId: ws, mayUse: true };
+        if (bot) return { botId: bot, wsId: ws, mayUse: true };
+        // A group (or a chat whose one bot is gone): only where everything goes through the cloud.
+        const bots = botsOfChat(locked, chatId);
+        if (!cloud || !bots.length) throw notHere();
+        return { botId: bots[0], wsId: ws, mayUse: true, group: true };
       },
     });
     sendJson(res, 200, { ok: true, message: taken.message, ...(taken.turn ? { turn: taken.turn.id } : {}) } satisfies ChatSendAnswer);
@@ -1817,9 +2071,10 @@ export async function sweepTurns() {
   for (const t of late.rows.map(turnOf))
     if (t.note) {
       failed.push(t);
-      // Its computer didn't wake in time: a workspace Bops Cloud moved here goes back to the Mac (autoMoves). Not when
-      // its runner listens: then it waited behind a longer answer in its chat (one at a time), and the computer is fine.
-      if (!runnerOn(t.userId, t.targetDevice)) noteBroken(t.userId, t.targetDevice, t.note);
+      // Its computer didn't wake in time: said on its cloud workspaces (an older owner's Bops Cloud moved goes back to
+      // the Mac: autoMoves). Not when its runner listens: then it waited behind a longer answer in its chat (one at a
+      // time), and the computer is fine.
+      if (!runnerOn(t.userId, t.targetDevice)) noteBroken(t.userId, t.desktopId, t.note, t.botId);
     } else shown(t, "done");
   const byUser = new Map<string, TurnRow[]>();
   for (const t of failed) byUser.set(t.userId, [...(byUser.get(t.userId) ?? []), t]);
