@@ -51,6 +51,7 @@ import {
   type TurnShown,
 } from "./protocol.ts";
 import { announce, checkUser, loadState, lockedState, lockUser, toJson, writeMessages } from "./state.ts";
+import { bootKeeper, bootTiming } from "./runner-boot.ts";
 import { latestRelease, releaseOf } from "./runner-release.ts";
 import { noRunnerWords, oldRunnerWords, settingUpWords, updatingWords } from "./thread-acts.ts";
 import { deliverWaitingTo, isConnected } from "./tunnel.ts";
@@ -76,7 +77,9 @@ import { computerUseOf, HOSTNAME, list, viewerAccess, wsOfBot, type SliceViewer 
  *   computer is woken (orgo-web POST /api/internal/bops/wake, signed with BOPS_CLOUD_WAKE_SECRET), one wake at a time per
  *   computer however many turns wait on it, and the turns go to the runner as it connects. A computer billed by the
  *   hour is woken only when the owner allowed it (chat_routing.allow_hourly); one that can't be woken (stopped,
- *   deleted, out of Free hours, out of AI credit) fails its turns with a note saying so.
+ *   deleted, out of Free hours, out of AI credit) fails its turns with a note saying so. A computer whose wake worked but
+ *   whose runner doesn't connect within 3 minutes, or whose runner connects from before CLOUD_SELF_MIN_VERSION, gets its
+ *   keeper from orgo-web when Bops Cloud may ask (runner-boot.ts bootKeeper, off unless BOPS_RUNNER_BOOT=on).
  * - **Running it**: the runner claims a turn (only one meant for its own device, and only the oldest of its chat while
  *   none of that chat runs: one answer at a time per chat, and one app job at a time beside it, CHAT_LANE), and gets Bops
  *   Cloud's clock to stamp its answer by (a computer's own lags after a nap). The claim checks again that the bot still
@@ -1973,6 +1976,7 @@ async function wakeLoop(userId: string, desktopId: string) {
       return;
     }
     if (a.state === "running" || a.state === "woke" || a.state === "storage" || a.state === "retry") {
+      if (a.state !== "retry") bootIfNoRunner(userId, desktopId, device);
       const fresh = await query<RawTurn>(`UPDATE bops.chat_turns SET state = 'waking', updated_at = now() WHERE user_id = $1 AND target_device = $2 AND state = 'owed' RETURNING ${COLS}`, [userId, device]);
       for (const t of fresh.rows.map(turnOf)) shown(t, "waking");
       const s = a.state === "storage" ? (a.expectedSeconds ?? 30) : a.state === "retry" ? (a.retryAfterS ?? 10) : turnTiming.wakeAgainMs / 1000;
@@ -1983,6 +1987,24 @@ async function wakeLoop(userId: string, desktopId: string) {
     }
     await waitForRunner(userId, device, wait);
   }
+}
+
+/** The computers whose wake worked, waiting to see whether a runner connects (bootIfNoRunner), by "<user>\0<device>". */
+const bootChecks = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * A wake that worked: when no runner of the computer connects within bootTiming.afterWakeMs, orgo-web is asked to put its
+ * keeper on it (runner-boot.ts bootKeeper, which says whether it may). One check a computer at a time.
+ */
+function bootIfNoRunner(userId: string, desktopId: string, device: string) {
+  const k = rkey(userId, device);
+  if (bootChecks.has(k)) return;
+  const t = setTimeout(() => {
+    bootChecks.delete(k);
+    if (!runnerOn(userId, device)) void bootKeeper(userId, desktopId);
+  }, bootTiming.afterWakeMs);
+  t.unref?.();
+  bootChecks.set(k, t);
 }
 
 /** Every turn waiting on a computer that can't be woken ends with that note. */
@@ -2115,6 +2137,9 @@ const runnerLive: Route = {
     }
     // At a Bops it didn't run before: the mirror of what Bops Cloud does (cloudDoesFor) put right, under the owner's lock.
     if (!capped && before !== undefined && before !== said && !done) void remirror(userId).catch((e: Error) => console.warn(`[turns] re-mirror: ${e.message}`));
+    // A runner too old to set itself up (or one that says no version): its computer gets its keeper from orgo-web, when
+    // Bops Cloud may ask (runner-boot.ts bootKeeper: on, cloudSelf, no keeper asking, not asked in 6 hours).
+    if (!done && !capped && (!said || !VERSION.test(said) || olderThan(said, CLOUD_SELF_MIN_VERSION))) void bootKeeper(userId, c.desktopId);
     // Its computer answers again: what was said of it on its cloud workspaces goes (an "old" one only once it's new enough).
     if (!done) await clearTrouble(userId, { desktop: c.desktopId, version: said && VERSION.test(said) ? said : null }).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
     // A wake waiting for it carries on now, and what it's owed goes to it.
@@ -2843,6 +2868,8 @@ export async function turnById(userId: string, id: string): Promise<TurnRow | nu
 export function resetTurns(opts: { wake?: AskWake; does?: Partial<Record<keyof CloudDoes, CloudDoesCheck>> } = {}) {
   askWake = opts.wake ?? askOrgo;
   doesChecks = opts.does ?? CLOUD_DOES_CHECKS;
+  for (const t of bootChecks.values()) clearTimeout(t);
+  bootChecks.clear();
   proved.clear();
   provedUsers.clear();
   broken.clear();
