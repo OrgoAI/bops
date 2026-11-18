@@ -3,7 +3,7 @@ import { createHash, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appsOpen } from "@/lib/apps-access";
-import { botChatId, live as isLive, routineSent, siteBotOf, siteOf, workBot, workspaceOf, type Session, type Workspace } from "@/lib/types";
+import { botChatId, live as isLive, routineSent, siteBotOf, siteOf, workBot, workspaceOf, type Bot, type Session, type Workspace } from "@/lib/types";
 import { appCoders, appEnvOf, copyBotOf, DEV_PORT, DNS_TYPES, dnsNeeds, ENV_NAME, ENV_RESERVED, isCopyName, isSiteName, localAddress, localsOf, localWords, LOG_LINE, LOG_LINES, MAX_SITES, offersInOrder, PASS_COOKIE, REGISTRANT_FIELDS, subdomainTyped, cleanGithubMirror, keepsPoint } from "@/lib/hosted-apps";
 import { screenMap } from "@/lib/screens";
 import type {
@@ -27,9 +27,11 @@ import type {
   AppRenewal,
   AppRestoreConfirm,
   AppSettingsAnswer,
+  AppsRoom,
   CloudflareApplied,
   CloudflareOptions,
   CloudflarePlan,
+  ComputerRoom,
   DeployState,
   DomainOffer,
   DomainSearchAnswer,
@@ -181,6 +183,8 @@ const g = globalThis as unknown as {
   bopsPreviewWatches?: Map<string, { deploy: string; stop: () => void }>;
   /** Tests: how often a watched Preview deploy is read, and for how long (watchPreview). */
   bopsPreviewWatchMs?: { every?: number; for?: number };
+  /** Each computer's room for more apps as last read, by "<wsId>/<computerId>" (roomOn). */
+  bopsRooms?: Map<string, { at: number; room: Promise<AppsRoom | null> }>;
 };
 
 /** A changeset's id: the sha256 of its canonical JSON. */
@@ -310,6 +314,8 @@ async function withApp<T>(wsId: string, name: string, kind: AppWork, fn: () => P
     return await fn();
   } finally {
     underWay.delete(key);
+    // (It may have made or removed deploy projects or links: each computer's room is read again.)
+    roomsMoved();
     done();
   }
 }
@@ -758,12 +764,16 @@ export async function listApps(wsId: string): Promise<HostedAppsAnswer> {
   const domainsOn = domainsReader();
   const projectsOn = projectsReader();
   const urlsOn = urlsReader();
+  // (Each computer's room, read alongside: one with no line, or that couldn't be read, says none.)
+  const roomRead = why ? Promise.resolve([]) : roomsFor(wsId, kept).catch(() => [] as ComputerRoom[]);
   const apps = await Promise.all(kept.map(([name, h]) => appView(wsId, name, h, on, why, ours, (w) => (closed = w), domainsOn, projectsOn, urlsOn)));
   apps.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.name.localeCompare(b.name));
   if (why) return { enabled: false, why, apps };
   held(ours);
   if (!closed && !kept.some(([name, h]) => sitesOf(h, name).some((x) => x.projectId))) closed = await probe(wsId);
-  return closed ? { enabled: false, why: closed, apps } : { enabled: true, apps };
+  const room = await roomRead;
+  held(ours);
+  return closed ? { enabled: false, why: closed, apps } : { enabled: true, apps, ...(room.length ? { room } : {}) };
 }
 
 /** One app as it is now, as the Apps page lists it (after a change to its sites). */
@@ -925,6 +935,13 @@ async function urlsNow(computerId: string, ours: () => boolean): Promise<{ urls:
   if (!r.enabled) throw new HostedAppError(r.why, 403);
   return { urls: r.value.enabled ? (r.value.public_urls ?? []) : [], list: r.value };
 }
+
+/**
+ * What Bops makes on a computer for a new app's first deploy (or a new site's): its Published project, empty
+ * (ensureProd, no public URL of its own), then its Preview, a public URL and a project on it (ensurePreview). How many
+ * more new apps a computer has room for is counted with it (roomOn): change it here when a first deploy makes less.
+ */
+export const NEW_APP_TAKES = { projects: 2, urls: 1 } as const;
 
 /**
  * A site's Published project on the app's computer (prodIn), its record rewritten to it when it names another,
@@ -1170,6 +1187,93 @@ function urlsReader(): UrlsOn {
     if (!list) read.set(computerId, (list = within(publicUrls.list(computerId).then((r) => (r.enabled ? (r.value.enabled ? (r.value.public_urls ?? []) : []) : null), () => null), READ_MS)));
     return list;
   };
+}
+
+/* ---------------- How many more apps a computer has room for ---------------- */
+
+/** How long a computer's room is kept once read (roomOn): the Apps page reads its list every few seconds while a deploy runs. */
+const ROOM_MS = 30_000;
+/** Each computer's room as last read, by "<wsId>/<computerId>", and when (roomOn); all dropped once work on an app ends (withApp), none kept while it's under way. */
+const rooms = (g.bopsRooms ??= new Map());
+
+/**
+ * What a computer's two lists say of its room for new apps (`takes`: what each one makes, NEW_APP_TAKES): every deploy
+ * project and public URL counts, deployed or not. A cap that's negative is none (that one never runs out); public URLs
+ * not open there have none either. Null, so no line: no cap on either, or an orgo-web that doesn't say the projects' cap
+ * (one from before it, or a computer that can't host apps).
+ */
+export function roomOf(projects: { projects?: unknown[]; limit?: unknown }, urls: Pick<OrgoPublicUrls, "enabled" | "limit" | "public_urls">, takes: { projects: number; urls: number } = NEW_APP_TAKES): AppsRoom | null {
+  const capOf = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.floor(v) : null);
+  const limit = capOf(projects.limit);
+  if (limit === null) return null;
+  const used = projects.projects?.length ?? 0;
+  const urlsLimit = urls.enabled ? (capOf(urls.limit) ?? -1) : -1;
+  const urlsUsed = urls.public_urls?.length ?? 0;
+  const fits = (cap: number, n: number, each: number) => (cap < 0 || each <= 0 ? Infinity : Math.max(0, Math.floor((cap - n) / each)));
+  const byProjects = fits(limit, used, takes.projects);
+  const byUrls = fits(urlsLimit, urlsUsed, takes.urls);
+  const apps = Math.min(byProjects, byUrls);
+  if (apps === Infinity) return null;
+  return { used, limit, urlsUsed, urlsLimit, apps, ...(byUrls < byProjects ? { urlsFirst: true as const } : {}) };
+}
+
+/** Whether work on one of the workspace's apps is under way here (withApp): what's on its computers may be changing. */
+const workOn = (wsId: string) => [...underWay.keys()].some((k) => k.startsWith(`${wsId}/`));
+
+/**
+ * How many more new apps a computer has room for, with how many deploy projects and public URLs it has of its caps
+ * (roomOf), from orgo-web's two lists (one call each, with the owner's key or, on a runner, the computer's own). Kept
+ * ROOM_MS, and read again once work on an app ends here (a deploy, a remove, a left over removed: withApp). While work
+ * on one of the workspace's apps is under way, read each time and never kept: what it changed on Orgo is said at once
+ * (a left over removed, the page reading its list again as the app's stamp moves), never the room from before it. Null:
+ * no line (no cap, hosting not open here), and a read that failed or was slow, which is never kept and never a number.
+ */
+export function roomOn(wsId: string, computerId: string): Promise<AppsRoom | null> {
+  const key = `${wsId}/${computerId}`;
+  const read = () =>
+    within(
+      Promise.all([deploys.projects(computerId), publicUrls.list(computerId)]).then(([p, u]) => ({ room: p.enabled && u.enabled ? roomOf(p.value, u.value) : null })),
+      READ_MS,
+    );
+  if (workOn(wsId)) return read().then((r) => r?.room ?? null);
+  const kept = rooms.get(key);
+  if (kept && Date.now() - kept.at < ROOM_MS) return kept.room;
+  const reading = read();
+  const entry = { at: Date.now(), room: reading.then((r) => r?.room ?? null) };
+  rooms.set(key, entry);
+  void reading.then((r) => {
+    if (!r && rooms.get(key) === entry) rooms.delete(key);
+  });
+  return entry.room;
+}
+
+/** Every computer's room read again next time (work on an app ended: it may have made or removed projects or links). */
+const roomsMoved = () => rooms.clear();
+
+/** The bot a computer is named for ("Boppy's computer"): the one of the workspace's bots whose own computer it is (workBot). */
+export function roomHost(wsId: string, computerId: string): Bot | undefined {
+  const bots = getState().bots;
+  const on = bots.find((b) => workspaceOf(b) === wsId && computerOf(b.id) === computerId);
+  return on ? workBot(on, bots) : undefined;
+}
+
+/**
+ * The room of every computer the workspace's apps are on (one that lost its computer is on none), and of its main
+ * bot's, where a new app goes (`main`), that one first; each named for its bot. A computer that has no line (roomOn
+ * null) or no bot of the workspace on it now is left out.
+ */
+async function roomsFor(wsId: string, apps: [string, AppHosting][]): Promise<ComputerRoom[]> {
+  const m = mainBot(wsId);
+  const main = m ? computerOf(m.id) : undefined;
+  const on = [...new Set([...(main ? [main] : []), ...apps.filter(([, h]) => !h.lost && h.computerId).map(([, h]) => h.computerId)])];
+  const out = await Promise.all(
+    on.map(async (c): Promise<ComputerRoom | null> => {
+      const host = roomHost(wsId, c);
+      const r = host ? await roomOn(wsId, c) : null;
+      return host && r ? { ...r, computerId: c, bot: host.name, ...(c === main ? { main: true as const } : {}) } : null;
+    }),
+  );
+  return out.filter((x): x is ComputerRoom => !!x);
 }
 
 /**

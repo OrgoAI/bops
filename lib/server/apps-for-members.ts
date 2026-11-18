@@ -1,4 +1,5 @@
 import "server-only";
+import { roomKeyOf } from "@/cloud/group-key";
 import { appsLevelOf, permits } from "@/lib/member-access";
 import {
   MEMBER_ACTS_KEPT,
@@ -10,8 +11,10 @@ import {
   type AppForMembers,
   type AppsForMembers,
   type AppSettingsAnswer,
+  type AppsRoom,
   type HostedApp,
   type MemberAppAct,
+  type MemberRoom,
   type PreviewPassword,
 } from "@/lib/hosted-apps";
 import { onRunner } from "./persist";
@@ -23,9 +26,10 @@ import { getState, stateReady, stateTooNew, update } from "./store";
  * Mac as it reads them for its own Your Apps page: Bops Cloud can't read Ingot or Orgo for them, so it sends members
  * parts of this (cloud/ws-slice.ts appsFor). Only while someone has Your Apps at Read or more; never a variable's name
  * or value, an Ingot token, a key, a deploy's log or error text, who a domain is registered to, DNS records, or a
- * computer's or deploy project's id. A site's Preview password only while someone has Your Apps at Write (Bops Cloud
- * sends it to them alone), and never in a bot's chat or prompt. Written only when what's shown changed, or an hour
- * after the last write, so an idle workspace changes the synced state at most once an hour.
+ * computer's or deploy project's id (a computer's room is keyed by cloud/group-key.ts roomKeyOf, never a group's key). A site's
+ * Preview password only while someone has Your Apps at Write (Bops Cloud sends it to them alone), and never in a bot's
+ * chat or prompt. Written only when what's shown changed, or an hour after the last write, so an idle workspace changes
+ * the synced state at most once an hour.
  */
 
 /** How it reads what it shows: hosted-apps.ts's own (tests give their own). */
@@ -35,6 +39,8 @@ export type AppsReaders = {
   settings: (wsId: string, name: string, site?: string, env?: "preview") => Promise<AppSettingsAnswer>;
   owned: (wsId: string, name: string) => Promise<AppDomainOptions>;
   password: (wsId: string, name: string, site?: string) => Promise<PreviewPassword>;
+  /** A computer's room for more apps, with the id of the bot it's named for (hosted-apps.ts roomOn, roomHost); null: no line. None: no rooms. */
+  room?: (wsId: string, computerId: string) => Promise<(AppsRoom & { bot?: string }) | null>;
 };
 
 const realReaders = async (): Promise<AppsReaders> => {
@@ -45,6 +51,11 @@ const realReaders = async (): Promise<AppsReaders> => {
     settings: (ws, name, site, env) => h.appSettings(ws, name, site, env),
     owned: (ws, name) => h.domainOptions(ws, name),
     password: (ws, name, site) => h.previewPassword(ws, name, site),
+    room: async (ws, c) => {
+      const r = await h.roomOn(ws, c);
+      const b = h.roomHost(ws, c);
+      return r && { ...r, ...(b ? { bot: b.id } : {}) };
+    },
   };
 };
 
@@ -205,6 +216,36 @@ async function appFor(wsId: string, a: HostedApp, r: AppsReaders, acts: MemberAp
   };
 }
 
+/**
+ * How many more apps each computer the apps (`list`) are on has room for, as members see it (MemberRoom), by its room
+ * key (roomKeyOf: never its id, nor its group's key, which a member who doesn't see its bots could rename it by): the
+ * numbers alone, the apps on it by name, and the id of the bot it's named for (Bops Cloud sends that only to a viewer
+ * who sees it). A computer with no line, or whose room couldn't
+ * be read, has none (never a number from before). Read once each from hosted-apps.ts roomOn, which keeps it a while.
+ */
+async function roomsFor(wsId: string, list: HostedApp[], r: AppsReaders): Promise<Record<string, MemberRoom>> {
+  const out: Record<string, MemberRoom> = {};
+  if (!r.room) return out;
+  const on = new Map<string, string[]>();
+  for (const a of list) if (a.hosting?.computerId && !a.hosting.lost) on.set(a.hosting.computerId, [...(on.get(a.hosting.computerId) ?? []), a.name]);
+  for (const [c, names] of on) {
+    const got = await r.room(wsId, c).catch(() => null);
+    if (!got) continue;
+    // (Field by field, the names in order: a page read in another order is the same room, never a write.)
+    out[roomKeyOf(wsId, c)] = {
+      used: got.used,
+      limit: got.limit,
+      urlsUsed: got.urlsUsed,
+      urlsLimit: got.urlsLimit,
+      apps: got.apps,
+      ...(got.urlsFirst ? { urlsFirst: true as const } : {}),
+      appNames: [...names].sort().slice(0, MEMBER_APPS),
+      ...(got.bot ? { bot: got.bot } : {}),
+    };
+  }
+  return out;
+}
+
 const running = new Map<string, Promise<void>>();
 const again = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -261,7 +302,9 @@ async function see(wsId: string, from: HostedApp[] | undefined, readers: AppsRea
   const first = list.find((x) => x.hosting)?.name;
   const opts = first ? await r.owned(wsId, first).catch(() => null) : null;
   const owned = (opts?.owned ?? []).map((d) => ({ id: d.id, domain: d.domain }));
-  const next: AppsForMembers = { at: now(), apps, ...(owned.length ? { owned } : {}) };
+  // Each computer's room: part of what's shown, so a change of it is written (as often as anything else here).
+  const room = await roomsFor(wsId, list.filter((x) => x.hosting).slice(0, MEMBER_APPS), r);
+  const next: AppsForMembers = { at: now(), apps, ...(owned.length ? { owned } : {}), ...(Object.keys(room).length ? { room } : {}) };
   const same = kept && canonical({ ...kept, at: 0 }) === canonical({ ...next, at: 0 });
   if (!same || now() - (kept?.at ?? 0) >= FRESH_MS)
     update((s) => {

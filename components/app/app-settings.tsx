@@ -181,9 +181,11 @@ export const escCloses = (busy: boolean, close: () => void) => (e: { key: string
 /**
  * Add app's form, under "On the web": its name (an Ingot repo's, as it's typed), what it should be, and
  * whether to put it live when it's ready (on). Start has the workspace's main bot build it on its computer;
- * `onStarted` opens that task.
+ * `onStarted` opens that task. `full`: that computer has no room for a new app (its full line, hosted-apps.tsx
+ * roomSaid), said before Start while it would go live, as its first deploy needs that room; Start isn't held (the bot
+ * can still build it).
  */
-export function AddAppForm({ ws, builder, onStarted, onCancel }: { ws: string; builder?: string | null; onStarted: (a: AddAppAnswer) => void; onCancel: () => void }) {
+export function AddAppForm({ ws, builder, full, onStarted, onCancel }: { ws: string; builder?: string | null; full?: string; onStarted: (a: AddAppAnswer) => void; onCancel: () => void }) {
   const [name, setName] = useState("");
   const [what, setWhat] = useState("");
   const [deploy, setDeploy] = useState(true);
@@ -248,6 +250,10 @@ export function AddAppForm({ ws, builder, onStarted, onCancel }: { ws: string; b
         {error ? (
           <span role="alert" className={ALERT}>
             {error.error}
+          </span>
+        ) : deploy && full ? (
+          <span data-room-note role="status" className={HINT}>
+            {full}
           </span>
         ) : (
           builder && <span className={HINT}>{builder} builds it on its computer.</span>

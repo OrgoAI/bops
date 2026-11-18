@@ -344,7 +344,101 @@ export type AppCommitsAnswer = { commits: AppCommit[]; head: string | null; next
  * GET /api/hosted-apps?ws= . `enabled` false with `why` when deploying can't work here (signed out,
  * self-hosted, or Orgo answers that hosting isn't open to this account); the apps are still listed.
  */
-export type HostedAppsAnswer = { enabled: boolean; why?: string; apps: HostedApp[] };
+export type HostedAppsAnswer = { enabled: boolean; why?: string; apps: HostedApp[]; room?: ComputerRoom[] };
+
+/* ---------------- How many more apps a computer has room for ---------------- */
+
+/**
+ * How much room a computer has for apps (lib/server/hosted-apps.ts roomOn), as orgo-web counts what's on it: its deploy
+ * projects (`used`: every one, deployed or not) and public URLs (`urlsUsed`), each against the cap orgo-web puts on
+ * every computer (`limit`, `urlsLimit`; negative: no cap, so that one never runs out), and how many more new apps fit
+ * there (`apps`: each takes what Bops makes for a first deploy, lib/server/hosted-apps.ts NEW_APP_TAKES). `urlsFirst`:
+ * the public URLs run out before the deploy projects do, so the line says those.
+ */
+export type AppsRoom = { used: number; limit: number; urlsUsed: number; urlsLimit: number; apps: number; urlsFirst?: true };
+
+/**
+ * A computer's room as the owner's Your Apps shows it (HostedAppsAnswer.room), one for each computer the workspace's apps
+ * are on and its main bot's (`main`: where a new app goes): the computer, and the name of the bot it's named for.
+ */
+export type ComputerRoom = AppsRoom & { computerId: string; bot: string; main?: true };
+
+/**
+ * What a deploy makes on its computer: deploy projects and public URLs, besides `newApps`, sites deployed for the first
+ * time, each taking what a new app takes (counted on the server alone: lib/server/hosted-apps.ts NEW_APP_TAKES).
+ */
+export type RoomTakes = { projects: number; urls: number; newApps?: number };
+
+/** Whether what a deploy makes (`t`) fits in a computer's room. */
+export const roomFits = (r: AppsRoom, t: RoomTakes) =>
+  (t.projects <= 0 || r.limit < 0 || r.used + t.projects <= r.limit) && (t.urls <= 0 || r.urlsLimit < 0 || r.urlsUsed + t.urls <= r.urlsLimit);
+
+/** How a computer's room is said (the owner's Your Apps words, components/app/hosted-apps.tsx, and members', shared-apps.tsx). */
+export const ROOM_WORDS = {
+  computer: (bot: string) => `${bot}'s computer`,
+  /** A computer named for the apps on it, where its bot isn't one the viewer sees (a member's Your Apps). */
+  computerOf: (apps: string[]) => {
+    const shown = apps.length > 3 ? [...apps.slice(0, 2), `${apps.length - 2} more`] : apps;
+    const list = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : (shown[0] ?? "");
+    return `the computer ${list} ${apps.length === 1 ? "is" : "are"} on`;
+  },
+  roomFor: (computer: string, apps: number) => `Room for ${apps} more ${apps === 1 ? "app" : "apps"} on ${computer}.`,
+  deploysUsed: (used: number, limit: number) => `${used} of ${limit} deploys used.`,
+  urlsUsed: (used: number, limit: number) => `${used} of ${limit} web addresses used.`,
+  fullDeploys: (used: number, limit: number) => `${used} of ${limit} deploys.`,
+  full: (computer: string, what: string) => `${computer.charAt(0).toUpperCase()}${computer.slice(1)} is full: ${what} Remove an app or a left over to add another.`,
+};
+
+/**
+ * A computer's room in one quiet line (`computer`: its name, "Boppy's computer"): how many more apps fit and how much of
+ * what runs out first is used, or that it's full (no new app fits) and what to do. The deploys are said, or the public
+ * URLs when they run out first.
+ */
+export function roomLine(r: AppsRoom, computer: string, w: typeof ROOM_WORDS = ROOM_WORDS): string {
+  if (r.apps > 0) return `${w.roomFor(computer, r.apps)} ${r.urlsFirst ? w.urlsUsed(r.urlsUsed, r.urlsLimit) : w.deploysUsed(r.used, r.limit)}`;
+  return w.full(computer, r.urlsFirst ? w.urlsUsed(r.urlsUsed, r.urlsLimit) : w.fullDeploys(r.used, r.limit));
+}
+
+/**
+ * What a deploy to some sites' Preview makes on their computer: a site with neither a Published nor a Preview project
+ * yet is deployed for the first time (`newApps`: it takes what a new app takes); else a deploy project for a Preview with
+ * none, and a public URL for one with no link (ensurePreview). Publish (`publish`): a Published project for each site
+ * whose Preview serves something and has none (ensureProd). A site whose Preview wasn't read (`preview` unsaid: Orgo
+ * couldn't say) is counted as making nothing, so nothing is held for it.
+ */
+export function roomTakes(sites: { projectId: string | null; preview?: { projectId: string | null; url: string | null; serving: string | null } | null }[], publish = false): RoomTakes {
+  const t = { projects: 0, urls: 0, newApps: 0 };
+  for (const s of sites) {
+    if (!s.preview) continue;
+    if (publish) {
+      if (s.preview.serving && !s.projectId) t.projects++;
+      continue;
+    }
+    if (!s.projectId && !s.preview.projectId) {
+      t.newApps++;
+      continue;
+    }
+    if (!s.preview.projectId) t.projects++;
+    if (!s.preview.url) t.urls++;
+  }
+  return t;
+}
+
+/**
+ * The full line said beside a Deploy or Publish before it's pressed (undefined: nothing to say), only while the computer
+ * is full (no new app fits): for a first deploy of a site (`newApps`), its full line as it is; for a deploy that makes a
+ * Preview or a Published project alone, when that doesn't fit, naming what runs out for it. A deploy that makes nothing
+ * (one of an app that has its projects) is never held, nor one where the room couldn't be read.
+ */
+export function roomHeld(r: AppsRoom | undefined, computer: string, t: RoomTakes, w: typeof ROOM_WORDS = ROOM_WORDS): string | undefined {
+  if (!r || r.apps > 0) return undefined;
+  if (t.newApps) return roomLine(r, computer, w);
+  if ((!t.projects && !t.urls) || roomFits(r, t)) return undefined;
+  // (What this deploy can't get said: the deploys when its projects don't fit, else the public URLs.)
+  const { urlsFirst: _first, ...rest } = r;
+  void _first;
+  return roomLine(roomFits(r, { projects: t.projects, urls: 0 }) ? { ...rest, apps: 0, urlsFirst: true } : { ...rest, apps: 0 }, computer, w);
+}
 
 /**
  * POST /api/hosted-apps/[name] with { ws, action }:
@@ -761,7 +855,20 @@ export type AppsForMembers = {
   apps: Record<string, AppForMembers>;
   /** The workspace's domains bought through Orgo, for Use a domain: sent to Write only (cloud/ws-slice.ts appsFor). */
   owned?: { id: string; domain: string }[];
+  /**
+   * How many more apps each computer the apps are on has room for (MemberRoom), by its room key (cloud/group-key.ts
+   * roomKeyOf of the workspace and the computer's id: never the id, nor its group's key, which names a group to rename).
+   * Sent to Read and Write.
+   */
+  room?: Record<string, MemberRoom>;
 };
+
+/**
+ * A computer's room as members see it (AppsForMembers.room): the numbers (AppsRoom), the apps on it by name (what a
+ * Deploy of one goes by), and the bot it's named for, by id (`bot`: Bops Cloud sends it only to a viewer who sees
+ * that bot; one who doesn't has the computer named for its apps).
+ */
+export type MemberRoom = AppsRoom & { appNames: string[]; bot?: string };
 
 /** One app as members see it (AppsForMembers.apps). */
 export type AppForMembers = {

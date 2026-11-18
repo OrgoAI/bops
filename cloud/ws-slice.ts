@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
 import { groupKeyOf } from "./group-key.ts";
 import { accessOf, adminAccess, appsLevelOf, cleanPowers, currentFor, holdsKeys, isAccessLevel, levelOf, permits, powersOf, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import { KEY_NAME, PREVIEW_PASSWORD, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedWsSlice, type WsRole } from "./protocol.ts";
+import { KEY_NAME, PREVIEW_PASSWORD, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedRoom, type SharedWsSlice, type WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -435,6 +435,37 @@ const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: t
 /** A member's act on an app a Bops from before GITHUB_ACTS_MIN_VERSION doesn't know (its window would read one as a domain's). */
 const GITHUB_ACT = new Set(["github", "githubLink", "githubPull"]);
 const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
+/** A computer's room for more apps (lib/hosted-apps.ts MemberRoom): its numbers and the apps on it; its bot only as roomsOf says. */
+const ROOM_SEEN: Spec = { used: true, limit: true, urlsUsed: true, urlsLimit: true, apps: true, urlsFirst: true, appNames: true };
+const count = (v: unknown) => typeof v === "number" && Number.isInteger(v) && Math.abs(v) < 1e6;
+
+/**
+ * Each computer's room as the owner's Mac read it for members (appsForMembers.room), at Read and Write: by its room key
+ * (group-key.ts roomKeyOf: never its id, nor its group's key, which would let a member rename a group of bots they don't
+ * see; one shaped as a group's is dropped), its numbers whole or not at all, the apps on it by name, and the bot it's
+ * named for only when the viewer sees that bot (`botsSeen`). Undefined: none.
+ */
+function roomsOf(seen: Record<string, unknown>, botsSeen: ReadonlySet<unknown>): Record<string, SharedRoom> | undefined {
+  if (!isObject(seen.room)) return undefined;
+  const out: Record<string, SharedRoom> = {};
+  for (const [key, v] of Object.entries(seen.room).slice(0, MAX_SHARED_APPS)) {
+    if (!/^r[0-9a-f]{16}$/.test(key) || !isObject(v)) continue;
+    const r = keep(v, ROOM_SEEN) as Record<string, unknown>;
+    if (![r.used, r.limit, r.urlsUsed, r.urlsLimit, r.apps].every(count) || (r.apps as number) < 0) continue;
+    const names = Array.isArray(r.appNames) ? r.appNames.filter((n): n is string => typeof n === "string" && /^[a-z0-9-]{1,64}$/.test(n)).slice(0, MAX_SHARED_APPS) : [];
+    out[key] = {
+      used: r.used as number,
+      limit: r.limit as number,
+      urlsUsed: r.urlsUsed as number,
+      urlsLimit: r.urlsLimit as number,
+      apps: r.apps as number,
+      ...(r.urlsFirst === true ? { urlsFirst: true as const } : {}),
+      appNames: names,
+      ...(typeof v.bot === "string" && botsSeen.has(v.bot) ? { bot: v.bot } : {}),
+    };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 /**
  * An app's GitHub production as shown (repo and branch, as the owner's Bops or Bops Cloud checked them when set), or none
  * when malformed; at every level `at`, the changeset last sent there (github.last.ingot: a Link, a Publish or a Bring in,
@@ -485,7 +516,8 @@ export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer
  * Admin always has Write: viewerAccess). A workspace with no apps yet gives an empty list. Allow lists only: of each app's record its name, its
  * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
  * members (Workspace.appsForMembers) its head, sites (each with its Preview's link and state), history, deploys and
- * members' acts; each site's settings, its Preview's password and the workspace's own domains only at Write. A site's
+ * members' acts, and each computer's room for more apps (roomsOf: by its room key, never its id or its group's key);
+ * each site's settings, its Preview's password and the workspace's own domains only at Write. A site's
  * Preview link the owner's Mac hasn't read (a new app a bot made on its computer while the Mac was off) is the one its
  * password was shared for, when the app's record names it (sitesFilled), at Read too: that it asks for a password, never
  * the password. The password is the one Bops Cloud keeps from whoever set it last (Workspace.previewPasswords:
@@ -536,7 +568,9 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
       return app as SharedApp;
     });
   const owned = write && Array.isArray(seen.owned) ? (keep(seen.owned, [{ id: true, domain: true }]) as { id: string; domain: string }[]) : undefined;
-  return { level: write ? "write" : "read", at: typeof seen.at === "number" ? seen.at : 0, list, ...(owned?.length ? { owned } : {}) };
+  // How many more apps each computer has room for: Read and Write alike.
+  const room = roomsOf(seen, botsSeen);
+  return { level: write ? "write" : "read", at: typeof seen.at === "number" ? seen.at : 0, list, ...(owned?.length ? { owned } : {}), ...(room ? { room } : {}) };
 }
 
 /** Whether a bot works on another bot's computer (lib/types.ts sharesComputer, on the owner's state as it is). */

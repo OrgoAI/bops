@@ -8,7 +8,7 @@ import { appIcon } from "./app-controls";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { allLocals, localWords, type AppDeploy, type AppEnv, type HostedApp, type HostedAppsAnswer, type HostedSite, type LocalAnswer, type LocalSite, type PreviewSite, type SiteDomain } from "@/lib/hosted-apps";
 import { readSettings, Variables } from "./app-settings";
-import { AppEnvCtx, act, deploying, isSending, OpenHostedApp, PROBLEM, PULSE, short, UrlLink, useSending } from "./hosted-apps";
+import { AppEnvCtx, act, deploying, isSending, OpenHostedApp, PROBLEM, PULSE, roomWhy, short, UrlLink, useSending } from "./hosted-apps";
 import { useDismiss } from "./new-thread";
 import { OpenPreview } from "./panel-tabs";
 import { PasswordBeside, usePreviewPassword } from "./preview-password";
@@ -152,14 +152,15 @@ export const canPublish = (x: { domains?: SiteDomain[]; serving: string | null; 
  * Why Deploy (to the Preview) or Publish can't be pressed now (undefined: it can). Publish needs the Preview to
  * serve something Published doesn't already, and a domain (or a Published that was live before).
  */
-export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: HostedApp, env: "preview" | "prod", sites: (HostedSite | HostedApp)[]): string | undefined {
+export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why" | "room">, a: HostedApp, env: "preview" | "prod", sites: (HostedSite | HostedApp)[]): string | undefined {
   if (!answer.enabled) return answer.why || "Deploying isn't open here.";
   if (isSending(a.name)) return "A deploy is being sent. Wait for it.";
   const previews = sites.map((x) => x.preview);
   if (env === "preview") {
     if (!a.head) return "Nothing is committed yet.";
     if (previews.some((x) => x && deploying(x))) return "The preview is deploying. Wait for it to finish.";
-    return undefined;
+    // A first deploy its computer has no room for (its Published and Preview made then): said before it's pressed.
+    return roomWhy(answer, a, sites);
   }
   if (a.hosting?.lost) return "Its computer is gone. Deploy a preview to give it a new home.";
   // Production on GitHub (AppHosting.github): Publish pushes what the Preview serves there, linked first.
@@ -174,7 +175,8 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
   if (!previews.some((x) => x?.serving)) return "The preview isn't live yet. Deploy a preview first.";
   if (sites.every((x) => !x.preview?.serving || x.preview.serving === x.serving)) return "What's published is the preview already.";
   if (!sites.some((x) => x.preview?.serving && canPublish(x))) return "Connect a domain first. Published sites live only on their own domain.";
-  return undefined;
+  // A first Publish that makes its Published project, where its computer has no room for one.
+  return roomWhy(answer, a, sites, true);
 }
 
 /* Where its production is on GitHub, as a form: components/app/github-form.tsx (a shared workspace's Your Apps has it too). */
@@ -209,7 +211,7 @@ export function AppEnvs({
   commits?: AppCommit[];
   history?: ReactNode;
   ws: string;
-  answer: Pick<HostedAppsAnswer, "enabled" | "why">;
+  answer: Pick<HostedAppsAnswer, "enabled" | "why" | "room">;
   app: HostedApp;
   /** The site it's about, of an app with more (none: the app's own, or all of them on the Apps page). */
   site?: string;
@@ -582,6 +584,7 @@ export function AppEnvs({
     env={picked === "prod" ? "prod" : "preview"} onEnv={onPick} busy={!!busy}
     password={pass.on ? <AppPassword password={pass.password} waiting={pass.waiting === "Reading…"} error={pass.error ?? pass.waiting}/> : undefined}
     whyUpdate={whyNotEnv(answer, app, "preview", sites)} whyPublish={status.action === "connect-domain" ? undefined : whyNotEnv(answer, app, "prod", sites)}
+    roomNote={answer.enabled ? { update: roomWhy(answer, app, sites), publish: gh ? undefined : roomWhy(answer, app, sites, true) } : undefined}
     onUpdate={() => void deploy()} onPublish={at => promote(at)} onDomain={domainFlow} history={history} historyOpen={historyOpen}
     technical={<div data-technical-details className="flex flex-col gap-4 rounded-xl bg-desk p-4 text-[13px] leading-[18px]">
       <dl className="grid grid-cols-[90px_minmax(0,1fr)] gap-x-3 gap-y-2"><dt className="text-pencil">Preview URL</dt><dd className="break-all">{app.preview?.url ?? "No preview yet"}</dd><dt className="text-pencil">Version</dt><dd className="break-all">{app.preview?.serving ?? "None"}</dd><dt className="text-pencil">Publish to</dt><dd className="break-all">{gh ? ghWhere : publishTo}</dd></dl>

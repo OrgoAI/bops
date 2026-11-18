@@ -9,6 +9,7 @@ import { accessFor, adminGate, cleanAct, githubWhy, GITHUB_NOT_LINKED, GITHUB_NO
 import { CHANGES_MIN_VERSION, checkChange, cleanChange, THIS_WS } from "../change-routes.ts";
 import type { WakeRefusal } from "../turns.ts";
 import { ADMIN_POWERS_MIN_VERSION, GITHUB_ACTS_MIN_VERSION, GITHUB_KEY_LINE, KEYS_MIN_VERSION, MEMBER_FILES_MIN_VERSION, MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberActPayload, type WsAccess } from "../protocol.ts";
+import { groupKeyOf, roomKeyOf } from "../group-key.ts";
 import { appBotsFor, appThreadsFor, appThreadsOf, botsOf, chatIdsOf, computerUseOf, handedByOthers, keyNamesOf, keysOf, OWNER_VIEW, ownerAppsOpen, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, viewerAccess, type SliceViewer } from "../ws-slice.ts";
 
 /**
@@ -2063,6 +2064,37 @@ test("Your Apps: each site's Preview, where members deploy (its link, newest dep
   const older = sharedSlice(appsBlob({ apps: "write" }), "ws_apps", TOM_VIEW).apps!.list[0];
   assert.deepEqual(Object.keys(older.sites![0]).sort(), ["domains", "live", "name", "serving", "url"]);
   assert.ok(older.deploys!.every((d) => !("env" in d)));
+});
+
+test("Your Apps says how many more apps each computer has room for, at Read and Write alike: by its room key, never its id nor its group's key; its bot only to a viewer who sees it; nothing malformed, and nothing when the owner's Mac sent none", () => {
+  const shop = roomKeyOf("ws_apps", "comp-1");
+  const blog = roomKeyOf("ws_apps", "comp-3");
+  const room = {
+    [shop]: { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, appNames: ["shop"], bot: "max" },
+    // (Its bot hidden from them, and fields the owner's Mac never sends: neither shown.)
+    [blog]: { used: 10, limit: 10, urlsUsed: 10, urlsLimit: 10, apps: 0, urlsFirst: true, appNames: ["blog", "Not A Name"], bot: "zed", computerId: "comp-3", projectId: "proj-3" },
+    "comp-9": { used: 1, limit: 10, urlsUsed: 0, urlsLimit: 10, apps: 4, appNames: ["notes"] },
+    // (A group's key, which a rename takes: never sent as a room's, so a member can't learn the key of a group they don't see.)
+    [groupKeyOf("ws_apps", "comp-6")]: { used: 1, limit: 10, urlsUsed: 0, urlsLimit: 10, apps: 4, appNames: ["menu"] },
+    [roomKeyOf("ws_apps", "comp-4")]: { used: "6", limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, appNames: ["x"] },
+    [roomKeyOf("ws_apps", "comp-5")]: { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: -1, appNames: ["y"] },
+  };
+  const blob = appsBlob({ apps: "read" });
+  ((blob.workspaces as Record<string, Record<string, unknown>>[])[0].appsForMembers as Record<string, unknown>).room = room;
+  const want = {
+    [shop]: { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, appNames: ["shop"], bot: "max" },
+    [blog]: { used: 10, limit: 10, urlsUsed: 10, urlsLimit: 10, apps: 0, urlsFirst: true, appNames: ["blog"] },
+  };
+  assert.deepEqual(sharedSlice(blob, "ws_apps", TOM_VIEW).apps?.room, want, "at Read");
+  const ws = (blob.workspaces as Record<string, Record<string, Record<string, unknown>>>[])[0];
+  ws.memberAccess["tom@orgo.ai"].apps = "write";
+  assert.deepEqual(sharedSlice(blob, "ws_apps", TOM_VIEW).apps?.room, want, "at Write, the same");
+  const text = JSON.stringify(sharedSlice(blob, "ws_apps", TOM_VIEW).apps?.room);
+  for (const hidden of ["comp-", "proj-", "zed", groupKeyOf("ws_apps", "comp-3"), groupKeyOf("ws_apps", "comp-6")]) assert.ok(!text.includes(hidden), `"${hidden}" isn't shown`);
+  assert.notEqual(blog, groupKeyOf("ws_apps", "comp-3"), "a room's key is never its group's");
+  assert.match(blog, /^r[0-9a-f]{16}$/);
+  assert.equal(sharedSlice(appsBlob({ apps: "read" }), "ws_apps", TOM_VIEW).apps?.room, undefined, "none sent, none shown");
+  assert.equal("apps" in sharedSlice(appsBlob({ apps: "none" }, { appsForMembers: { at: 1, apps: {}, room } }), "ws_apps", TOM_VIEW), false, "None still hides it");
 });
 
 test("Your Apps is in the member's fingerprint: what the owner's Mac reads again gives them a new one", () => {

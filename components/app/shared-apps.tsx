@@ -1,13 +1,13 @@
 "use client";
 
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { appStatus, changesBetween, type DeployState } from "@/lib/hosted-apps";
+import { appStatus, changesBetween, roomHeld, roomLine, roomTakes, ROOM_WORDS, type DeployState } from "@/lib/hosted-apps";
 import { hasUnpublishedPreview, reviewLabel } from "@/lib/app-review";
 import { AppDisclosure, appAttention, appIcon, appList, appOutline, appRow } from "./app-controls";
 import { AppPassword, AppReview, AppVersions } from "./app-review";
 import { Fold } from "./fold";
 import { useState } from "react";
-import type { MemberAppAct, SharedApp, SharedApps } from "@/cloud/protocol";
+import type { MemberAppAct, SharedApp, SharedApps, SharedRoom } from "@/cloud/protocol";
 import { DOMAIN_WORDS } from "@/lib/hosted-apps";
 import { REPLY_WAITS_LINE } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
@@ -27,7 +27,11 @@ import { KeyVariables } from "./app-key-links";
  * publishes (what its Preview serves goes on Published) and goes back on Published. An Admin, or a Member with App
  * secrets, once the owner's Bops takes it (SharedOpen.appGithub), also sets where an app publishes on GitHub, links it,
  * and brings GitHub's changes in (GithubPart): Bops Cloud keeps the setting, and the app's own computer does the rest,
- * with the owner's Mac on or off. Never its variables, logs or a domain to buy: the owner's.
+ * with the owner's Mac on or off. Never its variables, logs or a domain to buy: the owner's. Under the list, one quiet line
+ * for each computer the apps are on (SharedApps.room): how many more apps it has room for, or that it's full; at Write, a
+ * Deploy that would make an app's first Preview where its computer has no room says so before it's pressed. Advice only:
+ * the room is the owner's Mac's last read, so a member's Deploy and Restore are never held on it; orgo-web refuses one
+ * that doesn't fit, and that refusal is said as any act's is.
  */
 
 /** Every word the shared page says (the tests read them for dashes and the old name). */
@@ -124,6 +128,8 @@ export const SHARED_APPS_WORDS = {
   linkFirst: "Link it to GitHub first.",
   /** Publish, while its computer links it to GitHub or brings GitHub's changes in. */
   githubWait: "Its computer is busy with GitHub. Publish once it's done.",
+  /** How many more apps a computer has room for (lib/hosted-apps.ts roomLine), as the owner's Your Apps says it. */
+  ...ROOM_WORDS,
 };
 /** The GitHub form's words here (github-form.tsx GithubForm): Save links it too. */
 export const SHARED_GITHUB_FORM_WORDS = {
@@ -155,9 +161,44 @@ const isGithubKind = (act: string) => act === "github" || act === "githubLink" |
 
 const BUTTON = "rounded-full px-3 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
 
+/**
+ * A computer as its room's line names it: its bot's ("Boppy's computer"), when that's one the viewer sees (Bops Cloud
+ * sends its id only then), else for the apps on it; null when it can't be named (no line).
+ */
+export function roomComputer(r: SharedRoom, bots: readonly { id: string; name: string }[]): string | null {
+  const b = r.bot ? bots.find((x) => x.id === r.bot) : undefined;
+  if (b) return W.computer(b.name);
+  return r.appNames.length ? W.computerOf(r.appNames) : null;
+}
+
+/**
+ * What a member's Deploy of an app would make on its computer, as far as their page can tell (lib/hosted-apps.ts
+ * roomTakes), for the full line said beside it (advice: never a hold): a site never live with no Preview yet is deployed
+ * for the first time (it takes what a new app takes), one live before with no Preview yet gets its Preview. A site's
+ * Preview counts as read only when the owner's Mac said it (its link, its deploy, or what it serves, null included: a
+ * `preview` of null alone is also what it sends when Orgo couldn't say); one it didn't read, or a Bops from before
+ * Preview, is counted as making nothing, as on the owner's page. Whether Published's project is there isn't shown.
+ */
+export function sharedTakes(a: SharedApp) {
+  return roomTakes(
+    (a.sites ?? []).map((s) => {
+      const read = s.previewServing !== undefined || s.previewLive !== undefined || typeof s.preview === "string";
+      return {
+        projectId: s.live || s.serving ? s.name : null,
+        ...(read ? { preview: { projectId: s.preview || s.previewLive ? s.name : null, url: s.preview ?? null, serving: s.previewServing ?? null } } : {}),
+      };
+    }),
+  );
+}
+
 export function SharedAppsPage({ state }: { state: AppState }) {
   const apps = state.shared?.apps;
   if (!apps) return null;
+  // Each computer's room, named for its bot (or its apps): one line each.
+  const rooms = Object.entries(apps.room ?? {}).flatMap(([key, r]) => {
+    const computer = roomComputer(r, state.bots);
+    return computer ? [{ key, r, computer }] : [];
+  });
   const write = apps.level === "write";
   // An Admin whose owner's Bops publishes for them (Bops Cloud says so only then: ADMIN_PUBLISH_MIN_VERSION).
   const publish = write && state.shared?.role === "admin" && state.shared.adminPublish === true;
@@ -170,8 +211,18 @@ export function SharedAppsPage({ state }: { state: AppState }) {
         <span className="text-[13px] text-[#6B6B6B]">{W.none}</span>
       ) : (
         <div className={appList}>
-          {apps.list.map((a) => (
-            <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} github={github} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} />
+          {apps.list.map((a) => {
+            const on = rooms.find((x) => x.r.appNames.includes(a.name));
+            return <SharedAppCard key={a.name} app={a} apps={apps} publish={publish} github={github} acts={(state.shared?.appActs ?? []).filter((x) => x.act.app === a.name)} room={on && roomHeld(on.r, on.computer, sharedTakes(a), W)} />;
+          })}
+        </div>
+      )}
+      {rooms.length > 0 && (
+        <div data-apps-room className="flex flex-col gap-1">
+          {rooms.map(({ key, r, computer }) => (
+            <span key={key} data-room-line data-room-full={r.apps === 0 || undefined} className="text-[12.5px] leading-[18px] text-[#9A9A98]">
+              {roomLine(r, computer, W)}
+            </span>
           ))}
         </div>
       )}
@@ -181,8 +232,13 @@ export function SharedAppsPage({ state }: { state: AppState }) {
 
 type Pending = NonNullable<NonNullable<AppState["shared"]>["appActs"]>[number];
 
-/** One app: its state, address and Deploy (and an Admin's Publish); its sites, history, deploys, settings and domains open below. */
-function SharedAppCard({ app: a, apps, acts, publish, github = false }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean; github?: boolean }) {
+/**
+ * One app: its state, address and Deploy (and an Admin's Publish); its sites, history, deploys, settings and domains open
+ * below. `room`: its computer's full line, where a Deploy would make its first Preview there and there's no room: said
+ * beside Deploy at Write as advice, never a hold (the room is the owner's Mac's last read; orgo-web refuses a deploy that
+ * doesn't fit, said as any refusal is).
+ */
+function SharedAppCard({ app: a, apps, acts, publish, github = false, room }: { app: SharedApp; apps: SharedApps; acts: Pending[]; publish: boolean; github?: boolean; room?: string }) {
   const [open, setOpen] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const [env, setEnv] = useState<"preview" | "prod">("preview");
@@ -265,6 +321,7 @@ function SharedAppCard({ app: a, apps, acts, publish, github = false }: { app: S
       <Fold lazy open={open}><div className="flex min-w-0 flex-col gap-5 border-b border-rule px-4 py-4">
         {!write && <span className="text-[13px] text-pencil">{W.readOnly}</span>}
         <AppReview status={status} previewUrl={pv ? site?.preview ?? null : a.url ?? null} liveUrl={a.url ?? null} previewAt={serving ?? null} publishedAt={liveAt} versions={a.commits} env={env} onEnv={setEnv} github={!!gh} destination={destination} publishLine={where ?? W.publishLine} busy={!!going} whyPublish={whyPublish} updateAlso
+          roomNote={write && room ? { update: room } : undefined}
           password={site?.previewProtected ? <AppPassword password={write ? site.previewPassword ?? null : null}/> : undefined}
           onUpdate={write ? () => void send({ act: "deploy", app: a.name }) : undefined}
           onPublish={publish ? at => send({ act: "deploy", app: a.name, env: "prod", ...(pv && !a.siteNames?.length ? { at } : {}) }) : undefined}
