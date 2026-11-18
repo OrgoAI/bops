@@ -770,5 +770,57 @@ check("a bot's settings page settings (Workspace.botSettings): two Macs setting 
   });
 }
 
+{
+  // An app a teammate removed (Workspace.appsRemoved, written by Bops Cloud as the app's computer said it's off the web).
+  const shop = (o = {}) => ({ botId: "max", computerId: "c1", sites: [{ name: "admin" }], ...o });
+  const row = (key, app, at, o = {}) => ({ key, userId: "u_sam", name: "Sam", app, ok: true, at, ...o });
+  const blob = (w) => ({ owner: { name: "Ava" }, workspaces: [{ id: "ws_acme", name: "Acme", ...w }] });
+  const wsOf = (b) => b.workspaces[0];
+  const both = (base, mac, cloud) => [M.merge3(base, mac, cloud), M.merge3(base, cloud, mac)];
+
+  check("removals: every row of both sides, by key, newest first, ten at most", () => {
+    const base = blob({ appsRemoved: [row("k1", "a1", 1)] });
+    const mac = blob({ appsRemoved: [row("k2", "a2", 5), row("k1", "a1", 1)], name: "Acme Inc" });
+    const cloud = blob({ appsRemoved: [row("k3", "a3", 9), row("k1", "a1", 1, { codeLeft: true })] });
+    for (const got of both(base, mac, cloud)) {
+      assert.deepEqual(wsOf(got).appsRemoved.map((r) => r.key), ["k3", "k2", "k1"]);
+      assert.equal(wsOf(got).appsRemoved[2].codeLeft, true, "the row changed on one side only: that side's");
+      assert.equal(wsOf(got).name, "Acme Inc", "the rest of the workspace merges as before");
+    }
+    const many = (from, n) => Array.from({ length: n }, (_, i) => row(`${from}${i}`, `x${from}${i}`, from === "m" ? i * 2 : i * 2 + 1));
+    const got = M.merge3(blob({}), blob({ appsRemoved: many("m", 7) }), blob({ appsRemoved: many("t", 7) }));
+    assert.equal(wsOf(got).appsRemoved.length, 10);
+    assert.deepEqual(wsOf(got).appsRemoved.map((r) => r.at), [13, 12, 11, 10, 9, 8, 7, 6, 5, 4]);
+  });
+
+  check("a removal beats a change to the app on the other side: Bops Cloud dropped it, the Mac changed it meanwhile, and it stays gone (what members see of it and its Preview passwords too)", () => {
+    const base = blob({ hostedApps: { shop: shop(), blog: shop({ computerId: "c2" }) }, previewPasswords: { "shop/shop": { url: "u", password: "p", at: 1 }, "blog/blog": { url: "u", password: "p", at: 1 } } });
+    // The Mac redeployed shop (its record changed), and read what members see of it.
+    const mac = blob({ hostedApps: { shop: shop({ projectId: "p9" }), blog: shop({ computerId: "c2" }) }, appsForMembers: { at: 2, apps: { shop: { head: null, sites: [], commits: [], deploys: [] } } }, previewPasswords: base.workspaces[0].previewPasswords });
+    // Bops Cloud: shop's computer took it off the web; its record, passwords and act row gone, a removal in its place.
+    const cloud = blob({ hostedApps: { blog: shop({ computerId: "c2" }) }, previewPasswords: { "blog/blog": { url: "u", password: "p", at: 1 } }, appsRemoved: [row("k1", "shop", 3)] });
+    for (const got of both(base, mac, cloud)) {
+      const w = wsOf(got);
+      assert.deepEqual(Object.keys(w.hostedApps), ["blog"], "shop stays removed");
+      assert.deepEqual(Object.keys(w.appsForMembers?.apps ?? {}), [], "and what members see of it");
+      assert.deepEqual(Object.keys(w.previewPasswords), ["blog/blog"]);
+      assert.deepEqual(w.appsRemoved.map((r) => r.key), ["k1"]);
+    }
+    // A removal that didn't go never drops one.
+    const failed = blob({ hostedApps: { shop: shop(), blog: shop({ computerId: "c2" }) }, appsRemoved: [row("k1", "shop", 3, { ok: false })] });
+    assert.ok(wsOf(M.merge3(base, mac, failed)).hostedApps.shop, "ok: false keeps it");
+  });
+
+  check("an app of the same name made after both sides saw the removal is a new app, and stays", () => {
+    const seen = { appsRemoved: [row("k1", "shop", 3)] };
+    const base = blob({ ...seen, hostedApps: {} });
+    const mac = blob({ ...seen, hostedApps: { shop: shop({ computerId: "c5" }) } });
+    const cloud = blob({ ...seen, hostedApps: {}, name: "Acme Inc" });
+    for (const got of both(base, mac, cloud)) assert.equal(wsOf(got).hostedApps.shop?.computerId, "c5");
+    // Both sides have the row, even with no base (a Mac's first merge, its own copy whole): seen by both, so never a drop.
+    assert.equal(wsOf(M.merge3(null, mac, cloud)).hostedApps.shop?.computerId, "c5");
+  });
+}
+
 console.log(`state merge: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

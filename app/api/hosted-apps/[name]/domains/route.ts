@@ -2,6 +2,7 @@ import { appsOpen } from "@/lib/apps-access";
 import { buyDomain, connectDomain, connectFromCloudflare, domainOptions, HostedAppError, setAutoRenew } from "@/lib/server/hosted-apps";
 import { notReady } from "@/lib/server/ready";
 import { getState } from "@/lib/server/store";
+import { teammateGoing } from "@/lib/server/teammate-going";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { MAIN_WORKSPACE } from "@/lib/types";
 
@@ -45,6 +46,8 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
   if (!appsOpen(getState())) return Response.json({ error: "Not found" }, { status: 404 });
   const { name } = await ctx.params;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const theirs = teammateGoing(wsOf(b), name);
+  if (theirs) return theirs;
   try {
     if (b.action === "buy") return Response.json(await buyDomain(wsOf(b), name, { domain: b.domain, registrant: b.registrant, price: b.price }, b.site));
     if (b.action === "connect")

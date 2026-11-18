@@ -14,7 +14,7 @@ import {
   type LiveSnapshot,
   type WsAccess,
 } from "./protocol.ts";
-import { chatIdsOf, chatWsOf, fullHash, list, OWNER_VIEW, sharedHash, sharedSlice, wsOfBot, type SliceViewer } from "./ws-slice.ts";
+import { chatIdsOf, chatWsOf, fullHash, list, OWNER_VIEW, sharedHash, sharedSlice, wsOfBot, type AppViews, type SliceViewer } from "./ws-slice.ts";
 
 /**
  * Live: what each bot of a workspace is doing right now (thinking, speaking, working…), and a nudge
@@ -117,9 +117,12 @@ export type LiveScope = {
   hash: string;
 };
 
-/** What `viewer` may hear of workspace `ws`, from the owner's state (`from`: its part's fullHash, when that's known already). */
-export function liveScope(blob: Record<string, unknown>, ws: string, viewer: SliceViewer, from = fullHash(blob, ws)): LiveScope {
-  const s = sharedSlice(blob, ws, viewer);
+/**
+ * What `viewer` may hear of workspace `ws`, from the owner's state (`from`: its part's fullHash, when that's known already),
+ * and what the apps' own computers last said of their apps (`views`, bops.app_views), as their reads are shown.
+ */
+export function liveScope(blob: Record<string, unknown>, ws: string, viewer: SliceViewer, from = fullHash(blob, ws), views?: AppViews): LiveScope {
+  const s = sharedSlice(blob, ws, viewer, views);
   const ids = (items: Record<string, unknown>[]) => new Set(items.flatMap((x) => (typeof x.id === "string" ? [x.id] : [])));
   return { viewer, from, bots: ids(s.bots), chats: new Set(chatIdsOf(s)), routines: ids(s.routines), hash: sharedHash(s) };
 }
@@ -172,6 +175,8 @@ type Entry = {
   touched: number;
   /** When a stream of it was last open (-Infinity: never). */
   watchedAt: number;
+  /** What its apps' own computers last said of them (bops.app_views), as the last read or write here had it: what members' scopes are worked out with. */
+  views?: AppViews;
 };
 export type OpenResult = "ok" | "account_full" | "full";
 
@@ -302,18 +307,32 @@ export class LiveHub {
    * The owner's state was written: each stream of `target` held to a scope worked out from an older one
    * (`full`, its part now) is worked out again from `blob`, once for each viewer.
    */
-  rescope(target: LiveTarget, blob: Record<string, unknown>, full: string) {
+  rescope(target: LiveTarget, blob: Record<string, unknown>, full: string, force = false) {
     const e = this.entry(target, false);
     if (!e) return;
     const done = new Map<string, LiveScope>();
     for (const s of e.subs) {
-      if (!s.scope || s.scope.from === full) continue;
+      if (!s.scope || (!force && s.scope.from === full)) continue;
       const v = s.scope.viewer;
       const key = `${v.role}\0${v.email ?? ""}\0${v.id}`;
       let next = done.get(key);
-      if (!next) done.set(key, (next = liveScope(blob, target.ws, v, full)));
+      if (!next) done.set(key, (next = liveScope(blob, target.ws, v, full, e.views)));
       s.scope = next;
     }
+  }
+
+  /** What `target`'s apps' own computers last said of them (bops.app_views), kept while it's watched; whether that's new. */
+  setViews(target: LiveTarget, views: AppViews): boolean {
+    const e = this.entry(target, false);
+    if (!e) return false;
+    const was = e.views;
+    e.views = views;
+    return !was || JSON.stringify(was) !== JSON.stringify(views);
+  }
+
+  /** What `target`'s apps' own computers last said of them, as kept here (setViews). */
+  viewsOf(target: LiveTarget): AppViews | undefined {
+    return this.entry(target, false)?.views;
   }
 
   /**
@@ -593,6 +612,19 @@ export function stateWritten(account: string, blob: Record<string, unknown>, by:
     if (prev?.hashes.get(ws) !== full) h.publish({ account, ws }, { type: "state", hash: sliceHash(blob, ws), by: by ?? "cloud", at: Date.now() });
   }
   h.seen.set(account, { hashes, chats: chatsOf(blob) });
+}
+
+/**
+ * What an app's own computer said of its apps changed (cloud/apps-view.ts, bops.app_views): never the owner's state, so
+ * nothing else tells the workspace's viewers. Each member's stream is worked out again with `views` (LiveHub.rescope),
+ * and every stream hears "state", a member's with their own new fingerprint, so a window shows the new read.
+ */
+export function viewsWritten(account: string, ws: string, blob: Record<string, unknown>, views: AppViews, h: LiveHub = hub) {
+  const target = { account, ws };
+  h.setViews(target, views);
+  if (!h.watched(account).includes(ws)) return;
+  h.rescope(target, blob, fullHash(blob, ws), true);
+  h.publish(target, { type: "state", hash: sliceHash(blob, ws), by: "cloud", at: Date.now() });
 }
 
 /**

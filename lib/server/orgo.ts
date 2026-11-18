@@ -1318,7 +1318,7 @@ export const deploys = {
       ...(app.env && Object.keys(app.env).length ? { env: app.env } : {}),
       // (No public URL of its own: a Published site lives on its domains only. An orgo-web without the flag ignores it.)
       ...(app.publicUrl === false ? { public_url: false } : {}),
-      // How it builds and is checked, set as it's made (a project's settings can't be changed after with a computer's own sign in).
+      // How it builds and is checked, set as it's made, so its first build has them (they're changed after with deploys.change).
       ...(app.settings ?? {}),
     }),
   /** Queue a deploy of one changeset (none: the newest on main). A newer deploy replaces one still queued. */

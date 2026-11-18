@@ -27,8 +27,8 @@ const FAKES = {
   "chat-summary": forward("chat-summary", ["compactChat"]),
   permission: forward("permission", ["replyToAsk"]),
   persist: forward("persist", ["onRunner"]),
-  "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew", "askDeployAgain", "linkGithubMirror", "pullGithubMirror", "personAuthor"]),
-  "apps-for-members": forward("apps-for-members", ["noteMemberAct", "actKept", "seeApps"]),
+  "hosted-apps": forward("hosted-apps", ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "removeLeftOver", "listApps", "addSite", "setAutoRenew", "askDeployAgain", "linkGithubMirror", "pullGithubMirror", "personAuthor"]),
+  "apps-for-members": forward("apps-for-members", ["noteMemberAct", "noteRemoval", "actKept", "seeApps"]),
   keys: forward("keys", ["keyName", "keyProvider", "listKeys", "keysOf", "keysProject", "grantKey"]),
 };
 registerHooks({
@@ -167,19 +167,27 @@ globalThis.__fake = {
   persist: { onRunner: () => runner },
   // The owner's page's own functions (hosted-apps.ts): each records what it was asked; `appFails` makes the next throw.
   "hosted-apps": (hosted = Object.fromEntries(
-    ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "addSite", "setAutoRenew"].map((n) => [
+    ["deployApp", "promoteApp", "rollbackApp", "changeSettings", "connectDomain", "buyDomain", "changeEnv", "removeApp", "removeSite", "removeLeftOver", "addSite", "setAutoRenew"].map((n) => [
       n,
       async (...a) => {
         did.push([n, ...a]);
         if (appFails) throw new Error(appFails);
         // A deploy of Published's, which isn't one of the Preview's (hosted-apps.ts rollbackApp's 404).
         if (n === "rollbackApp" && a[2] === "dep-prod" && a[4] === "preview") throw Object.assign(new Error("That isn't one of its recent deploys."), { status: 404 });
+        if (n === "removeApp") return { removed: a[1], repo: a[2]?.repo === true, said: "store.acme.example still points at Orgo." };
+        if (n === "removeSite") return { app: {}, said: "Its domains came off too." };
         return n === "connectDomain" ? { domains: {}, domain: { domain: "store.acme.example" } } : {};
       },
     ]),
   )),
   "apps-for-members": {
     noteMemberAct: (wsId, app, act) => kept.push([wsId, app, act]),
+    // As apps-for-members.ts: kept on the workspace (Workspace.appsRemoved), newest first.
+    noteRemoval: (wsId, row) => {
+      removals.push([wsId, row]);
+      const w = state.workspaces.find((x) => x.id === wsId);
+      w.appsRemoved = [row, ...(w.appsRemoved ?? []).filter((x) => x.key !== row.key)].slice(0, 10);
+    },
     // As apps-for-members.ts: with `act`, only that act's done or refused (never one Bops Cloud kept going, or its setting).
     actKept: (wsId, app, key, act) => kept.some((k) => k[0] === wsId && k[1] === app && k[2].key === key && (!act || (k[2].act === act && !k[2].going))),
     seeApps: async () => void did.push(["seeApps"]),
@@ -214,8 +222,9 @@ let pulls = 0;
 let onPull = () => {};
 /** What the owner's Compact says (chat-summary.ts compactChat, sessions.ts compactThread). */
 let compactSays = { ok: true };
-/** What the owner's Mac kept on each app (noteMemberAct), and the next page function's error. */
+/** What the owner's Mac kept on each app (noteMemberAct), the apps it kept removed (noteRemoval), and the next page function's error. */
 const kept = [];
+const removals = [];
 let appFails = null;
 
 // Link and Bring in (hosted-apps.ts linkGithubMirror, pullGithubMirror): what they were asked, and what they say.
@@ -231,6 +240,8 @@ Object.assign(hosted, {
     return { app: {}, said: "Brought 1 change from GitHub into Ingot. Deploy the newest to the preview to see them there." };
   },
   personAuthor: (name) => `bops; ${name}`,
+  // The owner's page's list: shop's left overs on its computer, by name and id.
+  listApps: async (wsId) => (did.push(["listApps", wsId]), { enabled: true, apps: [{ name: "shop", leftOver: [{ id: "proj_old_1", name: "shop-old", port: 4000, url: null }] }] }),
 });
 const { memberEvent, resetAdmins } = await import(`${root}/lib/server/member-acts.ts`);
 // `computer`: Bops Cloud vouched for their Use its computer (as orgo-web keeps it), unless `computer: false`.
@@ -1086,6 +1097,80 @@ await check("a Member's change needs its switch in Team and a bot they have at W
   await settled();
   assert.equal(routed.length, 1);
   assert.equal(doneOf("key_mchg_05").ok, false);
+});
+
+await check("Remove from Your Apps (the owner's Mac): an Admin's takes the app off the web (its code too) and keeps a removal, not an act row; a Member with Remove apps does sites and left overs but never the code; a Member without it is refused in words; once by its key; never Delete its code", async () => {
+  const L = await import(`${root}/cloud/protocol.ts`);
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  kept.length = 0;
+  removals.length = 0;
+  // An Admin: the app, with its code.
+  await memberEvent(TOM_EV({ act: "remove", app: "shop", repo: true }, { key: "key_rm_000001", role: "admin" }), "e1");
+  await settleApps();
+  assert.deepEqual(did.filter((d) => d[0] === "removeApp"), [["removeApp", "ws_acme", "shop", { repo: true }]]);
+  assert.deepEqual(kept, [], "no act row: the app is gone");
+  assert.deepEqual(removals.map(([ws, r]) => [ws, r.key, r.userId, r.name, r.app, r.ok, r.said, r.codeLeft]), [["ws_acme", "key_rm_000001", "user_tom", "Tom", "shop", true, "store.acme.example still points at Orgo.", undefined]]);
+  assert.ok(did.some((d) => d[0] === "seeApps"), "what members see is read again");
+  // The same key again: done once (kept on the workspace's removals).
+  await memberEvent(TOM_EV({ act: "remove", app: "shop", repo: true }, { key: "key_rm_000001", role: "admin" }), "e2");
+  await settleApps();
+  assert.equal(did.filter((d) => d[0] === "removeApp").length, 1);
+  // A Member with Remove apps: a site, a left over by its name (the id found here), and the app, never its code.
+  fresh({ ownerEmail: "owner@orgo.ai", tomCan: { removeApps: true } });
+  kept.length = 0;
+  removals.length = 0;
+  await memberEvent(TOM_EV({ act: "removeSite", app: "shop", site: "admin" }, { key: "key_rm_000002" }), "e3");
+  await memberEvent(TOM_EV({ act: "removeLeftOver", app: "shop", leftOver: "shop-old" }, { key: "key_rm_000003" }), "e4");
+  await memberEvent(TOM_EV({ act: "removeLeftOver", app: "shop", leftOver: "shop-gone" }, { key: "key_rm_000004" }), "e5");
+  await memberEvent(TOM_EV({ act: "remove", app: "shop", repo: true }, { key: "key_rm_000005" }), "e6");
+  await settleApps();
+  assert.deepEqual(did.filter((d) => ["removeSite", "removeLeftOver", "removeApp"].includes(d[0])), [
+    ["removeSite", "ws_acme", "shop", "admin"],
+    ["removeLeftOver", "ws_acme", "shop", "proj_old_1"],
+  ]);
+  assert.deepEqual(kept.map((k) => [k[2].key, k[2].act, k[2].ok, k[2].site, k[2].leftOver, k[2].said]), [
+    ["key_rm_000005", "remove", false, undefined, undefined, "Only the owner or an Admin can delete its code."],
+    ["key_rm_000002", "removeSite", true, "admin", undefined, "Its domains came off too."],
+    ["key_rm_000003", "removeLeftOver", true, undefined, "shop-old", undefined],
+    ["key_rm_000004", "removeLeftOver", false, undefined, "shop-gone", "shop-gone isn't left over on its computer any more."],
+  ].sort((a, b) => kept.findIndex((k) => k[2].key === a[0]) - kept.findIndex((k) => k[2].key === b[0])));
+  assert.deepEqual(removals, []);
+  // Without the switch: refused, in the words of Team's switch; nothing done. The app's own site isn't a site to remove.
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  kept.length = 0;
+  await memberEvent(TOM_EV({ act: "remove", app: "shop" }, { key: "key_rm_000006" }), "e7");
+  await memberEvent(TOM_EV({ act: "removeSite", app: "shop", site: "shop" }, { key: "key_rm_000007", role: "admin" }), "e8");
+  await settleApps();
+  assert.ok(!did.some((d) => ["removeSite", "removeLeftOver", "removeApp"].includes(d[0])), "nothing removed");
+  assert.deepEqual(kept.map((k) => [k[2].key, k[2].ok, k[2].said]), [["key_rm_000006", false, L.REMOVE_APPS_LINE]]);
+  assert.equal(L.REMOVE_APPS_LINE, "The owner or an Admin can let you remove apps in Team.");
+  // Delete its code never reaches this Mac's way in (Bops Cloud does it with the Admin's own key).
+  await memberEvent(TOM_EV({ act: "deleteCode", app: "shop" }, { key: "key_rm_000008", role: "admin" }), "e9");
+  await settleApps();
+  assert.ok(!did.some((d) => d[0] === "removeApp"));
+  assert.ok(warned.some((w) => /e9: not a member's act/.test(w)));
+});
+
+await check("The owner's own press on an app a teammate's change to is still going (a workspace whose chat goes through Bops Cloud): refused in words; never in a workspace on the Mac, nor once it's done", async () => {
+  fresh({ ownerEmail: "owner@orgo.ai" });
+  const { teammateGoing, teammateGoingLine } = await import(`${root}/lib/server/teammate-going.ts`);
+  const ws = state.workspaces.find((w) => w.id === "ws_acme");
+  ws.appsForMembers = { at: 1, apps: { shop: { head: null, sites: [], commits: [], deploys: [], acts: [{ key: "k", userId: "user_tom", name: "Tom", act: "deploy", ok: true, going: true, at: 1 }] } } };
+  assert.equal(teammateGoing("ws_acme", "shop"), null, "chat on the Mac: as before");
+  ws.chatOn = "cloud";
+  const r = teammateGoing("ws_acme", "shop");
+  assert.equal(r.status, 409);
+  assert.deepEqual(await r.json(), { error: "A teammate's change to shop is still going. Try again once it's done." });
+  assert.equal(teammateGoingLine("shop"), "A teammate's change to shop is still going. Try again once it's done.");
+  assert.equal(teammateGoing("ws_acme", "site"), null, "another app");
+  ws.appsForMembers.apps.shop.acts[0] = { ...ws.appsForMembers.apps.shop.acts[0], going: undefined };
+  assert.equal(teammateGoing("ws_acme", "shop"), null, "done");
+  // Every way the owner deploys, changes settings or a domain, or removes it, asks first.
+  const { readFileSync } = await import("node:fs");
+  const src = (f) => readFileSync(`${root}/app/api/hosted-apps/[name]/${f}`, "utf8");
+  assert.match(src("route.ts"), /\["deploy", "promote", "reapply", "rollback", "removeSite", "removeLeftOver"\]\.includes\(b\.action as string\) \? teammateGoing\(wsId, name\)/);
+  assert.equal((src("route.ts").match(/teammateGoing\(wsId, name\)/g) ?? []).length, 2, "and Remove app");
+  for (const f of ["settings/route.ts", "domains/route.ts", "domains/[domainId]/route.ts"]) assert.match(src(f), /teammateGoing\(/, f);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

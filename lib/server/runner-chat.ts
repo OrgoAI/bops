@@ -1,11 +1,27 @@
 import "server-only";
 import { mkdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { jobApp, RUNNER_HOLD, RUNNER_TURNS_DIR, TURN_BEAT_MS, type GithubJob, type RunnerClaim, type RunnerDone, type RunnerResume, type RunnerTurnEvent, type TurnJob, type TurnMember } from "@/cloud/protocol";
+import {
+  APP_JOB_KINDS,
+  isRemoveJob,
+  jobApp,
+  RUNNER_HOLD,
+  RUNNER_TURNS_DIR,
+  TURN_BEAT_MS,
+  type AppJob,
+  type RunnerAppsViewEvent,
+  type RunnerClaim,
+  type RunnerDone,
+  type RunnerResume,
+  type RunnerTurnEvent,
+  type TurnJob,
+  type TurnMember,
+} from "@/cloud/protocol";
 import { workspaceOf, type AppApproval, type MemberTurn } from "@/lib/types";
+import { shareAppsView } from "./apps-view-share";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
-import { addMessage, getState, pullState, stateReady } from "./store";
+import { addMessage, flushState, getState, pullState, stateReady } from "./store";
 import { runInTurn, type TurnContext } from "./turn-context";
 
 /**
@@ -38,10 +54,14 @@ import { runInTurn, type TurnContext } from "./turn-context";
  * answers here as any other (a workspace in the cloud): nothing it starts waits for the Mac.
  *
  * A turn that's a job (TurnMember.job, asked from a shared workspace and checked by Bops Cloud: cloud/turns.ts
- * takeAppJob, takeChatJob) isn't words to answer: it's done here (runJob, through runnerJob: an app's GitHub job by
- * hosted-apps.ts githubJob, a chat's compact by chat-summary.ts compactChat), said in the bot's chat as Bops' own (a
- * chat's compact by Bops Cloud instead, stamped as the teammate's), and its result told with its end. No model sees it
- * but the compact's summary. A kind this runner doesn't do yet is said so plainly, and nothing is done.
+ * takeAppJob, takeChatJob) isn't words to answer: it's done here (runJob, through runnerJob: an app's job by
+ * hosted-apps.ts appJob, which does its GitHub ones by githubJob; a chat's compact by chat-summary.ts compactChat), said
+ * in the bot's chat as Bops' own (a chat's compact by Bops Cloud instead, stamped as the teammate's), and its result told
+ * with its end. No model sees it but the compact's summary. A kind this runner doesn't do yet is said so plainly, and
+ * nothing is done. A remove's end goes only once this runner's state is saved (flushState): Bops Cloud drops the app as
+ * it hears it, and a save of the record after that would be one of an app that's gone. After any other app's job (a left
+ * over removed too), what members see of the app is told to Bops Cloud (apps-view-share.ts), as it is when Bops Cloud
+ * asks ("apps-view": a member is looking at an old one).
  */
 
 const RECONNECT_MIN_MS = 2_000;
@@ -70,8 +90,8 @@ type Box = {
   marks?: Map<string, number>;
   /** Tests: how often a resume looks again at an upgrade's hold. */
   holdPollMs?: number;
-  /** Tests: what does an app's GitHub job (hosted-apps.ts githubJob), as runnerJob gives it one. */
-  job?: (botId: string, job: GithubJob, by: string) => Promise<JobResult>;
+  /** Tests: what does an app's job (hosted-apps.ts appJob), as runnerJob gives it one. */
+  job?: (botId: string, job: AppJob, by: string) => Promise<JobResult>;
   /** Tests: what compacts a chat (chat-summary.ts compactChat), and whether Bops Cloud has its summary now (store.ts changeLanded). */
   compact?: (chatId: string, member: undefined, opts: { line: false }) => Promise<{ ok: true } | { ok: false; error: string }>;
   landed?: (has: (state: Record<string, unknown>) => boolean) => Promise<boolean>;
@@ -80,7 +100,7 @@ const g = globalThis as unknown as { __bopsRunnerChat?: Box };
 const box: Box = (g.__bopsRunnerChat ??= { running: new Map() });
 
 const answerOf = async () => box.answer ?? (await import("./chat")).answerMessage;
-const githubOf = async () => box.job ?? (await import("./hosted-apps")).githubJob;
+const appJobOf = async () => box.job ?? (await import("./hosted-apps")).appJob;
 const compactOf = async () => box.compact ?? (await import("./chat-summary")).compactChat;
 const landedOf = async () => box.landed ?? (await import("./store")).changeLanded;
 const identityOf = async () => box.identity ?? (await import("./runner")).checkIdentity;
@@ -181,6 +201,12 @@ function onBlock(live: Live, block: string) {
   }
   if (type === "turn" && typeof body.id === "string") void answerTurn(body as unknown as RunnerTurnEvent).catch((e: Error) => console.warn(`[runner-chat] ${String(body.id)}: ${e.message}`));
   else if (type === "turn-cancel" && typeof body.id === "string") cancel(body.id);
+  // Bops Cloud asks for what members see of this computer's apps (cloud/turns.ts nudgeAppViews): one share at a time per workspace.
+  else if (type === "apps-view" && typeof body.ws === "string") {
+    const ev = body as unknown as RunnerAppsViewEvent;
+    const names = Array.isArray(ev.apps) ? ev.apps.filter((x): x is string => typeof x === "string").slice(0, 100) : undefined;
+    void shareAppsView(ev.ws, names).catch(() => {});
+  }
   else if (type === "state" && !live.pulling) {
     live.pulling = setTimeout(() => {
       live.pulling = undefined;
@@ -382,20 +408,14 @@ function couldnt(job: TurnJob): string {
 export const jobLine = (job: TurnJob, r: { ok: boolean; said: string }) => (r.ok ? r.said : `${couldnt(job)}: ${r.said}`);
 
 /**
- * Do a job (TurnMember.job) on this computer, in `by`'s name, by its kind: an app's GitHub job by hosted-apps.ts
- * githubJob; compacting a chat (its turn's chat) by chat-summary.ts compactChat (chatJob). A kind this runner doesn't do
- * yet (one a newer Bops Cloud owes it) does nothing, and says so plainly.
+ * Do a job (TurnMember.job) on this computer, in `by`'s name, by its kind: an app's by hosted-apps.ts appJob (its GitHub
+ * ones there by githubJob); compacting a chat (its turn's chat) by chat-summary.ts compactChat (chatJob). A kind this
+ * runner doesn't do yet (one a newer Bops Cloud owes it) does nothing, and says so plainly.
  */
 export async function runnerJob(ctx: TurnContext, job: TurnJob, by: string): Promise<JobResult> {
-  switch (job.act) {
-    case "githubLink":
-    case "githubPull":
-      return (await githubOf())(ctx.botId, job, by);
-    case "compactChat":
-      return chatJob(ctx.chatId);
-    default:
-      return { ok: false, said: JOB_UNKNOWN };
-  }
+  if (job.act === "compactChat") return chatJob(ctx.chatId);
+  if (!(APP_JOB_KINDS as readonly string[]).includes(job.act)) return { ok: false, said: JOB_UNKNOWN };
+  return (await appJobOf())(ctx.botId, job as AppJob, by);
 }
 
 /** What a chat's compact that this runner couldn't save says (chat-summary.ts's own words for one that didn't go). */
@@ -430,16 +450,25 @@ async function runJob(ctx: TurnContext, job: TurnJob, by: string) {
   const first = await post(`/v1/runner/turns/${encodeURIComponent(ctx.id)}/beat`, { phase: "tools" });
   if (first.status === 409) return;
   let result: JobResult = { ok: false, said: "That didn't go. Try again." };
+  let ran = false;
   await asTurn(
     ctx,
     async () => {
       result = await runnerJob(ctx, job, by);
+      ran = true;
       if (!ctx.cancelled && job.act !== "compactChat") addMessage({ chatId: ctx.chatId, role: "bot", botId: ctx.botId, text: jobLine(job, result), ...(jobApp(job) ? { appNote: true } : {}), bops: true });
+      // A remove's end only once what it cleared here is saved: Bops Cloud drops the app (or its site) as it hears it.
+      if (isRemoveJob(job)) await flushState().catch((e: Error) => console.warn(`[runner-chat] ${ctx.id}: couldn't save before its end: ${e?.message ?? e}`));
       return null;
     },
     undefined,
     () => ({ ok: result.ok, said: result.said, ...(result.removed === "app" || result.removed === "site" ? { removed: result.removed } : {}) }),
   );
+  // What members see of the app, told afresh: never after taking the app or a site off (Bops Cloud drops that from the
+  // record as it hears the end, which this runner reads only later); after a left over goes, so it's gone there too.
+  const app = jobApp(job);
+  const b = app && ran && job.act !== "remove" && job.act !== "removeSite" ? getState().bots?.find((x) => x.id === ctx.botId) : undefined;
+  if (app && b) void shareAppsView(workspaceOf(b), [app]).catch(() => {});
 }
 
 /**

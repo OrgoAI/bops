@@ -2,6 +2,7 @@ import { appsOpen } from "@/lib/apps-access";
 import { appSettings, changeSettings, HostedAppError } from "@/lib/server/hosted-apps";
 import { notReady } from "@/lib/server/ready";
 import { getState } from "@/lib/server/store";
+import { teammateGoing } from "@/lib/server/teammate-going";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { MAIN_WORKSPACE } from "@/lib/types";
 
@@ -41,6 +42,8 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ name: str
   const { name } = await ctx.params;
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = (typeof b.ws === "string" && b.ws.trim()) || getState().workspace || MAIN_WORKSPACE;
+  const theirs = teammateGoing(wsId, name);
+  if (theirs) return theirs;
   try {
     return Response.json(await changeSettings(wsId, name, { port: b.port, install: b.install, build: b.build, start: b.start, health: b.health }, b.site, b.env));
   } catch (e) {

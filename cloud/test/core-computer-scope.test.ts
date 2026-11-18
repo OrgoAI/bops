@@ -757,6 +757,35 @@ test("a computer never reads the Preview passwords kept for members, and its wri
   assert.equal(sitesOf(stale.json.state)[0].previewProtected, true);
 });
 
+test("a computer never reads who removed which app, keeps it when it writes back, and can't bring back an app removed moments ago; one removed 20 minutes ago it may", T, async () => {
+  clearAuthCache();
+  const u = await seeded("removed");
+  const was = await stateNow(u);
+  const st = structuredClone(was.state) as Record<string, unknown> & ReturnType<typeof stateOf>;
+  const ws = st.workspaces[0] as Record<string, unknown>;
+  ws.appsRemoved = [
+    { key: "k_rm_1", userId: "u-ada", name: "Ada", app: "fresh", ok: true, at: Date.now() - 60_000 },
+    { key: "k_rm_2", userId: "u-ada", name: "Ada", app: "older", ok: true, at: Date.now() - 20 * 60_000 },
+  ];
+  assert.equal((await call(cloud.url, "PUT", "/v1/state", { key: `key-${u}`, headers: asNew(u), json: { base: was.version, state: st } })).status, 200);
+  const read = await call(cloud.url, "GET", "/v1/state", { key: vm(u), headers: asNew(u) });
+  assert.equal(read.status, 200, read.text);
+  assert.ok(!read.text.includes("k_rm_1"), "never read");
+  // A write that brings back the one removed a minute ago: refused; the one removed 20 minutes ago: taken.
+  const back = structuredClone(read.json.state) as ReturnType<typeof stateOf>;
+  (back.workspaces[0] as Record<string, unknown>).hostedApps = { ...((back.workspaces[0] as Record<string, unknown>).hostedApps as object), fresh: { botId: "main", computerId: D1 } };
+  const no = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read.json.version, state: back } });
+  assert.equal(no.status, 403, no.text);
+  assert.deepEqual(no.json.paths, ["workspaces.ws_main.hostedApps.fresh"]);
+  const again = structuredClone(read.json.state) as ReturnType<typeof stateOf>;
+  (again.workspaces[0] as Record<string, unknown>).hostedApps = { ...((again.workspaces[0] as Record<string, unknown>).hostedApps as object), older: { botId: "main", computerId: D1 } };
+  const yes = await call(cloud.url, "PUT", "/v1/state", { key: vm(u), headers: asNew(u), json: { base: read.json.version, state: again } });
+  assert.equal(yes.status, 200, yes.text);
+  const kept = (await stateNow(u)).state.workspaces[0] as Record<string, unknown>;
+  assert.deepEqual((kept.appsRemoved as { key: string }[]).map((r) => r.key), ["k_rm_1", "k_rm_2"], "kept as it was");
+  assert.ok((kept.hostedApps as Record<string, unknown>).older);
+});
+
 test("a computer reads only what its bots need: their bots, chats, threads, routines and workspaces, a teammate's name and where it works; its runner's write over that keeps the rest as it was", T, async () => {
   clearAuthCache();
   const u = await seeded("narrow");

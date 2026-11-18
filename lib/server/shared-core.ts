@@ -119,9 +119,13 @@ function landed(d: SharedWsState, messages: Record<string, unknown>[], p: Pendin
     // A change: the owner's Mac said how it went (SharedWsSlice.changed), done or why not (settle).
     case "change":
       return !!d.state.changed?.some((x) => x.key === p.key && x.ok);
-    // An app's: the owner's Mac kept it on the app, done or refused (its `ok` and `said` show there).
+    // An app's code deleted: Bops Cloud did it as it answered (actWith lets it go then); here, once no code is left.
+    case "deleteCode":
+      return !d.state.apps?.removed?.some((x) => x.app === a.app && x.codeLeft);
+    // An app's: the owner's Mac kept it on the app, done or refused (its `ok` and `said` show there), or (an app removed:
+    // it's gone) on the workspace's removals, by the same key (SharedApps.removed).
     default:
-      return !!d.state.apps?.list.find((x) => x.name === a.app)?.acts?.some((x) => x.key === p.key);
+      return !!d.state.apps?.list.find((x) => x.name === a.app)?.acts?.some((x) => x.key === p.key) || !!d.state.apps?.removed?.some((x) => x.key === p.key);
   }
 }
 type Copy = { open: SharedOpen; data: SharedWsState; older: Map<string, Older> };
@@ -321,6 +325,11 @@ export class SharedCopy {
     // An app's: Your Apps at Write, an app they're shown (cloud/members.ts appsTouched says the same, and more).
     if (isAppAct(act)) {
       const apps = c.data.state.apps;
+      // Its code, of an app removed with its code left: an Admin's (Bops Cloud checks the rest).
+      if (act.act === "deleteCode") {
+        if (!apps?.removed?.some((x) => x.app === act.app && x.codeLeft)) return { status: 404, error: "No such app." };
+        return c.open.role === "admin" ? null : { status: 403, error: ADMIN_LINE, code: ADMIN_ONLY };
+      }
       if (!apps?.list.some((x) => x.name === act.app)) return { status: 404, error: "No such app." };
       if (apps.level !== "write") return { status: 403, error: "You can see these apps. Ask the owner for Write to change them.", code: MEMBER_APPS_READ_ONLY };
       return null;
@@ -498,7 +507,9 @@ export async function actWith(copy: SharedCopy, act: MemberAct, key: string, me:
   copy.acting(key, act, me);
   const r = await send(JSON.stringify({ key, act })).catch((): ActResult => ({ status: 0 }));
   if (r.status === 202) {
-    copy.acted(key, r.body?.cloud ? "cloud" : r.body?.macOn ? "sending" : "waiting");
+    // An app's code: Bops Cloud deleted it (or said why not, on its removal) before it answered, so it's done now.
+    if (act.act === "deleteCode") copy.forget(key);
+    else copy.acted(key, r.body?.cloud ? "cloud" : r.body?.macOn ? "sending" : "waiting");
     void copy.refresh();
     return { ok: true, key, macOn: !!r.body?.macOn };
   }
@@ -736,6 +747,10 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...(s.adminPublish && open.role === "admin" ? { adminPublish: true as const } : {}),
       // Its apps' GitHub production, at Your Apps Write, for whoever has the power of Publish (cloud/ws-slice.ts sharedSlice).
       ...(s.appGithub && s.apps?.level === "write" ? { appGithub: true as const } : {}),
+      // At Your Apps Write: the kinds its apps' own computers do now (a workspace where everything goes through the cloud),
+      // and Remove, for someone who may (cloud/ws-slice.ts sharedSlice).
+      ...(Array.isArray(s.appJobs) && s.apps?.level === "write" ? { appJobs: s.appJobs.filter((x) => typeof x === "string") } : {}),
+      ...(s.appRemove && s.apps?.level === "write" ? { appRemove: true as const } : {}),
       // Keys (cloud/ws-slice.ts keysOf): whether they manage this workspace's keys, whether the owner's Bops takes their
       // bots' key switches, and the switches on their way or not gone (keys.tsx).
       ...(s.keys ? { keys: true as const, ...(s.keyActs ? { keyActs: true as const } : {}) } : {}),

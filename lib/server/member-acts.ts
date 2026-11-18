@@ -1,11 +1,11 @@
 import "server-only";
 import { cleanChange } from "@/cloud/change-routes";
 import { deviceIdOf } from "@/cloud/device";
-import { cleanMemberFiles, isAppAct, isGithubAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
+import { cleanMemberFiles, isAppAct, isGithubAct, isRemoveAct, KEY_NAME, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, REMOVE_APPS_LINE, STORED_ACT_MS, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
 import { appsOpen } from "@/lib/apps-access";
 import { accessKey, accessOf, adminAccess, adminMay, appsLevelOf, askOwnersOnly, cleanName, currentFor, levelOf, noUseNote, permits, threadOwnersOnly, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
-import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
+import { actKept, noteMemberAct, noteRemoval, seeApps } from "./apps-for-members";
 import { botChatId, keptPersona, workBot, workspaceOf, type MemberSaid, type MemberTurn, type Message, type Workspace } from "@/lib/types";
 import type { AddedFile } from "@/lib/added-files";
 import { answerMessage, handleMessage } from "./chat";
@@ -77,7 +77,8 @@ function actOf(a: unknown): MemberAct | null {
   if (x.act === "persona")
     return short(x.botId, 120) && [x.text, x.was].every((v) => typeof v === "string" && v.length <= MEMBER_MAX_TEXT) ? { act: "persona", botId: x.botId as string, text: x.text as string, was: x.was as string } : null;
   if (x.act === "key") return short(x.botId, 120) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" ? { act: "key", botId: x.botId as string, name: x.name, on: x.on } : null;
-  if (x.act === "deploy" || x.act === "rollback" || x.act === "settings" || x.act === "domain" || x.act === "githubLink" || x.act === "githubPull") return appActOf(x);
+  // (Never "deleteCode": Bops Cloud deletes an app's code itself, with an Admin's own key.)
+  if (["deploy", "rollback", "settings", "domain", "githubLink", "githubPull", "remove", "removeSite", "removeLeftOver"].includes(x.act as string)) return appActOf(x);
   if (x.act === "change") {
     const call = cleanChange(x);
     return call ? { act: "change", ...call } : null;
@@ -92,6 +93,11 @@ function appActOf(x: Record<string, unknown>): MemberAct | null {
   // Link, or Bring in GitHub's changes: when the app's own computer couldn't (cloud/turns.ts takeAppJob). Never where it
   // publishes ("github"): Bops Cloud writes that itself (cloud/members.ts githubHere), and this Mac's merge keeps it.
   if (x.act === "githubLink" || x.act === "githubPull") return x.site === undefined ? { act: x.act, app: x.app } : null;
+  // Taking it off the web (cloud/protocol.ts MemberRemoveAct): the app (`repo`, exactly true: its code too), one of its
+  // other sites, or a left over by the name it shows.
+  if (x.act === "remove") return x.site === undefined && (x.repo === undefined || x.repo === true) ? { act: "remove", app: x.app, ...(x.repo === true ? { repo: true as const } : {}) } : null;
+  if (x.act === "removeSite") return typeof x.site === "string" && x.site !== x.app ? { act: "removeSite", app: x.app, site: x.site } : null;
+  if (x.act === "removeLeftOver") return x.site === undefined && isAppName(x.leftOver) && (x.leftOver as string).length <= 80 ? { act: "removeLeftOver", app: x.app, leftOver: x.leftOver as string } : null;
   const site = typeof x.site === "string" ? { site: x.site } : {};
   // Published ("prod"): an Admin's alone (refused); none is the Preview's.
   if ((x.act === "deploy" || x.act === "rollback") && x.env !== undefined && x.env !== "prod") return null;
@@ -229,6 +235,10 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho, admin = fa
     // Its GitHub production: the same power (an Admin, or a Member with App secrets), for an app of one folder.
     if (isGithubAct(act) && !adminMay("publish", me)) return "no App secrets";
     if (isGithubAct(act) && h.sites?.length) return "more than one site";
+    // Off the web: an Admin, or a Member with Remove apps on in Team (MemberAccess.can.removeApps). Its code: an Admin's alone.
+    if (isRemoveAct(act) && !admin && access.can?.removeApps !== true) return "not allowed, remove";
+    if (act.act === "remove" && act.repo && !admin) return "not an Admin, code";
+    if (act.act === "removeSite" && act.site === act.app) return "no such app";
     return null;
   }
   // A change as the owner's window makes it (change-acts.ts): the power it needs, this workspace's bots and apps alone.
@@ -303,7 +313,7 @@ export async function memberEvent(p: MemberActPayload, eventId: string): Promise
   if (!act || !who || typeof p.wsId !== "string" || typeof p.key !== "string") return void console.warn(`[members] event ${eventId}: not a member's act`);
   // The same act on an app again (an ack that was lost): done, or refused, once; or still being done.
   const doing = isAppAct(act) ? `${p.wsId}\n${act.app}\n${p.key}` : "";
-  if (isAppAct(act) && (going.has(doing) || actKept(p.wsId, act.app, p.key, act.act))) return;
+  if (isAppAct(act) && (going.has(doing) || actKept(p.wsId, act.app, p.key, act.act) || removedKept(p.wsId, p.key))) return;
   const admin = await adminOf(p, who);
   const why = refused(p, act, who, admin);
   if (why && isAppAct(act) && why !== "too late" && why !== "no such workspace" && why !== "no such app") {
@@ -530,7 +540,12 @@ const REFUSED: Record<string, string> = {
   "not an Admin": "Only the owner or an Admin can publish.",
   "no App secrets": "Only the owner, an Admin, or someone with App secrets can do this.",
   "more than one site": "It runs more than one site, and one GitHub folder is one app.",
+  "not allowed, remove": REMOVE_APPS_LINE,
+  "not an Admin, code": "Only the owner or an Admin can delete its code.",
 };
+
+/** Whether a member's act with this key removed an app already (Workspace.appsRemoved): the same act again is done once. */
+const removedKept = (wsId: string, key: string) => !!getState().workspaces?.find((w) => w.id === wsId)?.appsRemoved?.some((x) => x.key === key);
 
 /** Whether an act on an app is Published's: Publish (a deploy) or going back there (a rollback), an Admin's alone. */
 const isPublish = (act: MemberAppAct) => (act.act === "deploy" || act.act === "rollback") && act.env === "prod";
@@ -542,6 +557,7 @@ const keptAct = (p: MemberActPayload, act: MemberAppAct, who: MemberWho, ok: boo
   act: act.act,
   ...(act.site ? { site: act.site } : {}),
   ...(act.act === "domain" && "zone" in act ? { domain: act.subdomain ? `${act.subdomain}.${act.zone}` : act.zone } : {}),
+  ...(act.act === "removeLeftOver" ? { leftOver: act.leftOver } : {}),
   ...(isPublish(act) ? { env: "prod" as const } : {}),
   ok,
   ...(said ? { said } : {}),
@@ -554,9 +570,11 @@ const plain = (e: unknown) => (e instanceof Error ? e.message : "That didn't go.
 /**
  * An act on an app, done as the owner's page does it (lib/server/hosted-apps.ts): deploy, go back to an earlier
  * deploy, change a site's settings (never its variables), point one of the workspace's own domains at it (connectDomain
- * checks the domain is one Orgo lists for the workspace, and refuses any other). Never buying a domain, DNS, auto renew,
- * adding or removing a site or the app. Kept on the app, as done or refused with why (named as the member), then what
- * members see is read again.
+ * checks the domain is one Orgo lists for the workspace, and refuses any other), and, for an Admin or a Member with
+ * Remove apps, take the app off the web (its code too, an Admin's: removeApp), one of its other sites (removeSite) or a
+ * left over of it (removeLeftOver, found by the name members see). Never buying a domain, DNS, auto renew, or adding a
+ * site. Kept on the app, as done or refused with why (named as the member); an app removed is kept on the workspace
+ * instead (noteRemoval), as the app is gone. Then what members see is read again.
  */
 async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, eventId: string): Promise<void> {
   const h = await import("./hosted-apps");
@@ -579,6 +597,19 @@ async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, 
     else if (act.act === "githubLink") ({ said } = await h.linkGithubMirror(p.wsId, act.app));
     else if (act.act === "githubPull") ({ said } = await h.pullGithubMirror(p.wsId, act.app, h.personAuthor(who.name)));
     else if (act.act === "github") throw new Error("Bops Cloud sets where it publishes.");
+    else if (act.act === "remove") {
+      const r = await h.removeApp(p.wsId, act.app, { repo: act.repo === true });
+      noteRemoval(p.wsId, { key: p.key, userId: who.userId, name: who.name, app: act.app, ok: true, ...(r.said ? { said: plain(new Error(r.said)) } : {}), at: Date.now() });
+      void seeApps(p.wsId).catch(() => {});
+      return;
+    } else if (act.act === "removeSite") ({ said } = await h.removeSite(p.wsId, act.app, act.site));
+    else if (act.act === "removeLeftOver") {
+      // By the name members see (AppForMembers.leftOver), never an id they sent.
+      const app = (await h.listApps(p.wsId)).apps.find((x) => x.name === act.app);
+      const id = app?.leftOver?.find((l) => l.name === act.leftOver)?.id;
+      if (!id) throw new Error(`${act.leftOver} isn't left over on its computer any more.`);
+      await h.removeLeftOver(p.wsId, act.app, id);
+    } else if (act.act === "deleteCode") throw new Error("Bops Cloud deletes an app's code.");
     else {
       const got = await h.connectDomain(p.wsId, act.app, { zone: act.zone, ...(act.subdomain ? { subdomain: act.subdomain } : {}) }, act.site);
       domain = got.domain?.domain;
@@ -589,8 +620,8 @@ async function appEvent(p: MemberActPayload, act: MemberAppAct, who: MemberWho, 
     said = plain(e);
     console.warn(`[members] event ${eventId}: ${said}`);
   }
-  // (A GitHub act says how it went either way; the rest say only why not.)
-  const kept = keptAct(p, act, who, ok && (isGithubAct(act) || !said), said);
+  // (A GitHub act or a remove says how it went either way; the rest say only why not.)
+  const kept = keptAct(p, act, who, ok && (isGithubAct(act) || isRemoveAct(act) || !said), said);
   noteMemberAct(p.wsId, act.app, domain ? { ...kept, domain } : kept);
   void seeApps(p.wsId).catch(() => {});
 }

@@ -243,13 +243,13 @@ await check("Bob signs in while the repo is made: its folder isn't readied, and 
 
 /* ---------------- A deploy ---------------- */
 
-await check("a first deploy, with no sign-in meanwhile: its project made on Alex's computer", async () => {
+await check("a first deploy, with no sign-in meanwhile: its Preview's project made on Alex's computer (no Published project: that waits for Publish or a domain)", async () => {
   await asAlex();
   const from = calls.length;
   const got = await fails(H.deployApp("ws_main", "todo"));
   assert.ok(calls.slice(from).some((c) => c.as === "alex" && c.what === "POST /api/computers/c_a/deploy-projects"), JSON.stringify(got.error?.message));
   assert.deepEqual(bobsCalls(from), []);
-  assert.equal(S.getState().workspaces[0].hostedApps.todo.projectId, "dp_new");
+  assert.equal(S.getState().workspaces[0].hostedApps.todo.projectId, undefined, "no Published project kept");
 });
 
 await check("Bob signs in while a first deploy reads the computer's projects: no project is made, nothing is kept, nothing goes with his key", async () => {

@@ -6,6 +6,7 @@ import { deviceIdOf } from "./device.ts";
 import { HttpError, readBody, readJson, sendJson, type Route } from "./http.ts";
 import { query, tx } from "./db.ts";
 import { canWatch, hub, liveScope, seedSeen, serveStream, stateWritten, type LiveTarget } from "./live.ts";
+import { readAppViews } from "./apps-view.ts";
 import {
   accessKey,
   adminMay,
@@ -73,6 +74,11 @@ import {
   WS_ROLES,
   isAppAct,
   isGithubAct,
+  isRemoveAct,
+  REMOVE_APPS_LINE,
+  type AppJob,
+  type AppJobKind,
+  type MemberRemoveAct,
   GITHUB_ACTS_MIN_VERSION,
   GITHUB_KEY_LINE,
   GITHUB_NO_KEY,
@@ -104,6 +110,7 @@ import {
   computerFor,
   macNewEnough,
   ownerOf,
+  nameOf,
   recheckTurns,
   routedWorkspaces,
   routingOf,
@@ -115,8 +122,13 @@ import {
   takeMessage,
   wakeComputer,
   withAppAct,
+  withAppRemoved,
+  withSiteRemoved,
   withHosting,
   writeOwnerState,
+  jobNote,
+  nudgeAppViews,
+  type AppJobRefusal,
   type WakeRefusal,
 } from "./turns.ts";
 import { cleanGithubMirror, GITHUB_KEY_NAME, keepsPoint, sameDestination, type GithubMirror } from "./github-config.ts";
@@ -298,7 +310,16 @@ export async function watchable(user: CloudUser, key: string, projectId: string,
  * CHANGES_MIN_VERSION), said to anyone but the owner. `github`: the owner's last Mac takes the GitHub acts, and the
  * viewer's own Bops knows them (GITHUB_ACTS_MIN_VERSION: SharedWsSlice.appGithub, and the acts shown on an app).
  */
-export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, adminPublish = false, keyActs = false, changes = false, github: { acts?: boolean; seen?: boolean } = {}): SliceViewer => ({
+export const viewerOf = (
+  user: CloudUser,
+  access: WsAccess,
+  adminActs = false,
+  adminPublish = false,
+  keyActs = false,
+  changes = false,
+  github: { acts?: boolean; seen?: boolean } = {},
+  apps: { jobs?: AppJobKind[]; remove?: boolean; seen?: boolean } = {},
+): SliceViewer => ({
   role: access.role,
   ...(adminActs && access.role !== "owner" ? { adminActs: true } : {}),
   ...(adminPublish && access.role === "admin" ? { adminPublish: true } : {}),
@@ -313,6 +334,11 @@ export const viewerOf = (user: CloudUser, access: WsAccess, adminActs = false, a
   // The GitHub acts (protocol.ts GITHUB_ACTS_MIN_VERSION): the owner's last Mac takes them (`acts`), the viewer's own Bops knows them (`seen`).
   ...(github.acts && access.role !== "owner" ? { githubActs: true } : {}),
   ...(github.seen ? { githubSeen: true } : {}),
+  // Everything through the cloud (protocol.ts CLOUD_ALL_MIN_VERSION): what the apps' computers do (`jobs`), whether a
+  // remove is done (`remove`), and whether the viewer's own Bops knows them (`seen`).
+  ...(apps.seen ? { appActsSeen: true } : {}),
+  ...(apps.seen && apps.jobs && access.role !== "owner" ? { appJobs: apps.jobs } : {}),
+  ...(apps.seen && apps.remove && access.role !== "owner" ? { appRemove: true } : {}),
 });
 
 /** Whether the caller, someone other than the owner, has Keys (member-access.ts holdsKeys: as orgo-web says, an Admin when it doesn't). */
@@ -438,7 +464,7 @@ export async function watchProject(req: IncomingMessage, res: ServerResponse, us
   // Anyone but the owner hears only what's of the bots they see: worked out from the owner's state, read
   // now (a read that fails fails the stream: nothing is sent unscoped), then kept up as it's written (live.ts stateWritten).
   const viewer = viewerOf(user, access);
-  const scopeNow = async () => liveScope(await ownerState(target.account), target.ws, viewer);
+  const scopeNow = async () => liveScope(await ownerState(target.account), target.ws, viewer, undefined, hub.viewsOf(target));
   const written = hub.written;
   const scope = viewer.role === "owner" ? undefined : await scopeNow();
   let unsure = 0;
@@ -503,6 +529,12 @@ const readState: Route = {
     if (!projectId) throw new HttpError(404, "Not found");
     const { access, target } = await watchable(user!, bearer(req), projectId);
     const blob = await ownerState(target.account);
+    // Your Apps, for someone other than the owner it may be open to (ws-slice.ts appsOpenFor): what the apps' own
+    // computers last said of them (bops.app_views), and whether everything goes through the cloud (turns.ts allCloud).
+    const appsMaybe = access.role !== "owner" && !!appsOpenFor({ role: access.role, id: user!.id, ...(user!.email ? { email: user!.email } : {}), ...(access.ownerEmail ? { ownerEmail: access.ownerEmail } : {}) });
+    const cloud = appsMaybe && (await cloudAll(target.account, target.ws));
+    const views = appsMaybe ? await viewsFor(target.account, target.ws) : undefined;
+    const seen = knowsAppActs(req);
     // What this caller is shown: all of it for the owner, else only the bots the owner gave them (by
     // their email or user id; none when neither is there). Its messages are only of the chats it has.
     const viewer = viewerOf(
@@ -516,8 +548,18 @@ const readState: Route = {
       access.role !== "owner" && (await adminGate(target.account, CHANGES_MIN_VERSION)),
       // The GitHub acts: the owner's last Mac takes them, and this caller's Bops knows them (an older one reads one as a domain's).
       { acts: access.role !== "owner" && (await adminGate(target.account, GITHUB_ACTS_MIN_VERSION)), seen: knowsGithubActs(req) },
+      // The apps' computers do what's turned on for them (config.ts appJobs) with everything through the cloud; else the
+      // owner's Mac removes from CLOUD_ALL_MIN_VERSION on. Only to a Bops that knows them.
+      appsMaybe && seen
+        ? cloud
+          ? { jobs: config.appJobs(), remove: config.appJobs().includes("remove"), seen }
+          : { remove: await adminGate(target.account, CLOUD_ALL_MIN_VERSION), seen }
+        : { seen },
     );
-    const slice = sharedSlice(blob, target.ws, viewer);
+    const slice = sharedSlice(blob, target.ws, viewer, views);
+    if (views) hub.setViews(target, views);
+    // A computer whose view of its apps here is getting old is asked for a new one (never woken for it).
+    if (cloud && slice.apps) nudgeViews(blob, target, views ?? {});
     const bots = viewer.role === "owner" ? undefined : botsOf(slice);
     const handed = bots && handedByOthers(blob, bots);
     // The owner's app threads they aren't shown, and the bots whose app lines they are (Orgo's team with Write: ws-slice.ts appThreadsFor).
@@ -634,6 +676,10 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
     case "github":
     case "githubLink":
     case "githubPull":
+    case "remove":
+    case "removeSite":
+    case "removeLeftOver":
+    case "deleteCode":
       return appAct(key, x);
     default:
       return null;
@@ -660,6 +706,19 @@ function appAct(key: string, x: Record<string, unknown>): { key: string; act: Me
     if (x.github === null) return { key, act: { act: "github", app: x.app, github: null, ...link } };
     const c = cleanGithubMirror(x.github);
     return "ok" in c ? { key, act: { act: "github", app: x.app, github: c.ok, ...link } } : null;
+  }
+  // Off the web (MemberRemoveAct): the app (`repo` exactly true: its code too), one of its other sites (named, never its
+  // own), a left over by the name it shows; and its code, once it's gone.
+  switch (x.act) {
+    case "remove":
+      if (x.site !== undefined || (x.repo !== undefined && x.repo !== true)) return null;
+      return { key, act: { act: "remove", app: x.app, ...(x.repo === true ? { repo: true as const } : {}) } };
+    case "removeSite":
+      return typeof x.site === "string" && x.site !== x.app ? { key, act: { act: "removeSite", app: x.app, site: x.site } } : null;
+    case "removeLeftOver":
+      return x.site === undefined && appName(x.leftOver, 80) ? { key, act: { act: "removeLeftOver", app: x.app, leftOver: x.leftOver } } : null;
+    case "deleteCode":
+      return x.site === undefined ? { key, act: { act: "deleteCode", app: x.app } } : null;
   }
   const site = x.site !== undefined ? { site: x.site as string } : {};
   // Where a deploy or a rollback goes: the Preview (none), or Published ("prod": an Admin's, checked as it's taken).
@@ -704,15 +763,19 @@ export const GITHUB_NOT_LINKED = "Link it to GitHub first, then bring GitHub's c
  * the app doesn't have "no such", a deploy that can't be put back NOT_WAITING. Its GitHub production: an app with one site
  * alone, a Link once it has where to, Bring in once it's linked (NOT_LINKED). The owner's Mac checks it all again.
  */
-function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct) {
-  const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)));
+function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct, o: { cloud?: boolean; views?: AppViewsOf } = {}) {
+  const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)), o.views);
   const app = apps?.list.find((x) => x.name === act.app);
   if (!apps || !app) throw new HttpError(404, "No such app.");
   // Shown at Read: their level, or Orgo's team in a workspace whose owner isn't (appsOpenFor), where nothing is theirs to change.
   if (apps.level !== "write" || appsOpenFor(viewer) !== "write") throw new HttpError(403, "You can see these apps. Ask the owner for Write to change them.", { code: MEMBER_APPS_READ_ONLY });
   const site = act.site ?? app.name;
   if (![app.name, ...(app.siteNames ?? [])].includes(site)) throw new HttpError(404, "No such app.");
-  if (act.act === "domain" && !apps.owned?.some((d) => d.id === act.zone)) throw new HttpError(404, "Pick a domain this workspace has.");
+  // A domain the workspace has: in a workspace where everything goes through the cloud the owner's Mac's list goes
+  // stale, so only its shape is checked here (cleanAct) and orgo-web holds the computer to the workspace's own.
+  if (act.act === "domain" && !o.cloud && !apps.owned?.some((d) => d.id === act.zone)) throw new HttpError(404, "Pick a domain this workspace has.");
+  // A left over by the name it shows (at Write: SharedApp.leftOver).
+  if (act.act === "removeLeftOver" && !app.leftOver?.some((l) => l.name === act.leftOver)) throw new HttpError(404, "No such left over.");
   if (act.act === "rollback" && !app.deploys?.some((d) => d.id === act.deployment && d.site === site && d.canRollback)) throw new HttpError(409, "That deploy can't be put back.", { code: NOT_WAITING });
   if (isGithubAct(act)) {
     if (app.siteNames?.length && !(act.act === "github" && act.github === null)) throw new HttpError(409, ONE_FOLDER(app.name), { code: NOT_WAITING });
@@ -721,6 +784,12 @@ function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, acc
   }
   return app;
 }
+
+/** appsTouched, for tests. */
+export const appsTouchedFor = (...a: Parameters<typeof appsTouched>) => appsTouched(...a);
+
+/** What each app's own computer last said of the apps (ws-slice.ts AppViews): shown with the owner's Mac's read. */
+type AppViewsOf = Parameters<typeof appsFor>[4];
 
 /** Whether a thread of the owner's is an app thread left out of this view (ws-slice.ts appThreadsFor). */
 const hiddenApp = (blob: Record<string, unknown>, slice: ReturnType<typeof sliceOf>, threadId: unknown) =>
@@ -1009,6 +1078,40 @@ let takeJob: typeof takeAppJob = (...a) => takeAppJob(...a);
 type TakeChat = (o: Parameters<typeof takeChatJob>[0]) => Promise<{ turn: { id: string }; fresh: boolean }>;
 const realTakeChat: TakeChat = (o) => takeChatJob(o);
 let takeChat: TakeChat = realTakeChat;
+/** A computer asked to share its apps' view (turns.ts nudgeAppViews). */
+let nudge: typeof nudgeAppViews = (...a) => nudgeAppViews(...a);
+/** What each app's own computer last said of a workspace's apps (apps-view.ts readAppViews). */
+const realViews = (owner: string, ws: string) => readAppViews(null, owner, ws);
+let viewsFor: (owner: string, ws: string) => Promise<NonNullable<AppViewsOf>> = realViews;
+
+/** Whether a caller's Bops knows the remove acts, removal rows and an act going on a computer (protocol.ts CLOUD_ALL_MIN_VERSION). */
+const knowsAppActs = (req: IncomingMessage) => {
+  const v = appVersionOf(req);
+  return !!v && !olderThan(v, CLOUD_ALL_MIN_VERSION);
+};
+
+/**
+ * Each computer the workspace's apps live on asked to share its view of them when the newest one shown is getting old
+ * (turns.ts nudgeAppViews): the owner's Mac's read (appsForMembers.at) or that computer's own (bops.app_views).
+ */
+function nudgeViews(blob: Record<string, unknown>, target: LiveTarget, views: NonNullable<AppViewsOf>) {
+  const w = list(blob.workspaces).find((x) => x.id === target.ws);
+  const hosted = w && w.hostedApps && typeof w.hostedApps === "object" && !Array.isArray(w.hostedApps) ? (w.hostedApps as Record<string, unknown>) : {};
+  const seen = w?.appsForMembers && typeof w.appsForMembers === "object" ? (w.appsForMembers as { at?: unknown }) : {};
+  const macAt = typeof seen.at === "number" ? seen.at : 0;
+  const by = new Map<string, { apps: string[]; newest: number }>();
+  for (const [name, h] of Object.entries(hosted)) {
+    if (!h || typeof h !== "object" || Array.isArray(h)) continue;
+    const r = h as Record<string, unknown>;
+    if (r.lost !== undefined || typeof r.computerId !== "string" || !r.computerId) continue;
+    const d = r.computerId.toLowerCase();
+    const g = by.get(d) ?? { apps: [], newest: macAt };
+    g.apps.push(name);
+    if (Object.hasOwn(views, name)) g.newest = Math.max(g.newest, views[name].at);
+    by.set(d, g);
+  }
+  for (const [desktop, g] of by) nudge(target.account, target.ws, desktop, g.apps.slice(0, 30), g.newest);
+}
 
 /** Whether a caller's Bops knows the GitHub acts (protocol.ts GITHUB_ACTS_MIN_VERSION): it says its version, at that or newer. */
 const knowsGithubActs = (req: IncomingMessage) => {
@@ -1077,6 +1180,9 @@ const actIn: Route = {
       if (role.role !== "admin" && !actor.can?.appSecrets) throw new HttpError(403, `The owner or an Admin can let you change ${POWER_WORDS.appSecrets.name} in Team.`, { code: ADMIN_ONLY });
       if (!(await adminGate(target.account, GITHUB_ACTS_MIN_VERSION))) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
     }
+    // Off the web: an Admin, or a Member with Remove apps on in Team; its code too (`repo`, Delete its code) an Admin alone.
+    if (isRemoveAct(body.act) && role.role !== "admin" && !actor.can?.removeApps) throw new HttpError(403, REMOVE_APPS_LINE, { code: ADMIN_ONLY });
+    if (((body.act.act === "remove" && body.act.repo) || body.act.act === "deleteCode") && role.role !== "admin") throw new HttpError(403, ADMIN_LINE, { code: ADMIN_ONLY });
     const viewer = viewerOf(user!, role, actor.adminActs);
     // Their own view, every item whole and with the owner's ids: what they may act on is only what they're shown.
     const slice = sliceOf(blob, target.ws, viewer);
@@ -1085,9 +1191,18 @@ const actIn: Route = {
     // Everything through the cloud: an answer sent again (a lost 202) whose ask holds this very person's reply is done.
     if (body.act.act === "answer" && answeredBy(blob, body.act.askId, user!.id) && (await cloudAll(target.account, target.ws))) return sendJson(res, 202, CLOUD_DONE);
     if (isAppAct(body.act)) {
-      appsTouched(slice, viewer, access, body.act);
+      const still = () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked;
+      // Its code, once the app is gone: Bops Cloud's own call to Ingot with the Admin's key, whichever way the workspace goes.
+      if (body.act.act === "deleteCode") return deleteCodeHere(res, { user: user!, role, target, viewer, projectId, act: body.act, bearer: bearer(req), still });
+      // Everything through the cloud (turns.ts allCloud): the app's own computer does it, never the owner's Mac.
+      const cloud = await cloudAll(target.account, target.ws);
+      const views = cloud ? await viewsFor(target.account, target.ws) : undefined;
+      appsTouched(slice, viewer, access, body.act, { cloud, views });
       // Done here (the setting) and by the app's own computer (Link, Bring in), the owner's Mac on or off (githubAct).
-      if (isGithubAct(body.act)) return githubAct(res, { user: user!, role, target, viewer, projectId, key: body.key, act: body.act, blob, bearer: bearer(req), still: () => (noticed.get(keyOf(user!.id, projectId))?.n ?? 0) <= asked });
+      if (isGithubAct(body.act)) return githubAct(res, { user: user!, role, target, viewer, projectId, key: body.key, act: body.act, blob, bearer: bearer(req), still, cloud });
+      if (cloud) return appJobAct(res, { user: user!, role, target, viewer, projectId, key: body.key, act: body.act, blob, views, still });
+      // The owner's Mac takes a remove from CLOUD_ALL_MIN_VERSION on (an older one drops it).
+      if (isRemoveAct(body.act) && !(await adminGate(target.account, CLOUD_ALL_MIN_VERSION))) throw new HttpError(409, OWNER_OLD_LINE, { code: OWNER_BOPS_OLD });
     }
     // A change as the owner's window makes it: the power it needs (an Admin has every one), and only this workspace's
     // bots (at Write) and apps (Your Apps at Write), once the owner's Bops takes it (changeTouched).
@@ -1901,12 +2016,58 @@ const settingOf = (h: Record<string, unknown> | null) => (h?.github && typeof h.
 
 /** How a GitHub act on an app says where it publishes, in the app's bot's chat (the folder: "the whole repo" for ""). */
 const whereWords = (g: GithubSetting) => `GitHub ${g.repo}, ${g.branch}, ${g.path ? `folder ${g.path}` : "the whole repo"}`;
-/** What a "githubLink" or "githubPull" act says in the app's bot's chat as it goes to its computer. */
-export const jobAsked = (name: string, bot: string, act: GithubJob["act"], app: string) =>
-  act === "githubLink" ? `${name} asked ${bot}'s computer to link ${app} to GitHub.` : `${name} asked ${bot}'s computer to bring in GitHub's changes to ${app}.`;
-/** 409 GITHUB_NO_KEY: the app's computer can't call GitHub (no bot on it was given the key), and the owner's Mac isn't on to do it. */
-export const noGithubKey = (bot: string, saved: boolean) =>
-  `${bot}'s computer has no GitHub key, so it can't do this while the owner's Mac is off. Give ${bot} the GitHub key in Keys, then try again.${saved ? " Where it publishes is saved." : ""}`;
+/** What an app's job says in the app's bot's chat as it goes to its computer (Bops' own note). */
+export const jobAsked = (name: string, bot: string, job: AppJob): string => {
+  const ask = (what: string) => `${name} asked ${bot}'s computer to ${what}.`;
+  switch (job.act) {
+    case "githubLink":
+      return ask(`link ${job.app} to GitHub`);
+    case "githubPull":
+      return ask(`bring in GitHub's changes to ${job.app}`);
+    case "deploy":
+      return ask(job.env === "prod" ? `publish ${job.app}` : `deploy ${job.app}`);
+    case "rollback":
+      return ask(`go back to an earlier deploy of ${job.app}`);
+    case "settings":
+      return ask(`change ${job.app}'s settings`);
+    case "domain":
+      return ask(`point a domain at ${job.app}`);
+    case "remove":
+      return ask(`remove ${job.app}`);
+    case "removeSite":
+      return ask(`remove ${job.site} from ${job.app}`);
+    case "removeLeftOver":
+      return ask(`remove the left over ${job.leftOver}`);
+  }
+};
+/**
+ * 409 GITHUB_NO_KEY: the app's computer can't call GitHub (no bot on it was given the key), and the owner's Mac isn't on to
+ * do it, or never does it (`cloud`: a workspace where everything goes through the cloud).
+ */
+export const noGithubKey = (bot: string, saved: boolean, cloud = false) =>
+  `${bot}'s computer has no GitHub key, so it can't do this${cloud ? "" : " while the owner's Mac is off"}. Give ${bot} the GitHub key in Keys, then try again.${saved ? " Where it publishes is saved." : ""}`;
+
+/** Why an app's computer can't take a job now, in a workspace where everything goes through the cloud (appJobAct), and its code. */
+export function jobRefusal(why: AppJobRefusal, o: { app: string; bot: string; owner: string; saved?: boolean }): HttpError {
+  switch (why) {
+    case "home":
+      return new HttpError(409, `${o.app} lost its computer, so nothing can run it from here.`, { code: COMPUTER_NOT_READY });
+    case "noComputer":
+      return new HttpError(409, `${o.bot} has no computer of its own, so ${o.app} can't change from here. Give ${o.bot} a computer in ${o.bot}'s settings.`, { code: COMPUTER_NOT_READY });
+    case "runner":
+      return new HttpError(409, jobNote("noRunner", o.owner, o.bot) ?? JOB_OFF(o.bot), { code: COMPUTER_NOT_READY });
+    case "old":
+      return new HttpError(409, `${o.bot}'s computer runs an older Bops that can't do this yet. It updates the next time ${o.owner} opens Bops.`, { code: COMPUTER_NOT_READY });
+    case "key":
+      return new HttpError(409, noGithubKey(o.bot, !!o.saved, true), { code: GITHUB_NO_KEY });
+    case "busy":
+      return new HttpError(409, "Its computer is still on the last one. Try again once it's done.", { code: NOT_WAITING });
+    case "behind":
+      return new HttpError(409, `${o.app} still runs an old copy on another computer, so it can't be removed from here yet.`, { code: NOT_WAITING });
+  }
+}
+/** 409 CLOUD_NOT_YET: a kind its computer isn't given now (config.ts appJobs, the kill switch). */
+const JOB_OFF = (bot: string) => `${bot}'s computer can't do this from the cloud yet.`;
 
 /**
  * A GitHub act on an app (protocol.ts MemberGithubAct), checked by actIn (the power of Publish, the owner's last Mac at
@@ -1918,7 +2079,7 @@ export const noGithubKey = (bot: string, saved: boolean) =>
  */
 async function githubAct(
   res: ServerResponse,
-  o: { user: CloudUser; role: WsAccess; target: LiveTarget; viewer: SliceViewer; projectId: string; key: string; act: MemberGithubAct; blob: Record<string, unknown>; bearer: string; still: () => boolean },
+  o: { user: CloudUser; role: WsAccess; target: LiveTarget; viewer: SliceViewer; projectId: string; key: string; act: MemberGithubAct; blob: Record<string, unknown>; bearer: string; still: () => boolean; cloud?: boolean },
 ) {
   const { user, role, target, viewer, projectId, key, act } = o;
   const who = whoOf(user);
@@ -1944,7 +2105,7 @@ async function githubAct(
       ...(role.role === "admin" ? { role: "admin" as const } : {}),
       job,
     },
-    words: (bot) => jobAsked(who.name, bot, job.act, job.app),
+    words: (bot) => jobAsked(who.name, bot, job),
     // Under the lock, on the state as it is then: still theirs to do (appsTouched), as actIn found it.
     check: (locked) => {
       const slice = sliceOf(locked, target.ws, viewer);
@@ -1952,8 +2113,13 @@ async function githubAct(
       appsTouched(slice, viewer, viewerAccess(slice.workspace, viewer), { act: job.act, app: job.app });
     },
     still: o.still,
+    min: GITHUB_ACTS_MIN_VERSION,
+    needsKey: true,
+    ...(o.cloud ? { cloud: true } : {}),
   });
-  if (taken.where === "computer") return sendJson(res, 202, { ok: true, macOn: true, stored: true, computer: true, turn: taken.turn.id } satisfies MemberActAnswer);
+  if (taken.where === "computer") return sendJson(res, 202, { ok: true, macOn: true, stored: true, computer: true, turn: taken.turn.id, ...(o.cloud ? { cloud: true as const } : {}) } satisfies MemberActAnswer);
+  // Everything through the cloud: said now, never queued for the owner's Mac (appJobAct's words).
+  if (o.cloud) throw jobRefusal(taken.why, { app: job.app, bot: taken.bot, owner: ownerOf(o.blob), saved: act.act === "github" });
   // The app's computer can't do it now: the owner's Mac, which has the owner's own key, as a member's other app acts. Only
   // the key missing, and that Mac off: said now, as it would wait for nothing.
   if (taken.why === "key" && !isOn(target.account)) throw new HttpError(409, noGithubKey(taken.bot, act.act === "github"), { code: GITHUB_NO_KEY });
@@ -1973,6 +2139,184 @@ async function githubAct(
     throw new HttpError(404, "No such workspace");
   }
   sendJson(res, 202, { ok: true, macOn: isOn(target.account) } satisfies MemberActAnswer);
+}
+
+/** An app act its own computer does in a workspace where everything goes through the cloud (all but the GitHub ones and deleteCode). */
+type AppJobAct = Exclude<MemberAppAct, MemberGithubAct | { act: "deleteCode" }>;
+
+/** The job a member's app act asks of the app's computer (protocol.ts TurnJob): the act's own fields, as cleanAct kept them. */
+function jobOf(a: AppJobAct): Exclude<AppJob, { act: "githubLink" | "githubPull" }> {
+  switch (a.act) {
+    case "deploy":
+      return { act: "deploy", app: a.app, ...(a.site ? { site: a.site } : {}), ...(a.at ? { at: a.at } : {}), ...(a.env === "prod" ? { env: "prod" as const } : {}) };
+    case "rollback":
+      return { act: "rollback", app: a.app, deployment: a.deployment, ...(a.site ? { site: a.site } : {}), ...(a.env === "prod" ? { env: "prod" as const } : {}) };
+    case "settings":
+      return {
+        act: "settings",
+        app: a.app,
+        ...(a.site ? { site: a.site } : {}),
+        ...(a.port !== undefined ? { port: a.port } : {}),
+        ...(a.install !== undefined ? { install: a.install } : {}),
+        ...(a.build !== undefined ? { build: a.build } : {}),
+        ...(a.start !== undefined ? { start: a.start } : {}),
+        ...(a.health !== undefined ? { health: a.health } : {}),
+      };
+    case "domain":
+      return { act: "domain", app: a.app, ...(a.site ? { site: a.site } : {}), zone: a.zone, ...(a.subdomain ? { subdomain: a.subdomain } : {}) };
+    case "remove":
+      return { act: "remove", app: a.app, ...(a.repo ? { repo: true as const } : {}) };
+    case "removeSite":
+      return { act: "removeSite", app: a.app, site: a.site };
+    case "removeLeftOver":
+      return { act: "removeLeftOver", app: a.app, leftOver: a.leftOver };
+  }
+}
+
+/**
+ * A member's act on an app in a workspace where everything goes through the cloud (turns.ts allCloud), checked by actIn
+ * (Your Apps at Write, the Publish gate, Remove apps): done by the app's own computer as a job (turns.ts takeAppJob,
+ * `cloud`), never by the owner's Mac, which is never asked and never falls back. A kind its computers aren't given now
+ * (config.ts appJobs) is CLOUD_NOT_YET. An app whose computer is gone, with nothing left on another one, is taken out by
+ * Bops Cloud itself (removeLostHere): nothing of it is on the web. Else owed (202, `cloud`: the viewer's window shows it
+ * sending to its computer until the app's act row says how it went), or refused now in words (jobRefusal). A domain's
+ * zone was checked for its shape only (cleanAct): orgo-web holds the computer to the workspace's own domains.
+ */
+async function appJobAct(
+  res: ServerResponse,
+  o: { user: CloudUser; role: WsAccess; target: LiveTarget; viewer: SliceViewer; projectId: string; key: string; act: AppJobAct; blob: Record<string, unknown>; views?: AppViewsOf; still: () => boolean },
+) {
+  const { user, role, target, viewer, projectId, key, act } = o;
+  const who = whoOf(user);
+  const h = hostingIn(o.blob, target.ws, act.app);
+  const bot = typeof h?.botId === "string" ? nameOf(o.blob, h.botId) : "The bot";
+  if (!config.appJobs().includes(act.act)) throw new HttpError(409, JOB_OFF(bot), { code: CLOUD_NOT_YET });
+  if ((act.act === "remove" || act.act === "removeSite") && h && h.lost !== undefined && !list(h.behind).length) {
+    await removeLostHere({ target, viewer, act, who, key, views: o.views, still: o.still });
+    return sendJson(res, 202, { ok: true, macOn: true, stored: true, cloud: true } satisfies MemberActAnswer);
+  }
+  const job = jobOf(act);
+  const taken = await takeJob({
+    account: target.account,
+    wsId: target.ws,
+    job,
+    id: `msg_job_${user.id}_${key}`,
+    member: {
+      ...who,
+      ref: key,
+      ...(role.joinedAt !== undefined ? { joinedAt: role.joinedAt } : {}),
+      projectId,
+      ...(role.role === "admin" ? { role: "admin" as const } : {}),
+      job,
+    },
+    words: (b) => jobAsked(who.name, b, job),
+    // Under the lock, on the state as it is then: still theirs to do (appsTouched), as actIn found it.
+    check: (locked) => {
+      const slice = sliceOf(locked, target.ws, viewer);
+      if (!slice.workspace) throw new HttpError(404, "No such workspace");
+      appsTouched(slice, viewer, viewerAccess(slice.workspace, viewer), act, { cloud: true, views: o.views });
+    },
+    still: o.still,
+    min: CLOUD_ALL_MIN_VERSION,
+    // Publish of an app on GitHub: it pushes there, with a GitHub key given to a bot on its computer.
+    needsKey: job.act === "deploy" && job.env === "prod" && !!settingOf(h),
+    cloud: true,
+  });
+  if (taken.where === "computer") return sendJson(res, 202, { ok: true, macOn: true, stored: true, cloud: true, turn: taken.turn.id } satisfies MemberActAnswer);
+  throw jobRefusal(taken.why, { app: act.app, bot: taken.bot, owner: ownerOf(o.blob) });
+}
+
+/**
+ * A remove of an app whose computer is gone (AppHosting.lost) with no copy left on another computer (behind), or of one
+ * of its sites: nothing of it is on the web, so Bops Cloud takes it out of the owner's state itself, under their lock
+ * (turns.ts withAppRemoved, withSiteRemoved), checked again on the state as it is then. The app's members' view goes too.
+ * Kept by their key: the same act again changes nothing.
+ */
+async function removeLostHere(o: { target: LiveTarget; viewer: SliceViewer; act: Extract<AppJobAct, { act: "remove" | "removeSite" }>; who: MemberWho; key: string; views?: AppViewsOf; still: () => boolean }) {
+  const { target, act, who, key } = o;
+  const written = await tx(async (c) => {
+    await lockUser(c, target.account);
+    const blob = await lockedState(c, target.account);
+    const slice = sliceOf(blob, target.ws, o.viewer);
+    if (!slice.workspace) throw new HttpError(404, "No such workspace");
+    appsTouched(slice, o.viewer, viewerAccess(slice.workspace, o.viewer), act, { cloud: true, views: o.views });
+    const h = hostingIn(blob, target.ws, act.app);
+    if (!h) throw new HttpError(404, "No such app.");
+    if (h.lost === undefined || list(h.behind).length) throw new HttpError(409, "That changed meanwhile. Try again.", { code: NOT_WAITING });
+    if (appActKept(blob, target.ws, act.app, key)) return null;
+    const at = now();
+    let next: Record<string, unknown>;
+    if (act.act === "remove") next = withAppRemoved(blob, target.ws, act.app, { key, userId: who.userId, name: who.name, app: act.app, ok: true, ...(act.repo ? { codeLeft: true } : {}), at });
+    else next = withAppAct(withSiteRemoved(blob, target.ws, act.app, act.site) ?? blob, target.ws, act.app, { key, userId: who.userId, name: who.name, act: "removeSite", site: act.site, ok: true, at });
+    await writeOwnerState(c, target.account, next);
+    if (act.act === "remove") await c.query("DELETE FROM bops.app_views WHERE user_id = $1 AND ws_id = $2 AND app = $3", [target.account, target.ws, act.app]);
+    if (!o.still()) throw new HttpError(404, "No such workspace");
+    return next;
+  });
+  if (!written) return;
+  announce(target.account);
+  stateWritten(target.account, written, "cloud");
+}
+
+/** How long after an app was removed its code can still be deleted from Your Apps (deleteCodeHere). */
+export const DELETE_CODE_MS = 24 * 3600_000;
+/** Ingot's words, made one plain line. */
+const ingotWords = (v: unknown) => (typeof v === "string" && v.trim() ? v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 200) : null);
+/** A removal's words without what an earlier Delete its code added (deleteCodeHere adds it again). */
+const baseSaid = (v: unknown) => (typeof v === "string" ? v.replace(/\s*Its code (?:was deleted too|wasn't deleted:).*$/, "").trim() : "");
+
+/**
+ * An Admin's Delete its code (a "deleteCode" act) for an app removed with its code left (Workspace.appsRemoved codeLeft,
+ * at most DELETE_CODE_MS ago, the app gone from the workspace): Bops Cloud asks Ingot to delete its repo at once, with the
+ * Admin's own Orgo key from this request (Ingot takes the workspace's owner or an Admin, never a computer's token), used
+ * once and never kept or logged. Their role was asked of orgo-web afresh (actIn). Done (200, 204, or 404: there's none),
+ * the removal row says so and its code isn't left; refused, the row keeps Ingot's words and its code stays left. The
+ * same in either kind of workspace: the owner's Mac never does it.
+ */
+async function deleteCodeHere(res: ServerResponse, o: { user: CloudUser; role: WsAccess; target: LiveTarget; viewer: SliceViewer; projectId: string; act: Extract<MemberRemoveAct, { act: "deleteCode" }>; bearer: string; still: () => boolean }) {
+  const { target, act } = o;
+  if (o.role.role !== "admin") throw new HttpError(403, ADMIN_LINE, { code: ADMIN_ONLY });
+  if (appsOpenFor(o.viewer) !== "write") throw new HttpError(403, "You can see these apps. Ask the owner for Write to change them.", { code: MEMBER_APPS_READ_ONLY });
+  const rowOf = (blob: Record<string, unknown>) => {
+    const w = list(blob.workspaces).find((x) => x.id === target.ws);
+    if (!w || hostingIn(blob, target.ws, act.app)) return null;
+    return list(w.appsRemoved).find((r) => r.app === act.app && r.ok === true && r.codeLeft === true && typeof r.at === "number" && now() - r.at <= DELETE_CODE_MS && typeof r.key === "string") ?? null;
+  };
+  if (!rowOf(await ownerState(target.account))) throw new HttpError(404, "No such app.");
+  let answer: { status: number; why: string | null };
+  try {
+    const r = await fetchImpl(`${config.ingotUrl()}/api/v1/w/${encodeURIComponent(o.projectId.toLowerCase())}/repos/${act.app}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${o.bearer}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const j = (await r.json().catch(() => null)) as { message?: unknown; error?: unknown } | null;
+    answer = { status: r.status, why: ingotWords(j?.message) ?? ingotWords(j?.error) };
+  } catch {
+    throw new HttpError(503, "Ingot isn't answering. Try again.");
+  }
+  if ([502, 503, 504].includes(answer.status)) throw new HttpError(503, "Ingot isn't answering. Try again.");
+  const deleted = answer.status === 200 || answer.status === 204 || answer.status === 404;
+  const why = answer.why ?? `Ingot answered ${answer.status}`;
+  const written = await tx(async (c) => {
+    await lockUser(c, target.account);
+    const blob = await lockedState(c, target.account);
+    const row = rowOf(blob);
+    if (!row) return null;
+    const base = baseSaid(row.said);
+    const said = deleted ? `${base ? `${base} ` : ""}Its code was deleted too.` : `${base ? `${base} ` : ""}Its code wasn't deleted: ${why}`;
+    const next: Record<string, unknown> = { ...row, said };
+    if (deleted) delete next.codeLeft;
+    const out = { ...blob, workspaces: list(blob.workspaces).map((w) => (w.id === target.ws ? { ...w, appsRemoved: list(w.appsRemoved).map((r) => (r === row ? next : r)) } : w)) };
+    await writeOwnerState(c, target.account, out);
+    if (!o.still()) throw new HttpError(404, "No such workspace");
+    return out;
+  });
+  if (written) {
+    announce(target.account);
+    stateWritten(target.account, written, "cloud");
+  }
+  sendJson(res, 202, { ok: true, macOn: true, stored: true } satisfies MemberActAnswer);
 }
 
 /**
@@ -2390,6 +2734,10 @@ export function resetMembers(
     takeJob?: typeof takeAppJob;
     /** A chat's Compact as a job (unset: turns.ts takeChatJob). */
     takeChat?: TakeChat;
+    /** How a computer is asked to share its apps' view (unset: turns.ts nudgeAppViews). */
+    nudge?: typeof nudgeAppViews;
+    /** What the apps' own computers last said of them (unset: bops.app_views; none for a test that fakes the owner's state). */
+    appViews?: (owner: string, ws: string) => Promise<NonNullable<AppViewsOf>>;
   } = {},
 ) {
   kept.clear();
@@ -2405,6 +2753,8 @@ export function resetMembers(
   wake = opts.wake ?? ((...a) => wakeComputer(...a));
   takeJob = opts.takeJob ?? ((...a) => takeAppJob(...a));
   takeChat = opts.takeChat ?? realTakeChat;
+  nudge = opts.nudge ?? ((...a) => nudgeAppViews(...a));
+  viewsFor = opts.appViews ?? (opts.state ? async () => ({}) : realViews);
   queue = opts.queue ?? realQueue;
   isOn = opts.isOn ?? realIsOn;
   const faked = opts.isOn;

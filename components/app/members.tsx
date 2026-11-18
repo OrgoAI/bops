@@ -558,7 +558,7 @@ export const withPower = (can: Partial<Record<Power, true>> | undefined, power: 
 
 /**
  * What someone may change (lib/member-access.ts MemberAccess.can: the org chart, bot settings, memory and skills, workspace
- * settings, app secrets, spending, the owner's Mac), each Off or On as Use its computer is, saying on hover what it covers.
+ * settings, app secrets, spending, the owner's Mac, removing apps), each Off or On as Use its computer is, saying on hover what it covers.
  * `locked`: an Admin's, every one on.
  */
 export function PowerRows({ can, onChange, disabled, locked, lead }: { can?: Partial<Record<Power, true>>; onChange?: (next: Partial<Record<Power, true>>) => void; disabled?: boolean; locked?: boolean; lead?: React.ReactNode }) {

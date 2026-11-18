@@ -143,8 +143,58 @@ const KEPT_MARKS = ["sessions", "routines", "watches"] as const;
 
 function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolean, me?: Me): unknown {
   const v = mergeEither(key, b, m, t, top, me);
-  if (top && key === "workspaces") return keepAppsLevels(v, [m, t, b]);
+  if (top && key === "workspaces") return keepAppsLevels(keepRemovals(v, b, m, t, me), [m, t, b]);
   return top && (KEPT_MARKS as readonly string[]).includes(key) ? keepMarks(v, [b, m, t]) : v;
+}
+
+/** How many removals a workspace keeps (lib/hosted-apps.ts APPS_REMOVED_KEPT). */
+const REMOVED_KEPT = 10;
+
+/**
+ * Apps someone other than the owner removed (Workspace.appsRemoved, rows by their act's `key`), put together from both
+ * sides: every row either has (one changed on one side only is that side's, changed on both this Mac's, an older Bops's
+ * theirs), newest first, REMOVED_KEPT at most. And an app a row new on either side since `base` names (one that went:
+ * `ok`) stays removed, even where the other side changed it meanwhile (its record, what members see of it and its
+ * Preview passwords): Bops Cloud dropped it as the app's own computer said it was off the web, and a Mac that touched
+ * it since would otherwise bring it back. A row both sides had already never drops one: an app of that name made after
+ * both saw the removal is a new app, and stays (so is one where both sides have the row, as a Mac's first merge does).
+ */
+export function keepRemovals(merged: unknown, base: unknown, mine: unknown, theirs: unknown, me?: Me): unknown {
+  if (!Array.isArray(merged)) return merged;
+  const wsIn = (copy: unknown, id: string): Blob | undefined => (Array.isArray(copy) ? copy.find((x): x is Blob => isObject(x) && x.id === id) : undefined);
+  const rowsOf = (w: Blob | undefined): Blob[] => (w && Array.isArray(w.appsRemoved) ? w.appsRemoved.filter((r): r is Blob => isObject(r) && typeof r.key === "string" && typeof r.app === "string") : []);
+  return merged.map((w) => {
+    if (!isObject(w) || typeof w.id !== "string") return w;
+    const [b, m, t] = [rowsOf(wsIn(base, w.id)), rowsOf(wsIn(mine, w.id)), rowsOf(wsIn(theirs, w.id))];
+    if (!m.length && !t.length) return w;
+    const was = new Map(b.map((r) => [r.key as string, r]));
+    const byKey = new Map<string, Blob>();
+    for (const r of m) byKey.set(r.key as string, r);
+    for (const r of t) {
+      const k = r.key as string;
+      const x = byKey.get(k);
+      // Changed on one side only: that side's. On both: this Mac's (an older Bops's: theirs).
+      if (!x || (was.has(k) && same(x, was.get(k))) || (me?.older && !same(r, was.get(k)))) byKey.set(k, r);
+    }
+    const rows = [...byKey.values()].sort((x, y) => (Number(y.at) || 0) - (Number(x.at) || 0)).slice(0, REMOVED_KEPT);
+    const out: Blob = { ...w, appsRemoved: rows };
+    // Removed since the base on one side, which the other hasn't seen: gone from the result, whatever the other side did
+    // to it. (One both sides have, the base or not, was seen by both: an app of its name since is a new one.)
+    const inM = new Set(m.map((r) => r.key as string));
+    const inT = new Set(t.map((r) => r.key as string));
+    const gone = new Set(rows.filter((r) => r.ok === true && !was.has(r.key as string) && !(inM.has(r.key as string) && inT.has(r.key as string))).map((r) => r.app as string));
+    if (gone.size) {
+      if (isObject(out.hostedApps)) out.hostedApps = Object.fromEntries(Object.entries(out.hostedApps).filter(([name]) => !gone.has(name)));
+      if (isObject(out.appsForMembers) && isObject(out.appsForMembers.apps))
+        out.appsForMembers = { ...out.appsForMembers, apps: Object.fromEntries(Object.entries(out.appsForMembers.apps).filter(([name]) => !gone.has(name))) };
+      if (isObject(out.previewPasswords)) {
+        const left = Object.fromEntries(Object.entries(out.previewPasswords).filter(([k]) => !gone.has(k.split("/")[0])));
+        if (Object.keys(left).length) out.previewPasswords = left;
+        else delete out.previewPasswords;
+      }
+    }
+    return same(out, w) ? w : out;
+  });
 }
 
 const LEVELS = new Set(["none", "read", "write"]);

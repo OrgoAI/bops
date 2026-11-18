@@ -4,6 +4,7 @@
  */
 
 import { POSTHOG_HOST } from "./analytics-rules.ts";
+import { APP_ACT_JOBS, type AppJobKind } from "./protocol.ts";
 
 const env = (name: string) => process.env[name]?.trim() || "";
 
@@ -101,6 +102,19 @@ export const config = {
   planLimits: () => env("BOPS_PLAN_LIMITS") === "1",
   /** The area code a plan's number is bought in (AgentPhone picks a nearby one when there's none), as the app's BOPS_PHONE_AREA. */
   phoneArea: () => env("BOPS_PHONE_AREA") || "415",
+  /**
+   * The kinds of job an app's own computer is given for a member's Your Apps act in a workspace where everything goes
+   * through the cloud (members.ts appJobAct; protocol.ts AppJobKind), comma separated: a kill switch alone. Unset: every
+   * kind. "none": none. A kind left out is refused at once (CLOUD_NOT_YET) and its button hidden (SharedWsSlice.appJobs).
+   */
+  appJobs: (): AppJobKind[] => {
+    const v = env("BOPS_APP_JOBS");
+    if (!v) return [...APP_ACT_JOBS];
+    const said = new Set(v.split(",").map((x) => x.trim()));
+    return APP_ACT_JOBS.filter((k) => said.has(k));
+  },
+  /** The central Ingot server (lib/server/ingot.ts ingotUrl, the same BOPS_INGOT_URL): where an Admin's Delete its code goes (members.ts deleteCodeHere). */
+  ingotUrl: () => (env("BOPS_INGOT_URL") || "https://bops.bot/api/ingot").replace(/\/+$/, ""),
 
   /** Upstreams, overridable for tests (a fake server on localhost). */
   upstream: {

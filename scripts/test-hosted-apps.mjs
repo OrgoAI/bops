@@ -57,6 +57,14 @@
 // pointed anywhere, each refusal in words, one that hangs said as unknown and never sent again; auto-renew and DNS of
 // only the workspace's own domains, read again from Orgo first; a name under a bought domain used on an app; the window
 // only, an @orgo.ai account only, and nothing asked of Orgo on a bot's computer.
+//
+// A Published project is made only when it's first needed (Publish, a domain pointed at it, its variables): a deploy to
+// the Preview makes the Preview alone, settings saved before go on the record (and into the Preview's create), and a
+// Publish refused for no domain makes nothing. An app an older Bops made one for keeps it (olderPublished). Then a
+// member's job on the app's own computer's runner (appJob): each kind, a kind it doesn't know and another computer's app
+// doing nothing, the domain from its computer's own list, a left over by name, Orgo not taking its sign in yet said
+// plainly; Remove site and Remove app clearing its run fields and never dropping the record, a domain that won't come
+// off keeping its site up, what may be left in Cloudflare said; and what members see of its apps (appsViewHere).
 // Usage: node --conditions=react-server scripts/test-hosted-apps.mjs
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -1316,6 +1324,19 @@ const L = await import(`${root}/lib/server/app-labels.ts`);
 const prodProject = (app, site = app, c = "c_boppy") => web.projects.find((p) => p.computerId === c && L.isLabelOf("prod", p.name, `${PROJECT}/${app}`, site));
 const previewProject = (app, site = app, c = "c_boppy") => web.projects.find((p) => p.computerId === c && L.isLabelOf("preview", p.name, `${PROJECT}/${app}`, site));
 const previewUrl = (app, site = app, c = "c_boppy") => web.urls.find((u) => u.computerId === c && L.isLabelOf("preview", u.label, `${PROJECT}/${app}`, site));
+/**
+ * A site's Published project as an older Bops made one with its first Preview (this Bops makes it only on Publish, a
+ * domain or its variables): a marked name on a free port, no public URL, nothing deployed. This one finds it by its
+ * label's seal and keeps it as it is (no cleanup of an empty one).
+ */
+const olderPublished = async (app, site = app, c = "c_boppy") => {
+  const taken = new Set([...web.projects.filter((p) => p.computerId === c).map((p) => p.port), ...web.urls.filter((u) => u.computerId === c).map((u) => u.port)]);
+  let port = 3100;
+  while (taken.has(port)) port++;
+  const made = await O.deploys.create(c, { repo: `${PROJECT}/${app}`, name: L.newLabel("prod", `${PROJECT}/${app}`, site), port, publicUrl: false });
+  assert.ok(made.enabled, "Published made");
+  return made.value;
+};
 const Chat = await import(`${root}/lib/server/chat.ts`);
 const AppsRoute = await import(`${root}/app/api/hosted-apps/route.ts`);
 const AppRoute = await import(`${root}/app/api/hosted-apps/[name]/route.ts`);
@@ -1944,7 +1965,7 @@ await check("No work_on_app or deploy_app on a routine's run or a turn someone e
 /* ---------------- Deploying ---------------- */
 
 let first;
-await check("A deploy from the window goes to its Preview: Published's project made first (a random marked name, port 3100, no public URL, nothing deployed), then its Preview's link with a label of its own, then its project named as that label on its port, the newest queued there", async () => {
+await check("A deploy from the window goes to its Preview, and makes no Published project (that waits for Publish or a domain): its Preview's link with a label of its own on port 3100, then its project named as that label on its port, the newest queued there", async () => {
   web.projects = [];
   web.urls = [];
   S.update((s) => {
@@ -1958,23 +1979,21 @@ await check("A deploy from the window goes to its Preview: Published's project m
   const n = web.calls.length;
   const r = await post("recipe-box", { ws: WS, action: "deploy" });
   assert.equal(r.status, 200);
-  assert.equal(web.projects.length, 2);
-  const prod = prodProject("recipe-box");
+  assert.equal(web.projects.length, 1, "its Preview's alone");
+  assert.equal(prodProject("recipe-box"), undefined, "no Published project yet");
   const pv = previewProject("recipe-box");
-  assert.ok(prod && pv, "a Published and a Preview project");
-  assert.deepEqual(prod.created, { source: "ingot", repo: `${PROJECT}/recipe-box`, name: prod.name, port: 3100, deploy: false, public_url: false });
-  assert.match(prod.name, /^[a-z0-9]{12}$/);
-  assert.equal(pv.port, 3101);
+  assert.ok(pv, "a Preview project");
+  assert.equal(pv.port, 3100);
   assert.equal(pv.created.env.AUTH_URL, `https://${pv.name}.orgo.dev`, "sign in at its own link");
   assert.equal(pv.created.env.AUTH_TRUST_HOST, "true");
-  // Its link first, with the project's name as its label, then the project (made after Published's).
+  // Its link first, with the project's name as its label, then the project.
   const order = web.calls.slice(n).filter((c) => c.method === "POST" && /\/(public-urls|deploy-projects)$/.test(c.path)).map((c) => c.path.split("/").at(-1));
-  assert.deepEqual(order, ["deploy-projects", "public-urls", "deploy-projects"]);
-  assert.deepEqual(web.urls.map((u) => [u.label, u.port, u.owned]), [[pv.name, 3101, false]]);
+  assert.deepEqual(order, ["public-urls", "deploy-projects"]);
+  assert.deepEqual(web.urls.map((u) => [u.label, u.port, u.owned]), [[pv.name, 3100, false]]);
   // orgo-web takes "<project>/<name>" only (checkIngotRepo, which the fake applies): a bare name is refused.
   await assert.rejects(O.deploys.create("c_boppy", { repo: "recipe-box", name: "bare", port: 3999 }), (e) => e instanceof O.OrgoError && e.code === "INVALID_REPO");
   assert.deepEqual(callsSince(n, "POST", /\/deploy-projects\/[^/]+\/deployments$/).map((c) => [c.path.split("/")[5], c.body]), [[pv.id, {}]], "the newest on main, on the Preview only");
-  assert.equal(hostedApps()["recipe-box"].projectId, prod.id);
+  assert.equal(hostedApps()["recipe-box"].projectId, undefined, "no Published project kept");
   assert.equal(hostedApps()["recipe-box"].preview, pv.name, "its label kept as a copy");
   assert.equal(hostedApps()["recipe-box"].url, undefined, "no address kept");
   assert.equal(r.body.app.name, "recipe-box");
@@ -1982,6 +2001,10 @@ await check("A deploy from the window goes to its Preview: Published's project m
   assert.equal(r.body.app.preview.url, `https://${pv.name}.orgo.dev`);
   assert.deepEqual([r.body.app.preview.live.state, r.body.app.preview.live.at], ["queued", first.id]);
   assert.equal(r.body.app.live, null, "Published untouched");
+  // (As an app from before has it: its Published project made with its first Preview, by an older Bops. This one keeps
+  // it as it is, and finds it by its label's seal: the tests below go on from there.)
+  const made = await olderPublished("recipe-box");
+  assert.deepEqual([made.port, prodProject("recipe-box")?.id], [3101, made.id]);
 });
 
 await check("A redeploy of an older changeset goes to the same Preview at the same link; a changeset id that isn't one is refused; a deploy from outside the window is refused", async () => {
@@ -2270,16 +2293,22 @@ await check("deploy_app with the short id Ingot prints: the whole one looked up 
   central.down = false;
 });
 
-await check("Projects Orgo no longer has are made again on the same computer: the Preview's with the same name on its link's port (its link stays), Published's with a new marked name", async () => {
+await check("Projects Orgo no longer has are made again on the same computer: the Preview's with the same name on its link's port (its link stays); Published's not by a deploy to the Preview (only Publish or a domain makes it), its record forgetting the one gone", async () => {
   const link = previewUrl("recipe-box").label;
   web.projects = [];
   const r = await post("recipe-box", { ws: WS, action: "deploy" });
   assert.equal(r.status, 200);
-  assert.equal(web.projects.length, 2);
+  assert.equal(web.projects.length, 1, "its Preview's alone");
   assert.equal(previewProject("recipe-box").name, link, "the same name");
   assert.equal(previewUrl("recipe-box").label, link, "the same link");
   assert.equal(previewProject("recipe-box").port, previewUrl("recipe-box").port);
-  assert.equal(hostedApps()["recipe-box"].projectId, prodProject("recipe-box").id);
+  assert.equal(prodProject("recipe-box"), undefined, "Published not made");
+  // (Published as an older Bops made it again, with a new marked name: found by its seal from here on.)
+  await olderPublished("recipe-box");
+  const again = await post("recipe-box", { ws: WS, action: "deploy" });
+  assert.equal(again.status, 200);
+  assert.equal(web.projects.length, 2, "nothing more made");
+  assert.equal(hostedApps()["recipe-box"].projectId, prodProject("recipe-box").id, "its record names the one found");
 });
 
 await check("Projects there for the repo that this Bops lost track of are the ones, found by their marks (Published by its label's seal, the Preview by its link's): none made again, the link the same, the record found again", async () => {
@@ -2315,12 +2344,16 @@ await check("Deploy this one on an app never deployed: its Preview made naming n
   assert.equal(r.status, 200);
   const p = previewProject("recipe-box");
   assert.equal(p.ingot_at, null, "nothing kept for later deploys");
-  assert.equal(prodProject("recipe-box").ingot_at, null);
+  assert.equal(prodProject("recipe-box"), undefined, "no Published project");
   assert.equal(newestFirst(p)[0].source_version, first.id);
-  assert.deepEqual(newestFirst(prodProject("recipe-box")), [], "nothing on Published");
+  // (Its Published as an older Bops made it: nothing on it, the tests below go on with it.)
+  const prod = await olderPublished("recipe-box");
+  assert.equal(prod.ingot_at, null);
   const again = await post("recipe-box", { ws: WS, action: "deploy" });
   assert.equal(again.status, 200);
   assert.equal(newestFirst(p)[0].source_version, newest);
+  assert.deepEqual(newestFirst(prodProject("recipe-box")), [], "nothing on Published");
+  assert.equal(hostedApps()["recipe-box"].projectId, prod.id, "its record names it");
 });
 
 await check("A deploy on a computer that has no token of the workspace's yet (the app never worked on there): Ingot is set up there first, as the deploy runner exports the repo with it; once it has one, a deploy sends no command there", async () => {
@@ -2742,7 +2775,7 @@ await check("sessions.ts: a run that ended done asks after its result is posted,
 /* ---------------- History, online and offline ---------------- */
 
 await check("Commits online: Ingot's log newest first, who and what, the one its site serves marked, paged with before", async () => {
-  const p = web.projects[0];
+  const p = prodProject("recipe-box");
   p.deployments.push({ id: randomUUID(), project_id: p.id, state: "succeeded", source_version: first.id, created_at: iso(), finished_at: iso(), error: null, log: [] });
   const r = await get(CommitsRoute, `/api/hosted-apps/recipe-box/commits?ws=${WS}`, { name: "recipe-box" });
   assert.equal(r.status, 200);
@@ -2785,7 +2818,7 @@ await check("History never needs the computer: asleep, the list and history come
   assert.deepEqual(down.body, { commits: [], head: null, next: null, offline: true });
   const listDown = await get(AppsRoute, `/api/hosted-apps?ws=${WS}`);
   const appDown = listDown.body.apps.find((x) => x.name === "recipe-box");
-  assert.deepEqual([listDown.status, appDown.offline, appDown.head, appDown.live.state], [200, true, null, newestFirst(web.projects[0])[0].state]);
+  assert.deepEqual([listDown.status, appDown.offline, appDown.head, appDown.live.state], [200, true, null, newestFirst(prodProject("recipe-box"))[0].state]);
   central.down = false;
   central.proxyDown = true;
   const proxied = await get(CommitsRoute, `/api/hosted-apps/recipe-box/commits?ws=${WS}`, { name: "recipe-box" });
@@ -2833,7 +2866,7 @@ await check("A workspace that isn't on Orgo yet can't have apps: the CLI's set u
 await check("The newest deploy's log, read on from where it got to", async () => {
   const r = await get(LogsRoute, `/api/hosted-apps/recipe-box/logs?ws=${WS}`, { name: "recipe-box" });
   assert.equal(r.status, 200);
-  const d = newestFirst(web.projects[0])[0];
+  const d = newestFirst(prodProject("recipe-box"))[0];
   assert.deepEqual(r.body, { state: d.state, log: d.log.join(""), next: `${d.id}:${d.log.length}`, more: false });
   const on = await get(LogsRoute, `/api/hosted-apps/recipe-box/logs?ws=${WS}&after=${encodeURIComponent(r.body.next)}`, { name: "recipe-box" });
   assert.equal(on.body.log, "");
@@ -4746,22 +4779,21 @@ await check("A site added to an app: only its name kept, nothing made on Orgo ye
   assert.deepEqual(writesSince(n), [], "none of it asked of Orgo");
 });
 
-await check("Deploy deploys every site's Preview, one after another: each site's Published project made first, then its link and its Preview project, each queued in turn; one site alone with `site`; one it doesn't have refused; Publish with no domains says so; the bot's words say each link", async () => {
+await check("Deploy deploys every site's Preview, one after another: its link and its Preview project (no Published project made), each queued in turn; one site alone with `site`; one it doesn't have refused; Publish with no domains says so and makes nothing; the bot's words say each link", async () => {
   const n = web.calls.length;
   const r = await post("shop-suite", { ws: WS, action: "deploy" });
   assert.equal(r.status, 200);
-  const prods = SUITE_SITES.map((x) => siteProject(x));
   const previews = SUITE_SITES.map((x) => sitePreview(x));
-  assert.ok(prods.every(Boolean) && previews.every(Boolean), "a Published and a Preview project each, marked for its site");
+  assert.ok(previews.every(Boolean), "a Preview project each, marked for its site");
+  assert.ok(SUITE_SITES.every((x) => !siteProject(x)), "no Published project made");
   const ports = web.projects.filter((p) => p.computerId === "c_boppy").map((p) => p.port);
   assert.equal(new Set(ports).size, ports.length, "a port each, none another project's");
-  for (const p of prods) assert.deepEqual(p.created, { source: "ingot", repo: `${PROJECT}/shop-suite`, name: p.name, port: p.port, deploy: false, public_url: false });
-  // One after another: each site's Published, its link, its Preview, then queued, before the next.
+  // One after another: each site's link, its Preview, then queued, before the next.
   const writes = writesSince(n).map((c) => `${c.method} ${c.path.replace(/[0-9a-f-]{36}/g, "id")}`);
-  assert.deepEqual(writes, Array(4).fill(["POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/public-urls", "POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects/id/deployments"]).flat());
+  assert.deepEqual(writes, Array(4).fill(["POST /api/computers/c_boppy/public-urls", "POST /api/computers/c_boppy/deploy-projects", "POST /api/computers/c_boppy/deploy-projects/id/deployments"]).flat());
   assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), previews.map((p) => p.id), "each site's Preview, in the order they were added");
-  assert.equal(suite().projectId, prods[0].id, "its own site's Published where it always was");
-  assert.deepEqual(suite().sites.map((x) => x.projectId), prods.slice(1).map((p) => p.id));
+  assert.equal(suite().projectId, undefined, "no Published kept");
+  assert.deepEqual(suite().sites.map((x) => x.projectId), [undefined, undefined, undefined]);
   assert.deepEqual(suite().sites.map((x) => x.preview), previews.slice(1).map((p) => p.name), "each site's link kept as a copy");
   assert.deepEqual(r.body.app.sites.map((x) => [x.name, x.preview.live?.state]), SUITE_SITES.map((x) => [x, "queued"]));
 
@@ -4794,14 +4826,20 @@ await check("Deploy deploys every site's Preview, one after another: each site's
   assert.deepEqual(callsSince(m, "POST", /\/public-urls$/), [], "its link stays");
   assert.equal(sitePreview("shop-suite-api").name, link);
 
-  // Publish with no domains anywhere: refused for each, in words; nothing on Published.
+  // Publish with no domains anywhere: refused for each, in words; nothing on Published, and no Published project made for it.
   m = web.calls.length;
   const said = hear(await H.deployForBot("boppy", "shop-suite", null, undefined, "prod"));
   assert.match(said, /^Published not changed: shop-suite.* no domain yet\. Connect one in Your Apps \(Published, Domain, From Cloudflare\), then say publish again\.$/);
   assert.deepEqual(callsSince(m, "POST", /\/deployments$/), []);
+  assert.deepEqual(callsSince(m, "POST", /\/deploy-projects$/), [], "no Published made");
   const line = hear(H.hostedAppsLine("boppy"));
   for (const [i, x] of SUITE_SITES.entries()) assert.ok(line.includes(`preview at https://${previews[i].name}.orgo.dev`), x);
   assert.ok(!/shop-suite[a-z-]*\.orgo\.dev/.test(line), "no site named on orgo.dev");
+  // (Each site's Published as an older Bops made it with its first Preview: the tests below go on with them, found by their seals.)
+  for (const x of SUITE_SITES) await olderPublished("shop-suite", x);
+  await post("shop-suite", { ws: WS, action: "deploy" });
+  assert.equal(suite().projectId, siteProject("shop-suite").id, "its own site's Published, found");
+  assert.deepEqual(suite().sites.map((x) => x.projectId), SUITE_SITES.slice(1).map((x) => siteProject(x).id));
 });
 
 await check("Each site's own settings, health check, variables, log, deploys and domains (the ones on its port), by `site`: a new port moves only that site's domains; a health path sent as typed, refused before Orgo when it can't be one", async () => {
@@ -5066,6 +5104,9 @@ await check("Removing an app (the window only): each site's domains and deploy p
   web.domains = web.domains.filter((d) => d.computerId !== "c_boppy" || d.target_port === recipeProject().port);
   await post("shop-suite", { ws: WS, action: "addSite", site: ADMIN });
   await post("shop-suite", { ws: WS, action: "deploy" });
+  // (Its Published as an older Bops made it with its first Preview, found as the app is read.)
+  await olderPublished("shop-suite", ADMIN);
+  await H.listApps(WS);
   const [own, admin] = [siteProject("shop-suite"), siteProject(ADMIN)];
   const [ownPv, adminPv] = [sitePreview("shop-suite"), sitePreview(ADMIN)];
   const linkOf = (p) => web.urls.find((u) => u.label === p.name);
@@ -5147,11 +5188,11 @@ await check("A bot's computer gone: its apps keep their records and sites' names
     assert.equal(r.status, 200);
     const home = hostedApps()["ivy-site"];
     assert.deepEqual([home.botId, home.computerId, home.lost, home.sites.map((x) => x.name)], ["ivy", "c_boppy", undefined, ["ivy-site-blog"]]);
-    // Each site's Published and Preview, made on its new home.
+    // Each site's Preview, made on its new home (no Published project: that waits for Publish or a domain).
     const ivyRepo = `${PROJECT}/ivy-site`;
     assert.deepEqual(
       web.projects.filter((p) => p.ingot_repo === ivyRepo).map((p) => [p.computerId, L.isLabelOf("prod", p.name, ivyRepo, "ivy-site") || L.isLabelOf("prod", p.name, ivyRepo, "ivy-site-blog") ? "prod" : L.isLabelOf("preview", p.name, ivyRepo, "ivy-site") || L.isLabelOf("preview", p.name, ivyRepo, "ivy-site-blog") ? "preview" : p.name]),
-      [["c_boppy", "prod"], ["c_boppy", "preview"], ["c_boppy", "prod"], ["c_boppy", "preview"]],
+      [["c_boppy", "preview"], ["c_boppy", "preview"]],
     );
     // Gone again, then removed: nothing left to take off a computer.
     for (const p of web.projects.filter((x) => x.ingot_repo === `${PROJECT}/ivy-site`)) web.projects = web.projects.filter((x) => x !== p);
@@ -5187,20 +5228,17 @@ function gate(method, re) {
   return g;
 }
 
-await check("Settings before a site's first deploy: saved, its deploy project is made with them in one create (nothing deployed, nothing changed after), so its first build starts it its own way, and its first deploy uses that project, its Preview made with the same commands in its create; refused for one whose computer is gone", async () => {
+await check("Settings before a site's first deploy: kept on its record, no project made for them (Published is made only when it's first needed), read back as saved; its first deploy makes its Preview with those commands in its create; Published made later (its variables) has them in its create too, and the record forgets them; refused for one whose computer is gone", async () => {
   suiteAgain();
   assert.equal((await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" })).status, 200);
-  const queuedAt = suite().queuedAt;
   let n = web.calls.length;
   const r = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/shop-suite/settings", SUITE, { ws: WS, site: "shop-suite-admin", start: "npm run admin", health: "/up" });
   assert.equal(r.status, 200);
-  const p = siteProject("shop-suite-admin");
-  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [["POST", "/api/computers/c_boppy/deploy-projects"]], "made with them, nothing changed after");
-  assert.deepEqual([writesSince(n)[0].body.start_cmd, writesSince(n)[0].body.health_path, writesSince(n)[0].body.public_url], ["npm run admin", "/up", false]);
-  assert.deepEqual([p.deployments.length, p.created.deploy], [0, false], "nothing deployed");
-  assert.deepEqual([r.body.settings.start, r.body.settings.health, r.body.settings.port], ["npm run admin", "/up", p.port]);
-  assert.deepEqual(suite().sites, [{ name: "shop-suite-admin", projectId: p.id }], "kept");
-  assert.ok((suite().queuedAt ?? 0) > (queuedAt ?? 0), "the window reads the app again");
+  assert.deepEqual(writesSince(n), [], "nothing made, nothing sent");
+  assert.equal(siteProject("shop-suite-admin"), undefined, "no Published project");
+  assert.deepEqual(r.body.settings, { port: null, install: null, build: null, start: "npm run admin", health: "/up" });
+  assert.deepEqual(suite().sites, [{ name: "shop-suite-admin", settings: { start_cmd: "npm run admin", health_path: "/up" } }], "kept on its record");
+  assert.deepEqual((await H.appSettings(WS, "shop-suite", "shop-suite-admin")).settings, r.body.settings, "read back as saved");
   n = web.calls.length;
   assert.equal((await post("shop-suite", { ws: WS, action: "deploy", site: "shop-suite-admin" })).status, 200);
   // Its first deploy goes to its Preview, made then with those commands in its create (a computer's own sign in
@@ -5215,7 +5253,16 @@ await check("Settings before a site's first deploy: saved, its deploy project is
   const link = web.urls.find((u) => u.label === pv.name);
   assert.ok(link, "its link");
   assert.deepEqual([pv.created.start_cmd, pv.created.health_path, pv.created.env?.AUTH_URL, pv.created.env?.AUTH_TRUST_HOST], ["npm run admin", "/up", `https://${link.label}.orgo.dev`, "true"], "in the create, with its sign in seeds");
-  assert.equal(p.deployments.length, 0, "Published untouched");
+  assert.equal(siteProject("shop-suite-admin"), undefined, "still no Published project");
+  // Its Published's variables are a first need of it (Orgo keeps them only on a project): made with the saved settings.
+  n = web.calls.length;
+  assert.deepEqual((await ask(EnvRoute, "PATCH", "/api/hosted-apps/shop-suite/env", SUITE, { ws: WS, site: "shop-suite-admin", env: { MODE: "live" } })).body, { env: ["MODE"] });
+  const p = siteProject("shop-suite-admin");
+  assert.ok(p, "Published made");
+  assert.deepEqual(writesSince(n).map((c) => [c.method, c.path]), [["POST", "/api/computers/c_boppy/deploy-projects"]], "made with them, nothing changed after");
+  assert.deepEqual([p.created.start_cmd, p.created.health_path, p.created.public_url, p.created.deploy], ["npm run admin", "/up", false, false]);
+  assert.equal(p.deployments.length, 0, "nothing deployed on Published");
+  assert.deepEqual(suite().sites, [{ name: "shop-suite-admin", projectId: p.id, preview: pv.name }], "the record forgets them: they're on its project");
   S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["shop-suite"] = { botId: "boppy", computerId: "c_gone", lost: 1, sites: [{ name: "shop-suite-admin" }] }));
   n = web.calls.length;
   const lost = await ask(SettingsRoute, "PATCH", "/api/hosted-apps/shop-suite/settings", SUITE, { ws: WS, start: "npm start" });
@@ -5223,7 +5270,7 @@ await check("Settings before a site's first deploy: saved, its deploy project is
   assert.deepEqual(writesSince(n), []);
 });
 
-await check("One thing at a time on an app: Remove app and Remove site refused while a deploy of it is being sent (nothing left on the web that Bops doesn't keep); variables saved before a first deploy wait for the deploy and go to the project it made (one a site); a deploy or a new site refused while it's being removed", async () => {
+await check("One thing at a time on an app: Remove app and Remove site refused while a deploy of it is being sent (nothing left on the web that Bops doesn't keep); Published's variables saved before a first deploy wait for the deploy, then make that site's Published with them; a deploy or a new site refused while it's being removed", async () => {
   suiteAgain();
   for (const site of ["shop-suite-admin", "shop-suite-api"]) assert.equal((await post("shop-suite", { ws: WS, action: "addSite", site })).status, 200);
   web.domains = web.domains.filter((d) => d.computerId !== "c_boppy" || d.target_port === recipeProject().port);
@@ -5243,9 +5290,10 @@ await check("One thing at a time on an app: Remove app and Remove site refused w
   assert.equal((await sending).status, 200);
   assert.deepEqual((await env).body, { env: ["API_KEY"] });
   const three = ["shop-suite", "shop-suite-admin", "shop-suite-api"];
-  assert.ok(three.every((x) => siteProject(x) && sitePreview(x)) && suiteProjects().length === 6, "a Published and a Preview a site, no more");
-  assert.deepEqual([suite().projectId, ...suite().sites.map((x) => x.projectId)], three.map((x) => siteProject(x).id), "each one's Published kept");
-  assert.deepEqual([...web.envs.get(siteProject("shop-suite-api").id).keys()], ["API_KEY"], "on the project it deploys");
+  // (A Preview a site; the variables, Published's, made that site's Published once the deploy was sent: no more.)
+  assert.ok(three.every((x) => sitePreview(x)) && siteProject("shop-suite-api") && suiteProjects().length === 4, "a Preview a site, and one Published for its variables, no more");
+  assert.deepEqual([suite().projectId, ...suite().sites.map((x) => x.projectId)], [undefined, undefined, siteProject("shop-suite-api").id], "that one's Published kept");
+  assert.deepEqual([...web.envs.get(siteProject("shop-suite-api").id).keys()], ["API_KEY"], "on the project it publishes");
 
   const r = gate("DELETE", /\/deploy-projects\/[^/]+$/);
   const going = ask(AppRoute, "DELETE", "/api/hosted-apps/shop-suite", SUITE, { ws: WS });
@@ -5294,6 +5342,9 @@ await check("An app moved off a computer that's still up (its bot on another one
   web.domains = web.domains.filter((d) => d.computerId !== "c_boppy" || d.target_port === recipeProject().port);
   await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" });
   assert.equal((await post("shop-suite", { ws: WS, action: "deploy" })).status, 200);
+  // (Each site's Published as an older Bops made it with its first Preview, found as the app is read.)
+  for (const x of ["shop-suite", "shop-suite-admin"]) await olderPublished("shop-suite", x);
+  await H.listApps(WS);
   const [own, admin] = [siteProject("shop-suite"), siteProject("shop-suite-admin")];
   const [ownPv, adminPv] = [sitePreview("shop-suite"), sitePreview("shop-suite-admin")];
   const had = S.getState().bots.find((b) => b.id === "boppy").computerId;
@@ -5343,6 +5394,9 @@ await check("Remove site and Remove app take what Bops set in the user's Cloudfl
   web.domains = web.domains.filter((d) => d.computerId !== "c_boppy" || d.target_port === recipeProject().port);
   await post("shop-suite", { ws: WS, action: "addSite", site: "shop-suite-admin" });
   assert.equal((await post("shop-suite", { ws: WS, action: "deploy" })).status, 200);
+  // (Each site's Published as an older Bops made it with its first Preview, found as the app is read.)
+  for (const x of ["shop-suite", "shop-suite-admin"]) await olderPublished("shop-suite", x);
+  await H.listApps(WS);
   const [own, admin] = [siteProject("shop-suite"), siteProject("shop-suite-admin")];
   const [ownPv, adminPv] = [sitePreview("shop-suite"), sitePreview("shop-suite-admin")];
   const linkOf = (p) => web.urls.find((u) => u.label === p.name).id;
@@ -5525,6 +5579,8 @@ await check("Two marked links for one site (two Macs at once): the older is its 
   notesAgain();
   web.urls = web.urls.filter((u) => !L.isLabelOf("preview", u.label, NOTES_REPO, "field-notes"));
   assert.equal((await post("field-notes", { ws: WS, action: "deploy" })).status, 200);
+  // (Its Published as an older Bops made it with its first Preview.)
+  if (!prodProject("field-notes")) await olderPublished("field-notes");
   const mine = notesLink();
   const other = L.newLabel("preview", NOTES_REPO, "field-notes");
   web.urls.push({ id: randomUUID(), computerId: "c_boppy", label: other, port: 3150, created_at: new Date(Date.now() + 60_000).toISOString(), owned: false });
@@ -7056,6 +7112,186 @@ await check("What members see of each computer's room (appsForMembers.room): key
       delete w.memberAccess;
       delete w.appsForMembers;
     });
+  }
+});
+
+/* ---------------- A member's job on the app's own computer (cloud/turns.ts takeAppJob, runner-chat.ts runnerJob) ---------------- */
+
+// This Bops as the app's computer's runner: its computer's own Orgo key in a file only it can read (runner-key.ts), which
+// Orgo's profile says is that computer's, and no identity here (as test-computer-task.mjs runs one).
+const RK = await import(`${root}/lib/server/runner-key.ts`);
+const OA = await import(`${root}/lib/server/orgo-auth.ts`);
+const runnerDir = join(scratch, "runner-key");
+mkdirSync(runnerDir, { mode: 0o700 });
+writeFileSync(join(runnerDir, ".orgo-secrets.env"), `export ORGO_API_KEY=${ORGO_KEY}\n`, { mode: 0o600 });
+const asRunner = (computerId = "c_boppy") => {
+  RK.runnerKeyForTests.files([join(runnerDir, ".orgo-secrets.env")]);
+  OA.orgoAuthForTests.authFile(join(runnerDir, "auth"));
+  OA.orgoAuthForTests.profile(async () => ({ status: 200, body: { api_key: { scope: "computer", computer_id: process.env.BOPS_RUNNER_COMPUTER } } }));
+  Object.assign(process.env, { BOPS_RUNNER_IDENTITY: "0", BOPS_RUNNER: "1", BOPS_RUNNER_COMPUTER: computerId });
+};
+const asMac = () => {
+  for (const k of ["BOPS_RUNNER", "BOPS_RUNNER_COMPUTER", "BOPS_RUNNER_IDENTITY"]) delete process.env[k];
+  RK.runnerKeyForTests.files(undefined);
+  OA.orgoAuthForTests.authFile(undefined);
+  OA.orgoAuthForTests.profile(undefined);
+  OA.orgoAuthForTests.reset();
+  globalThis.bopsOrgoKey = ORGO_KEY;
+};
+const DEMO = "demo-app";
+const DEMO_REPO = `${PROJECT}/${DEMO}`;
+const demo = () => hostedApps()[DEMO];
+const demoProjects = () => web.projects.filter((p) => p.ingot_repo === DEMO_REPO);
+const job = (j, by = "Sam") => H.appJob("boppy", { app: DEMO, ...j }, by).then(hear);
+
+await check("A member's job on the app's own computer (appJob), each kind on its runner: Update preview makes its Preview alone, settings go on the Preview, Go back on the Preview only, a domain of its own workspace's from its computer's own list (Published made for it then), Publish, a left over by the name members see; a kind it doesn't know and another computer's app do nothing; Orgo not taking this computer's sign in yet is said plainly", async () => {
+  central.repos.set(DEMO_REPO, { created_by: { id: "u_alex", name: "Alex" }, created_at: iso(), changesets: [] });
+  commit(DEMO, "A demo", { id: "boppy", name: "Boppy" });
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    w.hostedApps[DEMO] = { botId: "boppy", computerId: "c_boppy" };
+    w.hostedApps["ivy-page"] = { botId: "ivy", computerId: "c_ivy" };
+  });
+  web.liveAtOnce = true;
+  asRunner();
+  try {
+    let n = web.calls.length;
+    assert.deepEqual(await job({ act: "renameApp", to: "shop" }), { ok: false, said: "This computer's Bops doesn't know how to do that yet." });
+    assert.deepEqual(await H.appJob("boppy", { act: "deploy", app: "ivy-page" }, "Sam"), { ok: false, said: "ivy-page lives on another computer, not this one, so nothing of it was changed here." });
+    assert.deepEqual(writesSince(n), [], "nothing done");
+
+    // Update preview: its Preview alone, no Published project.
+    n = web.calls.length;
+    assert.deepEqual(await job({ act: "deploy" }), { ok: true, said: "Deploying demo-app to its preview." });
+    const pv = previewProject(DEMO);
+    assert.ok(pv && !prodProject(DEMO) && demoProjects().length === 1, "its Preview alone");
+    assert.equal(demo().preview, pv.name, "its label kept, as a runner may");
+    // Settings: on its Preview.
+    n = web.calls.length;
+    assert.deepEqual(await job({ act: "settings", build: "npm run build" }), { ok: true, said: "Changed the settings of demo-app's preview." });
+    assert.deepEqual(writesSince(n).map((c) => [c.method, c.path, c.body]), [["PATCH", `/api/computers/c_boppy/deploy-projects/${pv.id}`, { build_cmd: "npm run build" }]]);
+    // Go back: a deploy that isn't one of the Preview's is said as the owner's Mac says it.
+    assert.deepEqual(await job({ act: "rollback", deployment: "d_not_its" }), { ok: false, said: "Members roll back its preview only. Ask Alex to roll back what's published." });
+    // A domain of the workspace's own: from this computer's own list (owned_domains), never the workspace's (a computer
+    // may not read that one); Published is made for it, its first need.
+    n = web.calls.length;
+    const pointed = await job({ act: "domain", zone: ZONE, subdomain: "demo" });
+    assert.deepEqual(pointed, { ok: true, said: "Pointed demo.acme.example at demo-app." });
+    assert.ok(prodProject(DEMO), "Published made for its domain");
+    assert.ok(!web.calls.slice(n).some((c) => /^\/api\/projects\/[^/]+\/domains/.test(c.path)), "the workspace's bought domains never asked for");
+    assert.ok(web.domains.some((d) => d.domain === "demo.acme.example" && d.target_port === prodProject(DEMO).port), "on Published's port");
+    // A zone this computer's list doesn't have: Orgo's list is what it goes by.
+    assert.deepEqual(await job({ act: "domain", zone: "00000000-0000-4000-8000-000000000000" }), { ok: false, said: "That isn't one of this workspace's domains." });
+    // Publish: what its Preview serves goes on Published (its domain is there, pending).
+    n = web.calls.length;
+    assert.deepEqual(await job({ act: "deploy", env: "prod" }), { ok: true, said: "Publishing demo-app, what its preview serves." });
+    assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [prodProject(DEMO).id]);
+    // On GitHub with no bot here given the GitHub key: said, nothing sent.
+    const keys = structuredClone(S.getState().bots.find((b) => b.id === "boppy").keys);
+    S.update((s) => {
+      s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].github = { repo: "acme/demo", branch: "main", path: "" };
+      s.bots.find((b) => b.id === "boppy").keys = [];
+    });
+    n = web.calls.length;
+    assert.deepEqual(await job({ act: "deploy", env: "prod" }), { ok: false, said: "Boppy has no GitHub key on this computer, so demo-app wasn't sent to GitHub. Give it the GitHub key in Keys, then try again." });
+    assert.deepEqual(writesSince(n), []);
+    S.update((s) => {
+      delete s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].github;
+      s.bots.find((b) => b.id === "boppy").keys = keys;
+    });
+    // A left over, by the name members see it by (an old staging project of its repo): its id found here.
+    const old = { id: randomUUID(), computerId: "c_boppy", name: "demo-app-staging", port: 3199, source: "ingot", ingot_repo: DEMO_REPO, ingot_at: null, url: null, deployments: [] };
+    web.projects.push(old);
+    assert.deepEqual(await job({ act: "removeLeftOver", leftOver: "demo-app-staging" }), { ok: true, said: "Removed the left over demo-app-staging." });
+    assert.ok(!web.projects.includes(old), "off its computer");
+    assert.deepEqual(await job({ act: "removeLeftOver", leftOver: "demo-app-staging" }), { ok: false, said: "demo-app-staging isn't left over on its computer any more." });
+    // Orgo not taking this computer's own sign in for it yet (an orgo-web before E8): said plainly; its own domain rule in its words.
+    web.connectRefuse = { status: 403, body: { error: "Computer keys can't do that.", code: "computer_key" } };
+    assert.deepEqual(await job({ act: "domain", zone: ZONE, subdomain: "shop" }), { ok: false, said: "Orgo doesn't let this computer do this yet." });
+    web.connectRefuse = { status: 403, body: { error: "Not that one.", code: "computer_domain_scope" } };
+    assert.deepEqual(await job({ act: "domain", zone: ZONE, subdomain: "shop" }), { ok: false, said: "Orgo lets this computer point only its workspace's own domains at its apps." });
+    web.connectRefuse = null;
+  } finally {
+    asMac();
+    web.liveAtOnce = false;
+  }
+});
+
+await check("A member's remove on the app's own computer: Remove site and Remove app take its Previews, its Published and their domains off (a domain that won't come off keeps that site up, said, so a try again finds it all), clear what its runner kept, and never drop the record or its sites (Bops Cloud does, once it's done); what may be left in Cloudflare is said; its code stays in Ingot", async () => {
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].sites = [{ name: "demo-app-docs" }]));
+  web.liveAtOnce = true;
+  // (No Cloudflare key a computer can use: what Bops may have set there is said.)
+  const secrets = web.secrets;
+  web.secrets = [];
+  globalThis.bopsVaultNames = undefined;
+  asRunner();
+  try {
+    assert.equal((await job({ act: "deploy", site: "demo-app-docs" })).ok, true);
+    const docsPv = previewProject(DEMO, "demo-app-docs");
+    assert.ok(docsPv, "the site's Preview");
+    // Remove site: its Preview and link, then its Published (none); its record's run fields cleared, the site kept.
+    let r = await job({ act: "removeSite", site: "demo-app-docs" });
+    assert.deepEqual(r, { ok: true, said: "demo-app-docs is off the web.", removed: "site" });
+    assert.ok(!previewProject(DEMO, "demo-app-docs") && !web.urls.some((u) => u.label === docsPv.name), "off the web");
+    assert.deepEqual(demo().sites, [{ name: "demo-app-docs" }], "the site stays on its record: Bops Cloud takes it out");
+    assert.deepEqual(await job({ act: "removeSite", site: DEMO }), { ok: false, said: "The app's own site goes only with the app. Remove the app instead." });
+    // A typed domain on Published's port too (one in the user's Cloudflare, maybe), and one Orgo won't take off.
+    const prod = prodProject(DEMO);
+    web.domains.push({ id: "cd_demo_typed", computerId: "c_boppy", domain: "demo.typed.test", status: "active", target_port: prod.port, zone: null, token: "tok-demo" });
+    const pointed = web.domains.find((d) => d.domain === "demo.acme.example");
+    web.hold = (m, path) => {
+      if (m === "DELETE" && path.endsWith(`/domains/${pointed.id}`)) throw new Error("dropped");
+    };
+    let n = web.calls.length;
+    r = await job({ act: "remove" });
+    web.hold = null;
+    assert.deepEqual(r, { ok: false, said: "Couldn't take demo.acme.example off the web, so demo-app stays up. Try again." });
+    assert.ok(prodProject(DEMO), "its Published stays up, to try again");
+    assert.ok(!writesSince(n).some((c) => c.method === "DELETE" && c.path.endsWith(`/deploy-projects/${prod.id}`)), "never its project after a domain that stayed");
+    assert.ok(demo(), "its record kept");
+    // Again: all of it off, the record kept with its run fields cleared, the code in Ingot.
+    n = web.calls.length;
+    const i = central.calls.length;
+    r = await job({ act: "remove" });
+    assert.equal(r.ok, true, r.said);
+    assert.equal(r.removed, "app");
+    assert.match(r.said, /^demo-app is off the web\. Bops couldn't reach Cloudflare\. If it set TXT _orgo-verify\.demo\.typed\.test and CNAME demo\.typed\.test there, remove them\.$/);
+    assert.deepEqual(demoProjects(), [], "its projects gone");
+    assert.ok(!web.domains.some((d) => d.target_port === prod.port && d.computerId === "c_boppy"), "its domains gone");
+    assert.deepEqual(demo(), { botId: "boppy", computerId: "c_boppy", sites: [{ name: "demo-app-docs" }], ...(demo().queuedAt ? { queuedAt: demo().queuedAt } : {}) }, "the record stays, its run fields cleared");
+    assert.ok(repoOf(DEMO), "its code kept in Ingot");
+    assert.deepEqual(ingotSince(i, "DELETE", /\/repos\//), []);
+    // One left on another computer: refused here, nothing touched.
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].behind = [{ site: DEMO, computerId: "c_ivy", projectId: "p_old" }]));
+    n = web.calls.length;
+    assert.deepEqual(await job({ act: "remove" }), { ok: false, said: "demo-app still runs an old copy on another computer, so it can't be removed from here yet." });
+    assert.deepEqual(writesSince(n), []);
+  } finally {
+    asMac();
+    web.liveAtOnce = false;
+    web.secrets = secrets;
+    globalThis.bopsVaultNames = undefined;
+    S.update((s) => {
+      const w = s.workspaces.find((x) => x.id === WS);
+      delete w.hostedApps[DEMO];
+      delete w.hostedApps["ivy-page"];
+    });
+    central.repos.delete(DEMO_REPO);
+  }
+});
+
+await check("On a bot's computer, what members see of its apps (appsViewHere): only the apps whose home is this computer, by name when asked, with the bought domains its own list says it may use; nothing at all on the owner's Mac", async () => {
+  assert.deepEqual(await H.appsViewHere(WS), { apps: [], owned: null }, "never on the Mac");
+  asRunner();
+  try {
+    const all = await H.appsViewHere(WS);
+    const here = Object.entries(hostedApps()).filter(([, h]) => !h.lost && h.computerId === "c_boppy").map(([n]) => n).sort();
+    assert.deepEqual(all.apps.map((a) => a.name).sort(), here);
+    assert.ok(here.includes("recipe-box") && !here.includes("ivy-site"));
+    assert.deepEqual(all.owned, web.bought.filter((b) => b.project === PROJECT && b.status === "active").map(({ id, domain }) => ({ id, domain })));
+    assert.deepEqual((await H.appsViewHere(WS, ["recipe-box", "nope"])).apps.map((a) => a.name), ["recipe-box"]);
+  } finally {
+    asMac();
   }
 });
 

@@ -463,6 +463,37 @@ await check("what a computer reads (forComputer): only its bots' things and a te
   const bothSeen = C.forComputer(both, scope);
   assert.ok(!JSON.stringify(bothSeen).includes("p4ss") && !JSON.stringify(bothSeen).includes("Kq7mZ3x"));
   assert.deepEqual(C.withHeldBack(both, structuredClone(bothSeen), scope), both);
+  // Who removed which app (Workspace.appsRemoved): never read, with a scope or without; a write that carries it refused; put back as kept.
+  const REMOVED = [{ key: "k_rm", userId: "u-ada", name: "Ada", app: "old", ok: true, at: 1 }];
+  const gone = { ...base, workspaces: [{ id: "ws_main", name: "Acme", appsRemoved: REMOVED }] };
+  for (const view of [C.forComputer(gone, scope), C.forComputer(gone)]) {
+    assert.equal(view.workspaces[0].appsRemoved, undefined, "never read");
+    assert.equal(view.workspaces[0].name, "Acme");
+  }
+  assert.equal(C.carriesPasswords(gone), true, "a write that carries it is refused");
+  const goneBack = C.withHeldBack(gone, structuredClone(C.forComputer(gone, scope)), scope);
+  assert.deepEqual(goneBack, gone, "put back as kept");
+  assert.deepEqual(C.writeDenials(gone, goneBack, scope), []);
+});
+
+await check("an app removed lately can't be made again by a computer's stale copy (Workspace.appsRemoved, REMOVED_HOLD_MS); one removed long ago can; dropping a record is still refused", () => {
+  const base = baseState();
+  const sc = (at) => C.hostingScope({ ...base, workspaces: [{ ...base.workspaces[0], appsRemoved: [{ key: "k", userId: "u", name: "Ada", app: "fresh", ok: true, at }] }] }, D1);
+  const rec = { botId: "main", computerId: D1 };
+  assert.equal(C.REMOVED_HOLD_MS, 15 * 60_000);
+  assert.equal(C.hostingChangeAllowed("ws_main", undefined, rec, sc(Date.now() - 60_000), "fresh"), false, "removed a minute ago");
+  assert.equal(C.hostingChangeAllowed("ws_main", undefined, rec, sc(Date.now() - 20 * 60_000), "fresh"), true, "removed 20 minutes ago");
+  assert.equal(C.hostingChangeAllowed("ws_main", undefined, rec, sc(Date.now() - 60_000), "other"), true, "another name");
+  const failed = C.hostingScope({ ...base, workspaces: [{ ...base.workspaces[0], appsRemoved: [{ key: "k", app: "fresh", ok: false, at: Date.now() }] }] }, D1);
+  assert.equal(C.hostingChangeAllowed("ws_main", undefined, rec, failed, "fresh"), true, "a remove that didn't go");
+  assert.equal(C.hostingChangeAllowed("ws_main", base.workspaces[0].hostedApps.site, undefined, sc(Date.now()), "site"), false, "a record dropped: refused as ever");
+  // Settings kept for a Published made later (lib/hosted-apps.ts SiteSettings): its own work, in their shape alone.
+  const site = base.workspaces[0].hostedApps.site;
+  const plain = C.hostingScope(base, D1);
+  assert.equal(C.hostingChangeAllowed("ws_main", site, { ...site, settings: { port: 3000, start_cmd: "npm start", health_path: "/" } }, plain, "site"), true, "settings kept");
+  assert.equal(C.hostingChangeAllowed("ws_main", site, { ...site, settings: { port: 3000, env: { KEY: "x" } } }, plain, "site"), false, "nothing but settings");
+  assert.equal(C.hostingChangeAllowed("ws_main", site, { ...site, settings: { port: "3000" } }, plain, "site"), false, "a port is a port");
+  assert.equal(C.hostingChangeAllowed("ws_main", site, { ...site, settings: { start_cmd: "x".repeat(1001) } }, plain, "site"), false, "never long text");
 });
 
 await check("its apps on the web: what its deploys, Previews and Locals keep lands over what it read (a workspace without its Preview passwords), the passwords kept; another workspace's app never", () => {

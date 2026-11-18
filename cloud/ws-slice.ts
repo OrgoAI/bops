@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
 import { groupKeyOf } from "./group-key.ts";
 import { accessOf, adminAccess, appsLevelOf, cleanPowers, currentFor, holdsKeys, isAccessLevel, levelOf, permits, powersOf, seesChat, usesComputer, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import { KEY_NAME, PREVIEW_PASSWORD, type SharedApp, type SharedApps, type SharedGroup, type SharedKey, type SharedRoom, type SharedWsSlice, type WsRole } from "./protocol.ts";
+import { GITHUB_ACT_KINDS, KEY_NAME, PREVIEW_PASSWORD, type AppJobKind, type SharedApp, type SharedAppRemoval, type SharedApps, type SharedGroup, type SharedKey, type SharedRoom, type SharedWsSlice, type WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -255,6 +255,15 @@ export type SliceViewer = {
   githubActs?: boolean;
   /** Whether the viewer's own Bops knows the GitHub acts (GITHUB_ACTS_MIN_VERSION): else they're left out of what it's shown (appsFor). */
   githubSeen?: boolean;
+  /**
+   * The kinds of job the apps' own computers do for them now, in a workspace where everything goes through the cloud
+   * (cloud/turns.ts allCloud, cloud/config.ts appJobs), for a viewer whose Bops knows them (`appActsSeen`): SharedWsSlice.appJobs.
+   */
+  appJobs?: AppJobKind[];
+  /** Whether removing apps is done now (by the apps' computers, or by the owner's Mac at CLOUD_ALL_MIN_VERSION), for a viewer whose Bops knows it: SharedWsSlice.appRemove. */
+  appRemove?: boolean;
+  /** Whether the viewer's own Bops knows the remove acts, removal rows and an act going on a computer (protocol.ts CLOUD_ALL_MIN_VERSION): else they're left out (appsFor). */
+  appActsSeen?: boolean;
 };
 /** The owner, as sharedSlice takes them (who they are doesn't change what they see: all of it). */
 export const OWNER_VIEW: SliceViewer = { role: "owner", id: "" };
@@ -335,7 +344,7 @@ export function keyNamesOf(workspace: Record<string, unknown> | null): SharedKey
 /* ---------------- Your Apps ---------------- */
 
 /** What's shown of each app's own record (lib/hosted-apps.ts AppHosting) is worked out field by field in appsFor; of what the owner's Mac read for members (AppForMembers): */
-const SITE_SEEN = {
+export const SITE_SEEN = {
   name: true,
   url: true,
   // Its Preview, where members deploy: its link, its newest deploy, what it serves, and whether it asks for a password.
@@ -430,13 +439,40 @@ function sitesFilled(name: string, host: Record<string, unknown>, mac: unknown[]
   return [...filled, ...more.slice(0, Math.max(0, MAX_SITES - filled.length))];
 }
 
-const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
+export const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
 /** `env`: where it went, its Preview or Published (none: from a Bops before, Published's). */
-const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
-const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, env: true, ok: true, going: true, said: true, at: true };
+export const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true, env: true };
+const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, leftOver: true, env: true, ok: true, going: true, said: true, at: true };
 /** A member's act on an app a Bops from before GITHUB_ACTS_MIN_VERSION doesn't know (its window would read one as a domain's). */
-const GITHUB_ACT = new Set(["github", "githubLink", "githubPull"]);
-const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
+const GITHUB_ACT = new Set<string>(GITHUB_ACT_KINDS);
+/** A member's act on an app a Bops from before CLOUD_ALL_MIN_VERSION doesn't know (SliceViewer.appActsSeen). */
+const REMOVE_ACT = new Set(["remove", "removeSite", "removeLeftOver", "deleteCode"]);
+/** A left over on the app's computer (AppForMembers.leftOver): its name and port, never its id. Write only. */
+export const LEFT_OVER_SEEN: Spec = { name: true, port: true, link: true };
+/** An app someone removed (Workspace.appsRemoved). */
+const REMOVAL_SEEN: Spec = { key: true, userId: true, name: true, app: true, ok: true, said: true, codeLeft: true, at: true };
+/** How many removals are shown (lib/hosted-apps.ts APPS_REMOVED_KEPT). */
+const MAX_REMOVALS = 10;
+
+/**
+ * What each app's own computer last said members see of it (bops.app_views, cloud/apps-view.ts, cleaned as it was kept),
+ * by app: the view and when Bops Cloud took it (its clock). None: the owner's Mac's read alone (appsForMembers).
+ */
+export type AppViews = Record<string, { view: Record<string, unknown>; at: number }>;
+
+/**
+ * Whether a member's act on an app is one `viewer`'s Bops knows: the GitHub ones from GITHUB_ACTS_MIN_VERSION
+ * (githubSeen), and from CLOUD_ALL_MIN_VERSION (appActsSeen) the remove ones and any other going on a computer (an older
+ * window reads a going row as done). One it doesn't is left out.
+ */
+const actSeenBy = (viewer: SliceViewer) => (x: unknown) => {
+  if (!isObject(x)) return true;
+  const act = String(x.act);
+  if (GITHUB_ACT.has(act)) return !!viewer.githubSeen;
+  if (viewer.appActsSeen) return true;
+  return !REMOVE_ACT.has(act) && x.going !== true;
+};
+export const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
 /** A computer's room for more apps (lib/hosted-apps.ts MemberRoom): its numbers and the apps on it; its bot only as roomsOf says. */
 const ROOM_SEEN: Spec = { used: true, limit: true, urlsUsed: true, urlsLimit: true, apps: true, urlsFirst: true, appNames: true };
 const count = (v: unknown) => typeof v === "number" && Number.isInteger(v) && Math.abs(v) < 1e6;
@@ -526,7 +562,7 @@ export const ownerAppsOpen = (viewer: SliceViewer): boolean => appsOpenTo(viewer
  * withCloudPasswords), else the owner's Mac's copy; it changes their slice, so a Write viewer watching gets a new
  * fingerprint and reads it. Never its variables, tokens, keys, logs, error text, computer or project ids.
  */
-export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>): SharedApps | undefined {
+export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>, views: AppViews = {}): SharedApps | undefined {
   const open = appsOpenFor(viewer);
   if (viewer.role === "owner" || !workspace || !open) return undefined;
   const kept = appsLevelOf(access);
@@ -534,10 +570,25 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
   const level = open === "read" && kept === "write" ? "read" : kept;
   if (!permits(level, "read")) return undefined;
   const write = level === "write";
+  // Apps someone removed lately, at Read and Write, to a Bops that knows them.
+  const removals = viewer.appActsSeen && Array.isArray(workspace.appsRemoved) ? (keep(workspace.appsRemoved.filter(isObject).slice(0, MAX_REMOVALS), [REMOVAL_SEEN]) as SharedAppRemoval[]) : [];
+  const removed = removals.length ? { removed: removals } : {};
   // A workspace with no apps on the web yet still has Your Apps: an empty page, never a hidden one.
-  if (!isObject(workspace.hostedApps)) return { level: write ? "write" : "read", at: 0, list: [] };
+  if (!isObject(workspace.hostedApps)) return { level: write ? "write" : "read", at: 0, list: [], ...removed };
   const seen = isObject(workspace.appsForMembers) ? workspace.appsForMembers : {};
   const seenApps = isObject(seen.apps) ? seen.apps : {};
+  const macAt = typeof seen.at === "number" ? seen.at : 0;
+  // Each app's own computer's view where it's newer than the owner's Mac's read (members' acts stay the Mac's copy's, as
+  // Bops Cloud keeps them there); the newest time of what's shown, and the domains as the newest of those read them.
+  let at = macAt;
+  let ownedFrom: { at: number; owned: unknown } = { at: macAt, owned: seen.owned };
+  const viewOf = (name: string): Record<string, unknown> | null => {
+    const v = Object.hasOwn(views, name) ? views[name] : undefined;
+    if (!v || !isObject(v.view) || !(v.at > macAt)) return null;
+    if (v.at > at) at = v.at;
+    if (Array.isArray(v.view.owned) && v.at > ownedFrom.at) ownedFrom = { at: v.at, owned: v.view.owned };
+    return v.view;
+  };
   // Each Preview's password as whoever set it last told Bops Cloud, with the link it's for: that link at every level, where
   // the owner's Mac read none (sitesFilled reads its url alone); the password at Write only, over the owner's Mac's copy.
   const links = isObject(workspace.previewPasswords) ? workspace.previewPasswords : {};
@@ -547,7 +598,8 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
     .slice(0, MAX_SHARED_APPS)
     .map(([name, h]) => {
       const host = h as Record<string, unknown>;
-      const got = isObject(seenApps[name]) ? (seenApps[name] as Record<string, unknown>) : {};
+      const mac = isObject(seenApps[name]) ? (seenApps[name] as Record<string, unknown>) : {};
+      const got = viewOf(name) ?? mac;
       const settings = write && isObject(got.settings) ? Object.fromEntries(Object.entries(got.settings).filter(([site, v]) => /^[a-z0-9-]{1,64}$/.test(site) && isObject(v)).map(([site, v]) => [site, keep(v, SETTINGS_SEEN)])) : undefined;
       const sites = Array.isArray(host.sites) ? host.sites.flatMap((x) => (isObject(x) && typeof x.name === "string" ? [x.name] : [])) : [];
       const rows = sitesFilled(name, host, Array.isArray(got.sites) ? got.sites : undefined, links);
@@ -563,16 +615,18 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
         ...(rows ? { sites: write ? withCloudPasswords(name, keep(rows, [SITE_SEEN_WRITE]), passwords) : keep(rows, [SITE_SEEN]) } : {}),
         ...(Array.isArray(got.commits) ? { commits: keep(got.commits, [COMMIT_SEEN]) } : {}),
         ...(Array.isArray(got.deploys) ? { deploys: keep(got.deploys, [DEPLOY_SEEN]) } : {}),
-        // The GitHub ones only to a Bops that knows them (githubSeen).
-        ...(Array.isArray(got.acts) ? { acts: keep(viewer.githubSeen ? got.acts : got.acts.filter((x) => !isObject(x) || !GITHUB_ACT.has(String(x.act))), [ACT_SEEN]) } : {}),
+        // Members' acts as Bops Cloud and the owner's Mac keep them, only those the viewer's Bops knows (actSeenBy).
+        ...(Array.isArray(mac.acts) ? { acts: keep(mac.acts.filter(actSeenBy(viewer)), [ACT_SEEN]) } : {}),
         ...(settings && Object.keys(settings).length ? { settings } : {}),
+        // Its left overs on its computer, at Write: by name and port only.
+        ...(write && Array.isArray(got.leftOver) && got.leftOver.length ? { leftOver: keep(got.leftOver.slice(0, 20), [LEFT_OVER_SEEN]) } : {}),
       };
       return app as SharedApp;
     });
-  const owned = write && Array.isArray(seen.owned) ? (keep(seen.owned, [{ id: true, domain: true }]) as { id: string; domain: string }[]) : undefined;
+  const owned = write && Array.isArray(ownedFrom.owned) ? (keep(ownedFrom.owned, [{ id: true, domain: true }]) as { id: string; domain: string }[]) : undefined;
   // How many more apps each computer has room for: Read and Write alike.
   const room = roomsOf(seen, botsSeen);
-  return { level: write ? "write" : "read", at: typeof seen.at === "number" ? seen.at : 0, list, ...(owned?.length ? { owned } : {}), ...(room ? { room } : {}) };
+  return { level: write ? "write" : "read", at, list, ...(owned?.length ? { owned } : {}), ...(room ? { room } : {}), ...removed };
 }
 
 /** Whether a bot works on another bot's computer (lib/types.ts sharesComputer, on the owner's state as it is). */
@@ -755,13 +809,13 @@ function keepSession(s: Record<string, unknown>, bots?: ReadonlySet<unknown>, ch
 
 /** What `viewer` is shown of one workspace (the allow lists above, and only their bots for anyone but the owner), from the owner's whole blob. */
 export type SharedSlice = SharedWsSlice;
-export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: SliceViewer): SharedSlice {
+export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: SliceViewer, views?: AppViews): SharedSlice {
   const s = sliceOf(blob, ws, viewer);
   const access = viewer.role === "owner" ? undefined : viewerAccess(s.workspace, viewer);
   const all = (items: Record<string, unknown>[], spec: Spec) => items.map((x) => keep(x, spec) as Record<string, unknown>);
   const bots = viewer.role === "owner" ? undefined : new Set(s.bots.map((b) => b.id));
   const chats = bots && new Set(s.chats.map((c) => c.id));
-  const apps = access && bots ? appsFor(s.workspace, viewer, access, bots) : undefined;
+  const apps = access && bots ? appsFor(s.workspace, viewer, access, bots, views) : undefined;
   // The computers the bots shown share, and (with Your Apps) the site each works on: only there when there's any.
   const groups = computersOf(blob, ws, s.workspace, s.bots);
   // An Admin's: the computer each bot shown works on, to stream it with their own Orgo key (orgo-web hands its password to an Admin alone).
@@ -804,6 +858,11 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     // Where an app publishes on GitHub, its Link and Bring in, at Your Apps Write, for whoever has the power of Publish (an
     // Admin, a Member with App secrets), once the owner's last Mac takes them (members.ts adminGate, GITHUB_ACTS_MIN_VERSION).
     ...(apps?.level === "write" && viewer.githubActs && (viewer.role === "admin" || !!can?.includes("appSecrets")) ? { appGithub: true as const } : {}),
+    // In a workspace where everything goes through the cloud, the kinds of job the apps' own computers do now (cloud/config.ts
+    // appJobs), at Your Apps Write, to a Bops that knows them: its buttons go there, never to the owner's Mac.
+    ...(apps?.level === "write" && viewer.appActsSeen && viewer.appJobs ? { appJobs: viewer.appJobs } : {}),
+    // Remove app, a site or a left over, at Your Apps Write, for an Admin or a Member with Remove apps on, once it's done here.
+    ...(apps?.level === "write" && viewer.appActsSeen && viewer.appRemove && (viewer.role === "admin" || !!can?.includes("removeApps")) ? { appRemove: true as const } : {}),
     // Keys (keysOf), what the workspace's bots see of keys, and whether the owner's Bops takes their "key" act: part of
     // the fingerprint, so being given Keys, a key added or the owner updating gives them a new one.
     ...(keys ? { keys: true as const, ...(keyNames ? { keyNames } : {}), ...(viewer.keyActs ? { keyActs: true as const } : {}) } : {}),

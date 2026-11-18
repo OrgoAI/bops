@@ -360,8 +360,8 @@ await check("a new Preview link gets a password at once, before its first deploy
   assert.ok(link?.password, "set on Orgo");
   assert.match(link.password, SHAPE);
   const order = web.calls.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.path.replace(/[0-9a-f-]{36}/g, "id").replace(link.label, "label")}${c.body && "password" in c.body ? " password" : ""}`);
+  // (No Published project: that's made only on Publish or a domain.)
   assert.deepEqual(order, [
-    "POST /api/computers/c_a/deploy-projects",
     "POST /api/computers/c_a/public-urls",
     "POST /api/computers/c_a/deploy-projects",
     "PATCH /api/computers/c_a/public-urls/id password",
@@ -628,7 +628,10 @@ await check("a Preview deploy this Bops queued gets a new password once, as it g
   assert.equal(passwordCalls(n).length, 0, "none for a deploy that never went live");
   assert.equal(shares.length, k);
   assert.equal(previewLink().password, now);
-  // Published goes live (a Publish, an Apply variables): its project isn't the Preview's, so nothing.
+  // Published goes live (a Publish, an Apply variables): its project isn't the Preview's, so nothing. (Made as an older
+  // Bops made it with the first Preview; this one makes it only on Publish or a domain.)
+  const O = await import(`${root}/lib/server/orgo.ts`);
+  if (!prodProject()) assert.ok((await O.deploys.create("c_a", { repo: REPO, name: L.newLabel("prod", REPO, "recipe-box"), port: 3190, publicUrl: false })).enabled);
   const prod = prodProject();
   prod.deployments.push({ id: randomUUID(), project_id: prod.id, state: "succeeded", source_version: HEAD, created_at: iso(), finished_at: iso() });
   await list();

@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import { appVersionOf, olderThan } from "./app-version.ts";
 import type { CloudUser } from "./auth.ts";
-import { same, workBotOf } from "./computer-scope.ts";
+import { appHomeHere, hostingScope, same, workBotOf } from "./computer-scope.ts";
 import { config } from "./config.ts";
 import { query, tx } from "./db.ts";
 import { deviceIdOf } from "./device.ts";
@@ -32,6 +32,7 @@ import {
   type LiveTurn,
   type MemberActPayload,
   type MemberFile,
+  type RunnerAppsViewEvent,
   type RunnerClaim,
   type RunnerResume,
   type RunnerTurnEvent,
@@ -808,7 +809,7 @@ export function groupComputer(blob: Record<string, unknown>, chatId: string): { 
   return { desktop: desktop! };
 }
 
-const nameOf = (blob: Record<string, unknown>, botId: string) => {
+export const nameOf = (blob: Record<string, unknown>, botId: string) => {
   const n = list(blob.bots).find((b) => b.id === botId)?.name;
   return typeof n === "string" && n.trim() ? n.trim() : "The bot";
 };
@@ -1064,7 +1065,66 @@ function jobEnded(blob: Record<string, unknown>, t: TurnRow, ok: boolean, said: 
   if (!m?.job || !app) return null;
   const row = actsOf(blob, t.wsId, app).find((x) => x.key === m.ref);
   if (!row || row.going !== true) return null;
-  return withAppAct(blob, t.wsId, app, { key: m.ref, userId: m.userId, name: m.name, act: m.job.act, ok, said, at: Date.now() });
+  return withAppAct(blob, t.wsId, app, { key: m.ref, userId: m.userId, name: m.name, act: m.job.act, ...jobRowOf(m.job), ok, said, at: Date.now() });
+}
+
+/** What an app job's act row says of it besides its kind (SharedApp.acts): its site, the left over by name, Published. */
+const jobRowOf = (job: TurnJob): Record<string, unknown> => ({
+  ...("site" in job && typeof job.site === "string" ? { site: job.site } : {}),
+  ...("leftOver" in job && typeof job.leftOver === "string" ? { leftOver: job.leftOver } : {}),
+  ...("env" in job && job.env === "prod" ? { env: "prod" } : {}),
+});
+
+/** `o` without its key `k`. */
+const without = (o: Record<string, unknown>, k: string): Record<string, unknown> => Object.fromEntries(Object.entries(o).filter(([x]) => x !== k));
+/** How many removals a workspace keeps (lib/hosted-apps.ts APPS_REMOVED_KEPT). */
+const APPS_REMOVED_KEPT = 10;
+
+/**
+ * `blob` with app `app` of workspace `ws` removed, as Bops Cloud keeps it once the app's own computer took it off the web
+ * (jobFinished), or itself for an app whose computer is gone (members.ts appJobAct): its record (Workspace.hostedApps),
+ * what members saw of it (appsForMembers), its Preview passwords ("<app>/*"), and a removal row (Workspace.appsRemoved,
+ * newest first, APPS_REMOVED_KEPT at most) in place of its act row. Its view (bops.app_views) is the caller's to delete.
+ */
+export function withAppRemoved(blob: Record<string, unknown>, ws: string, app: string, row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...blob,
+    workspaces: list(blob.workspaces).map((w) => {
+      if (w.id !== ws) return w;
+      const next: Record<string, unknown> = { ...w };
+      if (isObject(w.hostedApps) && Object.hasOwn(w.hostedApps, app)) next.hostedApps = without(w.hostedApps, app);
+      if (isObject(w.appsForMembers) && isObject(w.appsForMembers.apps) && Object.hasOwn(w.appsForMembers.apps, app)) next.appsForMembers = { ...w.appsForMembers, apps: without(w.appsForMembers.apps, app) };
+      if (isObject(w.previewPasswords)) {
+        const kept = Object.fromEntries(Object.entries(w.previewPasswords).filter(([k]) => !k.startsWith(`${app}/`)));
+        if (Object.keys(kept).length) next.previewPasswords = kept;
+        else delete next.previewPasswords;
+      }
+      next.appsRemoved = [row, ...list(w.appsRemoved).filter((x) => x.key !== row.key)].slice(0, APPS_REMOVED_KEPT);
+      return next;
+    }),
+  };
+}
+
+/** `blob` with site `site` of app `app` (one of AppHosting.sites, never its own) gone, and its Preview password ("<app>/<site>"). Null: no such site. */
+export function withSiteRemoved(blob: Record<string, unknown>, ws: string, app: string, site: string): Record<string, unknown> | null {
+  const h = workspaceIn(blob, ws)?.hostedApps;
+  const rec = isObject(h) && Object.hasOwn(h, app) && isObject(h[app]) ? (h[app] as Record<string, unknown>) : null;
+  if (!rec || site === app || !list(rec.sites).some((x) => x.name === site)) return null;
+  const sites = list(rec.sites).filter((x) => x.name !== site);
+  const nextRec: Record<string, unknown> = { ...rec };
+  if (sites.length) nextRec.sites = sites;
+  else delete nextRec.sites;
+  const out = withHosting(blob, ws, app, nextRec);
+  return {
+    ...out,
+    workspaces: list(out.workspaces).map((w) => {
+      if (w.id !== ws || !isObject(w.previewPasswords) || !Object.hasOwn(w.previewPasswords, `${app}/${site}`)) return w;
+      const rest = without(w.previewPasswords, `${app}/${site}`);
+      const next: Record<string, unknown> = { ...w, previewPasswords: rest };
+      if (!Object.keys(rest).length) delete next.previewPasswords;
+      return next;
+    }),
+  };
 }
 
 /** Why a job ended that its computer never said, by its turn's note (NOTES' keys), as kept on the app. */
@@ -1083,6 +1143,8 @@ const JOB_NOTES: Record<string, (owner: string, bot: string) => string> = {
   // A runner from before CLOUD_ALL_MIN_VERSION claimed a job only newer ones know (claim): it did nothing.
   oldRunner: (_o, bot) => `${bot}'s computer took this on an older Bops. Try again once it's updated.`,
 };
+/** One of the words a job's end is said with (JOB_NOTES' keys), or null for a key that has none. */
+export const jobNote = (key: string, owner: string, bot: string): string | null => (Object.hasOwn(JOB_NOTES, key) ? JOB_NOTES[key](owner, bot) : null);
 /** Why a job ended that its computer never said (it couldn't wake, went quiet partway, their access changed), as kept on the app. */
 const jobWords = (t: TurnRow, owner: string, bot: string): string =>
   t.note && Object.hasOwn(JOB_NOTES, t.note) ? JOB_NOTES[t.note](owner, bot) : "Who can do this changed, so it didn't go.";
@@ -1200,19 +1262,29 @@ export const APP_JOB_DEADLINE_MS = 30 * 60_000;
  */
 export const jobDeadline = (job: TurnJob): number => (isGithubJob(job) || isRemoveJob(job) || ("env" in job && job.env === "prod") ? TURN_DEADLINE_MS : APP_JOB_DEADLINE_MS);
 
-export type AppJobTaken = { where: "computer"; turn: TurnRow; fresh: boolean } | { where: "mac"; why: "home" | "runner" | "key"; bot: string };
+/**
+ * Why an app job can't be owed to the app's computer: its home (lost, or not on its bot's computer), its bot has no
+ * computer, no runner there, one too old, no bot there given the GitHub key, another job still going on the app, or (a
+ * remove) a copy left on another computer.
+ */
+export type AppJobRefusal = "home" | "noComputer" | "runner" | "old" | "key" | "busy" | "behind";
+export type AppJobTaken = { where: "computer"; turn: TurnRow; fresh: boolean } | { where: "refused"; why: AppJobRefusal; bot: string };
 
 /**
- * An app's job (protocol.ts AppJob; today the GitHub ones, MemberGithubAct "githubLink" or "githubPull") owed to the
- * app's own computer, which has both what it needs there: Ingot (its runner's token for the workspace) and the GitHub
- * key (its own sign in, which Orgo's broker lets call only the keys given to a bot on it). Under the owner's lock, on
- * their state as it is then: `check` (throwing to refuse: still theirs to do), then the app's home (not lost, on the
- * computer its bot works on), a runner there at the version its kind needs on a computer the Mac didn't find down (a
- * GitHub job: one the owner's Mac's record says is running, as before, at GITHUB_ACTS_MIN_VERSION; else runnerVersionOf,
- * the Mac's record or its own word, at CLOUD_ALL_MIN_VERSION), and a bot of the workspace on it given the GitHub key. Any missing: "mac", and why, for the owner's Mac to do it instead. Else, once by its id (a retry finds it and
- * changes nothing): a note in the app's bot's chat (Bops', with what `words` says), its "going" act on the app, and a turn
- * owed to that computer with the job on its member (TurnMember.job), given out and woken as a chat turn is, one at a time
- * in that chat, until its deadline (jobDeadline). `still` false right before it's kept takes it all back (an orgo-web notice landed).
+ * An app's job (protocol.ts AppJob) owed to the app's own computer, which has what it needs there: Ingot (its runner's
+ * token for the workspace), its own Orgo sign in for its deploys, and for a GitHub kind the GitHub key (Orgo's broker
+ * lets it call only the keys given to a bot on it). Under the owner's lock, on their state as it is then: `check`
+ * (throwing to refuse: still theirs to do), then the app's home (not lost, on the computer its bot works on: computerFor,
+ * with `cloud` a bot set to the owner's Mac too), a runner there at `min` (a GitHub job: one the owner's Mac's record
+ * says is running, as before; else runnerVersionOf, the Mac's record or its own word), with `needsKey` a bot of the
+ * workspace on it given the GitHub key; with `cloud`, no other job of the app
+ * going (its act row), and for a remove no copy of it left on another computer (AppHosting.behind). Any missing:
+ * "refused", and why; the owner's Mac does it instead only outside `cloud` (members.ts). A computer the owner's Mac found
+ * down is refused outside `cloud` (as before), but with `cloud` the job is owed and its wake says why it can't run
+ * (JOB_NOTES). Else, once by its id (a retry finds it and changes nothing): a note in the app's bot's chat (Bops', with
+ * what `words` says), its "going" act on the app, and a turn owed to that computer with the job on its member
+ * (TurnMember.job), given out and woken as a chat turn is, one at a time in that chat, until its deadline (jobDeadline).
+ * `still` false right before it's kept takes it all back (an orgo-web notice landed).
  */
 export async function takeAppJob(o: {
   account: string;
@@ -1223,7 +1295,16 @@ export async function takeAppJob(o: {
   words: (bot: string) => string;
   check: (blob: Record<string, unknown>) => void;
   still?: () => boolean;
+  /** The least Bops its runner must run (GITHUB_ACTS_MIN_VERSION for a GitHub kind, else CLOUD_ALL_MIN_VERSION). */
+  min?: string;
+  /** It calls GitHub on the computer (a GitHub kind, a Publish of an app on GitHub). Unset: a GitHub kind's own. */
+  needsKey?: boolean;
+  /** A workspace where everything goes through the cloud (allCloud): never the owner's Mac. */
+  cloud?: boolean;
 }): Promise<AppJobTaken> {
+  const min = o.min ?? (isGithubJob(o.job) ? GITHUB_ACTS_MIN_VERSION : CLOUD_ALL_MIN_VERSION);
+  const needsKey = o.needsKey ?? isGithubJob(o.job);
+  const cloud = !!o.cloud;
   const taken = await tx(async (c): Promise<AppJobTaken & { written?: Record<string, unknown> }> => {
     await lockUser(c, o.account);
     let blob = await lockedState(c, o.account);
@@ -1235,19 +1316,30 @@ export async function takeAppJob(o: {
     if (!h) throw new HttpError(404, "No such app.");
     const botId = typeof h.botId === "string" ? h.botId : null;
     const bot = botId ? nameOf(blob, botId) : "The bot";
-    const desktop = botId ? computerFor(blob, botId) : null;
-    if (!botId || !desktop || h.lost !== undefined || typeof h.computerId !== "string" || h.computerId.toLowerCase() !== desktop) return { where: "mac", why: "home", bot };
-    // Its runner at the version its kind needs; a computer the Mac found down is left to the Mac, as before. A GitHub job
-    // keeps the rule from before: the owner's Mac's record says it's running (never one being set up again, failed or
-    // being stopped, whatever the runner said before), its version the newer of that record's and the runner's own word.
-    // The rest: runnerVersionOf, the Mac's record or the runner's own word.
+    const desktop = botId ? computerFor(blob, botId, cloud) : null;
+    if (h.lost !== undefined || !botId) return { where: "refused", why: "home", bot };
+    if (!desktop) return { where: "refused", why: cloud ? "noComputer" : "home", bot };
+    if (typeof h.computerId !== "string" || h.computerId.toLowerCase() !== desktop) return { where: "refused", why: "home", bot };
+    // Its runner at the version its kind needs; a computer the Mac found down is left to the Mac outside the cloud, as
+    // before, and woken for it inside. A GitHub job keeps the rule from before: the owner's Mac's record says it's running
+    // (never one being set up again, failed or being stopped, whatever the runner said before), its version the newer of
+    // that record's and the runner's own word. The rest: runnerVersionOf, the Mac's record or the runner's own word.
     const r = runnerAt(blob, desktop);
-    const github = isGithubJob(o.job);
     const asBefore = r?.status === "running" && typeof r.version === "string" && VERSION.test(r.version);
-    const v = !r || r.down || (github && !asBefore) ? null : await runnerVersionOf(c, o.account, blob, desktop);
-    if (!v || olderThan(v, github ? GITHUB_ACTS_MIN_VERSION : CLOUD_ALL_MIN_VERSION)) return { where: "mac", why: "runner", bot };
-    const keyed = list(blob.bots).some((b) => typeof b.id === "string" && wsOfBot(b) === o.wsId && computerFor(blob, b.id) === desktop && Array.isArray(b.keys) && b.keys.includes(GITHUB_KEY_NAME));
-    if (!keyed) return { where: "mac", why: "key", bot };
+    const v = !r || (!cloud && r.down) || (isGithubJob(o.job) && !asBefore) ? null : await runnerVersionOf(c, o.account, blob, desktop);
+    if (!v) return { where: "refused", why: "runner", bot };
+    if (olderThan(v, min)) return { where: "refused", why: cloud ? "old" : "runner", bot };
+    if (needsKey) {
+      const keyed = list(blob.bots).some((b) => typeof b.id === "string" && wsOfBot(b) === o.wsId && computerFor(blob, b.id, cloud) === desktop && Array.isArray(b.keys) && b.keys.includes(GITHUB_KEY_NAME));
+      if (!keyed) return { where: "refused", why: "key", bot };
+    }
+    if (cloud) {
+      // One job at a time on an app: another still going (its act row) is said, never queued behind it.
+      if (actsOf(blob, o.wsId, o.job.app).some((x) => x.going === true && x.key !== o.member.ref)) return { where: "refused", why: "busy", bot };
+      // A copy left on another computer: this computer's runner can't reach it, so the app can't go from here yet.
+      if ((o.job.act === "remove" || o.job.act === "removeSite") && list(h.behind).some((x) => typeof x.computerId === "string" && x.computerId.toLowerCase() !== desktop && (o.job.act === "remove" || ("site" in o.job && x.site === o.job.site))))
+        return { where: "refused", why: "behind", bot };
+    }
     const at = Date.now();
     const chatId = `bot:${botId}`;
     const message = { id: o.id, chatId, role: "system", botId, text: o.words(bot), at };
@@ -1258,7 +1350,7 @@ export async function takeAppJob(o: {
        RETURNING ${COLS}`,
       [o.account, `turn_${o.id}`, o.id, chatId, botId, o.wsId, JSON.stringify({ ...o.member, job: o.job }), desktop, deviceIdOf(o.account, desktop), jobDeadline(o.job) / 1000, at],
     );
-    blob = withAppAct(blob, o.wsId, o.job.app, { key: o.member.ref, userId: o.member.userId, name: o.member.name, act: o.job.act, ok: true, going: true, at });
+    blob = withAppAct(blob, o.wsId, o.job.app, { key: o.member.ref, userId: o.member.userId, name: o.member.name, act: o.job.act, ...jobRowOf(o.job), ok: true, going: true, at });
     await writeOwnerState(c, o.account, blob);
     if (o.still && !o.still()) throw new HttpError(404, "No such workspace");
     return { where: "computer", turn: turnOf(ins.rows[0]), fresh: true, written: blob };
@@ -1270,7 +1362,7 @@ export async function takeAppJob(o: {
     void dispatch(taken.turn);
   }
   if (taken.where === "computer") return { where: "computer", turn: taken.turn, fresh: taken.fresh };
-  return taken;
+  return { where: "refused", why: taken.why, bot: taken.bot };
 }
 
 /* ---------------- A chat's compact, as a job ---------------- */
@@ -1395,6 +1487,31 @@ export function nudgeRunners(userId: string) {
   const prefix = `${userId}\0`;
   for (const [k, set] of runners) if (k.startsWith(prefix)) for (const s of set) s.write("state", {});
 }
+
+/** How often one computer is asked to share its apps' view at most (nudgeAppViews), and how old the newest view must be first. */
+export const APP_VIEW_NUDGE_MS = 2 * 60_000;
+export const APP_VIEW_STALE_MS = 5 * 60_000;
+const nudged = new Map<string, number>();
+
+/**
+ * Ask the runner of computer `desktop` to share these apps' view now ("apps-view", lib/server/runner-chat.ts), as a member
+ * opens Your Apps in a workspace where everything goes through the cloud: only while it listens (a computer is never woken
+ * for it), only when the newest view shown of them (`newest`: the owner's Mac's read, or a computer's) is more than
+ * APP_VIEW_STALE_MS old, and at most once every APP_VIEW_NUDGE_MS per computer. Whether it was asked.
+ */
+export function nudgeAppViews(account: string, ws: string, desktop: string, apps: string[], newest = 0): boolean {
+  const now = Date.now();
+  if (now - newest <= APP_VIEW_STALE_MS || !apps.length) return false;
+  const device = deviceIdOf(account, desktop.toLowerCase());
+  const k = rkey(account, device);
+  const last = nudged.get(k);
+  if ((last !== undefined && now - last < APP_VIEW_NUDGE_MS) || !runnerOn(account, device)) return false;
+  nudged.set(k, now);
+  if (nudged.size > 5_000) for (const [x, at] of nudged) if (now - at >= APP_VIEW_NUDGE_MS) nudged.delete(x);
+  return toRunner(account, device, "apps-view", { ws, apps } satisfies RunnerAppsViewEvent);
+}
+/** For tests: forget when each computer was last asked (nudgeAppViews). */
+export const forgetNudges = () => nudged.clear();
 
 /** For tests: how many runners listen. */
 export const runnersOpen = () => [...runners.values()].reduce((n, s) => n + s.size, 0);
@@ -1704,8 +1821,9 @@ function memberStill(blob: Record<string, unknown>, t: TurnRow): "ok" | "gone" |
 /**
  * Whether a job's member may still have it done, by its kind: an app's GitHub job needs Your Apps at Write and the power
  * of Publish (an Admin always, a Member with App secrets); a deploy, rollback, settings or domain Your Apps at Write, and
- * what goes on Published (env "prod") the power of Publish too; a remove an Admin; compacting a chat Write on every bot
- * of the chat, and Use its computer ("noUse" without: it runs on one of its bots' computers).
+ * what goes on Published (env "prod") the power of Publish too; a remove Your Apps at Write and Remove apps (an Admin
+ * always, a Member with it on), and an Admin for its code too; compacting a chat Write on every bot of the chat, and Use
+ * its computer ("noUse" without: it runs on one of its bots' computers).
  */
 function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | null, viewer: SliceViewer, job: TurnJob, chatId: string): "ok" | "gone" | "noUse" {
   const access = viewerAccess(ws, viewer);
@@ -1720,10 +1838,12 @@ function jobStill(blob: Record<string, unknown>, ws: Record<string, unknown> | n
     case "settings":
     case "domain":
       return appsWrite && ("env" in job && job.env === "prod" ? publish : true) ? "ok" : "gone";
+    // Your Apps at Write, and an Admin, or a Member with Remove apps on; its code too an Admin alone.
     case "remove":
     case "removeSite":
     case "removeLeftOver":
-      return viewer.role === "admin" ? "ok" : "gone";
+      if (job.act === "remove" && job.repo) return appsWrite && viewer.role === "admin" ? "ok" : "gone";
+      return appsWrite && hasPower("removeApps", viewer.role, access.can) ? "ok" : "gone";
     case "compactChat": {
       const bots = botsOfChat(blob, chatId);
       if (!bots.length || !bots.every((id) => permits(levelOf(access, id), "write"))) return "gone";
@@ -1918,7 +2038,7 @@ export type JobResult = { ok: boolean; said: string; removed?: "app" | "site" };
  * write. An app's kinds keep how it went on the app as theirs (SharedApp.acts), in place of its "going" row (jobEnded).
  * A chat's job (compactChat) has no app to keep it on.
  */
-function jobFinished(blob: Record<string, unknown>, t: TurnRow, res: JobResult): Record<string, unknown> | null {
+function jobFinished(blob: Record<string, unknown>, t: TurnRow, res: JobResult, claimer?: string): Record<string, unknown> | null {
   const job = t.member?.job;
   if (!job) return null;
   switch (job.act) {
@@ -1929,15 +2049,33 @@ function jobFinished(blob: Record<string, unknown>, t: TurnRow, res: JobResult):
     case "rollback":
     case "settings":
     case "domain":
-    case "remove":
-    case "removeSite":
     case "removeLeftOver":
       return jobEnded(blob, t, res.ok, res.said);
+    // Off the web: the app (or its site) goes from the state too, which only Bops Cloud may write (a runner never drops a
+    // record or a site: computer-scope.ts hostingChangeAllowed), and only while its home is still the computer that did it.
+    case "remove": {
+      const m = t.member!;
+      const row = actsOf(blob, t.wsId, job.app).find((x) => x.key === m.ref);
+      if (!row || row.going !== true) return null;
+      const h = workspaceIn(blob, t.wsId)?.hostedApps;
+      const rec = isObject(h) && Object.hasOwn(h, job.app) ? h[job.app] : undefined;
+      if (!res.ok || res.removed !== "app") return jobEnded(blob, t, res.ok, res.said);
+      // (Off the web, but the app's home moved meanwhile: its record stays, and that's said.)
+      if (!claimer || !appHomeHere(t.wsId, rec, hostingScope(blob, claimer))) return jobEnded(blob, t, false, JOB_MOVED);
+      return withAppRemoved(blob, t.wsId, job.app, { key: m.ref, userId: m.userId, name: m.name, app: job.app, ok: true, said: res.said, ...(job.repo ? { codeLeft: true } : {}), at: Date.now() });
+    }
+    case "removeSite": {
+      const ended = jobEnded(blob, t, res.ok, res.said);
+      if (!ended || !res.ok || res.removed !== "site") return ended;
+      return withSiteRemoved(ended, t.wsId, job.app, job.site) ?? ended;
+    }
     // Nothing on the state: its runner wrote the chat's summary, and its line goes in the chat (finish, chatJobLine).
     case "compactChat":
       return null;
   }
 }
+/** A remove its computer said it did, of an app whose home moved meanwhile: the state keeps it, so say so. */
+const JOB_MOVED = "Its computer took it off the web, but the app moved meanwhile, so it stays in Your Apps. Try again.";
 
 /** The most tapbacks one turn's end carries (RunnerDone.reacts: a group's bots on the message it answered). */
 export const MAX_REACTS = 8;
@@ -2003,10 +2141,16 @@ async function finish(user: CloudUser, id: string, body: unknown, version: strin
       const old = chatJob(turn) ? JOB_NOTES.oldRunner(ownerOf(blob), nameOf(blob, turn.botId)) : JOB_OLD_RUNNER;
       const said = cleanSaid(res?.said) ?? (note ? note : state === "done" ? old : JOB_STOPPED);
       const removed = ok && (res?.removed === "app" || res?.removed === "site") ? res.removed : undefined;
-      const next = jobFinished(blob, turn, { ok, said, ...(removed ? { removed } : {}) });
+      const job = raw.member.job;
+      const next = jobFinished(blob, turn, { ok, said, ...(removed ? { removed } : {}) }, user.computer!.desktopId);
       if (next) {
         await writeOwnerState(db, user.id, next);
         jobWritten = next;
+        // A removed app's members' view goes with it (bops.app_views, never in the state).
+        const app = jobApp(job);
+        const still = app ? workspaceIn(next, raw.ws_id)?.hostedApps : undefined;
+        if (job.act === "remove" && app && !(isObject(still) && Object.hasOwn(still, app)))
+          await db.query("DELETE FROM bops.app_views WHERE user_id = $1 AND ws_id = $2 AND app = $3", [user.id, raw.ws_id, app]);
       }
       // A chat's (compactChat): its line in the chat, stamped as theirs, "Compacted by <name>" or why not (chatJobLine).
       const line = chatJobLine(turn, ok, said);

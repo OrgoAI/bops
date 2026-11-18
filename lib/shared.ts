@@ -1,4 +1,4 @@
-import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
+import type { AppJobKind, MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
 /**
  * Workspaces shared with the user (cloud/members.ts, lib/server/shared.ts): someone added them to one of
  * their Bops workspaces' Orgo projects, and they watch it here. With Write on a bot (the owner's choice,
@@ -63,6 +63,13 @@ export type SharedOpen = SharedWorkspace & {
    * GitHub's changes, which the app's own computer does (SharedWsSlice.appGithub: the owner's Bops takes them).
    */
   appGithub?: true;
+  /**
+   * At Your Apps Write, in a workspace where everything goes through the cloud: the kinds of job its apps' own computers
+   * do now (SharedWsSlice.appJobs), so Your Apps shows only the buttons that go through and says "Sending to its computer".
+   */
+  appJobs?: AppJobKind[];
+  /** At Your Apps Write, for someone who may (an Admin, a Member with Remove apps): Remove app, a site or a left over (SharedWsSlice.appRemove). */
+  appRemove?: true;
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: MemberSend["state"]; error?: string }[];
   /** The same for a bot's How I work (bot-panel.tsx HowIWork). */
