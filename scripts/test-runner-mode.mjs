@@ -41,7 +41,7 @@ const FAKES = {
   local: ["CHROME"],
   "orgo-sign-in": ["authStatus"],
   routines: [],
-  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn", "watchIdentity", "WHO_AM_I_EVERY_MS"], "orgo-auth": ["loadOrgoKey", "lookForRunnerKey"], "free-hours": ["startActivityBeat"], "runner-chat": ["startRunnerChat"], "browser-runner": ["startBrowserRelay"] } : {}),
+  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn", "watchIdentity", "WHO_AM_I_EVERY_MS"], "orgo-auth": ["loadOrgoKey", "lookForRunnerKey"], "free-hours": ["startActivityBeat"], "runner-chat": ["startRunnerChat", "startWorkingBeat"], "browser-runner": ["startBrowserRelay"] } : {}),
 };
 const VALUES = { local: { CHROME: "/nonexistent/Chrome" }, runner: { IDENTITY_EVERY_MS: 300000, WHO_AM_I_EVERY_MS: 60000 } };
 const loaded = [];
@@ -151,7 +151,7 @@ if (START) {
     globalThis.__fake.runner = { checkIdentity: async () => (calls.push("identity"), looks.shift() ?? "same"), runnerComputer: () => C1, startRunsOn: () => calls.push("runs-on"), watchIdentity: async () => {} };
     globalThis.__fake["orgo-auth"] = { loadOrgoKey: async () => (calls.push("key"), "sk_runner"), lookForRunnerKey: async () => (calls.push("look"), "sk_runner") };
     globalThis.__fake["free-hours"] = { startActivityBeat: () => calls.push("in-use") };
-    globalThis.__fake["runner-chat"] = { startRunnerChat: () => calls.push("chat") };
+    globalThis.__fake["runner-chat"] = { startRunnerChat: () => calls.push("chat"), startWorkingBeat: () => calls.push("working") };
     globalThis.__fake["browser-runner"] = { startBrowserRelay: () => calls.push("browser") };
     globalThis.__fake["orgo-sign-in"] = { authStatus: async () => (calls.push("state"), (ready = ++tries >= 2), {}) };
     Object.assign(process.env, good());
@@ -161,7 +161,7 @@ if (START) {
     console.log = () => {};
     await S.startRunner();
     console.log = log;
-    assert.deepEqual(calls, ["key", "identity", "identity", "state", "state", "runs-on", "in-use", "chat", "browser"], "key, which computer (again until Orgo says), the state (again until it loads), then its loops");
+    assert.deepEqual(calls, ["key", "identity", "identity", "state", "state", "runs-on", "in-use", "chat", "working", "browser"], "key, which computer (again until Orgo says), the state (again until it loads), then its loops (the working beat for its keeper too)");
     assert.deepEqual(globalThis.__fake.started, ["routines"], "the routines timer");
     for (const m of ["mail", "phone", "channels", "cloud-tunnel", "bops-sync", "access-sync", "watches", "relay", "runner-install", "mac", "attention", "orbit-sync", "memory-categories", "sessions"])
       assert.ok(!loaded.includes(m), `${m} isn't started`);

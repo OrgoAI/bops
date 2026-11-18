@@ -17,11 +17,12 @@ import {
   type TurnJob,
   type TurnMember,
 } from "@/cloud/protocol";
-import { workspaceOf, type AppApproval, type MemberTurn } from "@/lib/types";
+import { live as liveSession, pausedForOk, workspaceOf, type AppApproval, type MemberTurn } from "@/lib/types";
+import { RUNNER_KEEPER_LOOK, RUNNER_WORKING } from "@/vm/runner-steps.mjs";
 import { shareAppsView } from "./apps-view-share";
 import { cloudFetch } from "./cloud";
 import { loopHere, onRunner } from "./persist";
-import { addMessage, flushState, getState, pullState, stateReady } from "./store";
+import { addMessage, flushState, getState, ownSession, pullState, stateReady } from "./store";
 import { runInTurn, type TurnContext } from "./turn-context";
 
 /**
@@ -46,8 +47,9 @@ import { runInTurn, type TurnContext } from "./turn-context";
  *    never runs, on this runner or after a restart or an upgrade.
  *
  * "turn-cancel" (its member removed or their access changed, its lease lost) stops a turn where it is. "state" reads
- * the state now (an OK answered, a change of who may). A turn whose message it can't read fails with a note. The Mac
- * never runs this.
+ * the state now (an OK answered, a change of who may). "update" (a new runner release is out) touches
+ * RUNNER_KEEPER_LOOK, so this computer's keeper looks at once. A turn whose message it can't read fails with a note.
+ * The Mac never runs this.
  *
  * A group's turn (RunnerClaim.turn.group: Bops Cloud owes one only to a computer where every bot of the group works)
  * runs as the group does (chat.ts groupTurn), each of its bots' rows carrying the turn. A bot set to work on the Mac
@@ -90,6 +92,9 @@ type Box = {
   marks?: Map<string, number>;
   /** Tests: how often a resume looks again at an upgrade's hold. */
   holdPollMs?: number;
+  /** The working beat (startWorkingBeat), and for tests how often it beats. */
+  working?: ReturnType<typeof setInterval>;
+  workingMs?: number;
   /** Tests: what does an app's job (hosted-apps.ts appJob), as runnerJob gives it one. */
   job?: (botId: string, job: AppJob, by: string) => Promise<JobResult>;
   /** Tests: what compacts a chat (chat-summary.ts compactChat), and whether Bops Cloud has its summary now (store.ts changeLanded). */
@@ -207,6 +212,9 @@ function onBlock(live: Live, block: string) {
     const names = Array.isArray(ev.apps) ? ev.apps.filter((x): x is string => typeof x === "string").slice(0, 100) : undefined;
     void shareAppsView(ev.ws, names).catch(() => {});
   }
+  // A new runner release is out (cloud/runner-release.ts nudgeUpdates): this computer's keeper looks at once (it watches
+  // RUNNER_KEEPER_LOOK). Best effort: a touch that fails leaves the keeper to its own next look.
+  else if (type === "update") void touchFile(lookOf()).catch(() => {});
   else if (type === "state" && !live.pulling) {
     live.pulling = setTimeout(() => {
       live.pulling = undefined;
@@ -263,6 +271,41 @@ async function whileMarked<T>(id: string, run: () => Promise<T>, held?: () => T)
   }
 }
 const holding = () => stat(holdOf()).then((h) => Date.now() - h.mtimeMs < HOLD_STALE_MS, () => false);
+
+/** The runner's markers for its keeper, beside the reply marks (tests: beside theirs). */
+const workingOf = () => (box.turnsDir ? join(dirname(box.turnsDir), "working") : RUNNER_WORKING);
+const lookOf = () => (box.turnsDir ? join(dirname(box.turnsDir), "keeper-look") : RUNNER_KEEPER_LOOK);
+/** A file made, or its time set to now (its folder made first). */
+const touchFile = (file: string) => mkdir(dirname(file), { recursive: true }).then(() => writeFile(file, ""));
+const WORKING_EVERY_MS = 30_000;
+
+/**
+ * Whether a thread of this runner's own is going (a routine's run, a task): live, and not paused for the user's OK (a
+ * paused run holds no process here, and goes on through Bops Cloud after a restart). RUNNER_WORKING is touched then.
+ */
+export function workingNow(): boolean {
+  const s = getState();
+  return s.sessions.some((x) => liveSession(x) && ownSession(x) && !pausedForOk(x, s));
+}
+/** One beat: RUNNER_WORKING touched while a thread of its own is going (workingNow), else left as it is. Whether it was. */
+export async function beatWorking(): Promise<boolean> {
+  if (!workingNow()) return false;
+  return touchFile(workingOf()).then(
+    () => true,
+    () => false,
+  );
+}
+/**
+ * The working beat, on a runner (runner-start.ts): every 30 seconds while a thread of its own is going, RUNNER_WORKING
+ * is touched, so neither the Mac nor its keeper swaps this runner's files under it (vm/runner-steps.mjs installScript
+ * is busy while it was touched in the last 2 minutes). Nothing is touched while it's idle.
+ */
+export function startWorkingBeat() {
+  if (!onRunner() || !loopHere("sessions") || box.working) return;
+  void beatWorking();
+  box.working = setInterval(() => void beatWorking(), box.workingMs ?? WORKING_EVERY_MS);
+  box.working.unref?.();
+}
 
 /** The turn's beats while `run` runs, then its end: done (with its tapback, or `result`: a job's), paused for an OK, or nothing (taken back). */
 async function asTurn(ctx: TurnContext, run: () => Promise<{ paused?: boolean } | null>, after?: { messageId: string }, result?: () => JobResult) {
@@ -507,6 +550,7 @@ export function runnerChatForTests(opts: {
   retryMs?: number[];
   turnsDir?: string;
   holdPollMs?: number;
+  workingMs?: number;
   job?: typeof box.job;
   compact?: typeof box.compact;
   landed?: typeof box.landed;
@@ -520,5 +564,8 @@ export function runnerChatForTests(opts: {
   box.turnsDir = opts.turnsDir;
   box.holdPollMs = opts.holdPollMs;
   box.retryMs = opts.retryMs;
+  box.workingMs = opts.workingMs;
+  if (box.working) clearInterval(box.working);
+  box.working = undefined;
   box.running.clear();
 }
