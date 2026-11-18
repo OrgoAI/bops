@@ -1294,8 +1294,11 @@ async function hostingCall<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path:
 export type DeploySettings = { install_cmd?: string; build_cmd?: string; start_cmd?: string; health_path?: string };
 
 export const deploys = {
-  /** The computer's deploy projects, each with its newest deploys. */
-  projects: (computerId: string) => hostingCall<{ projects?: OrgoDeployProject[] }>("GET", `/computers/${encodeURIComponent(computerId)}/deploy-projects`),
+  /**
+   * The computer's deploy projects, each with its newest deploys, and how many it may have (`limit`, orgo-web's
+   * DEPLOY_PROJECTS_PER_COMPUTER: negative, no cap; absent from an orgo-web before it, or a computer that can't host).
+   */
+  projects: (computerId: string) => hostingCall<{ projects?: OrgoDeployProject[]; limit?: number }>("GET", `/computers/${encodeURIComponent(computerId)}/deploy-projects`),
   /** One project, with its newest deploys. */
   project: (computerId: string, projectId: string) => hostingCall<OrgoDeployProject>("GET", `/computers/${encodeURIComponent(computerId)}/deploy-projects/${encodeURIComponent(projectId)}`),
   /**

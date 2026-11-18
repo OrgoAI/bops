@@ -741,7 +741,10 @@ async function orgoWeb(req) {
     const [, computerId, kind, id, sub] = m;
     // HOSTING_ACCESS keeps hosting to admins: every deploy route answers as if deploys were off.
     if (web.closed) return json({ error: "Deploys are not enabled", code: "DEPLOYS_DISABLED" }, 404);
-    if (kind === "deploy-projects" && !id && req.method === "GET") return json({ enabled: true, supported: true, projects: web.projects.filter((p) => p.computerId === computerId).map(projectView) });
+    // (`limit`: DEPLOY_PROJECTS_PER_COMPUTER, only when a test sets one, as an orgo-web before it said none; `projectsDown`: the list refused.)
+    if (kind === "deploy-projects" && !id && req.method === "GET" && web.projectsDown) return json({ error: "Not now" }, 403);
+    if (kind === "deploy-projects" && !id && req.method === "GET")
+      return json({ enabled: true, supported: true, ...(web.projectLimit !== undefined ? { limit: web.projectLimit } : {}), projects: web.projects.filter((p) => p.computerId === computerId).map(projectView) });
     if (kind === "deploy-projects" && !id && req.method === "POST") {
       if (body.source !== "ingot") return json({ error: "Name an Ingot repo", code: "INVALID_SOURCE" }, 400);
       const ingotRepo = checkIngotRepo(body.repo);
@@ -6834,6 +6837,226 @@ await check("Cleanups: a bot whose Works on moves off the app has its copy's Loc
     s.chats = s.chats.filter((c) => c.id !== botChatId("sam") && c.id !== botChatId("kim"));
   });
   for (const d of [...boppy.folders.keys()]) if (d.startsWith(TEAM_DIR)) boppy.folders.delete(d);
+});
+
+/* ---------------- How many more apps each computer has room for ---------------- */
+
+await check("A computer's room for more apps (roomOf): its deploy projects and public URLs against their caps, each new app taking what a first deploy makes (2 projects, 1 public URL); the URLs said when they run out first; no line with no cap or a cap orgo-web doesn't say", () => {
+  assert.deepEqual(H.NEW_APP_TAKES, { projects: 2, urls: 1 }, "an empty Published, then the Preview's link and project");
+  const urls = (n, limit = 10) => ({ enabled: true, limit, public_urls: Array.from({ length: n }, (_, i) => ({ id: `u${i}` })) });
+  const projects = (n, limit = 10) => ({ limit, projects: Array.from({ length: n }, (_, i) => ({ id: `p${i}` })) });
+  assert.deepEqual(H.roomOf(projects(6), urls(3)), { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2 });
+  assert.deepEqual(H.roomOf(projects(8), urls(3)), { used: 8, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 1 });
+  assert.deepEqual(H.roomOf(projects(9), urls(3)).apps, 0, "one project left, a new app takes two: full");
+  assert.deepEqual(H.roomOf(projects(10), urls(3)).apps, 0);
+  assert.deepEqual(H.roomOf(projects(8, 5), urls(0)), { used: 8, limit: 5, urlsUsed: 0, urlsLimit: 10, apps: 0 }, "past its cap (a cap lowered since): full, never less than none");
+  assert.deepEqual(H.roomOf(projects(2), urls(8)), { used: 2, limit: 10, urlsUsed: 8, urlsLimit: 10, apps: 2, urlsFirst: true }, "the public URLs run out first");
+  assert.deepEqual(H.roomOf(projects(2), urls(10)), { used: 2, limit: 10, urlsUsed: 10, urlsLimit: 10, apps: 0, urlsFirst: true });
+  assert.deepEqual(H.roomOf(projects(4), { enabled: false, public_urls: [] }), { used: 4, limit: 10, urlsUsed: 0, urlsLimit: -1, apps: 3 }, "public URLs not open there: no cap of theirs");
+  assert.deepEqual(H.roomOf(projects(40, -1), urls(9)), { used: 40, limit: -1, urlsUsed: 9, urlsLimit: 10, apps: 1, urlsFirst: true }, "projects with no cap: the URLs alone");
+  assert.equal(H.roomOf(projects(4, -1), urls(9, -1)), null, "no cap at all: no line");
+  assert.equal(H.roomOf({ projects: [] }, urls(0)), null, "an orgo-web that doesn't say the projects' cap (or a computer that can't host): no line");
+  assert.deepEqual(H.roomOf(projects(0, 0), urls(0)).apps, 0, "a cap of none: full");
+});
+
+await check("roomOn reads each list once (kept a while), the room is in the Apps page's answer for every computer the apps are on and the main bot's (named for its bot), read again once a left over is removed; a failed read is no line and isn't kept; none with no cap or hosting closed", async () => {
+  const name = Object.entries(hostedApps()).find(([, h]) => h.computerId === "c_boppy" && !h.lost && !h.sites)?.[0];
+  assert.ok(name, "an app on Boppy's computer");
+  const on = (c) => [web.projects.filter((p) => p.computerId === c).length, web.urls.filter((u) => u.computerId === c).length];
+  const want = (c) => H.roomOf({ limit: 10, projects: Array(on(c)[0]).fill(0) }, { enabled: true, limit: web.urlLimit, public_urls: Array(on(c)[1]).fill(0) });
+  const urlLimit = web.urlLimit;
+  web.projectLimit = 10;
+  try {
+    globalThis.bopsRooms.clear();
+    const n = web.calls.length;
+    const r1 = await H.roomOn(WS, "c_boppy");
+    assert.deepEqual(r1, want("c_boppy"));
+    assert.deepEqual(r1.used, on("c_boppy")[0]);
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), r1);
+    assert.equal(callsSince(n, "GET", /\/c_boppy\/deploy-projects$/).length, 1, "the projects once");
+    assert.equal(callsSince(n, "GET", /\/c_boppy\/public-urls$/).length, 1, "the public URLs once");
+    // The Apps page: each computer the apps are on, the main bot's first, named for its bot.
+    forgetListed();
+    const a = await H.listApps(WS);
+    const boppyRoom = a.room.find((r) => r.computerId === "c_boppy");
+    assert.deepEqual(boppyRoom, { ...r1, computerId: "c_boppy", bot: "Boppy", main: true });
+    assert.equal(a.room[0].computerId, "c_boppy", "the main bot's first");
+    for (const r of a.room) assert.ok(Object.values(hostedApps()).some((h) => h.computerId === r.computerId && !h.lost) || r.main, `${r.computerId}: an apps' computer`);
+    assert.ok(!a.room.some((r) => Object.values(hostedApps()).some((h) => h.lost && h.computerId === r.computerId && !Object.values(hostedApps()).some((x) => !x.lost && x.computerId === r.computerId))), "none for a computer that's gone");
+    // A left over made on Orgo's own pages: said once the room is read again; removed here, it's read again at once.
+    const extra = { id: "p_room_left", computerId: "c_boppy", name: "roomleftover1", port: 3987, source: "ingot", ingot_repo: `${PROJECT}/${name}`, ingot_at: null, url: null, deployments: [], created: {} };
+    web.projects.push(extra);
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), r1, "kept a while");
+    globalThis.bopsRooms.clear();
+    const more = await H.roomOn(WS, "c_boppy");
+    assert.equal(more.used, r1.used + 1);
+    const left = await post(name, { ws: WS, action: "removeLeftOver", project: extra.id });
+    assert.equal(left.status, 200, JSON.stringify(left.body));
+    assert.ok(!web.projects.some((p) => p.id === extra.id), "removed");
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), r1, "read again after the left over went");
+    // A read that fails: no line (never the number before), and not kept: the next read has it.
+    globalThis.bopsRooms.clear();
+    web.projectsDown = true;
+    assert.equal(await H.roomOn(WS, "c_boppy"), null);
+    forgetListed();
+    assert.equal((await H.listApps(WS)).room?.find((r) => r.computerId === "c_boppy"), undefined, "no line on the page");
+    web.projectsDown = false;
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), r1, "the failure wasn't kept");
+    // No cap on either: no line.
+    globalThis.bopsRooms.clear();
+    web.projectLimit = -1;
+    web.urlLimit = -1;
+    assert.equal(await H.roomOn(WS, "c_boppy"), null);
+    forgetListed();
+    assert.equal((await H.listApps(WS)).room, undefined, "nothing on the page");
+    // An orgo-web that says no cap of the projects' (the fake's own default): none either.
+    globalThis.bopsRooms.clear();
+    web.projectLimit = undefined;
+    web.urlLimit = urlLimit;
+    assert.equal(await H.roomOn(WS, "c_boppy"), null);
+    // Hosting closed: none.
+    globalThis.bopsRooms.clear();
+    web.projectLimit = 10;
+    web.closed = true;
+    assert.equal(await H.roomOn(WS, "c_boppy"), null);
+    web.closed = false;
+    assert.equal(await H.roomOn(WS, "c_boppy"), null, "an answer is kept a while, as any is");
+    globalThis.bopsRooms.clear();
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), r1, "then read again");
+  } finally {
+    web.projectLimit = undefined;
+    web.projectsDown = false;
+    web.closed = false;
+    web.urlLimit = urlLimit;
+    globalThis.bopsRooms.clear();
+  }
+});
+
+await check("While work on one of the workspace's apps is under way (a left over being removed), a computer's room is read each time and never kept: the page's read as the app's stamp moves says the left over gone, never the room kept from before", async () => {
+  const name = Object.entries(hostedApps()).find(([, h]) => h.computerId === "c_boppy" && !h.lost && !h.sites)?.[0];
+  assert.ok(name, "an app on Boppy's computer");
+  web.projectLimit = 10;
+  const extra = { id: "p_room_mid", computerId: "c_boppy", name: "roommidway1", port: 3988, source: "ingot", ingot_repo: `${PROJECT}/${name}`, ingot_at: null, url: null, deployments: [], created: {} };
+  let go;
+  const gate = new Promise((r) => (go = r));
+  try {
+    globalThis.bopsRooms.clear();
+    const before = await H.roomOn(WS, "c_boppy");
+    web.projects.push(extra);
+    globalThis.bopsRooms.clear();
+    const withIt = await H.roomOn(WS, "c_boppy");
+    assert.equal(withIt.used, before.used + 1, "the left over counted, and kept");
+    const kept = globalThis.bopsRooms.get(`${WS}/c_boppy`);
+    // Its removal held right after Orgo took the project down, before the work on the app ends.
+    let removed = false;
+    let holding = null;
+    web.hold = async (m, path) => {
+      if (m === "DELETE" && path.endsWith(`/deploy-projects/${extra.id}`)) removed = true;
+      else if (removed && !holding) {
+        holding = `${m} ${path}`;
+        await gate;
+      }
+    };
+    const going = post(name, { ws: WS, action: "removeLeftOver", project: extra.id });
+    for (let i = 0; !holding && i < 300; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(holding, "the removal reached Orgo and is still under way");
+    assert.ok(!web.projects.some((p) => p.id === extra.id), "gone from Orgo");
+    const n = web.calls.length;
+    const mid = await H.roomOn(WS, "c_boppy");
+    assert.deepEqual(mid, before, "read again, the left over gone, though the room was read under 30 seconds ago");
+    assert.equal(callsSince(n, "GET", /\/c_boppy\/deploy-projects$/).length, 1, "read from Orgo");
+    assert.equal(globalThis.bopsRooms.get(`${WS}/c_boppy`), kept, "and not kept");
+    const again = web.calls.length;
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), before);
+    assert.equal(callsSince(again, "GET", /\/c_boppy\/deploy-projects$/).length, 1, "each time while it's under way");
+    go();
+    const left = await going;
+    assert.equal(left.status, 200, JSON.stringify(left.body));
+    assert.equal(globalThis.bopsRooms.size, 0, "everything kept dropped once it ends");
+    const after = web.calls.length;
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), before);
+    assert.deepEqual(await H.roomOn(WS, "c_boppy"), before);
+    assert.equal(callsSince(after, "GET", /\/c_boppy\/deploy-projects$/).length, 1, "kept again once nothing is under way");
+  } finally {
+    go();
+    web.hold = null;
+    web.projects = web.projects.filter((p) => p.id !== extra.id);
+    web.projectLimit = undefined;
+    globalThis.bopsRooms.clear();
+  }
+});
+
+await check("What members see of each computer's room (appsForMembers.room): keyed by its room key (never its id, nor its group's key, which a rename takes), the numbers, the apps on it by name, its bot's id; a change of room is written at once, the same room isn't; a computer whose room can't be read has none; none for one that's gone", async () => {
+  const F = await import(`${root}/lib/server/apps-for-members.ts`);
+  const { groupKeyOf, roomKeyOf } = await import(`${root}/cloud/group-key.ts`);
+  const app = (name, hosting = { botId: "boppy", computerId: "c_secret" }) => ({ name, head: "cs-2", updatedAt: 9, hosting, serving: null, live: null, preview: { projectId: "p_secret", url: null, label: null, serving: null, live: null } });
+  let room = { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, bot: "boppy" };
+  const asked = [];
+  const apps = [app("room-b"), app("room-a"), app("room-gone", { botId: "boppy", computerId: "c_gone", lost: 1 })];
+  const readers = () => ({
+    list: async () => ({ apps }),
+    commits: async () => ({ commits: [], head: null, next: null }),
+    settings: async () => ({ url: null, settings: null, env: [], deploys: [] }),
+    owned: async () => ({ owned: [] }),
+    password: async () => ({ on: false }),
+    room: async (_ws, c) => {
+      asked.push(c);
+      if (room instanceof Error) throw room;
+      return room;
+    },
+  });
+  const ws = () => S.getState().workspaces.find((w) => w.id === WS);
+  const keptHosted = ws().hostedApps;
+  S.update((s) => {
+    const w = s.workspaces.find((x) => x.id === WS);
+    w.hostedApps = { ...w.hostedApps, "room-a": { botId: "boppy", computerId: "c_secret" }, "room-b": { botId: "boppy", computerId: "c_secret" }, "room-gone": { botId: "boppy", computerId: "c_gone", lost: 1 } };
+    w.memberAccess = { "tom@orgo.ai": { others: "none", bots: {}, apps: "read", at: 1 } };
+    delete w.appsForMembers;
+  });
+  try {
+    const key = roomKeyOf(WS, "c_secret");
+    let t = 50_000;
+    await F.seeApps(WS, undefined, readers(), () => t);
+    assert.deepEqual(ws().appsForMembers.room, { [key]: { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, appNames: ["room-a", "room-b"], bot: "boppy" } });
+    assert.deepEqual(asked, ["c_secret"], "the gone one's computer never asked");
+    const text = JSON.stringify(ws().appsForMembers);
+    for (const hidden of ["c_secret", "c_gone", "p_secret", groupKeyOf(WS, "c_secret")]) assert.ok(!text.includes(hidden), `"${hidden}" isn't kept`);
+    assert.match(key, /^r[0-9a-f]{16}$/, "never shaped as a group's key (lib/server/change-acts.ts renames a group only by one)");
+    // The same room, within the hour: not written again.
+    t += 1_000;
+    await F.seeApps(WS, undefined, readers(), () => t);
+    assert.equal(ws().appsForMembers.at, 50_000);
+    // The room changed (two more deploys made elsewhere): written at once, as any change of what's shown is.
+    room = { used: 10, limit: 10, urlsUsed: 4, urlsLimit: 10, apps: 0, bot: "boppy" };
+    t += 1_000;
+    await F.seeApps(WS, undefined, readers(), () => t);
+    assert.equal(ws().appsForMembers.at, t);
+    assert.deepEqual(ws().appsForMembers.room[key], { used: 10, limit: 10, urlsUsed: 4, urlsLimit: 10, apps: 0, appNames: ["room-a", "room-b"], bot: "boppy" });
+    // URLs first, and the bot unknown: said as such.
+    room = { used: 2, limit: 10, urlsUsed: 10, urlsLimit: 10, apps: 0, urlsFirst: true };
+    t += 1_000;
+    await F.seeApps(WS, undefined, readers(), () => t);
+    assert.deepEqual(ws().appsForMembers.room[key], { used: 2, limit: 10, urlsUsed: 10, urlsLimit: 10, apps: 0, urlsFirst: true, appNames: ["room-a", "room-b"] });
+    // A room that can't be read (or has no line): none, never the number before.
+    for (const no of [null, new Error("Orgo didn't answer")]) {
+      room = { used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2 };
+      t += 1_000;
+      await F.seeApps(WS, undefined, readers(), () => t);
+      assert.ok(ws().appsForMembers.room, "a room again");
+      room = no;
+      t += 1_000;
+      await F.seeApps(WS, undefined, readers(), () => t);
+      assert.equal(ws().appsForMembers.room, undefined, String(no));
+      assert.equal(ws().appsForMembers.at, t, "written: what's shown changed");
+    }
+  } finally {
+    S.update((s) => {
+      const w = s.workspaces.find((x) => x.id === WS);
+      w.hostedApps = keptHosted;
+      delete w.memberAccess;
+      delete w.appsForMembers;
+    });
+  }
 });
 
 console.log(`\nhosted apps: ${passed} passed, ${failed} failed`);

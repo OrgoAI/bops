@@ -3280,5 +3280,232 @@ await test("apps that use a key from Keys (app-key-links.tsx): an app's keys fro
   }
 });
 
+/* ---------------- How many more apps each computer has room for ---------------- */
+
+const ROOMY = (o = {}) => ({ used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, computerId: "c1", bot: "Boppy", main: true, ...o });
+/** Each room line's words in a piece of HTML, in order. */
+const roomLines = (html) => [...html.matchAll(/<span(?=[^>]*\sdata-room-line)[^>]*>([^<]*)<\/span>/g)].map((m) => unescape(m[1]));
+/** The up front note's words in a piece of HTML, each one. */
+const roomNotes = (html) => [...html.matchAll(/<span(?=[^>]*\sdata-room-note)[^>]*>([^<]*)<\/span>/g)].map((m) => unescape(m[1]));
+const NOVA_FULL = "Nova's computer is full: 10 of 10 deploys. Remove an app or a left over to add another.";
+/** A never deployed app (its lists read: no Published, no Preview), on Nova's computer c1. */
+const freshApp = (extra = {}) => app("fresh", { hosting: { botId: "nova", computerId: "c1" }, preview: { projectId: null, url: null, label: null, serving: null, live: null }, ...extra });
+
+await test("Your Apps says how many more apps each computer has room for, one quiet line a computer under the list: room for one, for more, full, the web addresses when they run out first; none with no cap, a failed read, or deploying closed", () => {
+  const lines = (room, apps = APPS) => roomLines(list({ enabled: true, apps, ...(room ? { room } : {}) }));
+  assert.deepEqual(lines([ROOMY()]), ["Room for 2 more apps on Boppy's computer. 6 of 10 deploys used."]);
+  assert.deepEqual(lines([ROOMY({ used: 8, apps: 1 })]), ["Room for 1 more app on Boppy's computer. 8 of 10 deploys used."]);
+  assert.deepEqual(lines([ROOMY({ used: 10, apps: 0 })]), ["Boppy's computer is full: 10 of 10 deploys. Remove an app or a left over to add another."]);
+  assert.deepEqual(lines([ROOMY({ used: 2, urlsUsed: 8, apps: 2, urlsFirst: true })]), ["Room for 2 more apps on Boppy's computer. 8 of 10 web addresses used."]);
+  assert.deepEqual(lines([ROOMY({ used: 4, urlsUsed: 10, apps: 0, urlsFirst: true })]), ["Boppy's computer is full: 10 of 10 web addresses used. Remove an app or a left over to add another."]);
+  // One line a computer, as the server sends them (the main bot's first).
+  assert.deepEqual(lines([ROOMY(), ROOMY({ computerId: "c2", bot: "Max", main: undefined, used: 10, apps: 0 })]), [
+    "Room for 2 more apps on Boppy's computer. 6 of 10 deploys used.",
+    "Max's computer is full: 10 of 10 deploys. Remove an app or a left over to add another.",
+  ]);
+  // No apps yet: the main bot's room all the same, where a new one goes.
+  assert.deepEqual(lines([ROOMY({ used: 0, urlsUsed: 0, apps: 5 })], []), ["Room for 5 more apps on Boppy's computer. 0 of 10 deploys used."]);
+  // No cap, or a read that failed: the server sends no room, and there's no line. Deploying closed: none either.
+  assert.deepEqual(lines(undefined), []);
+  assert.deepEqual(roomLines(list({ enabled: false, why: "Sign in with Orgo to put apps on the web.", apps: APPS, room: [ROOMY()] })), []);
+  // Quiet: the page's quiet words, under the list, never a row of it.
+  const html = list({ enabled: true, apps: APPS, room: [ROOMY()] });
+  assert.match(html, /<span data-room-line[^>]*class="text-\[12\.5px\] leading-\[18px\] text-\[#9A9A98\]"/);
+  assert.ok(html.indexOf("data-apps-room") > html.indexOf(`data-hosted-app="${APPS.at(-1).name}"`), "after the apps");
+});
+
+await test("When its computer is full, a Deploy that would make a new project says so beside it before it's pressed, and it's held: a new app's first deploy, a first Publish; one of an app that has its projects stays as it was; with room, or the room unread, nothing", async () => {
+  const full = { enabled: true, room: [ROOMY({ bot: "Nova", used: 10, apps: 0 })] };
+  // (Its attributes in whatever order the DOM writes them.)
+  const update = (html) => {
+    const b = html.match(/<button(?=[^>]*\sdata-review-publish)[^>]*>([^<]*)<\/button>/);
+    return b && { label: b[1], disabled: /\sdisabled(?:=""|[\s>])/.test(b[0]) };
+  };
+  // A new app's first deploy (its Published and Preview made then), on a full computer: the full line, Update preview held.
+  let html = await envsOf({ app: freshApp(), answer: full });
+  assert.deepEqual(roomNotes(html), [NOVA_FULL]);
+  assert.deepEqual(update(html), { label: "Update preview", disabled: true });
+  assert.ok(unescape(html).includes(`data-tip="${NOVA_FULL}"><button`), "its tooltip says why, on what holds it");
+  // The same app with room: nothing said, pressable.
+  html = await envsOf({ app: freshApp(), answer: { enabled: true, room: [ROOMY({ bot: "Nova" })] } });
+  assert.deepEqual(roomNotes(html), []);
+  assert.deepEqual(update(html), { label: "Update preview", disabled: false });
+  // Its room unread (no line), or its lists unread (Orgo couldn't say): nothing held.
+  assert.deepEqual(update(await envsOf({ app: freshApp(), answer: { enabled: true } })), { label: "Update preview", disabled: false });
+  assert.deepEqual(roomNotes(await envsOf({ app: freshApp({ preview: undefined }), answer: full })), []);
+  // Another computer's room: not this app's.
+  assert.deepEqual(roomNotes(await envsOf({ app: freshApp(), answer: { enabled: true, room: [ROOMY({ computerId: "c2", used: 10, apps: 0 })] } })), []);
+  // An app that has its projects: its deploys stay as they are, full or not.
+  const made = shopApp({ preview: STAGING({ serving: id("e4") }) });
+  html = await envsOf({ app: made, answer: full });
+  assert.deepEqual(roomNotes(html), []);
+  assert.equal(update(html).disabled, false, "pressable");
+  // Its Preview gone (removed on Orgo's pages), Published there: one project and one link, which fit with one of each left.
+  const noPreview = shopApp({ preview: { projectId: null, url: null, label: null, serving: null, live: null } });
+  assert.deepEqual(roomNotes(await envsOf({ app: noPreview, answer: { enabled: true, room: [ROOMY({ bot: "Nova", used: 9, urlsUsed: 9, apps: 0 })] } })), [], "fits");
+  assert.deepEqual(roomNotes(await envsOf({ app: noPreview, answer: { enabled: true, room: [ROOMY({ bot: "Nova", used: 9, urlsUsed: 10, apps: 0, urlsFirst: true })] } })), ["Nova's computer is full: 10 of 10 web addresses used. Remove an app or a left over to add another."], "no link left: said so");
+  // A first Publish (its Preview live, no Published project yet: made then), on a full computer.
+  const unpublished = shopApp({ hosting: { botId: "nova", computerId: "c1" }, serving: null, live: null, preview: STAGING() });
+  html = await envsOf({ app: unpublished, answer: full });
+  assert.deepEqual(roomNotes(html), [NOVA_FULL]);
+  assert.deepEqual(update(html), { label: "Publish changes", disabled: true });
+  assert.deepEqual(roomNotes(await envsOf({ app: unpublished, answer: { enabled: true, room: [ROOMY({ bot: "Nova", used: 9, apps: 0 })] } })), [], "one project left: a Publish fits");
+  // Deploying closed: its own why, never a room line.
+  assert.deepEqual(roomNotes(await envsOf({ app: freshApp(), answer: { ...full, enabled: false, why: "Sign in with Orgo to put apps on the web." } })), []);
+  // whyNot (the Sites list's Deploy, Restore to preview) says the same, and only for a deploy to the Preview.
+  assert.equal(H.whyNot(full, freshApp(), undefined, undefined, "preview"), NOVA_FULL);
+  assert.equal(H.whyNot(full, freshApp(), id("e5"), undefined, "preview"), NOVA_FULL, "a restore of a never deployed app");
+  assert.equal(H.whyNot(full, made, undefined, undefined, "preview"), undefined);
+});
+
+await test("An app of more sites on a full computer: a new site's first deploy is held with the full line under Sites, its own Deploy preview too; a site that has its projects deploys as before", () => {
+  const sites = [
+    { ...SUITE_SITES[0], preview: STAGING() },
+    { name: "suite-new", projectId: null, url: null, serving: null, live: null, preview: { projectId: null, url: null, label: null, serving: null, live: null } },
+  ];
+  const tab = (answer) => renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer, app: suiteApp({ sites }), history: HISTORY, onChanged: noop }));
+  const siteRow = (html, name) => {
+    const start = html.indexOf(`data-site-line="${name}"`);
+    const next = html.indexOf("data-site-line=", start + 10);
+    return html.slice(start, next < 0 ? undefined : next);
+  };
+  let html = tab({ enabled: true, room: [ROOMY({ bot: "Nova", used: 10, apps: 0 })] });
+  assert.deepEqual(roomNotes(html), [NOVA_FULL]);
+  assert.deepEqual(deployIn(siteRow(html, "suite-new"), "Deploy preview"), { tip: NOVA_FULL, disabled: true });
+  assert.deepEqual(deployIn(siteRow(html, "suite"), "Deploy preview"), { tip: null, disabled: false }, "the one with its projects");
+  assert.deepEqual(deployIn(html, "Update all previews"), { tip: NOVA_FULL, disabled: true });
+  html = tab({ enabled: true, room: [ROOMY({ bot: "Nova" })] });
+  assert.deepEqual(roomNotes(html), []);
+  assert.deepEqual(deployIn(siteRow(html, "suite-new"), "Deploy preview"), { tip: null, disabled: false });
+});
+
+await test("Add app says the main bot's computer is full while the new app would go live, in place of who builds it; Start is never held", async () => {
+  const form = (extra) => renderToStaticMarkup(h(AS.AddAppForm, { ws: "ws_main", builder: "Boppy", onStarted: noop, onCancel: noop, ...extra }));
+  const FULL = "Boppy's computer is full: 10 of 10 deploys. Remove an app or a left over to add another.";
+  assert.deepEqual(roomNotes(form({ full: FULL })), [FULL]);
+  assert.ok(!text(form({ full: FULL })).includes("Boppy builds it on its computer."));
+  assert.ok(text(form({})).includes("Boppy builds it on its computer."));
+  // From the list: the main bot's room, when it's full.
+  const m = await mount(h(H.HostedAppsList, { ws: "ws_main", answer: { enabled: true, apps: APPS, room: [ROOMY({ used: 10, apps: 0 }), ROOMY({ computerId: "c2", bot: "Max", main: undefined })] }, onChanged: noop, builder: "Boppy" }));
+  try {
+    await click(button(m.box, "Add app"));
+    assert.deepEqual([...m.box.querySelectorAll("[data-add-app-form] [data-room-note]")].map((x) => x.textContent), [FULL]);
+  } finally {
+    await m.done();
+  }
+  const roomy = await mount(h(H.HostedAppsList, { ws: "ws_main", answer: { enabled: true, apps: APPS, room: [ROOMY()] }, onChanged: noop, builder: "Boppy" }));
+  try {
+    await click(button(roomy.box, "Add app"));
+    assert.equal(roomy.box.querySelector("[data-add-app-form] [data-room-note]"), null, "room for it: who builds it, as before");
+  } finally {
+    await roomy.done();
+  }
+});
+
+await test("The shared Your Apps says each computer's room as the owner's does, named for its bot when they see it, else for its apps; at Write a Deploy that would make an app's first Preview where there's no room says so beside it, as advice: Deploy and Restore are never held, the act goes and a refusal is said as any is; at Read there's nothing beside a Deploy", async () => {
+  const { SharedAppsPage, sharedTakes } = await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  // (Never deployed: the owner's Mac read its lists and found no Preview, so it sends what it serves as null, kept by Bops Cloud.)
+  const fresh = { name: "demo-app", head: { id: "cs9", message: "First page", at: 9 }, sites: [{ name: "demo-app", url: null, preview: null, previewServing: null, serving: null, live: null }], commits: [{ id: "cs9", message: "First page", author: "Max", at: 9, changes: { added: 1, modified: 0, deleted: 0 } }] };
+  const ROOM_AT = "r" + "0".repeat(16); // a room id the shape Bops Cloud accepts
+  const ROOM = (o = {}) => ({ used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, appNames: ["demo-app", "shop"], bot: "max", ...o });
+  const st = (level, room, bots = [{ id: "max", name: "Max" }], list = [sharedReviewApp, fresh]) => {
+    const base = sharedReviewState(level);
+    return { ...base, bots, shared: { ...base.shared, apps: { ...base.shared.apps, list, ...(room ? { room } : {}) } } };
+  };
+  const page = (state) => renderToStaticMarkup(h(SharedAppsPage, { state }));
+  assert.deepEqual(roomLines(page(st("read", { [ROOM_AT]: ROOM() }))), ["Room for 2 more apps on Max's computer. 6 of 10 deploys used."]);
+  assert.deepEqual(roomLines(page(st("write", { [ROOM_AT]: ROOM({ used: 8, apps: 1 }) }))), ["Room for 1 more app on Max's computer. 8 of 10 deploys used."]);
+  assert.deepEqual(roomLines(page(st("read", { [ROOM_AT]: ROOM({ used: 10, apps: 0 }) }))), ["Max's computer is full: 10 of 10 deploys. Remove an app or a left over to add another."]);
+  assert.deepEqual(roomLines(page(st("read", { [ROOM_AT]: ROOM({ used: 2, urlsUsed: 10, apps: 0, urlsFirst: true }) }))), ["Max's computer is full: 10 of 10 web addresses used. Remove an app or a left over to add another."]);
+  // Its bot not one they see (Bops Cloud sends no id then): named for its apps.
+  assert.deepEqual(roomLines(page(st("read", { [ROOM_AT]: ROOM({ bot: undefined }) }, []))), ["Room for 2 more apps on the computer demo-app and shop are on. 6 of 10 deploys used."]);
+  assert.deepEqual(roomLines(page(st("read", { [ROOM_AT]: ROOM({ bot: undefined, appNames: ["shop"], used: 10, apps: 0 }) }, []))), ["The computer shop is on is full: 10 of 10 deploys. Remove an app or a left over to add another."]);
+  assert.deepEqual(roomLines(page(st("read", undefined))), [], "none sent: no line");
+  const FULL = "Max's computer is full: 10 of 10 deploys. Remove an app or a left over to add another.";
+  // At Write, full: the new app's Deploy says so beside it, and is pressed all the same (the room is the owner's Mac's last
+  // read): the deploy goes, and orgo-web's refusal, when it doesn't fit, is said as any act's is. The one with its Preview
+  // deploys as before, nothing beside it.
+  routes = { "/api/workspaces/shared": { body: { ok: true } } };
+  const m = await mount(h(SharedAppsPage, { state: st("write", { [ROOM_AT]: ROOM({ used: 10, apps: 0 }) }) }));
+  try {
+    await click(button(m.box, "Open demo-app"));
+    await click(button(m.box, "Open shop"));
+    const card = (name) => m.box.querySelector(`[data-shared-app="${name}"]`);
+    assert.deepEqual([...card("demo-app").querySelectorAll("[data-room-note]")].map((x) => x.textContent), [FULL]);
+    const update = button(card("demo-app"), "Update preview");
+    assert.equal(update.disabled, false, "advice, never a hold");
+    assert.notEqual(update.parentElement.getAttribute("data-tip"), FULL, "its tip is its status, never the room as a why");
+    let n = calls.length;
+    await click(update);
+    assert.deepEqual(posts(n, "/api/workspaces/shared").map((c) => c.body.act), [{ act: "deploy", app: "demo-app" }], "the deploy is sent");
+    await click(button(card("demo-app"), "Version history"));
+    const restore = card("demo-app").querySelector('[data-version="cs9"] button');
+    assert.equal(restore.disabled, false, "Restore is never held on it either");
+    assert.equal(restore.parentElement.getAttribute("data-tip"), null);
+    n = calls.length;
+    await click(restore);
+    assert.deepEqual(posts(n, "/api/workspaces/shared").map((c) => c.body.act), [{ act: "deploy", app: "demo-app", at: "cs9" }]);
+    assert.equal(card("shop").querySelector("[data-room-note]"), null);
+    assert.equal(button(card("shop"), "Update preview").disabled, false);
+  } finally {
+    await m.done();
+  }
+  // orgo-web refused it (the computer really was full): said under the app as any act that didn't go.
+  const REFUSED = "This computer has no room for another deploy.";
+  const tried = { ...fresh, acts: [{ key: "k1", userId: "ada", name: "Ada", act: "deploy", ok: false, said: REFUSED, at: Date.now() }] };
+  assert.ok(unescape(page(st("write", { [ROOM_AT]: ROOM({ used: 10, apps: 0 }) }, undefined, [sharedReviewApp, tried]))).includes(REFUSED));
+  // A live app whose Preview the owner's Mac couldn't read (Orgo's projects list timed out): it sends no previewServing,
+  // and that's counted as making nothing, as on the owner's page: nothing beside its Deploy. One read and found missing
+  // (previewServing null) gets its Preview made: on a full computer, said.
+  const unread = { ...sharedReviewApp, name: "blog", sites: [{ name: "blog", url: "https://blog.example", preview: null, serving: "cs1", live: { id: "d1", state: "succeeded", when: 8 } }] };
+  const missing = { ...unread, sites: [{ ...unread.sites[0], previewServing: null }] };
+  assert.deepEqual(sharedTakes(unread), { projects: 0, urls: 0, newApps: 0 });
+  assert.deepEqual(sharedTakes(missing), { projects: 1, urls: 1, newApps: 0 });
+  assert.deepEqual(sharedTakes(fresh), { projects: 0, urls: 0, newApps: 1 });
+  assert.deepEqual(sharedTakes(sharedReviewApp), { projects: 0, urls: 0, newApps: 0 }, "a Preview with its link: nothing");
+  const blogRoom = { [ROOM_AT]: ROOM({ used: 10, apps: 0, appNames: ["blog"] }) };
+  for (const [a, said] of [[unread, []], [missing, ["Max's computer is full: 10 of 10 deploys. Remove an app or a left over to add another."]]]) {
+    const b = await mount(h(SharedAppsPage, { state: st("write", blogRoom, undefined, [a]) }));
+    try {
+      await click(button(b.box, "Open blog"));
+      assert.deepEqual([...b.box.querySelectorAll("[data-room-note]")].map((x) => x.textContent), said, a === unread ? "unread" : "missing");
+      assert.equal(button(b.box, "Update preview").disabled, false, "never held");
+    } finally {
+      await b.done();
+    }
+  }
+  // With room, or at Read: nothing beside it.
+  const roomy = await mount(h(SharedAppsPage, { state: st("write", { [ROOM_AT]: ROOM() }) }));
+  try {
+    await click(button(roomy.box, "Open demo-app"));
+    assert.equal(roomy.box.querySelector('[data-shared-app="demo-app"] [data-room-note]'), null);
+    assert.equal(button(roomy.box.querySelector('[data-shared-app="demo-app"]'), "Update preview").disabled, false);
+  } finally {
+    await roomy.done();
+  }
+  const read = await mount(h(SharedAppsPage, { state: st("read", { [ROOM_AT]: ROOM({ used: 10, apps: 0 }) }) }));
+  try {
+    await click(button(read.box, "Open demo-app"));
+    assert.equal(read.box.querySelector('[data-shared-app="demo-app"] [data-room-note]'), null, "no Deploy at Read: nothing to say beside it");
+  } finally {
+    await read.done();
+  }
+});
+
+await test("Every word of a computer's room plain, on both pages: no dashes, Knowledge never Orbit", async () => {
+  const { SHARED_APPS_WORDS } = await import(pathToFileURL(`${root}/components/app/shared-apps.tsx`).href);
+  const { ROOM_WORDS, roomLine } = await import(pathToFileURL(`${root}/lib/hosted-apps.ts`).href);
+  const sample = { computer: ["Boppy"], computerOf: [["shop", "blog", "menu", "cart"]], roomFor: ["Boppy's computer", 2], deploysUsed: [6, 10], urlsUsed: [8, 10], fullDeploys: [10, 10], full: ["Boppy's computer", "10 of 10 deploys."] };
+  assert.deepEqual(Object.keys(sample).sort(), Object.keys(ROOM_WORDS).sort(), "every one of them");
+  const all = [];
+  for (const words of [H.YOUR_APPS_WORDS, SHARED_APPS_WORDS]) for (const [k, args] of Object.entries(sample)) all.push(words[k](...args));
+  for (const r of [ROOMY(), ROOMY({ apps: 1 }), ROOMY({ apps: 0, used: 10 }), ROOMY({ apps: 2, urlsFirst: true }), ROOMY({ apps: 0, urlsFirst: true })]) all.push(roomLine(r, "Boppy's computer"));
+  for (const w of all) {
+    assert.ok(!NO_DASHES.test(w) && !/[‐‑‒–—―−]/.test(w), `no dashes: ${w}`);
+    assert.ok(!/orbit/i.test(w), `Knowledge, never Orbit: ${w}`);
+  }
+  assert.equal(SHARED_APPS_WORDS.computerOf(["shop", "blog", "menu", "cart"]), "the computer shop, blog and 2 more are on");
+});
+
 console.log(`\n${passed} passed${failed ? `, ${failed} failed` : ""}`);
 process.exit(failed ? 1 : 0);

@@ -5,7 +5,7 @@ import { flushSync } from "react-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Globe, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { AppDisclosure, appAttention, appGhost, appIcon, appList, appOutline, appRow, segmented, segment } from "./app-controls";
 import { hasUnpublishedPreview, reviewLabel, statusForApp } from "@/lib/app-review";
-import { DNS_TYPES, DOMAIN_WORDS, dnsNeeds } from "@/lib/hosted-apps";
+import { DNS_TYPES, DOMAIN_WORDS, dnsNeeds, roomHeld, roomLine, roomTakes, ROOM_WORDS } from "@/lib/hosted-apps";
 import type {
   AddAppAnswer,
   AppCommitsAnswer,
@@ -21,6 +21,7 @@ import type {
   AppSettingsAnswer,
   CloudflareApplied,
   CloudflarePlan,
+  ComputerRoom,
   DeployState,
   HostedApp,
   HostedAppAction,
@@ -242,17 +243,42 @@ export const useSending = () =>
     () => 0,
   );
 
+/** Every word Your Apps says of how many more apps each computer has room for (the tests read them for dashes and the old name). */
+export const YOUR_APPS_WORDS = { ...ROOM_WORDS };
+const YW = YOUR_APPS_WORDS;
+
+/** A computer's room in its one quiet line, named for its bot ("Room for 2 more apps on Boppy's computer. 6 of 10 deploys used."). */
+export const roomSaid = (r: ComputerRoom) => roomLine(r, YW.computer(r.bot), YW);
+
+/** The room of the computer an app is on, as the list read it (none: it lost its computer, or its room has no line). */
+const roomOfApp = (answer: Pick<HostedAppsAnswer, "room">, a: Pick<HostedApp, "hosting">) =>
+  a.hosting && !a.hosting.lost ? answer.room?.find((r) => r.computerId === a.hosting?.computerId) : undefined;
+
+/**
+ * The full line said before a Deploy (`publish`: a Publish) of some of an app's sites is pressed, when what it would make
+ * on the app's computer (a first deploy's projects and link, a first Publish's project) doesn't fit there and no new app
+ * fits either (lib/hosted-apps.ts roomHeld); undefined: it fits, or it makes nothing (a deploy of an app that has its projects).
+ */
+export function roomWhy(answer: Pick<HostedAppsAnswer, "room">, a: HostedApp, sites: (HostedSite | HostedApp)[], publish = false): string | undefined {
+  const r = roomOfApp(answer, a);
+  if (!r) return undefined;
+  const of = sites.map((x) => ({ projectId: "projectId" in x ? x.projectId : (x.hosting?.projectId ?? null), preview: x.preview }));
+  return roomHeld(r, YW.computer(r.bot), roomTakes(of, publish), YW);
+}
+
 /**
  * Why Deploy can't be pressed for it now (undefined: it can). `at`: a changeset picked from its history, not
- * the newest. `site`: Deploy for that site alone (else every site of it).
+ * the newest. `site`: Deploy for that site alone (else every site of it). A deploy to the Preview that would make
+ * projects its computer has no room for says so (roomWhy).
  */
-export function whyNot(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: HostedApp, at?: string, site?: HostedSite, env: "preview" | "prod" = "prod") {
+export function whyNot(answer: Pick<HostedAppsAnswer, "enabled" | "why" | "room">, a: HostedApp, at?: string, site?: HostedSite, env: "preview" | "prod" = "prod") {
   if (!answer.enabled) return answer.why || "Deploying isn't open here.";
   if (!at && !a.head) return "Nothing is committed yet.";
   // (To the Preview: only a deploy running there holds it up.)
   const busy = env === "preview" ? (site ? !!site.preview && deploying(site.preview) : [a, ...(a.sites ?? [])].some((x) => !!x.preview && deploying(x.preview))) : site ? deploying(site) : anyDeploying(a);
   if (busy) return env === "preview" ? "The preview is deploying. Wait for it to finish." : "A deploy is running. Wait for it to finish.";
   if (sending.has(a.name)) return "A deploy is being sent. Wait for it.";
+  if (env === "preview") return roomWhy(answer, a, site ? [site] : (a.sites ?? [a]));
   return undefined;
 }
 
@@ -570,7 +596,9 @@ export function HostedApps({ state, ws, tools }: { state?: Pick<AppState, "works
  * or Open app (its tab). Nothing until it's read and one quiet line when there are none; when there are none and
  * deploying isn't open here, only why (no invitation to make a site that can't go on the web), with the tools still
  * listed. Add app, in its title (and beside the line that says there are none): a form, and the workspace's main
- * bot (`builder`) builds it; `onStarted` opens that task.
+ * bot (`builder`) builds it; `onStarted` opens that task. Under the list, one quiet line for each computer the apps are
+ * on and the main bot's (one, when that's all one computer): how many more apps it has room for, or that it's full; the
+ * main bot's full line is said in Add app's form too, where a new app's first deploy would need that room.
  */
 export function HostedAppsList({
   ws,
@@ -595,6 +623,18 @@ export function HostedAppsList({
   const [adding, setAdding] = useState(false);
   const hasTools = Children.toArray(tools).length > 0;
   const why = answer && !answer.enabled ? answer.why || "Apps can't go on the web from here." : undefined;
+  // Each computer's room, once deploying is open here (none when Orgo couldn't say, or it has no cap).
+  const rooms = answer?.enabled ? (answer.room ?? []) : [];
+  const main = rooms.find((r) => r.main);
+  const roomLines = rooms.length > 0 && (
+    <div data-apps-room className="flex flex-col gap-1">
+      {rooms.map((r) => (
+        <span key={r.computerId} data-room-line data-room-full={r.apps === 0 || undefined} className={QUIET}>
+          {roomSaid(r)}
+        </span>
+      ))}
+    </div>
+  );
   const addButton = answer && !adding && (
     <span data-tip={why} className="flex shrink-0">
       <button
@@ -619,6 +659,7 @@ export function HostedAppsList({
         <AddAppForm
           ws={ws}
           builder={builder}
+          full={main && main.apps === 0 ? roomSaid(main) : undefined}
           onCancel={() => setAdding(false)}
           onStarted={(a) => {
             setAdding(false);
@@ -656,6 +697,7 @@ export function HostedAppsList({
           {tools}
         </div>
       )}
+      {roomLines}
       {(!answer || !answer.apps.length) && hasTools && <div className={appList}>{tools}</div>}
     </div>
   );
@@ -947,7 +989,7 @@ export function HostedAppView({
 }: {
   onBack?: () => void;
   ws: string;
-  answer: Pick<HostedAppsAnswer, "enabled" | "why">;
+  answer: Pick<HostedAppsAnswer, "enabled" | "why" | "room">;
   app: HostedApp;
   /** null: being read; false: it couldn't be. */
   history: AppCommitsAnswer | null | false;
@@ -1034,6 +1076,8 @@ export function HostedAppView({
         {sites && current && (
           <div data-sites className="flex flex-col">
             <div className="flex items-center gap-3"><span className="flex-1 text-[13px] font-medium">Sites</span><DeployButton label="Update all previews" why={whyNot(answer, app, undefined, undefined, "preview")} busy={busy("newest", app.name)} onClick={() => void run("newest", app.name, { ws, action: "deploy", env: "preview" })}/></div>
+            {/* (A first deploy of a site its computer has no room for: said up front, the Deploys it holds greyed.) */}
+            {answer.enabled && roomWhy(answer, app, sites) && <span data-room-note role="status" className={QUIET}>{roomWhy(answer, app, sites)}</span>}
             <div className="-mx-2 flex flex-col gap-0.5">
               {sites.map((x) => (
                 <SiteLine

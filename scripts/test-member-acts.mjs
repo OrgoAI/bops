@@ -1004,7 +1004,7 @@ globalThis.__fake.routes = Object.fromEntries(
     },
   ]),
 );
-const { groupKeyOf } = await import(pathToFileURL(`${root}/cloud/group-key.ts`).href);
+const { groupKeyOf, roomKeyOf } = await import(pathToFileURL(`${root}/cloud/group-key.ts`).href);
 const change = (body, path = "/api/workspaces") => ({ act: "change", method: "PATCH", path, body });
 /** Every pending change this Mac started (doChange runs on its own): waited for. */
 const settled = () => new Promise((r) => setTimeout(r, 20));
@@ -1032,6 +1032,11 @@ await check("an Admin's change goes through the owner's own route as their windo
   await memberEvent(event(change({ id: "@ws", computerName: { computer: groupKeyOf("ws_acme", "c1"), name: "Shop" } }), { member: ADA, role: "admin", key: "key_chg_03" }), "e_chg3");
   await settled();
   assert.deepEqual(routed[2].body, { id: "ws_acme", computerName: { computer: "c1", name: "Shop" } });
+  // By the key that computer's room is sent by (SharedApps.room, to every member with Your Apps): it names no group, so
+  // it's never turned into the computer's id and renames nothing of this Mac's.
+  await memberEvent(event(change({ id: "@ws", computerName: { computer: roomKeyOf("ws_acme", "c1"), name: "Shop" } }), { member: ADA, role: "admin", key: "key_chg_03r" }), "e_chg3r");
+  await settled();
+  assert.deepEqual(routed.at(-1).body, { id: "ws_acme", computerName: { computer: roomKeyOf("ws_acme", "c1"), name: "Shop" } });
   // A route that says no: kept as why, for their window.
   routeAnswer = () => Response.json({ error: "Pick one of the nine voices." }, { status: 400 });
   await memberEvent(event(change({ botId: "max", callVoice: "nope" }, "/api/bots"), { member: ADA, role: "admin", key: "key_chg_04" }), "e_chg4");

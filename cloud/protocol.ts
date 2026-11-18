@@ -868,7 +868,24 @@ export const PREVIEW_PASSWORD_PATH = "/v1/apps/preview-password";
 export type PreviewPasswordPost = { ws: string; app: string; site: string; url: string; password: string | null; seen?: number };
 
 /** What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` when the owner's Mac last read them. */
-export type SharedApps = { level: "read" | "write"; at: number; list: SharedApp[]; /** The workspace's domains bought through Orgo: Write only. */ owned?: { id: string; domain: string }[] };
+export type SharedApps = {
+  level: "read" | "write";
+  at: number;
+  list: SharedApp[];
+  /** The workspace's domains bought through Orgo: Write only. */
+  owned?: { id: string; domain: string }[];
+  /**
+   * How many more apps each computer the apps are on has room for, by its room key (group-key.ts roomKeyOf: never the
+   * computer's id, nor its SharedGroup.key, which names a group to rename): Read and Write. The window tells the lines apart by it alone.
+   */
+  room?: Record<string, SharedRoom>;
+};
+/**
+ * A computer's room for more apps (lib/hosted-apps.ts MemberRoom, spelled out): its deploy projects and public URLs of
+ * their caps (negative: no cap), how many more new apps fit (`apps`), whether the public URLs run out first, the apps on
+ * it by name, and the bot it's named for (`bot`: only one the viewer sees; none, it's named for its apps).
+ */
+export type SharedRoom = { used: number; limit: number; urlsUsed: number; urlsLimit: number; apps: number; urlsFirst?: true; appNames: string[]; bot?: string };
 /** One app as a member sees it (lib/hosted-apps.ts AppForMembers, spelled out: this file imports nothing). */
 export type SharedApp = {
   name: string;

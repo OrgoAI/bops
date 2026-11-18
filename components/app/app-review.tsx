@@ -45,11 +45,12 @@ export function AppVersions({ versions, preview, published, busy, onRestore, why
  * Same review decisions for the owner and members; callers retain their existing request contracts. `updateAlso`: Update
  * preview stays beside Publish (an Admin's page, which has no Technical details line of its own to update it from), so
  * whoever may publish may also rebuild the Preview. "Add a domain" shows only with `onDomain`: without it (a member),
- * Update preview takes its place, or nothing.
+ * Update preview takes its place, or nothing. `roomNote`: the computer's full line, said beside Update preview or Publish
+ * before it's pressed, when what that one would make on the app's computer doesn't fit there (lib/hosted-apps.ts roomHeld).
  */
-export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt, versions = [], password, github, destination, busy, whyUpdate, whyPublish, onUpdate, onPublish, onDomain, technical, history, env = "preview", onEnv, publishLine, historyOpen = false, updateAlso = false }: {
+export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt, versions = [], password, github, destination, busy, whyUpdate, whyPublish, onUpdate, onPublish, onDomain, technical, history, env = "preview", onEnv, publishLine, historyOpen = false, updateAlso = false, roomNote }: {
   historyOpen?: boolean; publishLine?: string; status: ReviewStatus; previewUrl: string | null; liveUrl: string | null; previewAt: string | null; publishedAt: string | null;
-  versions?: Version[]; password?: ReactNode; github?: boolean; destination: string; busy?: boolean; whyUpdate?: string; whyPublish?: string;
+  versions?: Version[]; password?: ReactNode; github?: boolean; destination: string; busy?: boolean; whyUpdate?: string; whyPublish?: string; roomNote?: { update?: string; publish?: string };
   onUpdate?: () => void; onPublish?: (at: string) => Promise<boolean>; onDomain?: () => void;
   technical: ReactNode; history?: ReactNode; env?: "preview" | "prod"; onEnv?: (env: "preview" | "prod") => void; updateAlso?: boolean;
 }) {
@@ -69,6 +70,8 @@ export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt,
   const url = env === "preview" ? previewUrl : liveUrl;
   const moved = !!confirm && (confirm.at !== previewAt || confirm.destination !== destination);
   const unpublished = hasUnpublishedPreview(status);
+  // (Beside the button it holds: Update preview's, else Publish's.)
+  const held = env !== "preview" ? undefined : update || updateBeside ? roomNote?.update : !domain && primary ? roomNote?.publish : undefined;
   return <div className="@container flex min-w-0 flex-col gap-5" data-review-content>
     <div className="flex flex-wrap items-center gap-3">
       <div role="tablist" aria-label="App view" className={segmented}>{(["preview", "prod"] as const).map(p => <button key={p} role="tab" aria-selected={env === p} data-tip={p === "preview" ? "Review changes here before publishing." : github ? "The version last sent to GitHub. Website deployment is managed there." : "The website your visitors use. Production is the technical name."} onClick={() => { onEnv?.(p); setConfirm(null); }} className={segment(env === p)}>{p === "preview" ? "Preview" : "Live"}</button>)}</div>
@@ -80,6 +83,7 @@ export function AppReview({ status, previewUrl, liveUrl, previewAt, publishedAt,
       <div className="flex flex-wrap items-center gap-3 px-4 py-4">
         {url ? <a href={url} target="_blank" rel="noreferrer" className={env === "preview" && unpublished && !confirm ? appAttention : appOutline}>{env === "preview" ? unpublished ? "Review preview" : "Open preview" : "Open website"}<ArrowUpRight {...appIcon}/></a> : <span className="text-[13px] text-pencil">{env === "preview" ? "No preview yet" : github ? "Website address not available" : "Not live yet"}</span>}
         {env === "preview" && password}<span className="hidden flex-1 @[512px]:block"/>
+        {held && <span data-room-note role="status" className="min-w-0 basis-full text-[12.5px] leading-[18px] text-pencil @[512px]:basis-auto @[512px]:max-w-[320px]">{held}</span>}
         {env === "preview" && updateBeside && <span data-tip={whyUpdate}><button data-review-update className={appOutline} disabled={busy || sending || !!whyUpdate} onClick={() => onUpdate?.()}>Update preview</button></span>}
         {env === "preview" && primary && <span data-tip={why ?? status.sentence}><button data-review-publish className={appPrimary} disabled={busy || sending || !!why || (!status.action && !update)} onClick={() => { if (update) onUpdate?.(); else if (domain) onDomain?.(); else if (previewAt) setConfirm({ at: previewAt, note: change?.message ?? previewAt, destination }); }}>{busy || sending ? "Working…" : label}</button></span>}
       </div>
