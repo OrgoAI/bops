@@ -73,4 +73,12 @@ check("a name chosen ahead: 12 lowercase letters and digits, a letter first", ()
   for (const no of ["1keaundwsjnt", "keaundwsjnt", "keaundwsjnt23", "Keaundwsjnt2", "keaund-sjnt2", 12, null]) assert.equal(L.labelGiven(no), null, String(no));
 });
 
+check("untailed: a label Orgo gave a tail (a runner's, <label>-x7k2) as Bops gave it; any other as it is", () => {
+  const l = L.newLabel("preview", REPO, "recipe-box");
+  assert.equal(L.untailed(l), l);
+  for (const tail of ["x7k2", "abcd", "zz99", "hjkm"]) assert.equal(L.untailed(`${l}-${tail}`), l, tail);
+  // (orgo-web's tail has no 0, 1, i, l or o, and is 4 long; a stem is 12 lowercase letters and digits.)
+  for (const no of [`${l}-x7k0`, `${l}-x7k1`, `${l}-ilox`, `${l}-x7k`, `${l}-x7k22`, `${l}-X7K2`, `${l.slice(1)}-x7k2`, "my-app-x7k2", `${l}x7k2`]) assert.equal(L.untailed(no), no, no);
+});
+
 console.log(`app labels: ${passed} passed`);

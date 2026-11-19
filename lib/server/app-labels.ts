@@ -48,3 +48,13 @@ export function isLabelOf(kind: LabelKind, label: unknown, repo: string, site: s
 export function labelGiven(v: unknown): string | null {
   return typeof v === "string" && /^[a-z][a-z0-9]{11}$/.test(v.trim()) ? v.trim() : null;
 }
+
+/**
+ * The label Bops gave a public URL, from the one Orgo answers for it. orgo-web keeps a Bops Preview label exactly for a
+ * Bops sign-in key (the owner's Mac). Before orgo-web keeps it for a Bops computer's own sign in too, it gives a label
+ * a runner sends a tail, as it does any name (<label>-x7k2: lib/public-urls/config.ts tailedLabel, 4 of a to z and 2 to
+ * 9 without i, l and o). Any other label comes back as it is.
+ */
+export function untailed(label: string): string {
+  return /^([a-z0-9]{12})-[a-hjkmnp-z2-9]{4}$/.exec(label)?.[1] ?? label;
+}

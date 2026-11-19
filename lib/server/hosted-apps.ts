@@ -94,7 +94,7 @@ import {
 } from "./cloudflare";
 import { onRunner, selfHosted } from "./persist";
 import { hostingChangeAllowed, hostingScope, type Blob } from "@/cloud/computer-scope";
-import { isLabelOf, labelGiven, newLabel } from "./app-labels";
+import { isLabelOf, labelGiven, newLabel, untailed } from "./app-labels";
 import { GITHUB_KEY, linkAndSay, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
 import { appFolder, authorOf, byBots, changesTo, dropToken, ensureIngotCli, folderChanges, hasToken, ingot, INGOT_BIN, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotChange, type IngotChangeset, type IngotRepo } from "./ingot";
 import { addMessage, bot, flushState, getState, ownerName, sameState, session, update } from "./store";
@@ -283,6 +283,21 @@ export const NOT_FOR_COMPUTER_YET = "Orgo doesn't let this computer do this yet.
 /** orgo-web's code for a refusal of a computer's own sign in, in plain words (undefined: not one of those). */
 export const computerRefusalWords = (code: unknown): string | undefined => (typeof code === "string" && Object.hasOwn(FOR_COMPUTER, code) ? FOR_COMPUTER[code] : undefined);
 const computerRefused = (e: unknown): e is OrgoError => onRunner() && e instanceof OrgoError && e.status === 403 && computerRefusalWords(e.code) !== undefined;
+/**
+ * Orgo's own words for what it turned down from a computer's runner, to its log: a port, a link's label or its move, a
+ * password, a domain. The user hears Bops' line, which may not say which of orgo-web's rules for a computer's own sign in
+ * it was. Its code, its status and its words only, never what was sent (a password).
+ */
+function orgoSaid(name: string, what: string, e: unknown) {
+  if (!onRunner() || !(e instanceof OrgoError)) return;
+  console.warn(`[hosted-apps] ${name}: Orgo turned down ${what} (${e.status}${e.code ? ` ${e.code}` : ""}): ${e.said ?? e.message}`);
+}
+
+/** A link a computer's runner just made that Orgo gave another label than the one sent (a tail: untailed), to its log. */
+function tailSaid(name: string, label: string, url: OrgoPublicUrl) {
+  if (onRunner() && url.label !== label) console.warn(`[hosted-apps] ${name}: Orgo named its preview link ${url.label}, not ${label}: it gives a computer's own sign in a tail`);
+}
+
 /** A read that answers null when Orgo can't say, but not when it turned this computer's own sign in away: that's said. */
 const orNull = <T,>(p: Promise<T>): Promise<T | null> => p.catch((e: unknown) => (e instanceof HostedAppError && e.extra?.code === "COMPUTER_KEY" ? Promise.reject(e) : null));
 
@@ -1029,7 +1044,8 @@ const keptSettings = (s: SiteHosting): { port?: number; settings?: DeploySetting
  * shown). Made only when it's first needed: Publish (sendDeploys, promoteApp), a domain pointed at it (appTarget),
  * and variables saved for it (Orgo keeps those only on a project). Never for a Preview, settings or a Local, which
  * find one with prodIfAny. Its settings saved before (AppHosting.settings) go in its create, then off the record.
- * `env`: variables to make it with, or to set on the one found.
+ * `env`: variables to make it with, or to set on the one found. `opts.seeds`: variables to make it with only, never set
+ * on one found (a runner's sign in seeds for its domain: a computer's own sign in can't set a project's variables).
  */
 async function ensureProd(
   wsId: string,
@@ -1037,7 +1053,7 @@ async function ensureProd(
   s: SiteHosting,
   ours: () => boolean,
   env?: Record<string, string>,
-  opts: { settings?: DeploySettings; made?: (p: OrgoDeployProject) => void } = {},
+  opts: { settings?: DeploySettings; made?: (p: OrgoDeployProject) => void; seeds?: Record<string, string> } = {},
 ): Promise<SiteHosting & { projectId: string }> {
   const repo = ingotRepo(wsId, name);
   const projects = await projectsNow(s.computerId, ours);
@@ -1066,12 +1082,14 @@ async function ensureProd(
   // The port saved for it (Settings, before it had a project) is the one it's made on, never another one in silence: one
   // something else on its computer took meanwhile is said, and nothing is made.
   if (saved.port !== undefined && !portFree(saved.port)) throw savedPortTaken(saved.port);
+  const vars = { ...opts.seeds, ...env };
   for (let tries = 0; ; tries++) {
     let label = newLabel("prod", repo, s.site);
     while (names.has(label)) label = newLabel("prod", repo, s.site);
     const port = saved.port ?? freePort(projects, urls, ports);
-    const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(env && Object.keys(env).length ? { env } : {}), ...(settings ? { settings } : {}) }).catch((e: unknown) => e as Error);
+    const made = await deploys.create(s.computerId, { repo, name: label, port, publicUrl: false, ...(Object.keys(vars).length ? { env: vars } : {}), ...(settings ? { settings } : {}) }).catch((e: unknown) => e as Error);
     held(ours);
+    if (made instanceof OrgoError && made.code === "PORT_TAKEN") orgoSaid(name, `port ${port} for Published`, made);
     if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(label);
     else if (made instanceof OrgoError && made.code === "PORT_TAKEN" && saved.port !== undefined) throw savedPortTaken(saved.port);
     else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.push(port);
@@ -1390,7 +1408,7 @@ function knownLabel(s: SiteHosting, all: AppHosting, name: string, repo: string,
       p.id !== s.projectId &&
       !legacy.includes(p.name) &&
       !isLabelOf("prod", p.name, repo, s.site) &&
-      urls.some((u) => u.label === p.name),
+      urls.some((u) => untailed(u.label) === p.name),
   )?.name;
 }
 
@@ -1401,12 +1419,14 @@ type PreviewFound = { url?: OrgoPublicUrl; project?: OrgoDeployProject; label: s
  * A site's Preview among its computer's projects and public URLs, found by its label's seal (or `known`):
  * the oldest marked URL, with the project named as it (maybe none: made again); else the oldest marked project
  * (its link made again). Any other marked one (two Macs at once) is a left over; nothing is deleted on its own.
+ * A link a computer's runner made is found by the label Bops gave it, with the tail Orgo may have added (untailed).
  */
 function previewIn(projects: OrgoDeployProject[], urls: OrgoPublicUrl[], repo: string, site: string, known?: string): PreviewFound | undefined {
   const is = (label: string) => isLabelOf("preview", label, repo, site) || (!!known && label === known);
-  const us = urls.filter((u) => is(u.label)).sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
+  const us = urls.filter((u) => is(untailed(u.label))).sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
   const ps = projects.filter((p) => ofRepo(p, repo) && is(p.name));
-  if (us[0]) return { url: us[0], project: ps.find((p) => p.name === us[0].label), label: us[0].label };
+  const label = us[0] && untailed(us[0].label);
+  if (us[0] && label) return { url: us[0], project: ps.find((p) => p.name === label), label };
   if (ps[0]) return { project: ps[0], label: ps[0].name };
   return undefined;
 }
@@ -1464,7 +1484,7 @@ function leftOversOf(h: AppHosting, name: string, repo: string, projects: OrgoDe
     if (own) usedUrls.add(own.id);
     out.push({ id: p.id, name: p.name, port: typeof p.port === "number" ? p.port : null, url: own?.url ?? p.url ?? null });
   }
-  for (const u of urls) if (!usedUrls.has(u.id) && previewLike(h, name, repo, u.label)) out.push({ id: `url:${u.id}`, name: u.label, port: u.port, url: u.url });
+  for (const u of urls) if (!usedUrls.has(u.id) && previewLike(h, name, repo, untailed(u.label))) out.push({ id: `url:${u.id}`, name: u.label, port: u.port, url: u.url });
   return out;
 }
 
@@ -1528,7 +1548,8 @@ function settingsFrom(p: OrgoDeployProject | undefined): DeploySettings | undefi
 /**
  * The sign in variables a project has none of yet (AUTH_URL, NEXTAUTH_URL, BETTER_AUTH_URL), set to `url`; never one
  * the user set. Not from a computer's runner: a project's variables are the owner's (orgo-web takes no change of them
- * from a computer's own sign in), and a Preview it makes has them from its create (seedsFor).
+ * from a computer's own sign in), so what a runner makes has them from its create (seedsFor): a Preview at its link,
+ * Published at the domain it's made for (connectDomain).
  */
 async function seedAuth(computerId: string, p: OrgoDeployProject, url: string, ours: () => boolean) {
   if (onRunner()) return;
@@ -1544,6 +1565,7 @@ const PREVIEW_WORDS = {
   accountLimit: (n: unknown) => `Your Orgo account has as many public links as it allows${typeof n === "number" ? ` (${n})` : ""}.`,
   noLink: "Couldn't get a link for its preview. Try again in a minute.",
   changed: (url: string) => `Its preview link changed to ${url}, as the old one was taken. Add it to Google sign in.`,
+  moved: (url: string) => `Its preview link is ${url} now. Add it to Google sign in.`,
   noRoom: (bot: string, site: string) => `${bot}'s computer has no room for ${site}'s preview: it runs as many deploys as Orgo allows. Remove a site or a left over first.`,
 };
 
@@ -1568,7 +1590,9 @@ function linkRefused(e: unknown): HostedAppError | undefined {
  * said in `said` (the user adds the new link to Google sign in). `given`: a name the owner chose ahead, used when
  * the site has no Preview yet (once it has one, its name never changes). `env`: the user's variables to make it
  * with, on top of the sign in seeds (seedsFor). Its link has a password once it's there (passwordNow "made": one set
- * at once when it has none), unless the owner turned it off.
+ * at once when it has none), unless the owner turned it off. On a computer's runner its project goes on a free port of
+ * its own, after its link, and the link is moved onto that port before anything deploys (projectThenLink): orgo-web
+ * lets a computer's own sign in put no app on a port a link points at.
  */
 async function ensurePreview(
   wsId: string,
@@ -1589,7 +1613,8 @@ async function ensurePreview(
   // (Never Published's port, nor one a custom domain points at: a project there would serve that domain. With no
   // Published yet, never the port saved for it either: AppHosting.settings.)
   const savedPort = fromProd ? undefined : keptSettings(s).port;
-  const skip = [...(typeof prodPort === "number" ? [prodPort] : []), ...(savedPort !== undefined ? [savedPort] : []), ...(await domainPorts(c))];
+  const pointed = await domainPorts(c);
+  const skip = [...(typeof prodPort === "number" ? [prodPort] : []), ...(savedPort !== undefined ? [savedPort] : []), ...pointed];
   held(ours);
   const keepLabel = (label: string) => {
     if (siteIn(hostingOf(wsId, name) ?? all, name, prod.site).preview !== label) keepSite(wsId, name, prod.site, (x) => ({ ...x, preview: label }));
@@ -1602,25 +1627,73 @@ async function ensurePreview(
     return r;
   };
   /**
-   * Its project made on `port` with `label`, seeded (its sign in at its own link: seedsFor), and built as Published
-   * builds: Published's commands set by hand (a legacy one's), or, with no Published yet, the ones saved for it
-   * (AppHosting.settings), go in the same create, so its first build has them.
+   * Its project made on `port` (its link's, unless said) with `label`, seeded (its sign in at its own link: seedsFor),
+   * and built as Published builds: Published's commands set by hand (a legacy one's), or, with no Published yet, the
+   * ones saved for it (AppHosting.settings), go in the same create, so its first build has them.
    */
-  const makeProject = async (label: string, url: OrgoPublicUrl): Promise<OrgoDeployProject | "name" | "port"> => {
+  const makeProject = async (label: string, url: OrgoPublicUrl, port: number = url.port): Promise<OrgoDeployProject | "name" | "port"> => {
     const env = seedsFor(url.url, opts.env);
     const settings = fromProd ? settingsFrom(fromProd) : keptSettings(s).settings;
-    const made = await deploys.create(c, { repo, name: label, port: url.port, env, ...(settings ? { settings } : {}) }).catch((e: unknown) => e as Error);
+    const made = await deploys.create(c, { repo, name: label, port, env, ...(settings ? { settings } : {}) }).catch((e: unknown) => e as Error);
     held(ours);
     if (made instanceof OrgoError && made.code === "NAME_TAKEN") return "name";
-    if (made instanceof OrgoError && made.code === "PORT_TAKEN") return "port";
+    if (made instanceof OrgoError && made.code === "PORT_TAKEN") {
+      // (Taken as a clash and tried again, so the user hears only noLink at the end: Orgo's own words go to the log.)
+      orgoSaid(name, `port ${port} for its preview`, made);
+      return "port";
+    }
     if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT")) throw new HostedAppError(PREVIEW_WORDS.noRoom(bot(prod.botId)?.name ?? "That bot", prod.site), 409, { code: made.code });
     if (made instanceof OrgoError && (made.code === "INVALID_ENV" || made.code === "INVALID_COMMAND" || made.code === "INVALID_HEALTH_PATH")) throw settingsRefused(made);
     if (made instanceof Error) throw refused(made);
     if (!made.enabled) throw new HostedAppError(made.why, 403);
     return made.value;
   };
-  /** Its project made on its URL's port, the URL moved to a free port when an app on the computer holds that one. */
-  const projectOn = async (label: string, url: OrgoPublicUrl): Promise<OrgoDeployProject> => {
+  /**
+   * Its link moved onto its project's port (a runner's: projectThenLink). When it can't be moved, a project this call
+   * just made (`made`) is removed again, so nothing is left half made; one it found is kept as it is.
+   */
+  const linkOnto = async (p: OrgoDeployProject, url: OrgoPublicUrl, made: boolean): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl }> => {
+    if (typeof p.port !== "number" || p.port === url.port) return { project: p, url };
+    const moved = await publicUrls.port(c, url.id, p.port).catch((e: unknown) => e as Error);
+    held(ours);
+    if (!(moved instanceof Error) && moved.enabled) return { project: p, url: moved.value };
+    orgoSaid(name, `its preview link's move to port ${p.port}`, moved);
+    if (made) {
+      await deploys.remove(c, p.id).catch(() => null);
+      held(ours);
+    }
+    throw moved instanceof Error ? refused(moved) : new HostedAppError(moved.why, 403);
+  };
+  /**
+   * Its project and its link joined on a computer's runner, which signs in as its computer. orgo-web never lets a
+   * computer's own sign in put an app on a port a domain or public URL points at (E8, lib/deploys/manage.ts
+   * createProject: 409 PORT_TAKEN), its own new link's included until orgo-web knows a Bops Preview's. So its project
+   * goes on a free port nothing points at, made with its link's address as its sign in seeds (a runner can't set them
+   * later: seedAuth), then its link moves onto that port. Nothing is deployed yet (deploys.create sends deploy: false),
+   * so its first deploy finds the link on its port, adopts it and never owns it.
+   */
+  const projectThenLink = async (label: string, url: OrgoPublicUrl): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl }> => {
+    const used = [...skip, url.port];
+    for (let tries = 0; tries < 5; tries++) {
+      const port = freePort(projects, urls, used);
+      const p = await makeProject(label, url, port);
+      if (p === "port") {
+        used.push(port);
+        continue;
+      }
+      if (p === "name") {
+        // Only its own, from a try that stopped halfway: read again, and its link moved onto it (never removed here).
+        const again = (await projectsNow(c, ours)).find((x) => x.name === label && ofRepo(x, repo));
+        if (!again) throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
+        return linkOnto(again, url, false);
+      }
+      return linkOnto(p, url, true);
+    }
+    throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
+  };
+  /** Its project made on its URL's port, the URL moved to a free port when an app on the computer holds that one (on a runner: projectThenLink). */
+  const projectOn = async (label: string, url: OrgoPublicUrl): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl }> => {
+    if (onRunner()) return projectThenLink(label, url);
     let u = url;
     const used = [...skip];
     for (let tries = 0; tries < 5; tries++) {
@@ -1628,10 +1701,10 @@ async function ensurePreview(
       if (p === "name") {
         // Only its own, from a try that stopped halfway: read again and taken as it is.
         const again = (await projectsNow(c, ours)).find((x) => x.name === label && ofRepo(x, repo));
-        if (again) return again;
+        if (again) return { project: again, url: u };
         throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
       }
-      if (p !== "port") return p;
+      if (p !== "port") return { project: p, url: u };
       used.push(u.port);
       const port = freePort(projects, urls, used);
       const moved = await publicUrls.port(c, u.id, port).catch((e: unknown) => Promise.reject(refused(e)));
@@ -1641,28 +1714,41 @@ async function ensurePreview(
     }
     throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
   };
-  // Both there: it's made.
+  // Both there: it's made. Its link on another port than its project's (a runner that stopped between making its
+  // project and moving its link onto it) is moved there now, while that project serves no link yet and nothing else
+  // points at its port.
   if (found?.url && found.project) {
+    const p = found.project;
+    let url = found.url;
+    if (typeof p.port === "number" && url.port !== p.port && !p.url && !urls.some((u) => u.id !== url.id && u.port === p.port) && !pointed.includes(p.port)) {
+      const moved = await publicUrls.port(c, url.id, p.port).catch((e: unknown) => e as Error);
+      held(ours);
+      if (!(moved instanceof Error) && moved.enabled) url = moved.value;
+      else orgoSaid(name, `its preview link's move to port ${p.port}`, moved);
+    }
     keepLabel(found.label);
-    return locked({ project: found.project, url: found.url, made: false });
+    return locked({ project: p, url, made: false });
   }
   // Its link there, its project gone (removed on Orgo's own pages): made again on the link's port.
   if (found?.url) {
-    const project = await projectOn(found.label, found.url);
+    const pair = await projectOn(found.label, found.url);
     keepLabel(found.label);
-    return locked({ project, url: found.url, made: true });
+    return locked({ ...pair, made: true });
   }
   let said: string | undefined;
   // Its project there, its link gone: made again with the project's name.
   if (found?.project) {
     const p = found.project;
-    const r = await publicUrls.create(c, typeof p.port === "number" ? p.port : freePort(projects, urls, skip), p.name).catch((e: unknown) => e as Error);
+    const port = typeof p.port === "number" ? p.port : freePort(projects, urls, skip);
+    const r = await publicUrls.create(c, port, p.name).catch((e: unknown) => e as Error);
     held(ours);
     if (!(r instanceof Error) && r.enabled) {
+      tailSaid(name, p.name, r.value);
       keepLabel(p.name);
       return locked({ project: p, url: r.value, made: true });
     }
     if (!(r instanceof Error)) throw new HostedAppError(r.why, 403);
+    orgoSaid(name, `a link named ${p.name} on port ${port}`, r);
     const no = linkRefused(r);
     if (no) throw no;
     // Its name taken meanwhile: that project is a left over now, and a new pair is made below with a new label.
@@ -1677,6 +1763,8 @@ async function ensurePreview(
     if (moved) {
       label = moved.label;
       fromOld = true;
+      // (One a runner made there had Orgo's tail: here it's made with the label alone, a new address to add to sign in.)
+      if (moved.tailed) said = "moved";
     }
   }
   if (!label && !said && s.preview && (isLabelOf("preview", s.preview, repo, prod.site) || labelGiven(s.preview) === s.preview)) {
@@ -1691,6 +1779,7 @@ async function ensurePreview(
     held(ours);
     if (!(r instanceof Error) && !r.enabled) throw new HostedAppError(r.why, 403);
     if (r instanceof Error) {
+      orgoSaid(name, `a link named ${l} on port ${port}`, r);
       const no = linkRefused(r);
       if (no) throw no;
       if (r instanceof OrgoError && r.code === "PORT_TAKEN") {
@@ -1707,13 +1796,14 @@ async function ensurePreview(
       continue;
     }
     const url = r.value;
-    const project = await projectOn(l, url).catch(async (e: unknown) => {
+    tailSaid(name, l, url);
+    const pair = await projectOn(l, url).catch(async (e: unknown) => {
       // (Its link, new and never shown, isn't left behind for a project that couldn't be made.)
       if (!(e instanceof HostedAppError && e.message === SWAPPED)) await publicUrls.remove(c, url.id).catch(() => null);
       throw e;
     });
     keepLabel(l);
-    return locked({ project, url, made: true, ...(said ? { said: PREVIEW_WORDS.changed(url.url) } : {}) });
+    return locked({ ...pair, made: true, ...(said ? { said: (said === "moved" ? PREVIEW_WORDS.moved : PREVIEW_WORDS.changed)(url.url) } : {}) });
   }
   throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
 }
@@ -1721,9 +1811,10 @@ async function ensurePreview(
 /**
  * A site's Preview link left on another computer of the workspace (the app moved: the computers it left first,
  * then every other one its bots use), moved here with its label: removed there, then made here at once. If this
- * computer can't take it, it's put back there. Undefined: none, or it couldn't be moved (a new one is made).
+ * computer can't take it, it's put back there. Undefined: none, or it couldn't be moved (a new one is made). `tailed`:
+ * it had Orgo's tail there (a runner made it: untailed), so its address here isn't the one it had.
  */
-async function previewElsewhere(wsId: string, name: string, h: AppHosting, site: string, repo: string, here: string, ours: () => boolean): Promise<{ label: string } | undefined> {
+async function previewElsewhere(wsId: string, name: string, h: AppHosting, site: string, repo: string, here: string, ours: () => boolean): Promise<{ label: string; tailed: boolean } | undefined> {
   // (A computer's runner never touches another computer's links: a new label is made instead.)
   if (onRunner()) return undefined;
   const others = [
@@ -1739,12 +1830,12 @@ async function previewElsewhere(wsId: string, name: string, h: AppHosting, site:
     const r = await publicUrls.list(c).catch(() => null);
     held(ours);
     if (!r?.enabled || !r.value.enabled) continue;
-    const u = (r.value.public_urls ?? []).find((x) => isLabelOf("preview", x.label, repo, site) || (!!s.preview && x.label === s.preview));
+    const u = (r.value.public_urls ?? []).find((x) => isLabelOf("preview", untailed(x.label), repo, site) || (!!s.preview && untailed(x.label) === s.preview));
     if (!u || u.disabled) continue;
     const gone = await publicUrls.remove(c, u.id).catch(() => null);
     held(ours);
     if (!gone?.enabled) continue;
-    return { label: u.label };
+    return { label: untailed(u.label), tailed: untailed(u.label) !== u.label };
   }
   return undefined;
 }
@@ -1877,8 +1968,13 @@ const passwordRefused = (g.bopsPasswordRefused ??= new Map<string, number>());
  */
 const PASSWORD_AGAIN_MS = 5 * 60_000;
 const PASSWORD_LATER_MS = 60 * 60_000;
-/** Orgo can't put a password on a link yet: before its migration (503 PASSWORD_UNAVAILABLE), or the user's key can't (403). */
-const passwordUnavailable = (e: unknown) => e instanceof OrgoError && ((e.status === 503 && e.code === "PASSWORD_UNAVAILABLE") || e.status === 403);
+/**
+ * Orgo can't put a password on a link yet: before its migration (503 PASSWORD_UNAVAILABLE), or the user's key can't
+ * (403), or can't one as short as a Preview's (400 INVALID_PASSWORD: a computer's own sign in, a runner's, before
+ * orgo-web takes a Bops computer's as it takes a Bops sign-in key's).
+ */
+const passwordUnavailable = (e: unknown) =>
+  e instanceof OrgoError && ((e.status === 503 && e.code === "PASSWORD_UNAVAILABLE") || e.status === 403 || (e.status === 400 && e.code === "INVALID_PASSWORD"));
 
 /** A site's record as kept now (undefined: the app or the site is gone, or it's lost its computer). */
 const siteNow = (wsId: string, name: string, site: string, computerId: string) => {
@@ -2001,6 +2097,7 @@ async function passwordAsked(wsId: string, name: string, site: string, computerI
       const r = await setPasswordSure(computerId, url.id, password).catch((e: unknown) => e as Error);
       if (!ours()) return url.protected;
       if (r instanceof Error || !r.enabled || r.value.protected === false) {
+        orgoSaid(name, `a password for its preview link ${url.label}`, r);
         const later = passwordUnavailable(r);
         passwordRefused.set(key, Date.now() + (later ? PASSWORD_LATER_MS : PASSWORD_AGAIN_MS));
         // (Not again for an Orgo that can't take one, nor one whose hosting is closed here.)
@@ -2219,15 +2316,17 @@ export async function changePreviewPassword(wsId: string, name: string, action: 
     key,
     async () => {
       const password = action === "off" ? null : newPassword();
-      const r = await setPasswordSure(h.computerId, url.id, password).catch((e: unknown) =>
-        Promise.reject(
-          e instanceof OrgoError && e.status === 503 && e.code === "PASSWORD_UNAVAILABLE"
+      const r = await setPasswordSure(h.computerId, url.id, password).catch((e: unknown) => {
+        orgoSaid(name, `a password for its preview link ${url.label}`, e);
+        return Promise.reject(
+          // (Or none as short as a Preview's, from a computer's own sign in: passwordUnavailable.)
+          e instanceof OrgoError && ((e.status === 503 && e.code === "PASSWORD_UNAVAILABLE") || (e.status === 400 && e.code === "INVALID_PASSWORD"))
             ? new HostedAppError(PASSWORD_WORDS.cant, 409)
             : e instanceof OrgoError && e.status === 403
               ? new HostedAppError(PASSWORD_WORDS.key, 403)
               : refused(e),
-        ),
-      );
+        );
+      });
       held(ours);
       if (!r.enabled) throw new HostedAppError(r.why, 403);
       passwordRefused.delete(key);
@@ -2684,7 +2783,7 @@ export async function removeLeftOver(wsId: string, name: string, project: unknow
     } else {
       await takeDown(wsId, name, { botId: now.botId, computerId: now.computerId, projectId: x.id, site: name }, ours);
       // (A link Bops made for it, which its project doesn't own, goes with it.)
-      const u = urls.find((y) => y.label === x.name);
+      const u = urls.find((y) => untailed(y.label) === x.name);
       if (u) await publicUrls.remove(now.computerId, u.id).catch(() => null);
     }
     held(ours);
@@ -2833,6 +2932,37 @@ function settingsRefused(e: unknown) {
   return refused(e);
 }
 
+/**
+ * A project's settings changed (deploys.change), Orgo's refusals in words (settingsRefused). On a computer's runner, a new
+ * port a domain or a public link of its computer points at is said as that: orgo-web refuses it as it does one another
+ * app has (409 PORT_TAKEN: a computer's own sign in puts no app where something points, E8), and its own words go to
+ * the log.
+ */
+async function changeOn(name: string, computerId: string, projectId: string, patch: Parameters<typeof deploys.change>[2]) {
+  return deploys.change(computerId, projectId, patch).catch(async (e: unknown) => {
+    if (onRunner() && e instanceof OrgoError && e.code === "PORT_TAKEN" && typeof patch.port === "number") {
+      orgoSaid(name, `port ${patch.port}`, e);
+      const why = await pointedWords(computerId, projectId, patch.port);
+      if (why) return Promise.reject(why);
+    }
+    return Promise.reject(settingsRefused(e));
+  });
+}
+
+/** What points at `port` on a computer when no other app there has it: a domain, or a public link, in words (undefined: an app has it, nothing does, or Orgo couldn't say). */
+async function pointedWords(computerId: string, projectId: string, port: number): Promise<HostedAppError | undefined> {
+  const [projects, urls, all] = await Promise.all([
+    deploys.projects(computerId).then((r) => (r.enabled ? (r.value.projects ?? []) : null), () => null),
+    publicUrls.list(computerId).then((r) => (r.enabled && r.value.enabled ? (r.value.public_urls ?? []) : null), () => null),
+    domains.ofComputer(computerId).then((l) => l.domains ?? null, () => null),
+  ]);
+  if (!projects || projects.some((p) => p.id !== projectId && p.port === port)) return undefined;
+  const d = all?.find((x) => x.target_port === port);
+  if (d) return new HostedAppError(`${d.domain} points at port ${port} on its computer. Pick another port.`, 409, { field: "port" });
+  if (urls?.some((u) => u.port === port)) return new HostedAppError(`A public link on its computer points at port ${port}. Pick another port.`, 409, { field: "port" });
+  return undefined;
+}
+
 /** A command as it's typed to change it ("" for one Orgo finds itself), checked as orgo-web checks it. */
 function commandOf(v: unknown, what: string): string {
   if (typeof v !== "string") throw new HostedAppError(`Type the ${what} command, or leave it empty for Orgo to find it.`, 400, { field: what });
@@ -2887,7 +3017,7 @@ export async function changeSettings(
   const { h, p } = got;
   const was = typeof p.port === "number" ? p.port : null;
   held(ours);
-  const r = await deploys.change(h.computerId, h.projectId, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
+  const r = await changeOn(name, h.computerId, h.projectId, patch);
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
   const now = typeof r.value.port === "number" ? r.value.port : null;
@@ -2928,7 +3058,7 @@ async function firstSettings(wsId: string, name: string, site: unknown, patch: P
   if (why) throw new HostedAppError(why, 403);
   const found = await prodIfAny(wsId, name, h, ours);
   if (found.projectId) {
-    const r = await deploys.change(found.computerId, found.projectId, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
+    const r = await changeOn(name, found.computerId, found.projectId, patch);
     held(ours);
     if (!r.enabled) throw new HostedAppError(r.why, 403);
     return settingsOf(r.value, null);
@@ -2962,7 +3092,7 @@ const keptSettingsAnswer = (k: SiteSettings | undefined): AppSettingsAnswer => (
 async function previewSettings(wsId: string, name: string, site: unknown, patch: Parameters<typeof deploys.change>[2], ours: () => boolean): Promise<AppSettingsAnswer> {
   const got = await previewOf(wsId, name, ours, site);
   const project = got ? { computerId: got.h.computerId, id: got.p.id, url: got.h.url ?? null } : await withApp(wsId, name, "first", () => firstPreview(wsId, name, site, ours));
-  const r = await deploys.change(project.computerId, project.id, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
+  const r = await changeOn(name, project.computerId, project.id, patch);
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
   // A new port builds its live release again: that build, when Orgo says it's on its way, gets a new password once it's live (watchPreview).
@@ -3174,9 +3304,17 @@ type Target = {
 
 /**
  * (`make`: a domain is being connected, so a site with no Published project yet gets it made now, nothing
- * deployed: ensureProd. A domain needs only its port. Without it, a site with none answers null.)
+ * deployed: ensureProd, with `making`'s seeds, told to `making.made`. A domain needs only its port. Without it, a site
+ * with none answers null.)
  */
-async function appTarget(wsId: string, name: string, ours: () => boolean, site?: unknown, make = false): Promise<Target | null> {
+async function appTarget(
+  wsId: string,
+  name: string,
+  ours: () => boolean,
+  site?: unknown,
+  make = false,
+  making: Pick<NonNullable<Parameters<typeof ensureProd>[5]>, "seeds" | "made"> = {},
+): Promise<Target | null> {
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const at = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
   if (!at) throw new HostedAppError("There's no app by that name in this workspace.", 404);
@@ -3191,7 +3329,7 @@ async function appTarget(wsId: string, name: string, ours: () => boolean, site?:
   const h: SiteHosting & { projectId: string } | null = found
     ? found.h
     : make
-      ? await withApp(wsId, name, "first", () => ensureProd(wsId, name, hostingAt(wsId, name, site) ?? at, ours))
+      ? await withApp(wsId, name, "first", () => ensureProd(wsId, name, hostingAt(wsId, name, site) ?? at, ours, undefined, making))
       : null;
   if (!h) return null;
   const [p, list] = await Promise.all([
@@ -3317,12 +3455,16 @@ const cloudflareOf = (d: OrgoCustomDomain, zones: CfZone[] | null | undefined): 
   return z ? { cloudflare: { zone: z.name, zoneId: z.id } } : {};
 };
 
-/** domainOf for one bought elsewhere: the records to set where its DNS is kept, with what Orgo's look found. */
+/**
+ * domainOf for one bought elsewhere: the records to set where its DNS is kept, with what Orgo's look found. Never looked
+ * at from a computer's runner: orgo-web keeps a domain's DNS check the owner's (403 for a computer's own sign in), so
+ * there it has the records as Orgo said them.
+ */
 async function outsideOf(t: Target, d: OrgoCustomDomain, base: AppDomain, look: boolean): Promise<AppDomain> {
   const live = d.status === "active";
   const needed = (r: { type: string }) => !live || r.type !== "TXT";
   const asSaid = (d.dns_records ?? []).filter(needed).map((r) => ({ type: r.type, name: r.host || r.name, value: r.value }));
-  if (live && !look && keptAt.has(d.id)) return { ...base, publish: asSaid, where: keptAt.get(d.id) ?? null };
+  if (onRunner() || (live && !look && keptAt.has(d.id))) return { ...base, publish: asSaid, where: keptAt.get(d.id) ?? null };
   const check = await domains.check(t.h.computerId, d.id).catch(() => null);
   if (check) keptAt.set(d.id, check.provider?.name ?? null);
   const publish = check?.records?.length ? check.records.filter(needed).map((r) => ({ type: r.type, name: r.host || r.name, value: r.value, found: r.status })) : asSaid;
@@ -3830,6 +3972,7 @@ async function pointedHere(
   held(ours);
   const sub = "subdomain" in body && !!body.subdomain;
   const c = await domains.connect(t.h.computerId, body, t.port).catch((e: unknown) => {
+    orgoSaid(name, `${full ?? ("domain" in body ? body.domain : "a domain")} on port ${t.port}`, e);
     // A name under a bought domain Orgo turns down: said of that name, its field marked.
     if (sub && e instanceof OrgoError && e.code === "INVALID_SUBDOMAIN") return Promise.reject(new HostedAppError(BAD_NAME, 400, { field: "subdomain" }));
     if (sub && e instanceof OrgoError && (e.code === "NAME_IN_USE" || (e.status === 409 && !e.code))) return Promise.reject(new HostedAppError(`${full ?? "That name"} is in use already. Pick another name.`, 409, { field: "subdomain" }));
@@ -3860,18 +4003,40 @@ export async function connectDomain(wsId: string, name: string, ask: { domain?: 
   // On a computer's runner, the workspace's domains as its computer's own list says them, before anything is made for it
   // (appTarget makes Published first): an orgo-web that doesn't say them yet can't let this computer point one, so that's
   // said and nothing is left behind; one that does, without this zone, is no domain of the workspace's.
+  let seeds: Record<string, string> | undefined;
   if (zone && onRunner()) {
     const at = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
     if (at && !at.lost) {
       const its = await domains.ofComputer(at.computerId).catch((e: unknown) => Promise.reject(dnsRefused(e)));
       held(ours);
       if (!Array.isArray(its.owned_domains)) throw new HostedAppError(NOT_FOR_COMPUTER_YET, 403);
-      if (!its.owned_domains.some((d) => typeof d?.id === "string" && d.id.toLowerCase() === zone)) throw new HostedAppError("That isn't one of this workspace's domains.", 404);
+      const z = its.owned_domains.find((d) => typeof d?.id === "string" && d.id.toLowerCase() === zone);
+      if (!z || typeof z.domain !== "string") throw new HostedAppError("That isn't one of this workspace's domains.", 404);
+      // Published made for it now has its sign in at this domain (seedsFor) in its create, as the owner's Mac sets them at
+      // its first Publish (seedAuth): a computer's own sign in can't set a project's variables after.
+      seeds = seedsFor(`https://${sub ? `${sub}.` : ""}${z.domain.toLowerCase()}`);
     }
   }
-  const t = await appTarget(wsId, name, ours, site, true);
+  const just: { made?: OrgoDeployProject } = {};
+  const t = await appTarget(wsId, name, ours, site, true, seeds ? { seeds, made: (p) => (just.made = p) } : {});
   held(ours);
   if (!t) throw new HostedAppError(LOST, 409);
+  try {
+    return await connectTo(wsId, name, t, typed, zone, sub, site, ours);
+  } catch (e) {
+    // Published made for this domain alone, seeded for it, goes again when no domain points at it (nothing deployed): the
+    // next domain makes it anew, seeded for that one.
+    const p = just.made;
+    if (p && !(e instanceof HostedAppError && e.message === SWAPPED)) {
+      const pointedAt = await domains.ofComputer(t.h.computerId).then((l) => (l.domains ?? []).some((d) => d.target_port === p.port), () => true);
+      if (!pointedAt) await deploys.remove(t.h.computerId, p.id).catch(() => null);
+    }
+    throw e;
+  }
+}
+
+/** connectDomain once its target is read (`t`): one typed, or one of the workspace's bought domains (`zone`, maybe a name `sub` under it). */
+async function connectTo(wsId: string, name: string, t: Target, typed: string | null, zone: string | null | undefined, sub: string, site: unknown, ours: () => boolean): Promise<AppDomainAdded> {
   if (typed) {
     const there = t.all.find((d) => d.domain.toLowerCase() === typed);
     if (there) throw new HostedAppError(t.mine.includes(there) ? "That domain points at this app already." : "That domain points at another app on this computer. Remove it there first.", 409, { field: "domain" });
@@ -4447,7 +4612,7 @@ async function previewDown(wsId: string, name: string, h: AppHosting, sites: str
     for (const c of behind) {
       const r = await publicUrls.list(c).catch(() => null);
       held(ours);
-      const u = r?.enabled && r.value.enabled ? r.value.public_urls?.find((x) => isLabelOf("preview", x.label, repo, site) || (!!s.preview && x.label === s.preview)) : undefined;
+      const u = r?.enabled && r.value.enabled ? r.value.public_urls?.find((x) => isLabelOf("preview", untailed(x.label), repo, site) || (!!s.preview && untailed(x.label) === s.preview)) : undefined;
       if (u) await publicUrls.remove(c, u.id).catch(() => null);
     }
   }
