@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
 import { closeDb, query } from "../db.ts";
 import { RELEASE_MAX_BYTES, type RunnerRelease } from "../protocol.ts";
-import { checkReleases, forgetReleases, latestRelease, loadReleases, RELEASE_KEYS, RELEASE_MAX_TEXT, releaseOf, verifyRelease } from "../runner-release.ts";
+import { checkReleases, forgetReleases, latestRelease, loadReleases, RELEASE_KEYS, RELEASE_MAX_TEXT, RELEASE_SKEW_MS, releaseOf, verifyRelease } from "../runner-release.ts";
 import { listen, prepareDb, type Listening } from "./core-fakes.ts";
 
 /**
@@ -138,6 +138,13 @@ test("signed but not a well-formed release: the wrong kind or name, too big, a b
   assert.equal(bad({ sha256: "a".repeat(63) }), null);
   assert.equal(bad({ released: "yesterday" }), null, "released");
   assert.equal(bad({ released: 1_700_000_000_000 }), null);
+  // Signed later than this clock by at most RELEASE_SKEW_MS (the release machine's clock a little fast); past that, none.
+  assert.equal(RELEASE_SKEW_MS, 10 * 60_000);
+  const at = Date.parse(releaseOfV(V1).released);
+  assert.ok(verifyRelease(signed(releaseOfV(V1)), KEYS, at - RELEASE_SKEW_MS), "at the edge");
+  assert.equal(verifyRelease(signed(releaseOfV(V1)), KEYS, at - RELEASE_SKEW_MS - 1), null, "past it");
+  assert.ok(bad({ released: new Date(Date.now() + RELEASE_SKEW_MS / 2).toISOString() }), "5 minutes ahead of now");
+  assert.equal(bad({ released: new Date(Date.now() + 2 * RELEASE_SKEW_MS).toISOString() }), null, "20 minutes ahead of now");
   for (const stateLevel of [0, 10_000, -1, 4.5, "4"]) assert.equal(bad({ stateLevel }), null, `stateLevel ${stateLevel}`);
   assert.ok(bad({ stateLevel: 9999 }));
   assert.ok(bad({ stateLevel: 1 }));
@@ -246,4 +253,28 @@ test("an older signing of a version known, served again (a stale cache, or a fil
   assert.equal(releaseOf(V2)?.releasedAt, null);
   assert.equal((await look("/old.json"))?.buildId, "BuildDef_2");
   assert.equal((await kept()).build_id, "BuildDef_2");
+});
+
+test("a release stamped more than RELEASE_SKEW_MS past this clock is none: not kept, nobody told, said as signed ahead, and it never takes the place of a version's build", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  let nudged = 0;
+  const look = (path: string) => checkReleases({ url: `${site.url}${path}`, keys: KEYS, nudge: () => nudged++ });
+  const ahead = new Date(Date.now() + 60 * 60_000).toISOString();
+  serve("/ahead.json", signed(releaseOfV(V1, "BuildAhead_9", { released: ahead })));
+  assert.equal(await look("/ahead.json"), null);
+  assert.equal(nudged, 0);
+  assert.equal(releaseOf(V1), null);
+  assert.equal(latestRelease(), null);
+  assert.equal((await query("SELECT 1 FROM bops.runner_releases WHERE version = $1", [V1])).rowCount, 0);
+  assert.ok(
+    warn.mock.calls.some((c) => String(c.arguments[0]) === `[releases] latest.json is ${V1} (BuildAhead_9) signed ${ahead}, more than 10 minutes past this clock`),
+    "said why, as that's what to fix",
+  );
+  // The version's build signed at a time that's past: kept as any other, and the one ahead, read again, never replaces it.
+  serve("/v1.json", signed(releaseOfV(V1)));
+  assert.equal((await look("/v1.json"))?.buildId, "BuildAbc_1");
+  assert.equal(nudged, 1);
+  assert.equal(await look("/ahead.json"), null);
+  assert.equal(releaseOf(V1)?.buildId, "BuildAbc_1");
+  assert.equal((await query<{ build_id: string }>("SELECT build_id FROM bops.runner_releases WHERE version = $1", [V1])).rows[0].build_id, "BuildAbc_1");
 });

@@ -2509,14 +2509,16 @@ test("a runner of a signed release that connects with no record: Bops Cloud writ
   }, "0.0.54");
 });
 
-test("a record there already: an older running one caught up (who set it up, its key and shared kept, upgrading dropped once reached), the same version's other build only when Bops Cloud wrote it, one failed before the connect for a reason a runner connecting outlives running again; being set up, being stopped, failed since, failed for its safety (shared, owner only, listening beyond its computer or not saying, no sign-in) or for a reason not named, or newer, left as they are", async () => {
+test("a record there already, on a computer only its owner uses: an older running one caught up (who set it up and its key kept, upgrading dropped once reached), the same version's other build only when Bops Cloud wrote it, one failed before the connect for a reason a runner connecting outlives running again; being set up, being stopped, failed since, failed for its safety (shared, owner only, listening beyond its computer or not saying, no sign-in) or for a reason not named, or newer, left as they are", async () => {
   await inSelf(async () => {
     const s = await setupSelf();
+    // Acme with no members: a key Bops gave is the owner's own there (one someone else can use: the next test).
+    await stateChanges(s.owner, (st) => void (st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess = {}));
     const D = s.desktop.toUpperCase();
     const put = (rec: Record<string, unknown>) => stateChanges(s.owner, (st) => void (st.runners = { [D]: rec }));
     const said = { version: SELF, buildId: "Build55", auth: "identity" as const };
     const at = () => Date.now() - 60_000;
-    const base = { status: "running", version: "0.0.54", buildId: "Build54", by: "mac-o", at: at(), keyMade: true, keyId: "key_1", shared: true, auth: "key" };
+    const base = { status: "running", version: "0.0.54", buildId: "Build54", by: "mac-o", at: at(), keyMade: true, keyId: "key_1", auth: "key" };
     /** A record as kept, without the key it's under. */
     const without = (r: Record<string, unknown> | undefined) => Object.fromEntries(Object.entries(r ?? {}).filter(([k]) => k !== "key"));
     // Older, being upgraded to this one by the Mac: caught up, its upgrade done.
@@ -2551,7 +2553,7 @@ test("a record there already: an older running one caught up (who set it up, its
       await put({ status: "failed", version: SELF, buildId: "Build55", by: "mac-o", at: at(), error, keyMade: true, keyId: "key_1" });
       assert.equal(await recordRunner(s.owner, s.desktop, said), true, error);
       r = (await recordOf(s.owner, s.desktop))!;
-      assert.deepEqual(r, { key: D, status: "running", version: SELF, buildId: "Build55", keyMade: true, keyId: "key_1", auth: "identity", by: "cloud", at: r.at, shared: true }, error);
+      assert.deepEqual(r, { key: D, status: "running", version: SELF, buildId: "Build55", keyMade: true, keyId: "key_1", auth: "identity", by: "cloud", at: r.at }, error);
     }
     // Left as they are: failed since the connect; failed as shared or owner only, or stopped by the Mac as it listened
     // beyond its computer, or as its computer couldn't say what it listens on (supervisord starts it again when the
@@ -2577,7 +2579,7 @@ test("a record there already: an older running one caught up (who set it up, its
   });
 });
 
-test("a computer someone else can use: Bops Cloud writes or catches up its runner's record only as the Mac keeps one there (its identity alone, its bots all of one workspace whose chat goes through Bops Cloud); a runner on a key, or a computer that also serves another workspace or whose chat is on the Mac, is left as it is", async () => {
+test("a computer someone else can use: Bops Cloud writes or catches up its runner's record only as the Mac keeps one there (its identity alone, no key of Bops' on its record, its bots all of one workspace whose chat goes through Bops Cloud); a runner on a key, a record bound to a key Bops gave, or a computer that also serves another workspace or whose chat is on the Mac, is left as it is", async () => {
   await inSelf(async () => {
     const said = { version: SELF, buildId: "Build55", auth: "identity" as const };
     const key = { ...said, auth: "key" as const };
@@ -2612,6 +2614,26 @@ test("a computer someone else can use: Bops Cloud writes or catches up its runne
     const t = await setupSelf();
     assert.equal(await recordRunner(t.owner, t.desktop, said), true);
     assert.deepEqual([(await recordOf(t.owner, t.desktop))!.status, (await recordOf(t.owner, t.desktop))!.shared], ["running", true]);
+    // A record bound to a key Bops gave (keyMade, or a keyId from before keyMade), the runner now on its identity: left as
+    // it is, failed for a passing reason or up and older, `shared` on it or not. The Mac never keeps that runner here: it
+    // stops it and takes its key back (runner-install.ts keepUp), so Bops Cloud never counts it up meanwhile.
+    const T = t.desktop.toUpperCase();
+    const kept = async () => Object.fromEntries(Object.entries((await recordOf(t.owner, t.desktop))!).filter(([k]) => k !== "key"));
+    for (const rec of [
+      { status: "failed", version: SELF, buildId: "Build55", by: "mac-o", at, error: "it stopped on its computer", keyMade: true, keyId: "key_1" },
+      { status: "failed", version: SELF, buildId: "Build55", by: "mac-o", at, error: "it didn't answer on its computer", keyMade: true, keyId: "key_1", shared: true },
+      { status: "failed", version: SELF, buildId: "Build55", by: "mac-o", at, error: "it stopped on its computer", keyId: "key_1" },
+      { status: "running", version: "0.0.54", buildId: "Build54", by: "mac-o", at, auth: "identity", keyMade: true, keyId: "key_1", shared: true },
+    ]) {
+      await stateChanges(t.owner, (st) => void (st.runners = { [T]: rec }));
+      assert.equal(await recordRunner(t.owner, t.desktop, said), false, JSON.stringify(rec));
+      assert.deepEqual(await kept(), rec);
+    }
+    // With no key of Bops' on it: failed for a passing reason, running again on its identity, `shared` kept.
+    await stateChanges(t.owner, (st) => void (st.runners = { [T]: { status: "failed", version: SELF, buildId: "Build55", by: "mac-o", at, error: "it stopped on its computer", shared: true } }));
+    assert.equal(await recordRunner(t.owner, t.desktop, said), true);
+    const back = await kept();
+    assert.deepEqual(back, { status: "running", version: SELF, buildId: "Build55", auth: "identity", by: "cloud", at: back.at, shared: true });
     // A bot of Main on it too (two workspaces, one with members): nothing written, on its identity or not, with no record
     // or with a failed one.
     const u = await setupSelf();

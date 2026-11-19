@@ -1625,7 +1625,9 @@ export const RUNNER_LISTENS_UNKNOWN = "its computer can't say what it listens on
  * up. The only ones Bops Cloud marks running again once a runner of a signed release connects after them (cloud/turns.ts
  * cloudRecord). Every other stays as it is until the owner's Mac looks again: the four above, a runner that couldn't sign
  * in (lib/types.ts RUNNER_NO_SIGN_IN), and any failure not named here (scripts/test-runner-install.mjs checks that each
- * one the Mac writes is one or the other).
+ * one the Mac writes is one or the other). "It didn't answer on its computer" is here though that health check never got
+ * as far as what the runner listens on (it asks only once 127.0.0.1 answers): one revived from it is no more checked for
+ * that than a runner that connects with no record (cloudRecord says so).
  */
 export const RUNNER_FAILED_PASSING: ReadonlySet<string> = new Set([
   "it stopped on its computer",

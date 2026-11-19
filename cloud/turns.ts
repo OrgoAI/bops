@@ -1673,6 +1673,12 @@ export async function selfNote<N extends string>(c: pg.PoolClient | null, userId
   return none ? "settingUp" : "updating";
 }
 
+/**
+ * Whether a runner record is bound to a key Bops gave its computer, by lib/types.ts runnerKeyMade's rule: its `keyMade`,
+ * or, in one from before keyMade, a `keyId`.
+ */
+export const keyMadeOf = (r: Record<string, unknown> | undefined): boolean => !!r && !!(r.keyMade ?? r.keyId);
+
 /** What a runner said of itself as it connected (runnerLive): its version and build, and what it signed in with. */
 export type RunnerSaid = { version: string; buildId: string; auth: "identity" | "key" };
 
@@ -1691,10 +1697,22 @@ export type RunnerSaid = { version: string; buildId: string; auth: "identity" | 
  *   beyond its computer, it couldn't sign in, or one not named there): as it is.
  *
  * Never on a computer someone else can use (a workspace whose bots work there has members, or the record says `shared`)
- * unless the Mac would keep that runner (lib/server/runner-install.ts sharedRunnerOk): one on its computer's identity
- * alone (never a key, which its people could read as root there), where every bot on it is of that one workspace and its
- * chat goes through Bops Cloud (Workspace.chatOn "cloud", or chatAuto while the owner didn't choose the Mac). Any other
- * is left as it is, and the owner's Mac stops it once it looks.
+ * unless the Mac would keep that runner (lib/server/runner-install.ts keepUp, sharedRunnerOk): one on its computer's
+ * identity alone (never a key, which its people could read as root there), where every bot on it is of that one workspace
+ * and its chat goes through Bops Cloud (Workspace.chatOn "cloud", or chatAuto while the owner didn't choose the Mac), and
+ * whose record is bound to no key Bops gave it (keyMadeOf, as lib/types.ts runnerKeyMade: the Mac stops that runner and
+ * revokes its key). Any other is left as it is, failed or running, and the owner's Mac stops it once it looks.
+ *
+ * Two things it can't see (known, left as they are):
+ * - Sharing only Orgo knows of (a share link, or a member of the computer's Orgo project: lib/server/members.ts
+ *   othersCanUse, which only the owner's Mac asks). Such a computer looks private here, so a runner on it with no record,
+ *   or one failed for a passing reason, is written running, even one on a key, until the owner's Mac looks (keepUp)
+ *   and does as it does with any shared one: kept on its identity alone, or stopped and a key Bops gave taken back.
+ *   Bops Cloud never gives a key itself: one there was put there before.
+ * - Whether a runner revived from "it didn't answer on its computer" (RUNNER_FAILED_PASSING) listens beyond its
+ *   computer: the Mac's health check looks at that only once 127.0.0.1 answers, so that failure never got that far.
+ *   The same goes for a runner with no record, written running on its connect alone; either is looked at for it the
+ *   next time the owner's Mac sets it up or updates it (runner-install.ts health).
  *
  * The key is the record's own (any case), else the bot's computer id as the state has it (the runner looks it up so).
  */
@@ -1714,7 +1732,7 @@ export function cloudRecord(blob: Record<string, unknown>, desktop: string, said
   if (team || r?.shared === true) {
     const w = wss.size === 1 ? spaces[0] : undefined;
     const kept = !!w && (w.chatOn === "cloud" || (w.chatAuto === true && w.chatOn !== "mac"));
-    if (said.auth !== "identity" || !kept) return null;
+    if (said.auth !== "identity" || !kept || keyMadeOf(r)) return null;
   }
   const fresh = (keep: Record<string, unknown> = {}) => ({
     status: "running",

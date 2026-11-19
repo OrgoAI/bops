@@ -31,6 +31,12 @@ export const RELEASE_KEYS: Readonly<Record<string, string>> = Object.freeze({
 export const RELEASE_MAX_TEXT = 64 * 1024;
 /** How often it's read again, and how long a read may take. */
 export const RELEASE_POLL_MS = 10 * 60_000;
+/**
+ * How far past Bops Cloud's clock a release may say it was signed (`released`): the release machine's clock a little
+ * fast. One later than that is no release: a version is replaced only by a signing of it that's later (checkReleases),
+ * so one stamped far ahead would pin that version's build until then.
+ */
+export const RELEASE_SKEW_MS = 10 * 60_000;
 const READ_MS = 10_000;
 
 /** bops-server-<version>-<BUILD_ID>.tgz, as lib/server/runner-install.ts names a bundle. */
@@ -62,9 +68,10 @@ function keyOf(pem: string): KeyObject | null {
  * The release latest.json's text says, or null when it isn't one: `{payload, sig, keyId}` with `keyId` one of `keys`
  * (RELEASE_KEYS; another set only in tests), `sig` that key's ed25519 signature over `payload`'s bytes, and `payload` a
  * RunnerRelease: kind "bops-runner", version x.y.z, its bundle's name agreeing with its version and build, a sha256, a
- * size of at most RELEASE_MAX_BYTES, when it was signed, and a state level from 1 to 9999.
+ * size of at most RELEASE_MAX_BYTES, when it was signed (no later than RELEASE_SKEW_MS past `now`), and a state level
+ * from 1 to 9999.
  */
-export function verifyRelease(text: string, keys: Readonly<Record<string, string>> = RELEASE_KEYS): RunnerRelease | null {
+export function verifyRelease(text: string, keys: Readonly<Record<string, string>> = RELEASE_KEYS, now = Date.now()): RunnerRelease | null {
   if (typeof text !== "string" || text.length > RELEASE_MAX_TEXT) return null;
   let outer: unknown;
   try {
@@ -98,7 +105,9 @@ export function verifyRelease(text: string, keys: Readonly<Record<string, string
   if (!m || m[1] !== version || m[2] !== buildId) return null;
   if (typeof sha256 !== "string" || !SHA256.test(sha256)) return null;
   if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 1 || size > RELEASE_MAX_BYTES) return null;
-  if (typeof released !== "string" || !RELEASED.test(released) || !Number.isFinite(Date.parse(released))) return null;
+  if (typeof released !== "string" || !RELEASED.test(released)) return null;
+  const signedAt = Date.parse(released);
+  if (!Number.isFinite(signedAt) || signedAt > now + RELEASE_SKEW_MS) return null;
   if (typeof stateLevel !== "number" || !Number.isInteger(stateLevel) || stateLevel < 1 || stateLevel > 9999) return null;
   return { kind, version, buildId, name: name as string, sha256, size, released, stateLevel };
 }
@@ -199,9 +208,12 @@ export async function checkReleases(o: { url?: string; keys?: Readonly<Record<st
     say(got.why);
     return null;
   }
-  const r = verifyRelease(got.text, o.keys);
+  const now = Date.now();
+  const r = verifyRelease(got.text, o.keys, now);
   if (!r) {
-    say("isn't a signed release");
+    // Signed and well formed but stamped too far ahead (the release machine's clock): said so, as that's what to fix.
+    const ahead = verifyRelease(got.text, o.keys, Number.POSITIVE_INFINITY);
+    say(ahead ? `is ${ahead.version} (${ahead.buildId}) signed ${ahead.released}, more than ${RELEASE_SKEW_MS / 60_000} minutes past this clock` : "isn't a signed release");
     return null;
   }
   const was = known.get(r.version);
