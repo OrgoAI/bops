@@ -113,6 +113,11 @@ export const config = {
     const said = new Set(v.split(",").map((x) => x.trim()));
     return APP_ACT_JOBS.filter((k) => said.has(k));
   },
+  /**
+   * Where Bops Cloud reads the newest signed runner release (runner-release.ts, every 10 minutes): Orgo's release
+   * publishes it there. "off": never read (the releases read before stay known).
+   */
+  runnerReleases: () => env("BOPS_RUNNER_RELEASES") || "https://bops.bot/download/runner/latest.json",
   /** The central Ingot server (lib/server/ingot.ts ingotUrl, the same BOPS_INGOT_URL): where an Admin's Delete its code goes (members.ts deleteCodeHere). */
   ingotUrl: () => (env("BOPS_INGOT_URL") || "https://bops.bot/api/ingot").replace(/\/+$/, ""),
 

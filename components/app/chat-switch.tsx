@@ -58,6 +58,10 @@ export const CHAT_TROUBLE: Record<string, (bot: string, owner: string) => string
   split: () => "A group's bots work on different computers, so that group can't answer in the cloud yet.",
   // The owner's account is set to This Mac (Settings): the computer's own keeper won't set up its Bops (cloud/turns.ts, from its report).
   accountMac: (bot) => `Your bots work on This Mac in Settings, so ${bot}'s computer doesn't answer in the cloud. Set Settings to Cloud.`,
+  // Said only while the computer's own keeper sets its Bops up or updates it (cloud/turns.ts selfNote), and of a shared computer Bops can't run on.
+  settingUp: (bot) => `${bot}'s computer is setting up its Bops. It answers in a few minutes.`,
+  updating: (bot) => `${bot}'s computer is updating its Bops. It answers in a few minutes.`,
+  sharedOff: (bot) => `${bot}'s computer is shared with the team, and Orgo doesn't let Bops run on it yet.`,
 };
 
 /** Said instead of turning the switch on, sending nothing, while the owner's account is set to This Mac (/api/runs-on: "mac"). */

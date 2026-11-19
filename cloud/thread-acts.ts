@@ -153,8 +153,12 @@ export const NO_COMPUTER = "This runs on the bot's computer, and the owner hasn'
 export const noComputerToRun = (bot: string) => `${bot} has no computer to run this on.`;
 /** 409 COMPUTER_NOT_READY: the bot's computer has no runner yet. */
 export const noRunnerWords = (bot: string, owner: string) => `${bot}'s computer isn't set up yet. ${owner}'s Bops sets it up the next time it opens.`;
+/** The same, said while its computer's own keeper sets its Bops up (cloud/turns.ts keeperLive). */
+export const settingUpWords = (bot: string) => `${bot}'s computer is setting up its Bops. Try again in a few minutes.`;
 /** 409 COMPUTER_NOT_READY: the bot's computer runs a Bops too old for this. */
 export const oldRunnerWords = (bot: string, owner: string) => `${bot}'s computer needs a newer Bops before it can do this. It updates the next time ${owner} opens Bops.`;
+/** The same, said while its computer's own keeper updates its Bops (cloud/turns.ts keeperLive). */
+export const updatingWords = (bot: string) => `${bot}'s computer is updating its Bops. Try again in a few minutes.`;
 /** A thread's step when its computer won't wake for it (the Mac's words: sessions.ts queueAgain). */
 export const wakeWords = (why: string) => `Waiting for its computer to wake: ${why}`;
 /** The chat's line when a teammate picks where a thread runs (member-acts.ts "where"). */

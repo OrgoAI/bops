@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import WebSocket from "ws";
-import { forgetNotedVersions, olderThan, refreshAppPolicy, UPDATE_BOPS } from "../app-version.ts";
+import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
+import { forgetNotedVersions, olderThan, refreshAppPolicy, requireAppVersion, UPDATE_BOPS } from "../app-version.ts";
 import { closeDb, query } from "../db.ts";
-import { call, dropUsers, fakeOrgo, fakeProvider, keyOf, newUserId, prepareDb, seedUser, startCloud, until, type Listening } from "./core-fakes.ts";
+import { HttpError } from "../http.ts";
+import { call, dropUsers, fakeProvider, keyOf, listen, newUserId, prepareDb, seedUser, startCloud, until, type Listening } from "./core-fakes.ts";
 
 /**
  * Which Bops app each user is on, and old apps kept out (cloud/app-version.ts): every signed-in call
@@ -33,6 +36,23 @@ const socketStatus = (version: string | undefined) =>
     });
     ws.on("error", () => {});
   });
+
+/** Orgo's GET /api/user/profile: `key-<user>` the user's key, `orgo_vm_<user>~<desktop>` a computer's identity (its runner). */
+async function fakeOrgo(): Promise<Listening> {
+  const o = await listen(
+    createServer((req, res) => {
+      const key = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
+      let m: RegExpExecArray | null;
+      const json = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+      if (req.url !== "/api/user/profile") return json(404, {});
+      if ((m = /^key-(.+)$/.exec(key))) return json(200, { id: m[1], email: `${m[1]}@example.com` });
+      if ((m = /^orgo_vm_([^~]+)~([^~]+)$/.exec(key))) return json(200, { id: m[1], api_key: null, principal: { kind: "vm_identity", desktop_id: m[2], expires_at: new Date(Date.now() + 3600_000).toISOString() } });
+      json(401, { error: "no" });
+    }),
+  );
+  process.env.BOPS_ORGO_ORIGIN = o.url;
+  return o;
+}
 
 before(async () => {
   await prepareDb();
@@ -174,4 +194,41 @@ test("a Mac whose state a newer app wrote, on an app that doesn't stop its routi
     const r = await call(cloud.url, "POST", "/proxy/openai/v1/responses", { key: keyOf(alice), json: { model: "gpt-6.1-sol", input: "hi" }, headers });
     assert.equal(r.status, 200, `${JSON.stringify(headers)}: ${r.text}`);
   }
+});
+
+test("the state a Mac may be given is kept with its version (what a runner is never updated past); a computer's runner's never is", async () => {
+  const level = async () => (await query<{ app_version: string | null; state_level: number | null }>("SELECT app_version, state_level FROM bops.cloud_accounts WHERE user_id = $1", [alice])).rows[0];
+  // A Mac on this app says its level with every call (appHeaders).
+  await call(cloud.url, "GET", "/v1/state/head", { key: keyOf(alice), headers: { "x-bops-version": "0.0.55", "x-bops-state-level": "4" } });
+  await until(async () => (await level())?.state_level === 4, "the Mac's level kept");
+  assert.equal((await level()).app_version, "0.0.55");
+  // One that says none (before 0.0.29) may be given level 2 (STATE_PROTOCOL): kept so, at once, with its version.
+  await call(cloud.url, "GET", "/v1/state/head", { key: keyOf(alice), headers: { "x-bops-version": "0.0.28" } });
+  await until(async () => (await level())?.state_level === 2, "an older Mac's level");
+  // A computer's runner of hers, on a newer Bops and a newer level, says neither for the Mac.
+  forgetNotedVersions();
+  const box = `orgo_vm_${alice}~${randomUUID()}`;
+  const r = await call(cloud.url, "GET", "/v1/state/head", { key: box, headers: { "x-bops-version": "0.0.56", "x-bops-state-level": "5" } });
+  assert.ok(![401, 403, 426].includes(r.status), `signed in as her computer, on a route it may call: ${r.status} ${r.text}`);
+  await new Promise((done) => setTimeout(done, 200));
+  assert.deepEqual(await level(), { app_version: "0.0.28", state_level: 2 }, "the Mac's, as it last said");
+});
+
+test("blocked below a version, a computer's keeper still asks whether it may update its runner (/v1/runner/keeper)", async () => {
+  await block("0.0.55");
+  const refused = (path: string, version: string | null) => {
+    try {
+      requireAppVersion(path, version);
+      return false;
+    } catch (e) {
+      return e instanceof HttpError && e.status === 426;
+    }
+  };
+  for (const version of [null, "0.0.54", "0.0.18"]) {
+    assert.equal(refused("/v1/runner/keeper", version), false, `the keeper, said ${version}`);
+    assert.equal(refused("/v1/state", version), false);
+    assert.equal(refused("/v1/runner/live", version), true, "a runner's other calls are held to it as before");
+    assert.equal(refused("/v1/runner/keepers", version), true, "only that path");
+  }
+  assert.equal(refused("/v1/runner/live", "0.0.55"), false);
 });

@@ -492,6 +492,14 @@ export const USAGE_APP_HEADER = "x-bops-app";
  * (cloud/app-version.ts).
  */
 export const APP_VERSION_HEADER = "x-bops-version";
+/**
+ * Which build of its version a computer's runner runs (Next's BUILD_ID, as its bundle is named:
+ * bops-server-<version>-<BUILD_ID>.tgz), sent with every call to the cloud from a runner from
+ * CLOUD_SELF_MIN_VERSION on (lib/server/app-version.ts appHeaders). Bops Cloud keeps it with the runner's
+ * version (bops.runner_seen) and writes the owner's record of a runner only for a version and build that
+ * match a signed release (cloud/turns.ts recordRunner). A Mac sends none.
+ */
+export const RUNNER_BUILD_HEADER = "x-bops-build";
 
 /**
  * Sent as "off" by an app whose Mac sends no usage events (BOPS_TELEMETRY=0, DO_NOT_TRACK=1, a
@@ -1388,6 +1396,23 @@ export const MESSAGE_TAKEN = "message_taken";
 export const CHAT_NEEDS_UPDATE = "chat_needs_update";
 /** The first Bops whose Mac keeps to chat through Bops Cloud (runners kept up on identity, Use its computer, stored messages). */
 export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
+/*
+ * The versions everything through the cloud goes by, each set to the release that carries its code (a PR that misses
+ * its release moves its constant to the next before it merges), what each reads, and what happens when that's older:
+ *
+ * | Constant | Value | Reads | When older |
+ * |---|---|---|---|
+ * | CLOUD_ALL_MIN_VERSION | 0.0.54 | the owner's last Mac | as today |
+ * | CLOUD_SELF_MIN_VERSION | 0.0.55 | the owner's last Mac (cloudSelf, the keeper, recordRunner, cloudDoes) | exactly today: no keeper answers, no cloud records, an empty cloudDoes, nothing of this round |
+ * | TOOLS_ON_RUNNER_MIN_VERSION | 0.0.56 | the claim and resume header; every runner of a workspace (cloudDoes.watches) | no tools, as today; the Mac looks at watches |
+ * | CLOUD_OWN_MIN_VERSION | 0.0.56 | the caller's own version (owner presses); runnerVersionOf and the claim's min_version for reapply, restore, Published settings, pictures | the owner's Bops does it as today (OWN_NOT_YET); the old runner words |
+ * | CLOUD_OUTSIDE_MIN_VERSION | 0.0.57 | every runner of a workspace (cloudDoes.routines) | routines as today |
+ * | CLOUD_FOLLOW_MIN_VERSION | 0.0.57 | runnerVersionOf of each group computer and part claims; every runner (cloudDoes.desktop) | groupSplit as today; the Mac dresses the desktop |
+ * | TEAM_JOBS_MIN_VERSION | 0.0.57 | runnerVersionOf and the claim header for answerTeammate and runRoutine | the words; 410 oldRunner |
+ * | MADE_APPS_MIN_VERSION | 0.0.57 | the claim header for make_app and change_app; lookingAt sends | not offered; lookingAt answered on the owner's Bops as today |
+ *
+ * Only the first two are here yet: each of the others comes with the PR that reads it.
+ */
 /**
  * The first Bops with which everything in a workspace switched to the cloud goes through the cloud (cloud/turns.ts
  * allCloud): Your Apps on the app's own computer, a teammate's other acts done by Bops Cloud, and chats answered only off
@@ -1408,9 +1433,19 @@ export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
  */
 export const CLOUD_ALL_MIN_VERSION = "0.0.54";
 /**
- * The first Bops of this round (bots' computers that set up and update their own runner, and a Mac that leaves to Bops
- * Cloud each part it says it does: CloudDoes). Read from the owner's last Mac (cloud/turns.ts cloudSelf): older, and
- * everything is exactly as before, an empty cloudDoes too.
+ * The first Bops of this round: bots' computers that set up and update their own runner, and a Mac that leaves to Bops
+ * Cloud each part it says it does (CloudDoes). Read from the owner's last Mac (cloud/turns.ts cloudSelf, macNewEnough):
+ * older, and everything is exactly as before, an empty cloudDoes too. From it on, Bops Cloud also does what the owner's Mac
+ * did for the bots' runners: it keeps each runner's version and build, capped at the newest signed release
+ * (cloud/runner-release.ts), writes the owner's record of a runner of a signed release that connects with none, and catches
+ * its version up after it updated itself (cloud/turns.ts recordRunner, by CLOUD_BY), and it says a computer is setting up
+ * or updating its Bops while its keeper is live (turns.ts keeperLive). Set to the release that carries it. Who is checked
+ * against it:
+ *
+ * | Check | Reads | When older |
+ * |---|---|---|
+ * | recordRunner, keeperLive, the keeper's answer (POST /v1/runner/keeper) | the owner's last Mac (turns.ts macNewEnough) | nothing written, no keeper answers, today's words exactly |
+ * | cloudDoes and the other new paths of this round (turns.ts cloudSelf) | the owner's last Mac | today's behavior exactly, an empty cloudDoes |
  */
 export const CLOUD_SELF_MIN_VERSION = "0.0.55";
 /**
@@ -1569,6 +1604,118 @@ export const RUNNER_TURNS_DIR = "/var/run/bops/turns";
  * itself before it looks here, so none starts unseen. One older than 5 minutes (an upgrade that died) is ignored.
  */
 export const RUNNER_HOLD = "/var/run/bops/upgrading";
+/**
+ * Why a runner couldn't be set up on a computer (RunnerState.error), as lib/server/runner-install.ts writes it: someone
+ * else can use the computer's workspace and the computer has no identity of its own to run on (orgo-web's 409
+ * full_access_member, or its identity refused), or only the workspace's owner may set one up there (403 owner_only).
+ * Bops Cloud leaves such a record as it is (cloud/turns.ts recordRunner), and says the first plainly (NOTES sharedOff).
+ */
+export const RUNNER_FULL_ACCESS = "someone else can use this workspace";
+export const RUNNER_OWNER_ONLY = "only the workspace's owner can set a runner up there";
+/**
+ * Why a runner was stopped as it came up (lib/server/runner-install.ts, its health check): it listened beyond its own
+ * computer, or its computer couldn't say what it listens on. Bops Cloud leaves such a record as it is too, whatever
+ * connects after it (supervisord starts that runner again when its computer restarts): only the owner's Mac sets one up again.
+ */
+export const RUNNER_EXPOSED = "it listened beyond its own computer";
+export const RUNNER_LISTENS_UNKNOWN = "its computer can't say what it listens on";
+/**
+ * The failures (RunnerState.error, word for word as lib/server/runner-install.ts writes them) that a runner connecting
+ * since outlives: its computer didn't answer, it stopped there or didn't answer there, Orgo or its files didn't get it set
+ * up. The only ones Bops Cloud marks running again once a runner of a signed release connects after them (cloud/turns.ts
+ * cloudRecord). Every other stays as it is until the owner's Mac looks again: the four above, a runner that couldn't sign
+ * in (lib/types.ts RUNNER_NO_SIGN_IN), and any failure not named here (scripts/test-runner-install.mjs checks that each
+ * one the Mac writes is one or the other). "It didn't answer on its computer" is here though that health check never got
+ * as far as what the runner listens on (it asks only once 127.0.0.1 answers): one revived from it is no more checked for
+ * that than a runner that connects with no record (cloudRecord says so).
+ */
+export const RUNNER_FAILED_PASSING: ReadonlySet<string> = new Set([
+  "it stopped on its computer",
+  "its computer didn't answer",
+  "it didn't answer on its computer",
+  "its computer can't keep a runner going (no supervisord)",
+  "Orgo or Bops Cloud runs on this Mac, which the computer can't reach",
+  "no server bundle",
+  "the server bundle is damaged",
+  "Orgo didn't take its files",
+  "its files didn't upload",
+  "its files didn't reach its computer",
+  "its files weren't on its computer",
+  "its files couldn't be put in place",
+  "Orgo can't set up a runner on it yet",
+  "a runner needs a Linux computer",
+  "Orgo didn't give its computer its key",
+]);
+
+/* ---------------- Runners that set up and update themselves (CLOUD_SELF_MIN_VERSION) ---------------- */
+
+/**
+ * A signed release of the runner, as Orgo's release publishes it at bops.bot/download/runner/latest.json: that file is
+ * `{payload, sig, keyId}`, `payload` this object's exact JSON text, `sig` an ed25519 signature over its bytes (base64)
+ * made with the release key `keyId` (cloud/runner-release.ts RELEASE_KEYS, verifyRelease). `name` is the bundle's
+ * (bops-server-<version>-<buildId>.tgz, beside latest.json), `sha256` its hash (hex) and `size` its bytes (at most
+ * RELEASE_MAX_BYTES); `released` when it was signed (ISO 8601, UTC); `stateLevel` the STATE_LEVEL of the release's own
+ * cloud/protocol.ts, which Bops Cloud never updates a runner past the owner's last Mac's (bops.cloud_accounts.state_level).
+ */
+export type RunnerRelease = {
+  kind: "bops-runner";
+  version: string;
+  buildId: string;
+  name: string;
+  sha256: string;
+  size: number;
+  released: string;
+  stateLevel: number;
+};
+/** The largest runner bundle a signed release may name (RunnerRelease.size). */
+export const RELEASE_MAX_BYTES = 400 * 1024 * 1024;
+
+/** Why Bops Cloud answers a keeper as it does (KeeperAnswer.why), in the order it looks (cloud/runner-keeper.ts). */
+export type KeeperWhy =
+  | "ownerMac"
+  | "accountMac"
+  | "noRelease"
+  | "stale"
+  | "stopping"
+  | "someoneElse"
+  | "macBusy"
+  | "botsOnMac"
+  | "noBot"
+  | "manyWorkspaces"
+  | "notCloud"
+  | "notOnMap"
+  | "sharedKey"
+  | "macLevel"
+  | "upToDate"
+  | "off"
+  | "staffOnly"
+  | "halted"
+  | "claimed"
+  | "slots"
+  | "soak"
+  | "ok";
+/**
+ * POST /v1/runner/keeper: a computer's keeper (vm/bin/bops-runner-keeper.mjs, on the computer's own identity) asks
+ * whether it may set up or update the runner there, and says how the last time went. `keeper`: its own version.
+ * `runner`: the runner there (`up`: supervisord runs it), or none. `latest`: the newest signed release it read itself.
+ * `busy`: a reply is being answered there. `off`: when the owner's Mac took the runner off (epoch s). `key`: a line that
+ * sets ORGO_API_KEY is on the computer. `runsOn`: where Orgo says the account's bots work. `computer`: what orgo-web says
+ * of the computer (someone else can use it; it's a Bops computer), or null when it didn't say. `outcome`: the last
+ * thing it did, and to which version and build.
+ */
+export type KeeperAsk = {
+  keeper: string;
+  runner: { version: string; buildId: string; up: boolean } | null;
+  latest: { version: string; buildId: string } | null;
+  busy: boolean;
+  off?: number;
+  key: boolean;
+  runsOn: "cloud" | "mac" | null;
+  computer: { shared: boolean; bops: boolean } | null;
+  outcome?: { kind: "installed" | "updated" | "rolledBack" | "failed" | "busy" | "flapping" | "sharedKey"; version: string; buildId: string; why?: string };
+};
+/** Bops Cloud's answer to a keeper: what to do, why, and when to ask again (seconds). Never a place or a version to install. */
+export type KeeperAnswer = { do: "nothing" | "install" | "update"; why: KeeperWhy; retryS: number };
 
 /* ---------------- The bot's browser (cloud/browser.ts, lib/browser-relay.ts) ---------------- */
 

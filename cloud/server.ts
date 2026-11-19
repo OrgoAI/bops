@@ -25,6 +25,7 @@ import * as appsView from "./apps-view.ts";
 import * as appLease from "./app-lease.ts";
 import * as proxy from "./proxy.ts";
 import * as reconcile from "./reconcile.ts";
+import * as releases from "./runner-release.ts";
 import * as guard from "./turn-guard.ts";
 import * as session from "./session.ts";
 import * as slack from "./slack.ts";
@@ -105,8 +106,8 @@ async function appCheck(req: IncomingMessage, user: CloudUser, path: string) {
     return requireIphoneVersion(version);
   }
   // The Mac's only: a computer's runner is a Bops the Mac set up, and saying it would stand in for the Mac (turns.ts,
-  // whether the owner's Bops keeps to chat through Bops Cloud).
-  if (!user.computer) noteAppVersion(user.id, version);
+  // whether the owner's Bops keeps to chat through Bops Cloud), and for the state that Mac may be given.
+  if (!user.computer) noteAppVersion(user.id, version, state.stateLevelOf(req));
   requireAppVersion(path, version);
   if (!user.computer) await requireUsageAppVersion(user.id, path, version);
   if (!user.computer && path.startsWith("/proxy/") && (await state.behindState(req, user.id))) throw state.behindRefusal(path);
@@ -249,6 +250,8 @@ async function main() {
   const stopAppPolicy = startAppPolicy();
   // Chat turns whose runner went quiet are owed again or ended, and late ones end with a note (turns.ts).
   const stopTurns = turns.startTurns();
+  // The signed runner releases (runner-release.ts): read every 10 minutes, and a new one tells every runner listening.
+  const stopReleases = releases.startReleases(turns.nudgeUpdates);
   const server = makeServer();
   server.listen(config.port(), "127.0.0.1", () => console.log(`[cloud] listening on 127.0.0.1:${config.port()}`));
   const stop = () => {
@@ -259,6 +262,7 @@ async function main() {
     stopStateSweeps();
     stopAppPolicy();
     stopTurns();
+    stopReleases();
     tunnel.closeAll();
     // Every runner listening for turns reconnects to the next start, and is given what it's owed again (turns.ts).
     turns.closeRunners();

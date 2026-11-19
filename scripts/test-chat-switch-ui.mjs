@@ -123,10 +123,14 @@ await test("on, what keeps it from answering: what Bops Cloud said (chatTrouble)
   assert.equal(troubled("old"), "Max's computer runs an older Bops. The owner's Bops updates it the next time it opens.");
   assert.equal(troubled("noComputer"), "Max has no computer, so Max can't answer in the cloud. Give Max a computer in Max's settings.");
   assert.equal(troubled("split"), "A group's bots work on different computers, so that group can't answer in the cloud yet.");
+  // Said only while the computer's own keeper sets its Bops up or updates it, and of a shared computer Bops can't run on (cloud/turns.ts selfNote).
+  assert.equal(troubled("settingUp"), "Max's computer is setting up its Bops. It answers in a few minutes.");
+  assert.equal(troubled("updating"), "Max's computer is updating its Bops. It answers in a few minutes.");
+  assert.equal(troubled("sharedOff"), "Max's computer is shared with the team, and Orgo doesn't let Bops run on it yet.");
   assert.equal(troubled("something new"), undefined, "a note this window doesn't know: nothing said");
   // The owner's account set to This Mac (Settings): Bops Cloud says it from the computer's own keeper's report.
   assert.equal(troubled("accountMac"), "Your bots work on This Mac in Settings, so Max's computer doesn't answer in the cloud. Set Settings to Cloud.");
-  assert.deepEqual(Object.keys(S.CHAT_TROUBLE).sort(), ["accountMac", "cant", "deleted", "hourly", "noComputer", "noCredit", "noHours", "noRunner", "old", "paused", "split", "stopped"]);
+  assert.deepEqual(Object.keys(S.CHAT_TROUBLE).sort(), ["accountMac", "cant", "deleted", "hourly", "noComputer", "noCredit", "noHours", "noRunner", "old", "paused", "settingUp", "sharedOff", "split", "stopped", "updating"]);
   // Off, nothing is said of it.
   assert.equal(S.chatSwitchOf(stateWith({ chatOn: "mac", chatTrouble: { note: "stopped", botId: "max", at: 1 } }))?.trouble, undefined);
   // What the owner's state shows: Ivy with no computer, or a group across computers.
