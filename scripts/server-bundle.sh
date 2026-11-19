@@ -81,6 +81,8 @@ copy .next/static "$stage/server/.next/static"
 copy public "$stage/server/public"
 # The runner installs only a bundle with its server.js on top (lib/server/runner-install.ts installScript).
 [ -f "$stage/server/server.js" ] || { echo "The runner bundle has no server.js at its top. Not shipping." >&2; exit 1; }
+# A runner writes its computer's keeper from its own vm/ (traced in: next.config.ts), and the keeper runs these steps.
+[ -f "$stage/server/vm/runner-steps.mjs" ] || { echo "The runner bundle has no vm/runner-steps.mjs. Not shipping." >&2; exit 1; }
 mkdir -p dist-runner
 rm -f dist-runner/bops-server-*.tgz dist-runner/bops-server-*.tgz.sha256
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root -czf "dist-runner/$name" -C "$stage/server" .
