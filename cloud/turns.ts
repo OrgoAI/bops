@@ -51,6 +51,7 @@ import {
   type TurnShown,
 } from "./protocol.ts";
 import { announce, checkUser, loadState, lockedState, lockUser, toJson, writeMessages } from "./state.ts";
+import { bootKeeper, bootTiming } from "./runner-boot.ts";
 import { latestRelease, releaseOf } from "./runner-release.ts";
 import { noRunnerWords, oldRunnerWords, settingUpWords, updatingWords } from "./thread-acts.ts";
 import { deliverWaitingTo, isConnected } from "./tunnel.ts";
@@ -76,7 +77,9 @@ import { computerUseOf, HOSTNAME, list, viewerAccess, wsOfBot, type SliceViewer 
  *   computer is woken (orgo-web POST /api/internal/bops/wake, signed with BOPS_CLOUD_WAKE_SECRET), one wake at a time per
  *   computer however many turns wait on it, and the turns go to the runner as it connects. A computer billed by the
  *   hour is woken only when the owner allowed it (chat_routing.allow_hourly); one that can't be woken (stopped,
- *   deleted, out of Free hours, out of AI credit) fails its turns with a note saying so.
+ *   deleted, out of Free hours, out of AI credit) fails its turns with a note saying so. A computer that's up after a wake
+ *   but whose runner doesn't connect within 3 minutes, or whose runner connects from before CLOUD_SELF_MIN_VERSION, gets
+ *   its keeper from orgo-web when Bops Cloud may ask (runner-boot.ts bootKeeper, off unless BOPS_RUNNER_BOOT=on).
  * - **Running it**: the runner claims a turn (only one meant for its own device, and only the oldest of its chat while
  *   none of that chat runs: one answer at a time per chat, and one app job at a time beside it, CHAT_LANE), and gets Bops
  *   Cloud's clock to stamp its answer by (a computer's own lags after a nap). The claim checks again that the bot still
@@ -1341,8 +1344,8 @@ async function writeChatJobLines(userId: string, rows: Record<string, unknown>[]
   announce(userId, { chats: [...new Set(rows.map((m) => String(m.chatId)))], by: "cloud" });
 }
 
-/** Where a runner is on a computer as the owner's Mac keeps it (AppState.runners, by Orgo computer id, any case). */
-const runnerAt = (blob: Record<string, unknown>, desktop: string): Record<string, unknown> | undefined => {
+/** Where a runner is on a computer as the owner's Mac keeps it (AppState.runners, by Orgo computer id, any case; `desktop` lowercased). */
+export const runnerAt = (blob: Record<string, unknown>, desktop: string): Record<string, unknown> | undefined => {
   const all = isObject(blob.runners) ? blob.runners : {};
   const k = Object.keys(all).find((x) => x.toLowerCase() === desktop);
   return k && isObject(all[k]) ? (all[k] as Record<string, unknown>) : undefined;
@@ -1683,6 +1686,34 @@ export const keyMadeOf = (r: Record<string, unknown> | undefined): boolean => !!
 export type RunnerSaid = { version: string; buildId: string; auth: "identity" | "key" };
 
 /**
+ * Whether someone else can use a computer, and whether the Mac would refuse a runner there that signs in with `auth`
+ * (null: not known, a computer with no runner yet), by lib/server/runner-install.ts keepUp and sharedRunnerOk. `wss`: the
+ * workspaces whose bots work on it; `r`: the owner's record of its runner. `team`: one of those workspaces has members
+ * (memberAccess entries). On a computer someone else can use (`team`, or the record says `shared`), only a runner on its
+ * computer's identity alone (never a key, which its people could read as root there), where every bot on it is of one
+ * workspace whose chat goes through Bops Cloud (Workspace.chatOn "cloud", or chatAuto while the owner didn't choose the
+ * Mac), and whose record is bound to no key Bops gave it (keyMadeOf) is kept; any other is `refused`. cloudRecord writes
+ * no record for a refused one, and runner-boot.ts bootKeeper puts no keeper there.
+ */
+export function sharedRule(blob: Record<string, unknown>, wss: ReadonlySet<string>, r: Record<string, unknown> | undefined, auth: RunnerSaid["auth"] | null): { team: boolean; refused: boolean } {
+  const spaces = list(blob.workspaces).filter((w) => wss.has(w.id as string));
+  const team = spaces.some((w) => isObject(w.memberAccess) && Object.keys(w.memberAccess).length > 0);
+  if (!team && r?.shared !== true) return { team, refused: false };
+  const w = wss.size === 1 ? spaces[0] : undefined;
+  const kept = !!w && (w.chatOn === "cloud" || (w.chatAuto === true && w.chatOn !== "mac"));
+  return { team, refused: auth !== "identity" || !kept || keyMadeOf(r) };
+}
+
+/**
+ * Whether the owner's Mac keeps the runner of a computer down, by its record `r`: being stopped, or failed for a reason a
+ * runner connecting since doesn't outlive (anything not in RUNNER_FAILED_PASSING: someone else can use it, only the
+ * owner may, it listened beyond its computer, its computer can't say what it listens on, it couldn't sign in, or one not
+ * named there). cloudRecord leaves such a record as it is, and runner-boot.ts bootKeeper puts no keeper there.
+ */
+export const keptDown = (r: Record<string, unknown> | undefined): boolean =>
+  !!r && (r.status === "stopping" || (r.status === "failed" && !(typeof r.error === "string" && RUNNER_FAILED_PASSING.has(r.error))));
+
+/**
  * The owner's record of the runner on computer `desktop` (AppState.runners, lib/types.ts RunnerState) as Bops Cloud would
  * have it now that its runner connected saying `said` (at `at`), or null to leave it as it is. Only for a computer a bot of
  * theirs works on (computerFor `cloud`: a bot set to work on the Mac too, as its computer answers it where everything goes
@@ -1726,14 +1757,8 @@ export function cloudRecord(blob: Record<string, unknown>, desktop: string, said
   const r = had && isObject(all[had]) ? (all[had] as Record<string, unknown>) : undefined;
   const id = workBotOf(on[0], bots).computerId;
   const key = had ?? (typeof id === "string" && id.toLowerCase() === d ? id : d);
-  const wss = new Set(on.map(wsOfBot));
-  const spaces = list(blob.workspaces).filter((w) => wss.has(w.id as string));
-  const team = spaces.some((w) => isObject(w.memberAccess) && Object.keys(w.memberAccess).length > 0);
-  if (team || r?.shared === true) {
-    const w = wss.size === 1 ? spaces[0] : undefined;
-    const kept = !!w && (w.chatOn === "cloud" || (w.chatAuto === true && w.chatOn !== "mac"));
-    if (said.auth !== "identity" || !kept || keyMadeOf(r)) return null;
-  }
+  const { team, refused } = sharedRule(blob, new Set(on.map(wsOfBot)), r, said.auth);
+  if (refused) return null;
   const fresh = (keep: Record<string, unknown> = {}) => ({
     status: "running",
     version: said.version,
@@ -1973,6 +1998,8 @@ async function wakeLoop(userId: string, desktopId: string) {
       return;
     }
     if (a.state === "running" || a.state === "woke" || a.state === "storage" || a.state === "retry") {
+      // Up (not still coming back from storage, nor asked again): from now its runner has bootTiming.afterWakeMs to connect.
+      if (a.state === "running" || a.state === "woke") bootIfNoRunner(userId, desktopId, device);
       const fresh = await query<RawTurn>(`UPDATE bops.chat_turns SET state = 'waking', updated_at = now() WHERE user_id = $1 AND target_device = $2 AND state = 'owed' RETURNING ${COLS}`, [userId, device]);
       for (const t of fresh.rows.map(turnOf)) shown(t, "waking");
       const s = a.state === "storage" ? (a.expectedSeconds ?? 30) : a.state === "retry" ? (a.retryAfterS ?? 10) : turnTiming.wakeAgainMs / 1000;
@@ -1983,6 +2010,25 @@ async function wakeLoop(userId: string, desktopId: string) {
     }
     await waitForRunner(userId, device, wait);
   }
+}
+
+/** The computers whose wake worked, waiting to see whether a runner connects (bootIfNoRunner), by "<user>\0<device>". */
+const bootChecks = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * A wake that worked (the computer up: "running" or "woke"): when no runner of the computer connects within
+ * bootTiming.afterWakeMs, orgo-web is asked to put its keeper on it (runner-boot.ts bootKeeper, which says whether it may;
+ * with no runner to say what it signs in with, never on a computer someone else can use). One check a computer at a time.
+ */
+function bootIfNoRunner(userId: string, desktopId: string, device: string) {
+  const k = rkey(userId, device);
+  if (bootChecks.has(k)) return;
+  const t = setTimeout(() => {
+    bootChecks.delete(k);
+    if (!runnerOn(userId, device)) void bootKeeper(userId, desktopId);
+  }, bootTiming.afterWakeMs);
+  t.unref?.();
+  bootChecks.set(k, t);
 }
 
 /** Every turn waiting on a computer that can't be woken ends with that note. */
@@ -2115,6 +2161,10 @@ const runnerLive: Route = {
     }
     // At a Bops it didn't run before: the mirror of what Bops Cloud does (cloudDoesFor) put right, under the owner's lock.
     if (!capped && before !== undefined && before !== said && !done) void remirror(userId).catch((e: Error) => console.warn(`[turns] re-mirror: ${e.message}`));
+    // A runner too old to set itself up (or one that says no version): its computer gets its keeper from orgo-web, when
+    // Bops Cloud may ask (runner-boot.ts bootKeeper: on, cloudSelf, never had a keeper, the Mac would keep a runner signing
+    // in as this one does, not asked in 6 hours).
+    if (!done && !capped && (!said || !VERSION.test(said) || olderThan(said, CLOUD_SELF_MIN_VERSION))) void bootKeeper(userId, c.desktopId, auth);
     // Its computer answers again: what was said of it on its cloud workspaces goes (an "old" one only once it's new enough).
     if (!done) await clearTrouble(userId, { desktop: c.desktopId, version: said && VERSION.test(said) ? said : null }).catch((e: Error) => console.warn(`[turns] trouble cleared: ${e.message}`));
     // A wake waiting for it carries on now, and what it's owed goes to it.
@@ -2843,6 +2893,8 @@ export async function turnById(userId: string, id: string): Promise<TurnRow | nu
 export function resetTurns(opts: { wake?: AskWake; does?: Partial<Record<keyof CloudDoes, CloudDoesCheck>> } = {}) {
   askWake = opts.wake ?? askOrgo;
   doesChecks = opts.does ?? CLOUD_DOES_CHECKS;
+  for (const t of bootChecks.values()) clearTimeout(t);
+  bootChecks.clear();
   proved.clear();
   provedUsers.clear();
   broken.clear();

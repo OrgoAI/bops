@@ -87,6 +87,18 @@ export const config = {
    */
   wakeSecret: () => env("BOPS_CLOUD_WAKE_SECRET"),
   /**
+   * The secret Bops Cloud signs its asks to put the keeper on a bot's computer with (POST
+   * <orgo>/api/internal/bops/runner-boot, runner-boot.ts): the same BOPS_CLOUD_BOOT_SECRET on both sides, 32+ random
+   * bytes, never the wake's. Unset: nothing is asked.
+   */
+  bootSecret: () => env("BOPS_CLOUD_BOOT_SECRET"),
+  /**
+   * Whether Bops Cloud asks orgo-web to put the keeper on a computer that never got one (runner-boot.ts bootKeeper): "on",
+   * once orgo-web's runner boot is on production. Anything else (the default): never. TODO(K2): BOPS_RUNNER_UPDATES
+   * ("off", or "staff" for an owner who isn't Orgo's staff) stops boots too (runner-boot.ts setBootUpdatesGate).
+   */
+  runnerBoot: () => env("BOPS_RUNNER_BOOT") === "on",
+  /**
    * Chat through Bops Cloud by default (turns.ts autoRoute, chatAutoFor): "on" moves every owner's workspaces once their
    * bots' computers can answer there, a list of Orgo user ids (commas) only theirs (a canary). Unset or "off": nothing
    * moves there by itself. "revert": the same, and every workspace it moved goes back to the owner's Mac at start. A
