@@ -241,17 +241,21 @@ export const RELEASE_MAX_SIZE = 400 * 1024 * 1024;
 /** The largest latest.json read. */
 export const RELEASE_MAX_TEXT = 64 * 1024;
 
-const VERSION = /^\d+\.\d+\.\d+$/;
+const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
 const BUILD_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const KEY_ID = /^[A-Za-z0-9_-]{1,32}$/;
-const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+/** An ed25519 signature (64 bytes), base64. */
+const SIG = /^[A-Za-z0-9+/]{86}==$/;
+/** When it was signed: ISO 8601, UTC. */
+const RELEASED = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 /**
  * A runner release (runner/latest.json, `{payload, sig, keyId}`), when it's one: its signature checks out with the
  * built in key it names (ed25519 over the payload's exact bytes), and the payload is a bops-runner release whose name
- * is its version and build, with a sha256, a size up to RELEASE_MAX_SIZE, a time it was released, and the state level
- * it writes (a whole number from 1 to 9999). Null for anything else. `keys` is for tests: the keeper never passes it.
+ * is its version and build, with a sha256, a size up to RELEASE_MAX_SIZE, when it was signed (ISO 8601, UTC), and the
+ * state level it writes (a whole number from 1 to 9999). Null for anything else. The same checks as Bops Cloud's
+ * (cloud/runner-release.ts verifyRelease, scripts/test-runner-keeper.mjs checks they agree), but for how far ahead of
+ * its clock a release may say it was signed, which only Bops Cloud minds. `keys` is for tests: the keeper never passes it.
  */
 export function verifyRelease(text, keys = RELEASE_KEYS) {
   if (typeof text !== "string" || text.length > RELEASE_MAX_TEXT) return null;
@@ -263,14 +267,12 @@ export function verifyRelease(text, keys = RELEASE_KEYS) {
   }
   if (!outer || typeof outer !== "object" || Array.isArray(outer)) return null;
   const { payload, sig, keyId } = outer;
-  if (typeof payload !== "string" || typeof sig !== "string" || typeof keyId !== "string") return null;
-  if (!KEY_ID.test(keyId) || !Object.prototype.hasOwnProperty.call(keys, keyId) || !BASE64.test(sig)) return null;
+  if (typeof payload !== "string" || typeof sig !== "string" || typeof keyId !== "string" || !SIG.test(sig)) return null;
+  if (!Object.prototype.hasOwnProperty.call(keys, keyId)) return null;
   try {
-    const signature = Buffer.from(sig, "base64");
-    if (signature.length !== 64) return null;
     const key = createPublicKey(keys[keyId]);
     if (key.asymmetricKeyType !== "ed25519") return null;
-    if (!verify(null, Buffer.from(payload, "utf8"), key, signature)) return null;
+    if (!verify(null, Buffer.from(payload, "utf8"), key, Buffer.from(sig, "base64"))) return null;
   } catch {
     return null;
   }
@@ -287,8 +289,8 @@ export function verifyRelease(text, keys = RELEASE_KEYS) {
   const m = typeof name === "string" ? BUNDLE_NAME.exec(name) : null;
   if (!m || m[1] !== version || m[2] !== buildId) return null;
   if (typeof sha256 !== "string" || !SHA256.test(sha256)) return null;
-  if (!Number.isInteger(size) || size < 1 || size > RELEASE_MAX_SIZE) return null;
-  if (!((typeof released === "string" && Number.isFinite(Date.parse(released))) || (typeof released === "number" && Number.isFinite(released)))) return null;
-  if (!Number.isInteger(stateLevel) || stateLevel < 1 || stateLevel > 9999) return null;
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 1 || size > RELEASE_MAX_SIZE) return null;
+  if (typeof released !== "string" || !RELEASED.test(released) || !Number.isFinite(Date.parse(released))) return null;
+  if (typeof stateLevel !== "number" || !Number.isInteger(stateLevel) || stateLevel < 1 || stateLevel > 9999) return null;
   return { kind, version, buildId, name, sha256, size, released, stateLevel };
 }

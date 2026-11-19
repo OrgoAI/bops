@@ -46,7 +46,7 @@ export type RunnerRelease = {
   name: string;
   sha256: string;
   size: number;
-  released: string | number;
+  released: string;
   stateLevel: number;
 };
 export declare const RELEASE_KEYS: Readonly<Record<string, string>>;

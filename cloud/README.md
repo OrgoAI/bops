@@ -1216,6 +1216,7 @@ deleted user's tombstone 3 days after the last delete (`DELETED_KEEP_DAYS`), or 
 | `live.ts` | what each bot is doing right now, streamed to the user's devices (in memory only) |
 | `turns.ts` | chat through Bops Cloud: messages written here first, their answers owed to the bots' computers, the runners' stream, waking |
 | `runner-release.ts` | the signed runner releases (bops.bot/download/runner/latest.json, read every 10 minutes and checked against the release keys built in): a runner's version is kept only up to the newest, and the owner's record of a runner written only for one of them (`turns.ts recordRunner`) |
+| `runner-keeper.ts` | whether a computer's own keeper may set up or update its runner (`POST /v1/runner/keeper`, `keeperAnswer`), for owners whose Mac is at `CLOUD_SELF_MIN_VERSION`: never a place, a version or a key, only nothing, install or update, why, and when to ask again; each ask kept (`bops.runner_keeper`) for the halts, the slots and the soak (`BOPS_RUNNER_UPDATES`, `BOPS_RUNNER_UPDATE_SLOTS`, `BOPS_RUNNER_OWNER_SLOTS`, `BOPS_RUNNER_SOAK_MIN`) |
 | `browser.ts` | the bot's browser: the runner's socket, each viewer's stream, take over and input, and who may (in memory only) |
 | `lines.ts`, `voice.ts`, `calls.ts` | 4: who owns each line, a call's turns answered here, GPT-Live calls (dormant) |
 | `agent.ts`, `agent-prompt.ts`, `honcho.ts` | 5: the main bot's chat from the phone, what the bot is told there, and its memory |

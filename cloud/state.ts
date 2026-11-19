@@ -586,11 +586,14 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
         mirrored = true;
       }
     }
+    // A computer's runner never raises the state's level (it may be newer than the owner's Mac, which updated it
+    // itself): only a Mac does, so an older Mac of the owner's is never locked out of their state by a runner.
+    const wrote = user.computer ? Math.min(level, row.protocol) : level;
     const r = await c.query<{ version: string }>(
       `UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, protocol = GREATEST(protocol, $3), writer = $4, updated_at = now() WHERE user_id = $1 RETURNING version`,
-      [user.id, json, level, writer],
+      [user.id, json, wrote, writer],
     );
-    raised = level > row.protocol;
+    raised = wrote > row.protocol;
     // The Mac takes the version it's answered as what it sent: one more, Bops Cloud's, has it read what was put back.
     if (mirrored) await c.query("UPDATE bops.app_state SET version = version + 1, writer = 'cloud', updated_at = now() WHERE user_id = $1", [user.id]);
     return Number(r.rows[0].version);

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 import { after, before, test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { closeDb, ensureUserRow } from "../db.ts";
+import { closeDb, ensureUserRow, query } from "../db.ts";
+import { deviceIdOf } from "../device.ts";
 import { loadState } from "../state.ts";
-import { dropUsers, fakeOrgo, keyOf, newUserId, prepareDb, startCloud, type Listening } from "./edge-fakes.ts";
+import { dropUsers, fakeOrgo, keyOf, listen, newUserId, prepareDb, startCloud, type Listening } from "./edge-fakes.ts";
 
 /** Builds from before the state lived in the cloud (cloud/state.ts): their GET/PUT /v1/state backup, and loadState. The newer protocol is in edge-state-sync.test.ts. */
 
@@ -117,4 +118,46 @@ test("more than 20 MB is refused, as sent or once unzipped", async () => {
 test("only a signed-in user", async () => {
   assert.equal((await fetch(`${cloud.url}/v1/state`)).status, 401);
   assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", body: "{}" })).status, 401);
+});
+
+test("a computer's write never raises the state's level, so a runner newer than the owner's Mac never locks that Mac out; a Mac's write still does", async () => {
+  const id = user("level");
+  const desktop = "c1c1c1c1-0000-4000-8000-0000000000aa";
+  // orgo-web for this one: the user's key, and the computer's identity (orgo_vm_<user>~<desktop>).
+  const who = await listen(
+    createServer((req, res) => {
+      const key = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
+      const m = /^orgo_vm_([^~]+)~([^~]+)$/.exec(key);
+      const body = key === keyOf(id) ? { id, email: `${id}@example.com` } : m ? { id: m[1], api_key: null, principal: { kind: "vm_identity", desktop_id: m[2], expires_at: new Date(Date.now() + 3600_000).toISOString() } } : null;
+      res.writeHead(body ? 200 : 401, { "content-type": "application/json" }).end(JSON.stringify(body ?? { error: "no" }));
+    }),
+  );
+  const was = process.env.BOPS_ORGO_ORIGIN;
+  process.env.BOPS_ORGO_ORIGIN = who.url;
+  const write = (key: string, base: number, state: unknown, level: string, device?: string) =>
+    fetch(`${cloud.url}/v1/state`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${key}`, "x-bops-user": id, "x-bops-protocol": "2", "x-bops-state-level": level, "content-type": "application/json", ...(device ? { "x-bops-device": device } : {}) },
+      body: JSON.stringify({ base, state }),
+    });
+  const level = async () => (await query<{ p: number }>("SELECT protocol AS p FROM bops.app_state WHERE user_id = $1", [id])).rows[0].p;
+  try {
+    const bots = [{ id: "b1", name: "Max", isMain: true, computerId: desktop }];
+    assert.equal((await write(keyOf(id), 0, { bots, sessions: [] }, "4", "mac-a")).status, 200);
+    assert.equal(await level(), 4, "the Mac's");
+    // The computer's runner on a newer Bops (level 5) writes its own thread: taken, the level as it was.
+    const thread = { id: "s1", botId: "b1", by: deviceIdOf(id, desktop), status: "running" };
+    const put = await write(`orgo_vm_${id}~${desktop}`, 1, { bots, sessions: [thread] }, "5");
+    assert.equal(put.status, 200, await put.clone().text());
+    assert.equal(await level(), 4, "never raised by a computer");
+    // So the owner's Mac at level 4 still reads and writes it.
+    const v = ((await put.json()) as { version: number }).version;
+    assert.equal((await write(keyOf(id), v, { bots, sessions: [{ ...thread, status: "done" }] }, "4", "mac-a")).status, 200);
+    // A Mac on the newer Bops raises it, as before.
+    assert.equal((await write(keyOf(id), v + 1, { bots, sessions: [] }, "5", "mac-b")).status, 200);
+    assert.equal(await level(), 5);
+  } finally {
+    process.env.BOPS_ORGO_ORIGIN = was;
+    await who.close();
+  }
 });
