@@ -12,7 +12,8 @@ import { checkIdentity, IDENTITY_EVERY_MS, runnerComputer, startRunsOn, watchIde
  * runner.ts checkIdentity; on identity, its VMM asked every minute too), the user's state from Bops
  * Cloud, then the routines timer, asking Orgo where the bots work, saying its computer is in use while a
  * task of its own runs, and beating RUNNER_WORKING while one goes (so its keeper, or the Mac, never swaps
- * its files under it: runner-chat.ts startWorkingBeat). Its threads and the mirror of its own routines
+ * its files under it: runner-chat.ts startWorkingBeat), and putting its computer's keeper in place as this build's own
+ * (runner-keeper.ts ensureKeeper, which sets the runner up and updates it on its own). Its threads and the mirror of its own routines
  * start from the timer, as they do on the Mac. The look comes before the state: a copy of the computer (a
  * clone starts its runner as the original's) that loaded the state would take the original runner's live
  * threads for its own and fail them (store.ts migrate), and save that.
@@ -106,6 +107,10 @@ export async function startRunner() {
   // Its bots' browsers, for the owner and the members who may watch them (browser-runner.ts).
   const { startBrowserRelay } = await import("./browser-runner");
   startBrowserRelay();
+  // Its computer's keeper, which sets this runner up again and updates it, made this build's own (runner-keeper.ts
+  // ensureKeeper): a minute from now, then every 10 minutes until it is, never while the keeper is judging a build.
+  const { startKeeperCheck } = await import("./runner-keeper");
+  startKeeperCheck();
   // The Mac's health check waits for this line (runner-install.ts HEALTH_SCRIPT): it has the state and runs.
   console.log(`[runner] running the routines of the bots on ${runnerComputer()}`);
 }

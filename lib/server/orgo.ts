@@ -738,7 +738,7 @@ export const orgoMembers = {
  * is made from (orgo-web lib/curated-templates.ts). BOPS_ORGO_TEMPLATE points at your own build
  * when the default isn't in your Orgo account.
  */
-export const BOPS_TEMPLATE = process.env.BOPS_ORGO_TEMPLATE || "system/bops-base@0.1.11";
+export const BOPS_TEMPLATE = process.env.BOPS_ORGO_TEMPLATE || "system/bops-base@0.1.12";
 /**
  * Every Bops computer's disk, in GB: what Orgo makes them with (orgo-web BOPS_COMPUTER_DISK_GB) and grows
  * older ones to when they wake. Copies inherit their source's disk; growDisk asks for no more than Orgo allows.

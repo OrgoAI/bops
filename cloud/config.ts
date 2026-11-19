@@ -7,6 +7,8 @@ import { POSTHOG_HOST } from "./analytics-rules.ts";
 import { APP_ACT_JOBS, type AppJobKind } from "./protocol.ts";
 
 const env = (name: string) => process.env[name]?.trim() || "";
+/** A setting that's a whole number (0 or more), else `fallback`. */
+const wholeOr = (v: string, fallback: number) => (/^\d{1,9}$/.test(v) ? Number(v) : fallback);
 
 export const config = {
   port: () => Number(env("BOPS_CLOUD_PORT") || 8790),
@@ -118,6 +120,20 @@ export const config = {
    * publishes it there. "off": never read (the releases read before stay known).
    */
   runnerReleases: () => env("BOPS_RUNNER_RELEASES") || "https://bops.bot/download/runner/latest.json",
+  /**
+   * Whose computers' keepers may set up and update their runner (runner-keeper.ts, POST /v1/runner/keeper): "off" (none),
+   * "staff" (owners with an @orgo.ai email: apps-team.ts appsOpenTo) or "on" (every owner whose Mac is at
+   * CLOUD_SELF_MIN_VERSION). Anything else is "staff".
+   */
+  runnerUpdates: (): "off" | "staff" | "on" => {
+    const v = env("BOPS_RUNNER_UPDATES").toLowerCase();
+    return v === "off" || v === "on" ? v : "staff";
+  },
+  /** How many set ups and updates Bops Cloud says yes to in 15 minutes, in all and per owner (runner-keeper.ts). */
+  runnerUpdateSlots: () => wholeOr(env("BOPS_RUNNER_UPDATE_SLOTS"), 10),
+  runnerOwnerSlots: () => wholeOr(env("BOPS_RUNNER_OWNER_SLOTS"), 3),
+  /** How many minutes after a release an owner who isn't staff waits before their runners update (runner-keeper.ts). */
+  runnerSoakMin: () => wholeOr(env("BOPS_RUNNER_SOAK_MIN"), 60),
   /** The central Ingot server (lib/server/ingot.ts ingotUrl, the same BOPS_INGOT_URL): where an Admin's Delete its code goes (members.ts deleteCodeHere). */
   ingotUrl: () => (env("BOPS_INGOT_URL") || "https://bops.bot/api/ingot").replace(/\/+$/, ""),
 
