@@ -7318,13 +7318,18 @@ await check("A member's job on the app's own computer (appJob), each kind on its
     assert.ok(!prodProject(DEMO), "no Published made for it");
     assert.deepEqual(writesSince(n), [], "nothing written");
     web.ownedHidden = false;
-    // A domain Orgo won't point: Published, made for it alone and seeded for it, goes again (the next domain makes it anew).
+    // A domain Orgo won't point: Published, made for it alone and seeded for it, goes again (the next domain makes it
+    // anew), and the settings saved for it before it had a project, which went into its create, are on its record again.
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].settings = { start_cmd: "npm run serve" }));
     web.connectRefuse = { status: 409, body: { error: "That name is in use.", code: "NAME_IN_USE" } };
     n = web.calls.length;
     assert.deepEqual(await job({ act: "domain", zone: ZONE, subdomain: "demo" }), { ok: false, said: "demo.acme.example is in use already. Pick another name." });
     web.connectRefuse = null;
+    assert.equal(callsSince(n, "POST", /\/deploy-projects$/)[0]?.body.start_cmd, "npm run serve", "its saved settings in its create");
     assert.ok(!prodProject(DEMO), "no Published left behind");
     assert.equal(callsSince(n, "DELETE", /\/deploy-projects\//).length, 1, "the one made for it removed");
+    assert.deepEqual(demo().settings, { start_cmd: "npm run serve" }, "its saved settings kept");
+    S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].settings);
     // A domain of the workspace's own: from this computer's own list (owned_domains), never the workspace's (a computer
     // may not read that one); Published is made for it, its first need, with its sign in at that domain in its create, as
     // the owner's Mac sets them at its first Publish: a computer's own sign in can't set a project's variables after. The
@@ -7523,7 +7528,13 @@ await check("On its computer's runner, under orgo-web's rules for a computer's o
       assert.equal((await deploy()).ok, false);
       assert.ok(web.projects.includes(half) && web.urls.includes(link), "the one it found, and its link, kept");
       assert.deepEqual(callsSince(n, "DELETE", /./), [], "nothing removed");
-      // Then: both there, its link off its project's port, which serves no link yet and nothing else points at: moved.
+      // Then both there, its link off its project's port: a move Orgo refuses deploys nothing (its first deploy would make
+      // Orgo give it a link of its own).
+      n = web.calls.length;
+      assert.deepEqual(await deploy(), { ok: false, said: "Orgo says: Port taken." });
+      assert.deepEqual(callsSince(n, "POST", /[/]deployments$/), [], "nothing deployed off its link");
+      assert.deepEqual(callsSince(n, "DELETE", /./), [], "nothing removed");
+      // And once it can be: moved, while its project serves no link yet and nothing else points at its port.
       web.urlPortRefuse = null;
       n = web.calls.length;
       assert.equal((await deploy()).ok, true);
@@ -7545,6 +7556,20 @@ await check("On its computer's runner, under orgo-web's rules for a computer's o
       const app = web.projects.find((p) => p.computerId === "c_boppy" && p.ingot_repo !== REPO && typeof p.port === "number");
       assert.deepEqual(await settings(app.port), { ok: false, said: "Another app on this computer uses that port. Pick another." });
       assert.ok(logged(`Orgo turned down port ${dPort}`, "PORT_TAKEN", "A domain or public URL on this computer already points at port"));
+
+      // A new link refused a port its list didn't show taken: its project never goes there either.
+      fresh();
+      let refusedAt;
+      web.urlRefuse = (l, port) => {
+        web.urlRefuse = null;
+        refusedAt = port;
+        return { status: 409, body: { error: `Port ${port} has a public URL already.`, code: "PORT_TAKEN" } };
+      };
+      n = web.calls.length;
+      assert.equal((await deploy()).ok, true);
+      assert.equal(typeof refusedAt, "number");
+      assert.notEqual(callsSince(n, "POST", /[/]deploy-projects$/)[0].body.port, refusedAt, "never on a port found taken");
+      await settled();
       asMac();
     }
 
@@ -7570,6 +7595,7 @@ await check("On its computer's runner, under orgo-web's rules for a computer's o
     web.liveAtOnce = false;
     web.passwords = false;
     web.urlPortRefuse = null;
+    web.urlRefuse = null;
     web.hidden = undefined;
     web.projects = web.projects.filter((p) => p.ingot_repo !== REPO);
     web.urls = web.urls.filter((u) => !L.isLabelOf("preview", L.untailed(u.label), REPO, APP));

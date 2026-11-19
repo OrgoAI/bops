@@ -1475,6 +1475,9 @@ function leftOversOf(h: AppHosting, name: string, repo: string, projects: OrgoDe
     if (x.prod) used.add(x.prod.id);
     if (x.preview?.project) used.add(x.preview.project.id);
     if (x.preview?.url) usedUrls.add(x.preview.url.id);
+    // (Nor the link on its Preview project's port, whatever its name: one Orgo gave it as it went live serves it.)
+    const at = x.preview?.project?.port;
+    if (typeof at === "number") for (const u of urls) if (u.port === at) usedUrls.add(u.id);
   }
   for (const b of h.behind ?? []) used.add(b.projectId);
   const out: LeftOver[] = [];
@@ -1672,8 +1675,8 @@ async function ensurePreview(
    * later: seedAuth), then its link moves onto that port. Nothing is deployed yet (deploys.create sends deploy: false),
    * so its first deploy finds the link on its port, adopts it and never owns it.
    */
-  const projectThenLink = async (label: string, url: OrgoPublicUrl): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl }> => {
-    const used = [...skip, url.port];
+  const projectThenLink = async (label: string, url: OrgoPublicUrl, taken: number[]): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl }> => {
+    const used = [...skip, ...taken, url.port];
     for (let tries = 0; tries < 5; tries++) {
       const port = freePort(projects, urls, used);
       const p = await makeProject(label, url, port);
@@ -1691,9 +1694,12 @@ async function ensurePreview(
     }
     throw new HostedAppError(PREVIEW_WORDS.noLink, 409);
   };
-  /** Its project made on its URL's port, the URL moved to a free port when an app on the computer holds that one (on a runner: projectThenLink). */
-  const projectOn = async (label: string, url: OrgoPublicUrl): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl }> => {
-    if (onRunner()) return projectThenLink(label, url);
+  /**
+   * Its project made on its URL's port, the URL moved to a free port when an app on the computer holds that one (on a
+   * runner: projectThenLink, never on `taken`, ports found taken since the lists were read).
+   */
+  const projectOn = async (label: string, url: OrgoPublicUrl, taken: number[] = []): Promise<{ project: OrgoDeployProject; url: OrgoPublicUrl }> => {
+    if (onRunner()) return projectThenLink(label, url, taken);
     let u = url;
     const used = [...skip];
     for (let tries = 0; tries < 5; tries++) {
@@ -1724,7 +1730,11 @@ async function ensurePreview(
       const moved = await publicUrls.port(c, url.id, p.port).catch((e: unknown) => e as Error);
       held(ours);
       if (!(moved instanceof Error) && moved.enabled) url = moved.value;
-      else orgoSaid(name, `its preview link's move to port ${p.port}`, moved);
+      else if (onRunner()) {
+        // (Never deployed off its link from a runner: its first deploy would make Orgo give it a link of its own.)
+        orgoSaid(name, `its preview link's move to port ${p.port}`, moved);
+        throw moved instanceof Error ? refused(moved) : new HostedAppError(moved.why, 403);
+      }
     }
     keepLabel(found.label);
     return locked({ project: p, url, made: false });
@@ -1797,7 +1807,7 @@ async function ensurePreview(
     }
     const url = r.value;
     tailSaid(name, l, url);
-    const pair = await projectOn(l, url).catch(async (e: unknown) => {
+    const pair = await projectOn(l, url, ports).catch(async (e: unknown) => {
       // (Its link, new and never shown, isn't left behind for a project that couldn't be made.)
       if (!(e instanceof HostedAppError && e.message === SWAPPED)) await publicUrls.remove(c, url.id).catch(() => null);
       throw e;
@@ -4018,20 +4028,35 @@ export async function connectDomain(wsId: string, name: string, ask: { domain?: 
     }
   }
   const just: { made?: OrgoDeployProject } = {};
+  // (Published's settings saved before it had a project, which its create takes off the record: put back if it goes again.)
+  const saved = seeds ? hostingAt(wsId, name, site)?.settings : undefined;
   const t = await appTarget(wsId, name, ours, site, true, seeds ? { seeds, made: (p) => (just.made = p) } : {});
   held(ours);
   if (!t) throw new HostedAppError(LOST, 409);
   try {
     return await connectTo(wsId, name, t, typed, zone, sub, site, ours);
   } catch (e) {
-    // Published made for this domain alone, seeded for it, goes again when no domain points at it (nothing deployed): the
-    // next domain makes it anew, seeded for that one.
+    // Published made for this domain alone, seeded for it, goes again while no domain points at it and nothing was
+    // deployed to it meanwhile (a Publish from elsewhere): the next domain makes it anew, seeded for that one.
     const p = just.made;
-    if (p && !(e instanceof HostedAppError && e.message === SWAPPED)) {
-      const pointedAt = await domains.ofComputer(t.h.computerId).then((l) => (l.domains ?? []).some((d) => d.target_port === p.port), () => true);
-      if (!pointedAt) await deploys.remove(t.h.computerId, p.id).catch(() => null);
-    }
+    if (p && ours() && !(e instanceof HostedAppError && e.message === SWAPPED)) await unmade(wsId, name, t.h, p, saved);
     throw e;
+  }
+}
+
+/** Published made for a domain that wasn't pointed (connectDomain), removed again while it's still as made; its settings saved before it (`saved`) back on its record. */
+async function unmade(wsId: string, name: string, h: SiteHosting, p: OrgoDeployProject, saved: SiteSettings | undefined) {
+  const [pointedAt, now] = await Promise.all([
+    domains.ofComputer(h.computerId).then((l) => (l.domains ?? []).some((d) => d.target_port === p.port), () => true),
+    deploys.project(h.computerId, p.id).then((r) => (r.enabled ? r.value : null), () => null),
+  ]);
+  if (pointedAt || !now || now.current || now.deployments?.length) return;
+  const gone = await deploys.remove(h.computerId, p.id).then(() => true, () => false);
+  if (!gone || !saved || hostingAt(wsId, name, h.site)?.settings) return;
+  try {
+    keepSite(wsId, name, h.site, (x) => ({ ...x, settings: saved }));
+  } catch {
+    /* a runner not let keep them: they were never taken off then either (ensureProd) */
   }
 }
 
