@@ -12,9 +12,11 @@
 // asked from elsewhere. A thread, routine or watch kept between us (secret) on either side stays so,
 // whichever side's copy wins: a merge never takes the mark back. A bot's How I work changed on one side only is that side's
 // (an Admin's that Bops Cloud kept never loses to the Mac's older words), as is each other bot field Bops Cloud writes for
-// a teammate (keys, rules, name, effort, where it runs, Just do it, data off, app access), and so is a Preview password only Bops Cloud
-// writes (Workspace.previewPasswords), which the Mac's next save carries as it was. Anything else changed on both sides
-// still keeps the merging side's copy whole.
+// a teammate (keys, rules, name, effort, where it runs, Just do it, data off, app access, its phone and line, its email
+// and inbox, its voice), and so is a Preview password only Bops Cloud writes (Workspace.previewPasswords), which the Mac's
+// next save carries as it was. A channel link's pairing is one field and its Slack part goes key by key; the owner's
+// phones and the numbers that texted STOP go number by number. Anything else changed on both sides still keeps the
+// merging side's copy whole.
 //
 // Pure functions: nothing reaches Bops Cloud.
 // Usage: node scripts/test-state-merge.mjs
@@ -210,6 +212,85 @@ check("each bot field Bops Cloud writes for a teammate changed on one side only 
   // A field Bops Cloud never writes (its computer) still goes by this side's copy whole where both changed the bot.
   const moved = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [{ ...was, computer: "own", computerId: "c2" }] }).bots[0];
   assert.deepEqual(moved, here);
+});
+
+check("a bot's phone and line, email and inbox, and voice Bops Cloud writes (a plan change, a rename it follows) changed on one side only are that side's, each pair as one", () => {
+  const was = { id: "max", name: "Max", phone: "+14155550101", phoneLine: { numberId: "n1", agentId: "a1" }, email: "max@bops.example", mail: { inboxId: "i1", podId: "p1" }, voice: "sage", computerStatus: "ready" };
+  const here = { ...was, computerStatus: "asleep" };
+  const each = {
+    phone: { phone: "+14155550102", phoneLine: { numberId: "n2", agentId: "a2", plan: true } },
+    email: { email: "maxine@bops.example", mail: { inboxId: "i1", podId: "p1", past: ["max@bops.example"] } },
+    voice: { voice: "verse" },
+  };
+  for (const [what, v] of Object.entries(each)) {
+    const there = { ...was, ...v };
+    const got = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [there] }).bots[0];
+    assert.deepEqual(got, { ...here, ...v }, `${what}: the side that changed it, and the Mac's own change too`);
+    // One of a pair changed there: the pair is that side's whole.
+    const [first] = Object.keys(v);
+    const half = { ...was, [first]: v[first] };
+    assert.deepEqual(M.merge3({ bots: [was] }, { bots: [here] }, { bots: [half] }).bots[0][first], v[first], `${what}: half the pair`);
+    // Taken away there: gone here too.
+    const gone = { ...was };
+    for (const k of Object.keys(v)) delete gone[k];
+    const left = M.merge3({ bots: [was] }, { bots: [here] }, { bots: [gone] }).bots[0];
+    for (const k of Object.keys(v)) assert.ok(!(k in left), `${what}: ${k} gone`);
+    // Changed on both sides: this side's whole, as before.
+    const mine = { ...here, [first]: "mine" };
+    assert.equal(M.merge3({ bots: [was] }, { bots: [mine] }, { bots: [there] }).bots[0][first], "mine", `${what}: changed on both`);
+  }
+});
+
+/* ---------------- Channels, the owner's phones and STOPs ---------------- */
+
+check("a channel link changed on both sides: this Mac's copy, with who's paired and its code as one from the side that paired it, and Slack's part key by key", () => {
+  const was = { id: "ch_slack", kind: "slack", botId: "boppy", handle: "Acme", pairCode: "4821", pairCodeAt: 100, pairTries: 1, status: "live", at: 1, slack: { accountId: "acc_1", channels: [{ id: "C1", name: "general" }] } };
+  // This Mac read the bot's channels again; Bops Cloud paired the link with the code sent in Slack and learned the DM.
+  const mac = { ...was, slack: { ...was.slack, channels: [{ id: "C1", name: "general" }, { id: "C2", name: "sales" }] }, at: 2 };
+  const cloud = { ...was, owner: "U123", ownerName: "Sam", pairCode: "", pairTries: 0, slack: { ...was.slack, dm: "D9" } };
+  const merged = (m, t) => M.merge3({ channels: [was] }, { channels: [m] }, { channels: [t] }).channels[0];
+  const want = { ...mac, owner: "U123", ownerName: "Sam", pairCode: "", pairTries: 0, slack: { accountId: "acc_1", channels: [{ id: "C1", name: "general" }, { id: "C2", name: "sales" }], dm: "D9" } };
+  assert.deepEqual(merged(mac, cloud), want);
+  assert.deepEqual(M.merge3({ channels: [was] }, { channels: [cloud] }, { channels: [mac] }).channels[0].slack, want.slack, "merged the other way: Slack's part the same");
+  assert.equal(M.merge3({ channels: [was] }, { channels: [cloud] }, { channels: [mac] }).channels[0].owner, "U123");
+  // A new code made here (pairing again) and a pairing there: both changed it, so this Mac's, whole (never one side's owner with the other's code).
+  const fresh = { ...mac, pairCode: "9999", pairCodeAt: 200, pairTries: 0 };
+  const got = merged(fresh, cloud);
+  assert.deepEqual([got.owner, got.ownerName, got.pairCode, got.pairCodeAt, got.pairTries], [undefined, undefined, "9999", 200, 0]);
+  // Unpaired there (owner gone): gone here too.
+  const paired = { ...was, owner: "U1", ownerName: "Sam" };
+  const unpaired = { ...paired };
+  delete unpaired.owner;
+  delete unpaired.ownerName;
+  const out = M.merge3({ channels: [paired] }, { channels: [{ ...paired, at: 5 }] }, { channels: [unpaired] }).channels[0];
+  assert.ok(!("owner" in out) && !("ownerName" in out) && out.at === 5);
+  // Only one side changed the link: that side's, as ever.
+  assert.deepEqual(M.merge3({ channels: [was] }, { channels: [was] }, { channels: [cloud] }).channels[0], cloud);
+});
+
+check("the owner's phones and the numbers that texted STOP, both changed: what either side added stays, what either side removed goes", () => {
+  const p = (number, o = {}) => ({ number, consentAt: 1, ...o });
+  const base = { ownerPhones: [p("+1555000001"), p("+1555000002")], smsOptOut: ["+1555000100", "+1555000101"] };
+  // This Mac linked a phone and dropped one; Bops Cloud linked another (a text claimed) and took a STOP back.
+  const mine = { ownerPhones: [p("+1555000001"), p("+1555000003")], smsOptOut: ["+1555000100", "+1555000101", "+1555000102"] };
+  const theirs = { ownerPhones: [p("+1555000001", { verifiedAt: 5 }), p("+1555000002"), p("+1555000004", { claimedVia: "text" })], smsOptOut: ["+1555000100", "+1555000103"] };
+  const got = M.merge3(base, mine, theirs);
+  assert.deepEqual(got.ownerPhones, [p("+1555000001", { verifiedAt: 5 }), p("+1555000003"), p("+1555000004", { claimedVia: "text" })], "kept by number: theirs where only they changed one");
+  assert.deepEqual(got.smsOptOut, ["+1555000100", "+1555000102", "+1555000103"]);
+  // The other way round: the same numbers.
+  const back = M.merge3(base, theirs, mine);
+  assert.deepEqual(back.ownerPhones.map((x) => x.number).sort(), ["+1555000001", "+1555000003", "+1555000004"]);
+  assert.deepEqual(back.ownerPhones.find((x) => x.number === "+1555000001").verifiedAt, 5);
+  assert.deepEqual([...back.smsOptOut].sort(), ["+1555000100", "+1555000102", "+1555000103"]);
+  // Changed on both (verified here, claimed there): this Mac's.
+  const both = M.merge3(base, { ...mine, ownerPhones: [p("+1555000001", { verifiedAt: 9 })] }, theirs).ownerPhones.find((x) => x.number === "+1555000001");
+  assert.equal(both.verifiedAt, 9);
+  // Not there before on either side (no base): both sides' together.
+  assert.deepEqual(M.merge3(null, { smsOptOut: ["+1555000200"] }, { smsOptOut: ["+1555000201"] }).smsOptOut, ["+1555000200", "+1555000201"]);
+  // Every one removed on one side: none left of those.
+  assert.deepEqual(M.merge3(base, { ...base, smsOptOut: [] }, { ...base, smsOptOut: ["+1555000100", "+1555000101", "+1555000104"] }).smsOptOut, ["+1555000104"]);
+  // Changed on one side only: that side's, as ever.
+  assert.deepEqual(M.merge3(base, base, theirs).ownerPhones, theirs.ownerPhones);
 });
 
 /* ---------------- Threads ---------------- */

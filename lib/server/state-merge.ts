@@ -269,6 +269,10 @@ function mergeEither(key: string, b: unknown, m: unknown, t: unknown, top: boole
   if (same(t, b)) return m;
   // Both changed it.
   if (top && key === "usage" && Array.isArray(m) && Array.isArray(t)) return usageOf(m, t);
+  // The owner's own phones and the numbers that texted STOP: Bops Cloud writes them too (a text claimed, a STOP), so both
+  // sides' go together, number by number (mergeByValue).
+  if (top && (key === "ownerPhones" || key === "smsOptOut") && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined))
+    return mergeByValue(Array.isArray(b) ? b : [], m ?? [], t ?? [], key === "ownerPhones" ? phoneOf : (x) => (typeof x === "string" ? x : undefined), me?.older);
   if ((withIds(m) || withIds(t) || withIds(b)) && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined)) {
     const both = !top ? undefined
       : key === "routines" ? (was: Blob, x: Blob, y: Blob) => mergeRoutine(was, x, y, me)
@@ -276,6 +280,7 @@ function mergeEither(key: string, b: unknown, m: unknown, t: unknown, top: boole
       : key === "appApprovals" ? mergeApproval
       : key === "workspaces" || (me?.older && key === "bots") ? (was: Blob, x: Blob, y: Blob) => mergeObject(was, x, y, false, me)
       : key === "bots" ? keepBotFields
+      : key === "channels" ? keepChannelFields
       : undefined;
     return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], both, me?.older, top && key === "appApprovals");
   }
@@ -309,7 +314,22 @@ const HOW_I_WORK = ["persona", "personaBy"] as const;
  * (cloud/members.ts: How I work, a key, an Always allow, a change from its settings), each one field (How I work two
  * written as one): what keepBotFields merges one by one.
  */
-const CLOUD_WRITES: readonly (readonly string[])[] = [HOW_I_WORK, ["keys"], ["permissions"], ["name"], ["effort"], ["runsOn"], ["autoApprove"], ["dataOff"], ["access"]];
+const CLOUD_WRITES: readonly (readonly string[])[] = [
+  HOW_I_WORK,
+  ["keys"],
+  ["permissions"],
+  ["name"],
+  ["effort"],
+  ["runsOn"],
+  ["autoApprove"],
+  ["dataOff"],
+  ["access"],
+  // Its phone number and line (a plan change Bops Cloud takes), its email address and inbox, and its voice on calls (a
+  // rename or call voice it follows): each pair one field, as they're written together.
+  ["phone", "phoneLine"],
+  ["email", "mail"],
+  ["voice"],
+];
 
 /**
  * A bot changed on both sides: this Mac's copy, with each field Bops Cloud writes (CLOUD_WRITES) the other side's where
@@ -328,6 +348,65 @@ function keepBotFields(base: Blob, mine: Blob, theirs: Blob): Blob {
       if (theirs[k] === undefined) delete out[k];
       else out[k] = theirs[k];
     }
+  }
+  return out;
+}
+
+/** Who's paired with a channel link (ChannelLink.owner, ownerName) and its pairing code with its tries: one field, as pairing writes them together. */
+const PAIRING = ["owner", "ownerName", "pairCode", "pairCodeAt", "pairTries"] as const;
+
+/**
+ * A channel link (ChannelLink) changed on both sides: this Mac's copy, with who's paired and the pairing code (PAIRING, one
+ * field) the other side's where only that side changed them (Bops Cloud pairing a Slack link with the code sent there),
+ * and its Slack part (`slack`) put together key by key, so the direct message Bops Cloud learned (`dm`) and the channels
+ * this Mac read both stay. Changed on both, this Mac's as before.
+ */
+function keepChannelFields(base: Blob, mine: Blob, theirs: Blob): Blob {
+  const out: Blob = { ...mine };
+  const changed = (x: Blob) => PAIRING.some((k) => !same(x[k], base[k]));
+  if (!changed(mine) && changed(theirs))
+    for (const k of PAIRING) {
+      if (theirs[k] === undefined) delete out[k];
+      else out[k] = theirs[k];
+    }
+  const slack = mergeEither("slack", base.slack, mine.slack, theirs.slack, false);
+  if (slack === undefined) delete out.slack;
+  else out.slack = slack;
+  return same(out, mine) ? mine : out;
+}
+
+/** An owner phone's number (lib/types.ts AppState.ownerPhones): what mergeByValue keeps them by. */
+const phoneOf = (x: unknown) => (isObject(x) && typeof x.number === "string" ? x.number : undefined);
+
+/**
+ * A list of values changed on both sides, kept by each one's key (`keyOf`: a number), not by place: every one either side
+ * added since `base` stays, and one either side removed goes, even where the other changed it. One in both, changed on
+ * one side only, is that side's; on both, this Mac's (an older Bops's: theirs). This Mac's order, the others' new ones
+ * after. One with no key is this Mac's as it is.
+ */
+function mergeByValue(base: unknown[], mine: unknown[], theirs: unknown[], keyOf: (x: unknown) => string | undefined, older = false): unknown[] {
+  const b = new Map(base.flatMap((x) => (keyOf(x) !== undefined ? [[keyOf(x)!, x] as const] : [])));
+  const t = new Map(theirs.flatMap((x) => (keyOf(x) !== undefined ? [[keyOf(x)!, x] as const] : [])));
+  const m = new Set(mine.map(keyOf));
+  const out: unknown[] = [];
+  for (const x of mine) {
+    const k = keyOf(x);
+    if (k === undefined) {
+      out.push(x);
+      continue;
+    }
+    const was = b.get(k);
+    const other = t.get(k);
+    // Removed on their side: gone.
+    if (other === undefined) {
+      if (!b.has(k)) out.push(x);
+      continue;
+    }
+    out.push(b.has(k) && same(x, was) ? other : b.has(k) && !same(other, was) && older ? other : x);
+  }
+  for (const x of theirs) {
+    const k = keyOf(x);
+    if (k !== undefined && !m.has(k) && !b.has(k)) out.push(x);
   }
   return out;
 }

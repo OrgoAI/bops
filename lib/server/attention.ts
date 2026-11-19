@@ -1,5 +1,5 @@
 import "server-only";
-import { botChatId, MAIN_WORKSPACE, workspaceOf } from "@/lib/types";
+import { botChatId, cloudDoesOf, MAIN_WORKSPACE, workspaceOf, type AppState } from "@/lib/types";
 import { chose, decide } from "./decide";
 import { loopHere } from "./persist";
 import { addMessage, getState, ownerName, stateReady, update } from "./store";
@@ -84,15 +84,19 @@ export function holdForLater(item: { botId: string; text: string; watchId?: stri
 /** The digest's words: each piece of news held on a line of its own (cloud/ws-slice.ts tells it again with only the lines a member sees). */
 const heldText = (lines: string[]) => `While you were busy:\n${lines.map((t) => `• ${t}`).join("\n")}`;
 
+/** Whether Bops Cloud tells the digest of the workspace of `botId`'s held news (Workspace.cloudDoes.digest): it stays held for it then. */
+const cloudTells = (s: Pick<AppState, "bots" | "workspaces">, h: { botId: string }) => !!cloudDoesOf(s, h.botId).digest;
+
 /**
  * Tell the user what was held, in one message from the workspace's main bot, once they're free: not
  * on a call, and either they've messaged since the first item (they're around) or it's waited 20 minutes.
  * Checked every minute. Each line keeps the bot whose watch it came from (Message.held), so a shared
- * workspace shows someone only the news of the bots they were given.
+ * workspace shows someone only the news of the bots they were given. A workspace whose digest Bops Cloud
+ * tells (Workspace.cloudDoes.digest) is left to it: its news stays held, for Bops Cloud.
  */
 export function flush() {
   const st = getState();
-  const held = st.digest ?? [];
+  const held = (st.digest ?? []).filter((h) => !cloudTells(st, h));
   if (!held.length || onCall()) return;
   const first = Math.min(...held.map((h) => h.at));
   const around = st.messages.some((m) => m.role === "user" && m.at > first);
@@ -104,7 +108,7 @@ export function flush() {
     const ws = workspaceOf(b);
     byWs.set(ws, [...(byWs.get(ws) ?? []), h]);
   }
-  update((s) => (s.digest = []));
+  update((s) => (s.digest = (s.digest ?? []).filter((h) => cloudTells(s, h))));
   for (const [ws, items] of byWs) {
     const main = st.bots.find((b) => b.isMain && workspaceOf(b) === ws) ?? st.bots.find((b) => b.isMain && workspaceOf(b) === MAIN_WORKSPACE);
     if (!main) continue;

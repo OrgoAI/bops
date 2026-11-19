@@ -30,7 +30,7 @@ import {
 import { dropOlderMac, notifyMac } from "./tunnel.ts";
 import { messagesWritten, stateWritten } from "./live.ts";
 import { forgetTelemetryChoice } from "./analytics.ts";
-import { autoRoute, chatAutoFor, clearTrouble, keepChatOn, nudgeRunners, recheckTurns, routedWorkspaces, turnRowsMayWrite } from "./turns.ts";
+import { autoRoute, chatAutoFor, clearTrouble, cloudDoesFor, keepChatOn, nudgeRunners, recheckTurns, routedWorkspaces, turnRowsMayWrite } from "./turns.ts";
 
 /**
  * The app's state, kept here for each user (protocol.ts, "The app's state in Bops Cloud"). Owner: edge builder.
@@ -569,11 +569,17 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
       written = next;
     } else {
       // The switch of each workspace's chat as Bops Cloud keeps it (turns.ts keepChatOn): a Bops from before drops it,
-      // and one that never heard of a change of it (Bops Cloud may move a workspace by itself) doesn't have it yet.
-      // An account with no row, that Bops Cloud doesn't move workspaces for, and with no mark of either left: nothing to put back.
+      // and one that never heard of a change of it (Bops Cloud may move a workspace by itself) doesn't have it yet. So
+      // is what Bops Cloud does for each workspace (cloudDoesFor, in this transaction: Workspace.cloudDoes), put back or
+      // taken off. An account with no row, that Bops Cloud doesn't move workspaces for or do a part for, and with no mark
+      // of any left: nothing to put back.
       const rows = await routedWorkspaces(c, user.id);
       const on = chatAutoFor(user.id);
-      const kept = rows.size || on || (Array.isArray(written.workspaces) ? written.workspaces : []).some((w) => isObject(w) && (w.chatAuto !== undefined || w.chatAutoOff !== undefined || w.chatTrouble !== undefined)) ? keepChatOn(written, rows, on) : written;
+      const does = await cloudDoesFor(c, user.id, written);
+      const marked = (Array.isArray(written.workspaces) ? written.workspaces : []).some(
+        (w) => isObject(w) && (w.chatAuto !== undefined || w.chatAutoOff !== undefined || w.chatTrouble !== undefined || w.cloudDoes !== undefined),
+      );
+      const kept = rows.size || on || does.size || marked ? keepChatOn(written, rows, on, does) : written;
       if (kept !== written) {
         written = kept;
         json = toJson(blobOf(kept));

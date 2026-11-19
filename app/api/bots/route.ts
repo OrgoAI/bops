@@ -104,6 +104,7 @@ export async function PATCH(request: Request) {
     const r = await setComputer(b.id, body.computer);
     if ("error" in r) return Response.json(r, { status: 409 });
   }
+  // A new name follows outside the state (bots.ts followRename): its desktop too, unless Bops Cloud dresses the workspace's desktops (Workspace.cloudDoes.desktop).
   if (body.name !== undefined) {
     const r = renameBot(b.id, body.name);
     if ("error" in r) return Response.json(r, { status: 400 });

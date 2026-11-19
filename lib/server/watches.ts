@@ -2,7 +2,7 @@ import "server-only";
 import { screenNo } from "@/lib/screens";
 import { LIGHT, speedFor, tierParam } from "./routing";
 import { trackServerEvent } from "./analytics";
-import { botChatId, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, PAGE_WATCH_DEFAULT_MIN, PAGE_WATCH_MIN_MIN, workspaceOf, type Watch } from "@/lib/types";
+import { botChatId, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, PAGE_WATCH_DEFAULT_MIN, PAGE_WATCH_MIN_MIN, watchHome, workspaceOf, type Watch } from "@/lib/types";
 import { lineDigest, normalizeLine, normalizeTitle, newLines, pageLinesOf, screenLines, snapshotOf, type PageLine } from "@/cloud/page-diff";
 import { decide, chose, yes } from "./decide";
 import { holdForLater, urgency } from "./attention";
@@ -673,6 +673,8 @@ const looking = new Set<string>();
  */
 async function look(watchId: string, now = false): Promise<CheckResult | undefined> {
   const w = watchById(watchId);
+  // One its bot's computer looks at (watchHome: Bops Cloud has the workspace's watches looked at there) is never looked at here by itself.
+  if (w && !now && watchHome(getState(), w) !== "mac") return;
   if (w?.page) return checkPage(watchId, now);
   const b = w && bot(w.botId);
   if (!w || !b || looking.has(watchId) || (w.paused && !now) || (isScreenWatch(w) && busy(w.botId, w.display))) return;
@@ -833,12 +835,13 @@ async function macPage(w: Watch) {
 
 // One loop for every watched screen; importing this module (the state route does) starts it. The
 // loop calls whatever version of `look` was loaded last, so edits apply without a restart. Watches are
-// the Mac's: a computer's runner never looks (persist.ts loopHere).
+// the Mac's: a computer's runner never looks (persist.ts loopHere), and the Mac leaves one whose home is
+// its bot's computer (lib/types.ts watchHome) to it.
 const g = globalThis as typeof globalThis & { __bopsWatches?: ReturnType<typeof setInterval>; __bopsLook?: typeof look };
 g.__bopsLook = look;
 if (loopHere("watches")) g.__bopsWatches ??= setInterval(() => {
   if (!stateReady()) return;
-  for (const w of getState().watches ?? []) void g.__bopsLook?.(w.id);
+  for (const w of getState().watches ?? []) if (watchHome(getState(), w) === "mac") void g.__bopsLook?.(w.id);
 }, LOOK_MS);
 
 /** Names compare loosely: case, emoji and punctuation aside ("jordan" finds "Jordan 🌵✨"). */

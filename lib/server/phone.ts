@@ -807,12 +807,14 @@ async function picsOf(urls: string[]) {
 /**
  * Texts that came in while Bops couldn't be reached (asleep, offline, a network change): AgentPhone
  * retries only after 5 and 30 minutes, so Bops also looks itself, every 2 minutes and at start, at each workspace number's latest messages. Only ones newer than the
- * number's assignment and not already handled; a late retry of the same text is then skipped.
+ * number's assignment and not already handled; a late retry of the same text is then skipped. Never a
+ * workspace whose texts Bops Cloud takes (Workspace.cloudDoes.texts): it catches those up itself.
  */
 export async function phoneCatchUp() {
   const found: string[] = [];
   if (!phoneOn()) return found;
   for (const w of getState().workspaces ?? []) {
+    if (w.cloudDoes?.texts) continue;
     const line = w.line;
     const main = line && getState().bots.find((b) => b.isMain && workspaceOf(b) === w.id);
     if (!line || !main) continue;

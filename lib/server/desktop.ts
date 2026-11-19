@@ -17,6 +17,19 @@ import { getState } from "./store";
  */
 
 const hex = (c: string) => c.replace("#", "").padEnd(6, "0");
+
+/**
+ * Text from the state put into a page this file writes (the bot's name in home(), and anything else of the state):
+ * escaped, so a name with markup in it (a teammate can rename a bot through Bops Cloud) shows as written and never runs
+ * on the bot's computer.
+ */
+export function escHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+/** A color from the state as the pages here use it (in CSS, an SVG and the computer's settings): a hex color, else a plain gray. */
+export const cssColor = (c: unknown): string => (typeof c === "string" && /^#[0-9a-fA-F]{3,8}$/.test(c) ? c : "#9A9A98");
+/** The bot as the pages here show it: its color made safe (cssColor). Its name is escaped where it's put in (escHtml). */
+const shown = (b: Bot): Bot => ({ ...b, color: cssColor(b.color) });
 /** Mix a color toward white (t = how much of the color stays). */
 function tint(color: string, t: number) {
   const h = hex(color);
@@ -135,14 +148,17 @@ function doodles(motif: Motif, stroke: string, opacity: number, spots: readonly 
 const BASE_CSS = `*{box-sizing:border-box;margin:0}html,body{height:100%}body{font-family:Inter,"Helvetica Neue",Arial,system-ui,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}.d{position:absolute;pointer-events:none}`;
 
 /** The bot's wash with its doodles drawn in a deeper shade of its color, faint like pencil on paper. */
-function wallpaper(b: Bot, motif: Motif) {
+export function wallpaper(bot: Bot, motif: Motif) {
+  const b = shown(bot);
   return `<!doctype html><html><head><meta charset="utf-8"><style>${BASE_CSS}body{background:${botWash(b)}}</style></head><body>${doodles(motif, `color-mix(in oklab, ${accent(b)} 55%, #1a1a1a)`, 0.34, EDGE_SPOTS, 40)}</body></html>`;
 }
 
-function home(b: Bot, motif: Motif) {
+export function home(bot: Bot, motif: Motif) {
+  const b = shown(bot);
+  const name = escHtml(b.name);
   const mascot = mascotSvg(b.id, b.color, 104);
   const ink = b.isMain ? "#2E3300" : `color-mix(in oklab, ${b.color} 45%, #1a1a1a)`;
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${b.name}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${name}</title>
 <link rel="icon" href="/favicon.svg">
 <style>${BASE_CSS}
 body{background:${tint(accent(b), 0.1)};color:${ink};display:flex;flex-direction:column;align-items:center;padding-top:9vh;overflow:auto}
@@ -161,7 +177,7 @@ h1{font-size:19px;font-weight:450;margin-top:6px;opacity:.85}
 <div class="bubble" id="bubble">This is my computer. Watch me work, or take control when you need to.<button onclick="this.parentNode.style.visibility='hidden'">×</button></div>
 <div class="mascot">${mascot}</div>
 <div class="clock"><b id="t"></b><span id="ap"></span></div>
-<h1>Welcome back, ${b.name}</h1>
+<h1>Welcome back, ${name}</h1>
 <div class="apps" id="apps"></div>
 <script>
 // The tab's title (the home screen extension shows this page in a frame and can't know the name itself).
@@ -178,8 +194,9 @@ const b64 = (s: string | Buffer) => Buffer.from(s).toString("base64");
  * mid-task, or `restartChrome` is false (then each screen picks the changes up the next time its
  * Chrome starts, e.g. a screen reset).
  */
-export async function applyDesktop(b: Bot, { restartChrome = true }: { restartChrome?: boolean } = {}) {
-  if (!b.computerId) return;
+export async function applyDesktop(bot: Bot, { restartChrome = true }: { restartChrome?: boolean } = {}) {
+  if (!bot.computerId) return;
+  const b = shown(bot);
   const motif = await motifFor(b);
   const rgb = (c: string) => [0, 2, 4].map((i) => parseInt(hex(c).slice(i, i + 2), 16)).join(";;");
   const look = {

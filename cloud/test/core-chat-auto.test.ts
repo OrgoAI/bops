@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { closeDb } from "../db.ts";
-import { AUTO_HOLD_MS, autoMoves, chatAutoFor, keepChatOn, mirrorOf, troubleGoes, wholeOnComputers, type AutoSeen, type RoutingRow } from "../turns.ts";
+import type { CloudDoes } from "../protocol.ts";
+import { AUTO_HOLD_MS, autoMoves, chatAutoFor, cloudDoesFor, keepChatOn, mirrorOf, resetTurns, troubleGoes, wholeOnComputers, type AutoSeen, type RoutingRow } from "../turns.ts";
 
 /**
  * Chat through Bops Cloud by itself (turns.ts autoMoves, keepChatOn, chatAutoFor), with no database: a workspace nobody
@@ -217,6 +218,46 @@ test("the mirror says where Bops Cloud won't take the switch back on (chatAutoOf
   assert.deepEqual(keepChatOn({ workspaces: [{ id: "ws_acme", chatOn: "mac", chatAutoOff: true }] }, r, true).workspaces, [{ id: "ws_acme", chatOn: "mac" }]);
   const same = { workspaces: [{ id: "ws_acme", chatOn: "mac", chatAutoOff: true }] };
   assert.equal(keepChatOn(same, r, false), same, "as the table has it: the same blob back");
+});
+
+test("what Bops Cloud does for each workspace (cloudDoes) is a mirror: written where it does a part, its parts in order, kept over a save from an older Bops, taken off when it does none, and the same blob back when it's as it should be", () => {
+  const does = (o: Record<string, CloudDoes>) => new Map(Object.entries(o));
+  const r = rows({ ws_acme: row("cloud", "owner") });
+  // Written: in the order Bops Cloud writes the parts, whatever order it was given in.
+  const st = { workspaces: [{ id: "ws_main", name: "Main" }, { id: "ws_acme", name: "Acme", chatOn: "cloud" }] };
+  const written = keepChatOn(st, r, true, does({ ws_acme: { watches: true, texts: true } }));
+  assert.deepEqual(written.workspaces, [{ id: "ws_main", name: "Main", chatAuto: true }, { id: "ws_acme", name: "Acme", chatOn: "cloud", cloudDoes: { texts: true, watches: true } }]);
+  assert.deepEqual(Object.keys((written.workspaces as { cloudDoes?: object }[])[1].cloudDoes!), ["texts", "watches"]);
+  // Equality covers it: the same parts in another order, the same blob back; another part, a new blob.
+  const reordered = { workspaces: [{ id: "ws_main", name: "Main", chatAuto: true }, { id: "ws_acme", name: "Acme", chatOn: "cloud", cloudDoes: { watches: true, texts: true } }] };
+  assert.equal(keepChatOn(reordered, r, true, does({ ws_acme: { texts: true, watches: true } })), reordered);
+  assert.equal(keepChatOn(written, r, true, does({ ws_acme: { texts: true, watches: true } })), written);
+  const more = keepChatOn(written, r, true, does({ ws_acme: { texts: true, watches: true, digest: true } }));
+  assert.notEqual(more, written);
+  assert.deepEqual((more.workspaces as { cloudDoes?: object }[])[1].cloudDoes, { texts: true, digest: true, watches: true });
+  // A save from an older Bops drops it (and the switch): both put back, the rest of what it saved kept.
+  const older = { workspaces: [{ id: "ws_main", name: "Main" }, { id: "ws_acme", name: "Acme Inc" }] };
+  assert.deepEqual(keepChatOn(older, r, true, does({ ws_acme: { texts: true, watches: true } })).workspaces, [
+    { id: "ws_main", name: "Main", chatAuto: true },
+    { id: "ws_acme", name: "Acme Inc", chatOn: "cloud", cloudDoes: { texts: true, watches: true } },
+  ]);
+  // Bops Cloud does none for it now (a kill switch, the switch turned off): taken off, never left empty.
+  assert.deepEqual(keepChatOn(written, r, true, does({})).workspaces, [{ id: "ws_main", name: "Main", chatAuto: true }, { id: "ws_acme", name: "Acme", chatOn: "cloud" }]);
+  assert.deepEqual(keepChatOn(written, r, true, does({ ws_acme: {} })).workspaces, [{ id: "ws_main", name: "Main", chatAuto: true }, { id: "ws_acme", name: "Acme", chatOn: "cloud" }]);
+  assert.deepEqual(keepChatOn(written, r, true).workspaces, [{ id: "ws_main", name: "Main", chatAuto: true }, { id: "ws_acme", name: "Acme", chatOn: "cloud" }], "none given: none");
+  // One a Mac wrote itself (no part is a Mac's to write): taken off too; a part that isn't one never written.
+  const forged = { workspaces: [{ id: "ws_acme", chatOn: "cloud", cloudDoes: { texts: true } }] };
+  assert.deepEqual(keepChatOn(forged, r, true).workspaces, [{ id: "ws_acme", chatOn: "cloud" }]);
+  assert.deepEqual(keepChatOn(forged, r, true, does({ ws_acme: { texts: true, routines: false as unknown as true, made: true } as CloudDoes })).workspaces, [{ id: "ws_acme", chatOn: "cloud", cloudDoes: { texts: true } }]);
+  // A workspace with none and no mirror: the same blob back.
+  const none = { workspaces: [{ id: "ws_acme", chatOn: "cloud" }] };
+  assert.equal(keepChatOn(none, r, true), none);
+});
+
+test("cloudDoesFor: no part is Bops Cloud's in this release, for any workspace", async () => {
+  resetTurns();
+  const st = { workspaces: [{ id: "ws_main" }, { id: "ws_acme", chatOn: "cloud", cloudDoes: { texts: true } }] };
+  assert.equal((await cloudDoesFor(null, "u_no_such_owner", st)).size, 0);
 });
 
 test("BOPS_CHAT_AUTO: unset and off move nothing, on moves everyone's, a list only theirs, revert nothing", () => {

@@ -1407,6 +1407,38 @@ export const CLOUD_CHAT_MIN_VERSION = "0.0.36";
  * | Setting chat to "cloud" | CLOUD_CHAT_MIN_VERSION | as today |
  */
 export const CLOUD_ALL_MIN_VERSION = "0.0.54";
+/**
+ * The first Bops of this round (bots' computers that set up and update their own runner, and a Mac that leaves to Bops
+ * Cloud each part it says it does: CloudDoes). Read from the owner's last Mac (cloud/turns.ts cloudSelf): older, and
+ * everything is exactly as before, an empty cloudDoes too.
+ */
+export const CLOUD_SELF_MIN_VERSION = "0.0.55";
+/**
+ * What Bops Cloud does for a workspace now, part by part (lib/types.ts Workspace.cloudDoes): each part is set only while
+ * Bops Cloud does it there, and a Mac or runner from CLOUD_SELF_MIN_VERSION on leaves that part to it. Only Bops Cloud
+ * writes it (cloud/turns.ts keepChatOn, from cloudDoesFor), only where cloudSelf holds, and a kill switch clears its
+ * parts. What each part leaves to Bops Cloud:
+ * - texts: the texts that came in while Bops was away (lib/server/phone.ts phoneCatchUp);
+ * - slack, calls, plans: Slack messages, calls and plan changes for the workspace (Bops Cloud's own);
+ * - reminders: reminders, on Bops Cloud's clock (lib/types.ts routineHome "cloud");
+ * - routines: the other routines, on their bots' own computers (routineHome "computer");
+ * - digest: "While you were busy" (lib/server/attention.ts flush);
+ * - watches: page and screen watches, looked at by the bot's computer (lib/types.ts watchHome);
+ * - desktop: dressing a renamed bot's desktop (lib/server/bots.ts followRename).
+ */
+export type CloudDoes = {
+  texts?: true;
+  slack?: true;
+  calls?: true;
+  plans?: true;
+  reminders?: true;
+  routines?: true;
+  digest?: true;
+  watches?: true;
+  desktop?: true;
+};
+/** Every part of CloudDoes, in the order Bops Cloud writes them. */
+export const CLOUD_DOES_PARTS: readonly (keyof CloudDoes)[] = ["texts", "slack", "calls", "plans", "reminders", "routines", "digest", "watches", "desktop"];
 /** 409: the computer that would do this has no runner, or one older than CLOUD_ALL_MIN_VERSION, and the owner's Mac never does it instead. */
 export const COMPUTER_NOT_READY = "computer_not_ready";
 /** 409: this can't be done from the cloud yet (a workspace where everything goes through the cloud), and the owner's Mac never does it instead. */

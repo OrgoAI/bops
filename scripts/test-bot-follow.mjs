@@ -41,7 +41,12 @@ registerHooks({
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !STAND_INS.has(name)) return next(url, context);
     const names = [...readFileSync(new URL(url), "utf8").matchAll(/^export (?:async )?(?:function\*? |const |let |class )([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
-    return { format: "module", shortCircuit: true, source: names.map((n) => `export const ${n} = function () { return Promise.resolve(); };`).join("\n") };
+    // Each call is recorded (globalThis.__standIns: [module, export, the first argument's id]), so a test can see the desktop dressed or not.
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: names.map((n) => `export const ${n} = function (...a) { (globalThis.__standIns ??= []).push([${JSON.stringify(name)}, ${JSON.stringify(n)}, a[0]?.id]); return Promise.resolve(); };`).join("\n"),
+    };
   },
 });
 const scratch = mkdtempSync(join(tmpdir(), "bops-test-bot-follow-"));
@@ -184,6 +189,37 @@ await test("nothing on a computer's runner (or a server): never noted, nothing f
   F.followedHere("max");
   assert.deepEqual(done, []);
   assert.equal(existsSync(file()), false);
+});
+
+await test("a new name dresses its bot's desktop from this Mac, unless Bops Cloud dresses the workspace's desktops (cloudDoes.desktop): then its computer does", async () => {
+  mac(true);
+  load();
+  F.followBotFields();
+  const dressed = () => (globalThis.__standIns ?? []).filter(([m, n]) => m === "desktop" && n === "applyDesktop").map(([, , id]) => id);
+  globalThis.__standIns = [];
+  // Through the owner's own route (app/api/bots/route.ts PATCH, as a teammate's change the Mac does): Max has a computer.
+  await CA.doChange(WS, { method: "PATCH", path: "/api/bots", body: { botId: "max", name: "Max Desk" } }, { userId: "u_sam", name: "Sam" }, "k-desk-1");
+  await later();
+  assert.deepEqual(dressed(), ["max"], "no mirror: as before");
+  globalThis.__standIns = [];
+  acme().cloudDoes = { desktop: true };
+  await CA.doChange(WS, { method: "PATCH", path: "/api/bots", body: { botId: "max", name: "Max Cloud" } }, { userId: "u_sam", name: "Sam" }, "k-desk-2");
+  await later();
+  assert.equal(botIn("max").name, "Max Cloud", "renamed all the same");
+  assert.deepEqual(dressed(), [], "its computer dresses it");
+  // Followed as a change that came in (Bops Cloud's for a teammate), with the real follow: the same.
+  F.resetBotFollow({ here: () => true });
+  F.followBotFields();
+  arrives((s) => (s.bots.find((b) => b.id === "max").name = "Max Follows"));
+  await later();
+  assert.deepEqual(dressed(), [], "nor as one that came in");
+  // Another part of cloudDoes is no part of it.
+  acme().cloudDoes = { texts: true, routines: true };
+  arrives((s) => (s.bots.find((b) => b.id === "max").name = "Max Again"));
+  await later();
+  assert.deepEqual(dressed(), ["max"]);
+  delete acme().cloudDoes;
+  globalThis.__standIns = [];
 });
 
 await test("fieldChanges: by bot, a field at a time; a bot new or gone isn't one", () => {

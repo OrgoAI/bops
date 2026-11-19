@@ -166,7 +166,7 @@ const S = await import(`${root}/lib/server/store.ts`);
 const W = await import(`${root}/lib/server/watches.ts`);
 const R = await import(`${root}/app/api/watches/route.ts`);
 const Bots = await import(`${root}/lib/server/bots.ts`);
-const { botChatId, isScreenWatch, PAGE_WATCH_DEFAULT_MIN, PAGE_WATCH_MIN_MIN } = await import(`${root}/lib/types.ts`);
+const { botChatId, isScreenWatch, PAGE_WATCH_DEFAULT_MIN, PAGE_WATCH_MIN_MIN, watchHome } = await import(`${root}/lib/types.ts`);
 // The loop is the test's to run (one tick: the same look the interval makes), never on its own.
 clearInterval(globalThis.__bopsWatches);
 const tick = (watchId) => globalThis.__bopsLook(watchId);
@@ -1423,6 +1423,51 @@ test("moving a bot: a page watch doesn't hold it, a screen watch does", async ()
     });
     const r = await Bots.setComputer("max", "shared");
     assert.match(r.error ?? "", /is watching a screen/);
+  });
+});
+
+test("who looks at a watch (watchHome): its bot's computer where Bops Cloud has the workspace's watches looked at there, else the Mac; the Mac leaves the computer's alone", async () => {
+  const ws = () => S.getState().workspaces.find((w) => w.id === "ws_main" || w.id === (S.getState().bots.find((b) => b.id === "boppy").workspaceId ?? "ws_main"));
+  const D = "d1d1d1d1-0000-4000-8000-0000000000aa";
+  const was = S.getState().bots.find((b) => b.id === "boppy").computerId;
+  await check("no mirror: the Mac's, a page, a screen or a window on the Mac", () => {
+    S.update((s) => (s.bots.find((b) => b.id === "boppy").computerId = D));
+    for (const w of [{ botId: "boppy" }, { botId: "boppy", mac: { app: "Messages", title: "Dana" } }, { botId: "max" }]) assert.equal(watchHome(S.getState(), w), "mac");
+  });
+  await check("with `watches`: a page or screen watch of a bot on a computer is that computer's; a window on the Mac, or a bot with no computer, the Mac's", () => {
+    S.update(() => (ws().cloudDoes = { watches: true }));
+    assert.equal(watchHome(S.getState(), { botId: "boppy" }), "computer");
+    assert.equal(watchHome(S.getState(), { botId: "boppy", page: { url: "https://example.com" } }), "computer");
+    assert.equal(watchHome(S.getState(), { botId: "boppy", mac: { app: "Messages", title: "Dana" } }), "mac");
+    S.update((s) => delete s.bots.find((b) => b.id === "boppy").computerId);
+    assert.equal(watchHome(S.getState(), { botId: "boppy" }), "mac", "no computer");
+    S.update((s) => (s.bots.find((b) => b.id === "boppy").computerId = D));
+    S.update(() => (ws().cloudDoes = { texts: true, digest: true }));
+    assert.equal(watchHome(S.getState(), { botId: "boppy" }), "mac", "other parts are no part of it");
+  });
+  await check("the Mac's loop leaves a page watch whose home is the computer alone: not read, nothing written; once the mirror goes it reads it again", async () => {
+    S.update(() => delete ws().cloudDoes);
+    jevOn();
+    const id = await pageWatch("/home", BASE);
+    const hits0 = hitsOf("/home");
+    S.update(() => (ws().cloudDoes = { watches: true }));
+    wait(31);
+    const kept = structuredClone(watchOf(id));
+    assert.equal(await tick(id), undefined, "not looked at");
+    assert.equal(hitsOf("/home"), hits0, "not read");
+    assert.deepEqual(watchOf(id), kept, "nothing written");
+    // Checked by hand from the Mac's window: as before.
+    assert.equal((await W.checkNow(id)).result, "same");
+    S.update(() => delete ws().cloudDoes);
+    wait(31);
+    assert.equal(await tick(id), "same", "the Mac's again");
+    assert.equal(hitsOf("/home"), hits0 + 2);
+  });
+  S.update((s) => {
+    const b = s.bots.find((x) => x.id === "boppy");
+    if (was) b.computerId = was;
+    else delete b.computerId;
+    delete ws().cloudDoes;
   });
 });
 

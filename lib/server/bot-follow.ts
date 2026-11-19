@@ -10,7 +10,8 @@ import { userDataDir } from "./user-paths";
  * A bot's name, call voice or where it runs changed on another Bops (Bops Cloud, for a teammate in a workspace where
  * everything goes through the cloud: cloud/change-apply.ts), followed here as the owner's own route follows its own
  * change (app/api/bots/route.ts PATCH): a new name its email, phone agents, Telegram and Discord names and desktop
- * (bots.ts followRename), a new call voice its phone agents' voice (phone.ts syncLineVoices), a new place to work Orgo's
+ * (bots.ts followRename; never the desktop where Bops Cloud dresses the workspace's desktops, Workspace.cloudDoes.desktop:
+ * its computer does), a new call voice its phone agents' voice (phone.ts syncLineVoices), a new place to work Orgo's
  * copy of its routines (routine-sync.ts routineChanged). Bops Cloud can do none of these itself: they're the owner's
  * Mac's, with its keys and logins.
  *
