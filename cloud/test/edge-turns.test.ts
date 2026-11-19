@@ -2814,13 +2814,14 @@ test("a runner from before CLOUD_SELF_MIN_VERSION connecting has orgo-web put th
     box.close();
     assert.equal(bootsOf(off.desktop).length, 0);
     await withBoot(async () => {
+      // Acme has members and its chat goes through Bops Cloud: a runner on the computer's identity is one the Mac keeps.
       const s = await setupSelf();
       box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": "0.0.54", "x-bops-build": "Build54" });
       await until(() => bootsOf(s.desktop).length > 0, "the keeper asked for");
       assert.deepEqual(bootsOf(s.desktop), [{ userId: s.owner, desktopId: s.desktop.toLowerCase(), signed: true }]);
       box.close();
       // Again within 6 hours: not asked again.
-      box = await stream("/v1/runner/live", ckey(s.owner, s.desktop), "hello", { "x-bops-version": "0.0.54" });
+      box = await stream("/v1/runner/live", vm(s.owner, s.desktop), "hello", { "x-bops-version": "0.0.54", "x-bops-build": "Build54" });
       await pause(300);
       box.close();
       assert.equal(bootsOf(s.desktop).length, 1);
@@ -2830,6 +2831,26 @@ test("a runner from before CLOUD_SELF_MIN_VERSION connecting has orgo-web put th
       await pause(300);
       box.close();
       assert.equal(bootsOf(n.desktop).length, 0);
+      // On a computer someone else can use, a runner on the computer's key is one the Mac stops: nothing asked.
+      const k = await setupSelf();
+      box = await stream("/v1/runner/live", ckey(k.owner, k.desktop), "hello", { "x-bops-version": "0.0.54" });
+      await pause(300);
+      box.close();
+      assert.equal(bootsOf(k.desktop).length, 0);
+      // One the owner's Mac kept down there (someone else can use it, and the computer has no identity of its own): nothing.
+      const f = await setupSelf();
+      await stateChanges(f.owner, (st) => void (st.runners = { [f.desktop.toUpperCase()]: { status: "failed", version: "0.0.54", by: "mac-o", at: Date.now(), error: RUNNER_FULL_ACCESS } }));
+      box = await stream("/v1/runner/live", vm(f.owner, f.desktop), "hello", { "x-bops-version": "0.0.54", "x-bops-build": "Build54" });
+      await pause(300);
+      box.close();
+      assert.equal(bootsOf(f.desktop).length, 0);
+      // A keeper that asked 3 hours ago (past the 2 hours of KEEPER_LIVE_MS, within a slow keeper's look): never booted over.
+      const h = await setupSelf();
+      await keeperAsked(h.owner, h.desktop, "3 hours");
+      box = await stream("/v1/runner/live", vm(h.owner, h.desktop), "hello", { "x-bops-version": "0.0.54", "x-bops-build": "Build54" });
+      await pause(300);
+      box.close();
+      assert.equal(bootsOf(h.desktop).length, 0);
     });
   });
   await inSelf(
@@ -2845,25 +2866,50 @@ test("a runner from before CLOUD_SELF_MIN_VERSION connecting has orgo-web put th
   );
 });
 
-test("a wake orgo-web says worked with no runner connecting in the wait: orgo-web puts the keeper on; a runner that connects in time: nothing asked", async () => {
+/** setupSelf with Acme the owner's alone (its members gone): a computer nobody else can use. */
+async function privateSelf() {
+  const s = await setupSelf();
+  await ownerChanges(s.owner, (st) => void delete st.workspaces.find((w) => w.id === "ws_acme")!.memberAccess);
+  return s;
+}
+
+test("a computer up after a wake with no runner connecting in the wait: orgo-web puts the keeper on; a runner that connects in time, one someone else can use, or one still coming back from storage: nothing asked", async () => {
   await inSelf(() =>
     withBoot(async () => {
-      const s = await setupSelf();
+      const s = await privateSelf();
       wakeAnswers.set(s.desktop, () => ({ state: "running" }));
-      assert.equal((await act(s.writer, s.project, "key-boot-wake01", { act: "chat", chatId: "bot:max", text: "x" })).status, 202);
+      assert.equal((await sendAs(s.owner, "bot:max", { key: "boot-wake-0001", text: "x" })).status, 200);
       await until(() => wakes.some((w) => w.desktopId === s.desktop), "the wake");
       assert.equal(bootsOf(s.desktop).length, 0, "not before the wait");
       await until(() => bootsOf(s.desktop).length > 0, "the keeper asked for", 5_000);
       assert.deepEqual(bootsOf(s.desktop), [{ userId: s.owner, desktopId: s.desktop.toLowerCase(), signed: true }]);
       // Its runner connects in time.
-      const r = await setupSelf();
+      const r = await privateSelf();
       wakeAnswers.set(r.desktop, () => ({ state: "running" }));
-      assert.equal((await act(r.writer, r.project, "key-boot-wake02", { act: "chat", chatId: "bot:max", text: "x" })).status, 202);
+      assert.equal((await sendAs(r.owner, "bot:max", { key: "boot-wake-0002", text: "x" })).status, 200);
       await until(() => wakes.some((w) => w.desktopId === r.desktop), "the wake");
-      const box = await stream("/v1/runner/live", vm(r.owner, r.desktop), "hello", { "x-bops-version": SELF, "x-bops-build": "Build55" });
+      let box = await stream("/v1/runner/live", vm(r.owner, r.desktop), "hello", { "x-bops-version": SELF, "x-bops-build": "Build55" });
       await pause(1_500);
       box.close();
       assert.equal(bootsOf(r.desktop).length, 0);
+      // Someone else can use it (Acme's members): no runner to say it's one the Mac keeps there, so never.
+      const t = await setupSelf();
+      wakeAnswers.set(t.desktop, () => ({ state: "running" }));
+      assert.equal((await act(t.writer, t.project, "key-boot-wake03", { act: "chat", chatId: "bot:max", text: "x" })).status, 202);
+      await until(() => wakes.some((w) => w.desktopId === t.desktop), "the wake");
+      await pause(1_500);
+      assert.equal(bootsOf(t.desktop).length, 0);
+      // Coming back from storage: the wait starts only once it's up.
+      const g = await privateSelf();
+      wakeAnswers.set(g.desktop, (n) => (n <= 2 ? { state: "storage", expectedSeconds: 1 } : { state: "running" }));
+      assert.equal((await sendAs(g.owner, "bot:max", { key: "boot-wake-0004", text: "x" })).status, 200);
+      await until(() => wakes.filter((w) => w.desktopId === g.desktop).length >= 2, "two wakes from storage", 5_000);
+      await pause(400);
+      assert.equal(bootsOf(g.desktop).length, 0, "no wait started while it came back from storage");
+      await until(() => bootsOf(g.desktop).length > 0, "the keeper asked for", 6_000);
+      assert.ok(wakes.filter((w) => w.desktopId === g.desktop).length >= 3, "only after it was up");
+      box = await stream("/v1/runner/live", vm(g.owner, g.desktop), "hello", { "x-bops-version": SELF, "x-bops-build": "Build55" });
+      box.close();
     }, 1_000),
   );
 });

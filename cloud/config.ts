@@ -94,7 +94,8 @@ export const config = {
   bootSecret: () => env("BOPS_CLOUD_BOOT_SECRET"),
   /**
    * Whether Bops Cloud asks orgo-web to put the keeper on a computer that never got one (runner-boot.ts bootKeeper): "on",
-   * once orgo-web's runner boot is on production. Anything else (the default): never.
+   * once orgo-web's runner boot is on production. Anything else (the default): never. TODO(K2): BOPS_RUNNER_UPDATES
+   * ("off", or "staff" for an owner who isn't Orgo's staff) stops boots too (runner-boot.ts setBootUpdatesGate).
    */
   runnerBoot: () => env("BOPS_RUNNER_BOOT") === "on",
   /**

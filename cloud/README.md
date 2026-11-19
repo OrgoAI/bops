@@ -964,7 +964,7 @@ Then:
   `BOPS_CLOUD_WAKE_SECRET`; unset, nothing is woken), one wake at a time per computer however many turns
   wait, and the turns go to the runner as it connects. A computer billed by the hour is woken only when the
   owner allowed it (`allowHourly`). Stopped, deleted, out of Free hours or AI credit, billed by the hour
-  and not allowed: its turns end with a note saying so. A wake that worked with no runner within 3
+  and not allowed: its turns end with a note saying so. A computer up after a wake with no runner within 3
   minutes, or a runner from before 0.0.55, has orgo-web put the keeper on the computer (`runner-boot.ts`,
   `BOPS_RUNNER_BOOT=on` only).
 - **A runner that goes quiet** (its lease of 90 seconds runs out): owed again before it did anything that
@@ -1217,7 +1217,7 @@ deleted user's tombstone 3 days after the last delete (`DELETED_KEEP_DAYS`), or 
 | `tunnel.ts`, `hooks.ts`, `slack.ts`, `state.ts` | 3: the tunnel, webhooks, Slack, state |
 | `live.ts` | what each bot is doing right now, streamed to the user's devices (in memory only) |
 | `turns.ts` | chat through Bops Cloud: messages written here first, their answers owed to the bots' computers, the runners' stream, waking |
-| `runner-boot.ts` | asking orgo-web to put the keeper on a bot's computer that never got one (`POST <orgo>/api/internal/bops/runner-boot`, signed with `BOPS_CLOUD_BOOT_SECRET`; only with `BOPS_RUNNER_BOOT=on`, for a computer of one workspace where `cloudSelf` holds, no keeper asking within 2 hours, at most once in 6): a runner from before 0.0.55 connecting, or a wake that worked with no runner within 3 minutes |
+| `runner-boot.ts` | asking orgo-web to put the keeper on a bot's computer that never got one (`POST <orgo>/api/internal/bops/runner-boot`, signed with `BOPS_CLOUD_BOOT_SECRET`; only with `BOPS_RUNNER_BOOT=on`, for a computer of one workspace where `cloudSelf` holds, no keeper asking within 24 hours, its runner not kept down by the owner's Mac, and on a computer someone else can use only for a runner the Mac would keep there, at most once in 6 hours, or 15 minutes after an ask orgo-web gave no final answer to): a runner from before 0.0.55 connecting, or a computer up after a wake with no runner within 3 minutes |
 | `runner-release.ts` | the signed runner releases (bops.bot/download/runner/latest.json, read every 10 minutes and checked against the release keys built in): a runner's version is kept only up to the newest, and the owner's record of a runner written only for one of them (`turns.ts recordRunner`) |
 | `browser.ts` | the bot's browser: the runner's socket, each viewer's stream, take over and input, and who may (in memory only) |
 | `lines.ts`, `voice.ts`, `calls.ts` | 4: who owns each line, a call's turns answered here, GPT-Live calls (dormant) |
