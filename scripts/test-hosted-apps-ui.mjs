@@ -3400,6 +3400,34 @@ await test("apps that use a key from Keys (app-key-links.tsx): an app's keys fro
   }
 });
 
+await test("the picker beside an app's Variables offers every key This workspace has, each client's Canva pair, Unsplash and Snazzy Maps among them, and a pick links it to that app", async () => {
+  const K = await import(pathToFileURL(`${root}/components/app/app-key-links.tsx`).href);
+  const was = routes;
+  const keys = ["ANTHROPIC_API_KEY", "CANVA_CLIENT_ID__ACME_TEST", "CANVA_CLIENT_SECRET__ACME_TEST", "CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST", "UNSPLASH_ACCESS_KEY", "SNAZZY_MAPS_API_KEY"];
+  routes = {
+    "/api/keys": { body: { keys: [...keys.map((name) => ({ name, scope: "workspace", ...(/^(CANVA_|SNAZZY_)/.test(name) ? { forApps: true } : {}) })), { name: "STRIPE_SECRET_KEY", scope: "all" }] } },
+    "/api/keys/apps": { body: { links: [], can: { every: true, app: true } } },
+  };
+  const m = await mount(h(K.KeyVariablesList, { app: "brand-studio", answer: { links: [], can: { every: true, app: true } } }));
+  try {
+    await click(m.box.querySelector("[data-key-var-use]"));
+    const select = m.box.querySelector(`select[aria-label="${K.APP_KEYS_WORDS.pick}"]`);
+    assert.deepEqual([...select.querySelectorAll("option")].map((o) => o.getAttribute("value")).filter(Boolean), keys, "This workspace's, Canva's pairs and both keys for apps among them; never one for all workspaces");
+    await act(async () => {
+      for (const o of select.querySelectorAll("option")) o.selected = o.getAttribute("value") === "CANVA_CLIENT_SECRET__BETA_TEST";
+      Object.defineProperty(select, "value", { configurable: true, get: () => "CANVA_CLIENT_SECRET__BETA_TEST" });
+      select.dispatchEvent(new win.Event("change", { bubbles: true }));
+      await settle();
+    });
+    const n = calls.length;
+    await submit(m.box.querySelector("[data-key-var-add]"));
+    assert.deepEqual(calls.slice(n).filter((c) => c.method === "PUT").map((c) => [c.url, c.body]), [["/api/keys/apps", { app: "brand-studio", key: "CANVA_CLIENT_SECRET__BETA_TEST" }]], "under its own name");
+  } finally {
+    routes = was;
+    await m.done();
+  }
+});
+
 /* ---------------- How many more apps each computer has room for ---------------- */
 
 const ROOMY = (o = {}) => ({ used: 6, limit: 10, urlsUsed: 3, urlsLimit: 10, apps: 2, computerId: "c1", bot: "Boppy", main: true, ...o });

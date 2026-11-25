@@ -9,7 +9,7 @@
 //   asks first, Rename and Disconnect; each control sending what lib/server/logins.ts and the routes take;
 // - a workspace shared with the viewer: their own logins, and plainly that the owner's reach them only through bots;
 // - Keys for apps only (lib/server/keys.ts APP_KEY_PROVIDERS): each client's Canva app as a pair on its own form, listed
-//   by client, replaced and removed as a pair; Unsplash and Snazzy Maps; none with a bot's switch;
+//   by client, replaced and removed as a pair; Snazzy Maps; none with a bot's switch; Unsplash, a key for bots and apps;
 // - the Also signed in on screens note only where Bops knows of a sign in; every word plain: no dashes, never Orbit.
 //
 // Rendered into a DOM (linkedom) and clicked, against a fake Bops: nothing reaches a server. The .tsx files are
@@ -592,13 +592,13 @@ await test("Keys form: a pasted key picks its service by how it starts, a hand p
 
 await test("Keys: each client's Canva app is a pair of This workspace's keys named by the client, added on its own form, listed by client, replaced and removed as a pair; Unsplash and Snazzy Maps are keys for apps; neither is ever a bot's", async () => {
   const APP_PROVIDERS = [
-    { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers", tip: "Paste the app's Access Key.", readOnly: false, forApps: true },
+    { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers", tip: "Paste the app's Access Key.", readOnly: true },
     { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com", tip: "Your apps read map styles with it.", readOnly: false, forApps: true },
   ];
   const forApps = (name, label = "Canva") => ({ name, label, where: "canva.com/developers", tip: "Made in the client's Canva.", readOnly: false, forApps: true, updatedAt: "2026-11-24T00:00:00Z", scope: "workspace", bots: [] });
   const acme = [forApps("CANVA_CLIENT_ID__ACME_TEST"), forApps("CANVA_CLIENT_SECRET__ACME_TEST")];
   const beta = [forApps("CANVA_CLIENT_ID__BETA_TEST"), forApps("CANVA_CLIENT_SECRET__BETA_TEST")];
-  const unsplash = forApps("UNSPLASH_ACCESS_KEY", "Unsplash");
+  const snazzy = forApps("SNAZZY_MAPS_API_KEY", "Snazzy Maps");
   const options = (page) => [...page.querySelectorAll('select[aria-label="Service"] option')].map((o) => o.getAttribute("value"));
   const posted = (n) => bops.sent.slice(n).filter((x) => x.url === "/api/keys").map((x) => [x.method, x.body]);
   bops.providers = [...PROVIDERS, ...APP_PROVIDERS];
@@ -621,7 +621,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     await input(form.querySelector('input[aria-label="Client ID"]'), "test-client-id-1");
     await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-acme-0001");
     let n = bops.sent.length;
-    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, unsplash];
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, snazzy];
     await submit(form);
     assert.deepEqual(posted(n), [
       ["POST", { name: "CANVA_CLIENT_ID__ACME_TEST", value: "test-client-id-1", botIds: [], scope: "workspace", ws: "ws_fern" }],
@@ -644,7 +644,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-beta-0002");
     // Orgo keeps the client ID but not the secret: said so, both fields kept, and Save again finishes it.
     bops.refuse = (x) => x.body?.name === "CANVA_CLIENT_SECRET__BETA_TEST";
-    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, beta[0], unsplash];
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, beta[0], snazzy];
     await submit(form);
     form = page.querySelector("form[data-canva-form]");
     assert.match(form.querySelector('[role="alert"]').textContent, /^The client ID saved, but the secret didn't\. Orgo couldn't keep it just now\.$/);
@@ -659,7 +659,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     assert.equal(page.querySelector("form[data-canva-form] [role='alert']").textContent, "The client ID saved, but the secret didn't. Couldn't reach Bops. Try again.");
     bops.offline = null;
     n = bops.sent.length;
-    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, ...beta, unsplash];
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, ...beta, snazzy];
     await submit(page.querySelector("form[data-canva-form]"));
     assert.deepEqual(posted(n).map((x) => x[1].name), ["CANVA_CLIENT_SECRET__BETA_TEST"], "only what isn't saved yet");
     // Listed by client, each with its two names and Show (the reveal path, as any key), never a value; no bot can have them.
@@ -671,7 +671,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     assert.ok(!values.test(page.textContent) && ![...page.querySelectorAll("input")].some((i) => values.test(i.value)), "no value on the page, in its words or a field left open");
     assert.ok(!page.querySelector("[data-canva-apps] button[aria-haspopup='menu']"), "no bot switch for them");
     assert.ok(!sets()[0].querySelector("button[aria-pressed]"), "no side panel of bots for them");
-    assert.equal(tab(page, "This workspace").textContent, "This workspace4", "OpenAI, Unsplash and two clients");
+    assert.equal(tab(page, "This workspace").textContent, "This workspace4", "OpenAI, Snazzy Maps and two clients");
     // Replace Beta Test's: a new secret alone; its client ID stays.
     await click(sets()[1].querySelector(`button[aria-label="Replace Beta Test's Canva app"]`));
     form = page.querySelector("form[data-canva-form]");
@@ -686,7 +686,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     assert.match(sets()[0].textContent, /Remove Acme Test's Canva app from this workspace\?/);
     n = bops.sent.length;
     // (Meanwhile half of a third client's pair was saved elsewhere: the list read after the remove has it.)
-    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...beta, forApps("CANVA_CLIENT_ID__GAMMA_TEST"), unsplash];
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...beta, forApps("CANVA_CLIENT_ID__GAMMA_TEST"), snazzy];
     await click(buttonOf(sets()[0], "Remove"));
     assert.deepEqual(bops.sent.slice(n).map((x) => [x.method, x.url]), [
       ["DELETE", "/api/keys/CANVA_CLIENT_ID__ACME_TEST?scope=workspace&ws=ws_fern"],
@@ -716,8 +716,8 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     assert.deepEqual(posted(n), []);
     assert.equal(form.querySelector('[role="alert"]').textContent, "Give the client a shorter name: at most 43 characters, a space between words counting as one.");
     await click(buttonOf(form, "Cancel"));
-    // Unsplash: a key for apps, no bot switches, no side panel; a new Snazzy Maps key goes to no bot.
-    const un = page.querySelector('[data-key="workspace:UNSPLASH_ACCESS_KEY"]');
+    // Snazzy Maps: a key for apps, no bot switches, no side panel; a new one goes to no bot.
+    const un = page.querySelector('[data-key="workspace:SNAZZY_MAPS_API_KEY"]');
     assert.match(un.textContent, /For your apps\. Bots can't use it\./);
     assert.ok(!un.querySelector("button[aria-haspopup='menu']") && !un.querySelector("button[aria-pressed]"));
     assert.ok(!/bots use it|bots stop/i.test(words(un)), "nothing on it says bots use it");
@@ -725,11 +725,11 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     await click(sets()[0].querySelector('[data-key="workspace:CANVA_CLIENT_SECRET__BETA_TEST"] button[aria-label="Show key"]'));
     assert.deepEqual(bops.sent.at(-1), { url: "/api/keys/reveal", method: "POST", body: { name: "CANVA_CLIENT_SECRET__BETA_TEST", scope: "workspace", ws: "ws_fern" } });
     await click(un.querySelector('button[aria-label="Remove key"]'));
-    assert.match(un.textContent, /Remove UNSPLASH_ACCESS_KEY from this workspace\? Apps that use it stop getting it, and it's gone from Orgo too\./);
+    assert.match(un.textContent, /Remove SNAZZY_MAPS_API_KEY from this workspace\? Apps that use it stop getting it, and it's gone from Orgo too\./);
     assert.ok(!/bots stop/i.test(un.textContent), "its remove says nothing of bots using it");
     n = bops.sent.length;
     await click(buttonOf(un, "Remove"));
-    assert.deepEqual(bops.sent.slice(n).map((x) => [x.method, x.url]), [["DELETE", "/api/keys/UNSPLASH_ACCESS_KEY?scope=workspace&ws=ws_fern"]]);
+    assert.deepEqual(bops.sent.slice(n).map((x) => [x.method, x.url]), [["DELETE", "/api/keys/SNAZZY_MAPS_API_KEY?scope=workspace&ws=ws_fern"]]);
     await click(tab(page, "All workspaces"));
     await click(buttonOf(page, "Add a key"));
     await choose(page.querySelector('select[aria-label="Service"]'), "SNAZZY_MAPS_API_KEY");
@@ -749,7 +749,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
   const none = await mount(settings(stateOf()));
   try {
     await click(buttonOf(none.box, "Add a key"));
-    assert.ok(options(none.box).length > 0 && !options(none.box).some((v) => /UNSPLASH|SNAZZY|CANVA/.test(v)), "none for apps");
+    assert.ok(options(none.box).includes("UNSPLASH_ACCESS_KEY") && !options(none.box).some((v) => /SNAZZY|CANVA/.test(v)), "none for apps; Unsplash, a key for bots, is");
   } finally {
     bops.keysInfo = {};
     await none.done();
@@ -760,7 +760,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
   const card = await mount(h(BotKeys, { state: st, bot: st.bots[0], onAdd: noop, className: "" }));
   try {
     assert.ok(card.box.textContent.includes("OPENAI_API_KEY"), "the card lists the workspace's keys");
-    assert.ok(!/UNSPLASH|SNAZZY|CANVA/.test(card.box.textContent), "never one for apps");
+    assert.ok(!/SNAZZY|CANVA/.test(card.box.textContent), "never one for apps");
   } finally {
     bops.keys = [];
     bops.providers = [];
@@ -838,13 +838,13 @@ await test("Keys after a workspace switch: a form open for the last one closes, 
 
 await test("Keys in a shared workspace whose owner's Bops can't take bots' switches yet: a key for apps says nothing of switching bots", async () => {
   bops.providers = PROVIDERS;
-  bops.keys = [row("STRIPE_SECRET_KEY", "workspace"), { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com", tip: "Paste it.", readOnly: false, forApps: true, updatedAt: null, scope: "workspace", bots: [] }];
+  bops.keys = [row("STRIPE_SECRET_KEY", "workspace"), { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com", tip: "Make one.", readOnly: false, forApps: true, updatedAt: null, scope: "workspace", bots: [] }];
   bops.keysInfo = { shared: { keys: true, acts: false } };
   const m = await mount(settings(sharedState(true)));
   try {
     const page = m.box.querySelector("[data-logins]");
     assert.match(page.querySelector('[data-key="workspace:STRIPE_SECRET_KEY"]').textContent, /needs an update before you can switch bots/);
-    const un = page.querySelector('[data-key="workspace:UNSPLASH_ACCESS_KEY"]');
+    const un = page.querySelector('[data-key="workspace:SNAZZY_MAPS_API_KEY"]');
     assert.match(un.textContent, /For your apps\. Bots can't use it\./);
     assert.ok(!/switch bots|bots use it/i.test(words(un)), words(un));
   } finally {

@@ -11,10 +11,10 @@ const node = process.execPath;
 // (Bops Cloud's slice of it, SharedApp.github, is checked by cloud/test/core-members.test.ts, which needs the test database.)
 const yourAppsFiles = ['components/app/app-controls.tsx', 'components/app/app-review.tsx', 'components/app/app-envs.tsx', 'components/app/app-settings.tsx', 'components/app/hosted-apps.tsx', 'components/app/made-apps.tsx', 'components/app/shared-apps.tsx', 'components/app/preview-password.tsx', 'components/app/bops-app.tsx', 'components/app/crm.tsx', 'components/app/ui.tsx', 'lib/hosted-apps.ts', 'lib/app-review.ts', 'cloud/ws-slice.ts', 'cloud/protocol.ts'];
 
-// Keys: the vault's keys and bots' calls with them, keys only apps use (each client's Canva app, Unsplash, Snazzy Maps) and
+// Keys: the vault's keys and bots' calls with them (Unsplash among them), keys only apps use (each client's Canva app, Snazzy Maps) and
 // their links to apps, and Settings, Logins' Keys. Against a fake orgo-web and a fake Bops: nothing reaches Orgo or a vendor.
 // Bops Cloud's part runs only its act checks (cleanAct), which need no test database.
-const keysFiles = ['lib/canva-keys.ts', 'lib/server/keys.ts', 'lib/server/shared-keys.ts', 'lib/server/app-keys.ts', 'lib/server/access-sync.ts', 'app/api/keys/route.ts', 'app/api/keys/[name]/route.ts', 'app/api/keys/reveal/route.ts', 'app/api/logins/route.ts', 'components/app/keys.tsx', 'components/app/logins.tsx', 'cloud/protocol.ts', 'cloud/members.ts', 'scripts/test-keys.mjs', 'scripts/test-logins-ui.mjs', 'scripts/test-access.mjs'];
+const keysFiles = ['lib/canva-keys.ts', 'lib/server/keys.ts', 'lib/server/shared-keys.ts', 'lib/server/app-keys.ts', 'lib/server/access-sync.ts', 'app/api/keys/route.ts', 'app/api/keys/[name]/route.ts', 'app/api/keys/reveal/route.ts', 'app/api/logins/route.ts', 'components/app/keys.tsx', 'components/app/logins.tsx', 'cloud/protocol.ts', 'cloud/members.ts', 'scripts/test-keys.mjs', 'scripts/test-logins-ui.mjs', 'scripts/test-access.mjs', 'scripts/test-hosted-apps-ui.mjs'];
 
 const TARGETS = {
   'browser-speed': () => [

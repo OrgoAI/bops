@@ -690,9 +690,10 @@ test("cleanAct keeps only an act's own fields, each checked", () => {
     assert.equal(cleanAct(bad), null, JSON.stringify(bad)?.slice(0, 80));
   // A bot's key: the bot, the key's vault name, on or off, and nothing else.
   assert.deepEqual(cleanAct({ key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: false, value: "ghp_never" } }), { key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: false } });
-  // A key only apps use (a client's Canva app, Unsplash, Snazzy Maps) is never a bot's: on is refused, in plain words, before
-  // orgo-web or the owner's state is touched; off still goes (it only takes away).
-  for (const name of ["CANVA_CLIENT_ID__ACME", "CANVA_CLIENT_SECRET__ACME_TEST", "UNSPLASH_ACCESS_KEY", "SNAZZY_MAPS_API_KEY"]) {
+  // A key only apps use (a client's Canva app, Snazzy Maps) is never a bot's: on is refused, in plain words, before
+  // orgo-web or the owner's state is touched; off still goes (it only takes away). Unsplash is a bot's key too.
+  assert.deepEqual(cleanAct({ key, act: { act: "key", botId: "max", name: "UNSPLASH_ACCESS_KEY", on: true } }), { key, act: { act: "key", botId: "max", name: "UNSPLASH_ACCESS_KEY", on: true } });
+  for (const name of ["CANVA_CLIENT_ID__ACME", "CANVA_CLIENT_SECRET__ACME_TEST", "SNAZZY_MAPS_API_KEY"]) {
     const raw = { key, act: { act: "key", botId: "max", name, on: true } };
     assert.equal(cleanAct(raw), null, name);
     assert.equal(keyActWhy(raw), "That key is for apps only: bots can't use it.", name);

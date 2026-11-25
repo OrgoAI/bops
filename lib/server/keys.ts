@@ -76,6 +76,8 @@ export const KEY_PROVIDERS: KeyProvider[] = [
   { name: "RIPPLING_API_KEY", label: "Rippling", where: "Rippling, API tokens", tip: "Give the token read access only.", readOnly: true, hint: "Read only REST at /platform/api/... (e.g. GET /platform/api/employees).", chatOnly: true },
   { name: "VANTA_API_TOKEN", label: "Vanta", where: "Vanta, Settings, Developer console", tip: "Give the app read scopes only.", readOnly: true, hint: "Read only REST at /v1/... (e.g. GET /v1/tests).", chatOnly: true },
   { name: "X_BEARER_TOKEN", label: "X", where: "developer.x.com, your app, Keys and tokens, Bearer token", tip: "An app bearer token reads public data only.", readOnly: true, hint: "Read only REST at /2/... (e.g. GET /2/users/by/username/{name})." },
+  // Apps link it too (lib/server/app-keys.ts), as they do any key of This workspace's.
+  { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers, Your apps, your app, Keys", tip: "Paste the app's Access Key. Its Secret key stays with you.", readOnly: true, hint: "Read only REST at /... (e.g. GET /search/photos with query {\"query\": \"...\"}, GET /photos/{id})." },
 ];
 
 export const keyProvider = (name: string) => KEY_PROVIDERS.find((p) => p.name === name);
@@ -88,7 +90,6 @@ export const keyProvider = (name: string) => KEY_PROVIDERS.find((p) => p.name ==
 export type AppKeyProvider = { name: string; label: string; where: string; tip: string };
 
 export const APP_KEY_PROVIDERS: AppKeyProvider[] = [
-  { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers, Your apps, your app, Keys", tip: "Paste the app's Access Key. Its Secret key stays with you." },
   { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com, your email at the top right, Developer", tip: "Your apps read map styles with it. Make one for them alone." },
 ];
 

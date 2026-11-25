@@ -31,7 +31,7 @@ import { readAllowed } from "./view-only";
  * keeps in the owner's vault, and switches bots on and off for any key it sees; the owner's keys for all their workspaces
  * show by name alone, marked as the owner's. Without Keys, a line says who gives it. The user's own keys aren't there.
  *
- * Keys for apps only (`forApps`: Unsplash, Snazzy Maps, each client's Canva app) are This workspace's and never a bot's: no
+ * Keys for apps only (`forApps`: Snazzy Maps, each client's Canva app) are This workspace's and never a bot's: no
  * bot switches, no side panel of bots. A client's Canva app is a pair (lib/canva-keys.ts), added on its own form (CanvaForm)
  * and listed by client (CanvaSet).
  */
