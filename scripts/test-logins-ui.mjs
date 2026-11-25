@@ -8,6 +8,8 @@
 //   Read & act, No access; Can use it, No access), Who reaches it (people, through which bots, from memberAccess), It
 //   asks first, Rename and Disconnect; each control sending what lib/server/logins.ts and the routes take;
 // - a workspace shared with the viewer: their own logins, and plainly that the owner's reach them only through bots;
+// - Keys for apps only (lib/server/keys.ts APP_KEY_PROVIDERS): each client's Canva app as a pair on its own form, listed
+//   by client, replaced and removed as a pair; Unsplash and Snazzy Maps; none with a bot's switch;
 // - the Also signed in on screens note only where Bops knows of a sign in; every word plain: no dashes, never Orbit.
 //
 // Rendered into a DOM (linkedom) and clicked, against a fake Bops: nothing reaches a server. The .tsx files are
@@ -575,6 +577,132 @@ await test("Keys form: a pasted key picks its service by how it starts, a hand p
     bops.keys = [];
     bops.providers = [];
     await m2.done();
+  }
+});
+
+await test("Keys: each client's Canva app is a pair of This workspace's keys named by the client, added on its own form, listed by client, replaced and removed as a pair; Unsplash and Snazzy Maps are keys for apps; neither is ever a bot's", async () => {
+  const APP_PROVIDERS = [
+    { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers", tip: "Paste the app's Access Key.", readOnly: false, forApps: true },
+    { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com", tip: "Your apps read map styles with it.", readOnly: false, forApps: true },
+  ];
+  const forApps = (name, label = "Canva") => ({ name, label, where: "canva.com/developers", tip: "Made in the client's Canva.", readOnly: false, forApps: true, updatedAt: "2026-11-24T00:00:00Z", scope: "workspace", bots: [] });
+  const acme = [forApps("CANVA_CLIENT_ID__ACME_TEST"), forApps("CANVA_CLIENT_SECRET__ACME_TEST")];
+  const beta = [forApps("CANVA_CLIENT_ID__BETA_TEST"), forApps("CANVA_CLIENT_SECRET__BETA_TEST")];
+  const unsplash = forApps("UNSPLASH_ACCESS_KEY", "Unsplash");
+  const options = (page) => [...page.querySelectorAll('select[aria-label="Service"] option')].map((o) => o.getAttribute("value"));
+  const posted = (n) => bops.sent.slice(n).filter((x) => x.url === "/api/keys").map((x) => [x.method, x.body]);
+  bops.providers = [...PROVIDERS, ...APP_PROVIDERS];
+  bops.keys = [row("OPENAI_API_KEY", "workspace")];
+  const m = await mount(settings(stateOf({ bots: [{ ...BOPPY, keys: ["UNSPLASH_ACCESS_KEY"] }, SALES, SUPPORT, REX] })));
+  try {
+    const page = m.box.querySelector("[data-logins]");
+    // Offered from either tab: a key for apps is This workspace's whichever is open (an app takes no other).
+    await click(tab(page, "All workspaces"));
+    await click(buttonOf(page, "Add a key"));
+    assert.ok(["UNSPLASH_ACCESS_KEY", "SNAZZY_MAPS_API_KEY", "CANVA_CLIENT"].every((v) => options(page).includes(v)), "Unsplash, Snazzy Maps and a client's Canva app");
+    // A client's Canva app: its own fields, the names it's saved under, and no bots to pick.
+    await choose(page.querySelector('select[aria-label="Service"]'), "CANVA_CLIENT");
+    let form = page.querySelector("form[data-canva-form]");
+    assert.ok(form, "Canva's own form");
+    assert.ok(!form.querySelector('input[aria-label="Key"]') && !form.textContent.includes("Bots that may use it"));
+    assert.equal(form.querySelector('input[aria-label="Client secret"]').getAttribute("type"), "password");
+    await input(form.querySelector('input[aria-label="Client"]'), "Acme Test");
+    assert.match(form.textContent, /CANVA_CLIENT_ID__ACME_TEST[^]*CANVA_CLIENT_SECRET__ACME_TEST/, "the names its apps link to");
+    await input(form.querySelector('input[aria-label="Client ID"]'), "test-client-id-1");
+    await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-acme-0001");
+    let n = bops.sent.length;
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, unsplash];
+    await submit(form);
+    assert.deepEqual(posted(n), [
+      ["POST", { name: "CANVA_CLIENT_ID__ACME_TEST", value: "test-client-id-1", botIds: [], scope: "workspace" }],
+      ["POST", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-acme-0001", botIds: [], scope: "workspace" }],
+    ]);
+    assert.ok(!page.querySelector("form[data-canva-form]"), "the form closes once Orgo has both");
+    assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true", "shown under This workspace, where it went");
+    // A second client, from the Canva apps' own Add a client.
+    await click(buttonOf(page.querySelector("[data-canva-apps]"), "Add a client"));
+    form = page.querySelector("form[data-canva-form]");
+    await input(form.querySelector('input[aria-label="Client"]'), "acme test");
+    await input(form.querySelector('input[aria-label="Client ID"]'), "test-client-id-9");
+    await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-9");
+    n = bops.sent.length;
+    await submit(form);
+    assert.deepEqual(posted(n), [], "a client that has one already isn't added again");
+    assert.match(form.querySelector('[role="alert"]').textContent, /Acme Test has a Canva app here already/);
+    await input(form.querySelector('input[aria-label="Client"]'), "Beta Test");
+    await input(form.querySelector('input[aria-label="Client ID"]'), "test-client-id-2");
+    await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-beta-0002");
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, ...beta, unsplash];
+    await submit(form);
+    assert.deepEqual(posted(n).map((x) => x[1].name), ["CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"]);
+    // Listed by client, each with its two names and Show (the reveal path, as any key), never a value; no bot can have them.
+    const sets = () => [...page.querySelectorAll("[data-canva-client]")];
+    assert.deepEqual(sets().map((s) => s.querySelector("[data-canva-label]").textContent), ["Acme Test", "Beta Test"]);
+    assert.ok(sets()[0].querySelector('[data-key="workspace:CANVA_CLIENT_SECRET__ACME_TEST"] button[aria-label="Show key"]'));
+    assert.ok(sets()[0].querySelector('[data-key="workspace:CANVA_CLIENT_ID__ACME_TEST"]'));
+    assert.ok(!page.textContent.includes("test-secret") && !page.textContent.includes("test-client-id"), "no value on the page");
+    assert.ok(!page.querySelector("[data-canva-apps] button[aria-haspopup='menu']"), "no bot switch for them");
+    assert.ok(!sets()[0].querySelector("button[aria-pressed]"), "no side panel of bots for them");
+    assert.equal(tab(page, "This workspace").textContent, "This workspace4", "OpenAI, Unsplash and two clients");
+    // Replace Beta Test's: a new secret alone; its client ID stays.
+    await click(sets()[1].querySelector(`button[aria-label="Replace Beta Test's Canva app"]`));
+    form = page.querySelector("form[data-canva-form]");
+    assert.ok(!form.querySelector('input[aria-label="Client"]'), "the client stays");
+    assert.match(form.textContent, /New client ID or secret for Beta Test/);
+    await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-beta-0003");
+    n = bops.sent.length;
+    await submit(form);
+    assert.deepEqual(posted(n), [["POST", { name: "CANVA_CLIENT_SECRET__BETA_TEST", value: "test-secret-beta-0003", botIds: [], scope: "workspace" }]]);
+    // Remove Acme Test's: both of its keys, This workspace's.
+    await click(sets()[0].querySelector(`button[aria-label="Remove Acme Test's Canva app"]`));
+    assert.match(sets()[0].textContent, /Remove Acme Test's Canva app from this workspace\?/);
+    n = bops.sent.length;
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...beta, unsplash];
+    await click(buttonOf(sets()[0], "Remove"));
+    assert.deepEqual(bops.sent.slice(n).map((x) => [x.method, x.url]), [
+      ["DELETE", "/api/keys/CANVA_CLIENT_ID__ACME_TEST?scope=workspace"],
+      ["DELETE", "/api/keys/CANVA_CLIENT_SECRET__ACME_TEST?scope=workspace"],
+    ]);
+    assert.deepEqual(sets().map((s) => s.querySelector("[data-canva-label]").textContent), ["Beta Test"]);
+    // Unsplash: a key for apps, no bot switches, no side panel; a new Snazzy Maps key goes to no bot.
+    const un = page.querySelector('[data-key="workspace:UNSPLASH_ACCESS_KEY"]');
+    assert.match(un.textContent, /For your apps\. Bots can't use it\./);
+    assert.ok(!un.querySelector("button[aria-haspopup='menu']") && !un.querySelector("button[aria-pressed]"));
+    await click(tab(page, "All workspaces"));
+    await click(buttonOf(page, "Add a key"));
+    await choose(page.querySelector('select[aria-label="Service"]'), "SNAZZY_MAPS_API_KEY");
+    form = page.querySelector("form");
+    assert.match(form.textContent, /Your apps read map styles with it\.[^]*Get one in snazzymaps\.com\.[^]*For this workspace's apps\. Bots can't use it\./);
+    assert.ok(!form.textContent.includes("Bots that may use it"));
+    await input(form.querySelector('input[aria-label="Key"]'), "test-snazzy-0004");
+    n = bops.sent.length;
+    await submit(form);
+    assert.deepEqual(posted(n), [["POST", { name: "SNAZZY_MAPS_API_KEY", value: "test-snazzy-0004", botIds: [], scope: "workspace" }]], "This workspace's, from All workspaces too");
+    assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true");
+  } finally {
+    await m.done();
+  }
+  // A workspace without an Orgo workspace of its own has no This workspace: no key for apps is offered there.
+  bops.keysInfo = { workspaceKeys: false };
+  const none = await mount(settings(stateOf()));
+  try {
+    await click(buttonOf(none.box, "Add a key"));
+    assert.ok(options(none.box).length > 0 && !options(none.box).some((v) => /UNSPLASH|SNAZZY|CANVA/.test(v)), "none for apps");
+  } finally {
+    bops.keysInfo = {};
+    await none.done();
+  }
+  // A bot's own Keys card lists only keys a bot can have.
+  const { BotKeys } = await import(pathToFileURL(`${root}/components/app/keys.tsx`).href);
+  const st = stateOf({ bots: [{ ...BOPPY, keys: ["UNSPLASH_ACCESS_KEY"] }, SALES, SUPPORT, REX] });
+  const card = await mount(h(BotKeys, { state: st, bot: st.bots[0], onAdd: noop, className: "" }));
+  try {
+    assert.ok(card.box.textContent.includes("OPENAI_API_KEY"), "the card lists the workspace's keys");
+    assert.ok(!/UNSPLASH|SNAZZY|CANVA/.test(card.box.textContent), "never one for apps");
+  } finally {
+    bops.keys = [];
+    bops.providers = [];
+    await card.done();
   }
 });
 

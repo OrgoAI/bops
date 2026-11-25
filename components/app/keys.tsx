@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { CANVA_CLIENT_MAX, canvaClient, canvaClientOk, canvaLabel, canvaNames, canvaOf } from "@/lib/canva-keys";
 import { sameApp } from "@/lib/routine-catalog";
 import type { DiffLine } from "@/lib/skill-proposals";
 import { askHeadline } from "@/lib/permission";
@@ -29,9 +30,13 @@ import { readAllowed } from "./view-only";
  * Admin, or a Member given it in People) adds, replaces, removes, sees and copies This workspace's own keys, which orgo-web
  * keeps in the owner's vault, and switches bots on and off for any key it sees; the owner's keys for all their workspaces
  * show by name alone, marked as the owner's. Without Keys, a line says who gives it. The user's own keys aren't there.
+ *
+ * Keys for apps only (`forApps`: Unsplash, Snazzy Maps, each client's Canva app) are This workspace's and never a bot's: no
+ * bot switches, no side panel of bots. A client's Canva app is a pair (lib/canva-keys.ts), added on its own form (CanvaForm)
+ * and listed by client (CanvaSet).
  */
 
-type Provider = { name: string; label: string; where: string; tip: string; readOnly: boolean };
+type Provider = { name: string; label: string; where: string; tip: string; readOnly: boolean; forApps?: boolean };
 export type Scope = "workspace" | "all";
 /**
  * A key as GET /api/keys lists it for the open workspace. `usedIn`: the other workspaces it's switched on in (Used in,
@@ -62,6 +67,20 @@ const NO_KEYS_LINE = `People with Keys manage this workspace's keys. ${KEYS_GIVE
 const SWITCH_UPDATE_LINE = "The owner's Bops needs an update before you can switch bots for it.";
 
 const STRIPE_NAMES = ["STRIPE_SECRET_KEY", "STRIPE_API_KEY"];
+
+/** Add a key's pick for a client's Canva app: a pair of keys, on its own form (CanvaForm). */
+const CANVA_PICK = "CANVA_CLIENT";
+/** What a key for apps says in place of its bots. */
+const FOR_APPS_LINE = "For your apps. Bots can't use it.";
+
+/** Each client's Canva pair among `keys` (one scope's), by client name, the client ID first; a half saved shows alone. */
+function canvaSets(keys: KeyRow[]): { client: string; keys: KeyRow[] }[] {
+  const clients = [...new Set(keys.map((k) => canvaOf(k.name)?.client).filter((c): c is string => !!c))].sort();
+  return clients.map((client) => ({
+    client,
+    keys: (["id", "secret"] as const).map((part) => keys.find((k) => canvaOf(k.name)?.client === client && canvaOf(k.name)?.part === part)).filter((k): k is KeyRow => !!k),
+  }));
+}
 
 /**
  * The service a pasted key is for, by how it starts, of the ones Bops can call (`names`), or null when it doesn't say. A
@@ -325,7 +344,8 @@ export function KeysSettings({
   const main = team.find((b) => b.isMain) ?? team[0];
   const picked = keysFor && team.some((b) => b.id === keysFor) ? keysFor : main?.id;
   // The form: a new key (for these bots), or a new value for a saved one.
-  const [form, setForm] = useState<{ replace?: KeyRow; bots: string[] } | null>(keysFor ? { bots: picked ? [picked] : [] } : null);
+  // `canva`: a client's Canva app whose ID or secret is replaced; `start`: the service Add a key opens on.
+  const [form, setForm] = useState<{ replace?: KeyRow; canva?: string; start?: string; bots: string[] } | null>(keysFor ? { bots: picked ? [picked] : [] } : null);
   // This workspace or All workspaces, as Orgo's Secrets shows them; only All workspaces where this
   // workspace has no Orgo workspace of its own (an Orgo without them).
   // Opens on This workspace only when it has keys of its own (every key from before is for all workspaces);
@@ -335,7 +355,14 @@ export function KeysSettings({
   const scope: Scope = info?.workspaceKeys ? (tab ?? (shared || info.keys.some((k) => k.scope === "workspace") ? "workspace" : "all")) : "all";
   // A new key goes where the user is looking: the tab shown, whether it was picked or opened on. A shared workspace's, This workspace's alone.
   const addScope: Scope = shared ? "workspace" : scope;
-  const shown = info?.keys.filter((k) => k.scope === scope) ?? [];
+  const listed = info?.keys.filter((k) => k.scope === scope) ?? [];
+  // A client's Canva pair shows under its client's name, not as two keys.
+  const shown = listed.filter((k) => !canvaOf(k.name));
+  const sets = canvaSets(listed);
+  const rowsIn = (s: Scope) => {
+    const ks = info?.keys.filter((k) => k.scope === s) ?? [];
+    return ks.filter((k) => !canvaOf(k.name)).length + canvaSets(ks).length;
+  };
   const [saved, setSaved] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const loaded = !!info;
@@ -350,6 +377,8 @@ export function KeysSettings({
   }
   const done = (name: string, note?: string) => {
     setForm(null);
+    // A key for apps went to This workspace, whichever tab the form was opened on: shown there.
+    if (canvaOf(name) || info?.providers.find((x) => x.name === name)?.forApps) setTab("workspace");
     setSaved(note ?? (shared ? `${name} saved for this workspace.` : `${name} saved to your Orgo vault.`));
     setTimeout(() => setSaved(null), note ? 6000 : 2500);
   };
@@ -380,7 +409,7 @@ export function KeysSettings({
     );
   else if (!info.signedIn) body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
   else if (!holds) body = <span data-no-keys className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{NO_KEYS_LINE}</span>;
-  else if (!shown.length && !form)
+  else if (!shown.length && !sets.length && !form)
     body = (
       <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">
         {saved ?? (scope === "workspace" ? "No keys for this workspace yet." : shared ? "The owner has no keys for all their workspaces." : "No keys yet. Add one for Stripe, OpenAI, GitHub and more.")}
@@ -396,7 +425,7 @@ export function KeysSettings({
               k={k}
               state={state}
               picked={open === keyId(k)}
-              onPick={onPick && (() => onPick(k))}
+              onPick={onPick && !k.forApps ? () => onPick(k) : undefined}
               team={team}
               used={shared ? null : usedLine(uses?.[k.name], team)}
               onReplace={() => setForm({ replace: k, bots: [] })}
@@ -410,8 +439,33 @@ export function KeysSettings({
             {form?.replace?.name === k.name && form.replace.scope === k.scope && <AddKey info={info} team={team} replace={k} scope={k.scope} shared={shared} bots={[]} first={false} onSaved={done} onCancel={() => setForm(null)} />}
           </Fragment>
         ))}
-        {form?.replace ? null : form ? (
-          <AddKey info={info} team={team} scope={addScope} shared={shared} bots={form.bots} first={!shown.length} onSaved={done} onCancel={() => setForm(null)} />
+        {sets.length > 0 && (
+          <div data-canva-apps className={`flex flex-col ${shown.length ? "pt-3" : ""}`}>
+            <div className="flex items-end justify-between gap-3 pb-1">
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-[13.5px] font-semibold leading-[18px]">Canva apps</span>
+                <span className="text-[12px] leading-4 text-[#6B6B6B]">One for each client, made in that client&apos;s Canva. Your apps use them, never bots.</span>
+              </span>
+              {!form && (
+                <button onClick={() => setForm({ bots: [], start: CANVA_PICK })} className={`${btn} shrink-0 bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+                  Add a client
+                </button>
+              )}
+            </div>
+            {sets.map((set) => (
+              <CanvaSet
+                key={set.client}
+                set={set}
+                state={state}
+                team={team}
+                onReplace={() => setForm({ canva: set.client, bots: [] })}
+                form={form?.canva === set.client && <CanvaForm info={info} client={set.client} first={false} onSaved={done} onCancel={() => setForm(null)} />}
+              />
+            ))}
+          </div>
+        )}
+        {form?.replace || form?.canva ? null : form ? (
+          <AddKey info={info} team={team} scope={addScope} shared={shared} bots={form.bots} start={form.start} first={!shown.length && !sets.length} onSaved={done} onCancel={() => setForm(null)} />
         ) : (
           saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>
         )}
@@ -463,7 +517,7 @@ export function KeysSettings({
               className={`rounded-full px-3 py-1 text-[12.5px] font-medium leading-4 ${scope === x.id ? "bg-white text-ink shadow-[0_0_0_1px_#E6E6E3]" : "text-[#6B6B6B] hover:text-ink"}`}
             >
               {x.label}
-              <span className="pl-1 font-normal tabular-nums text-[#9A9A98]">{info.keys.filter((k) => k.scope === x.id).length}</span>
+              <span className="pl-1 font-normal tabular-nums text-[#9A9A98]">{rowsIn(x.id)}</span>
             </button>
           ))}
         </div>
@@ -511,6 +565,7 @@ function KeyLine({
   switchesOff,
   onRemoved,
   onBusy,
+  inSet,
 }: {
   k: KeyRow;
   state: AppState;
@@ -532,6 +587,8 @@ function KeyLine({
   onRemoved?: () => void;
   /** Told while one of its writes (a bot's switch, a remove) is on its way: a key card's Done waits for it. */
   onBusy?: (busy: boolean) => void;
+  /** One of a client's Canva pair (CanvaSet): replaced and removed with the pair, there. */
+  inSet?: boolean;
 }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -576,7 +633,7 @@ function KeyLine({
   const sendFailed = sends.at(-1)?.state === "failed" ? sends.at(-1) : undefined;
   const sendWaits = sends.some((x) => x.state === "waiting");
   return (
-    <div data-key={keyId(k)} className={`flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0 ${picked ? "-mx-2 rounded-xl px-2 shadow-[0_0_0_1.5px_#0A0A0A]" : ""}`}>
+    <div data-key={keyId(k)} className={`flex flex-col gap-1.5 ${inSet ? "py-1.5" : "border-b border-[#F0F0EE] py-3 first:pt-0"} ${picked ? "-mx-2 rounded-xl px-2 shadow-[0_0_0_1.5px_#0A0A0A]" : ""}`}>
       <div className="flex items-center gap-2">
         {/* Where focus goes when the last of its routines is deleted (autopilot.tsx, focusAfterRemove). */}
         {onPick ? (
@@ -634,12 +691,16 @@ function KeyLine({
               </button>
             </span>
           )}
-          <button type="button" disabled={busy} onClick={onReplace} aria-label="Replace key" data-tip="Replace key" className={rowIconBtn}>
-            <PencilIcon />
-          </button>
-          <button type="button" disabled={busy} onClick={() => setSure(true)} aria-label="Remove key" data-tip="Remove key" className={rowTrashBtn}>
-            <TrashIcon />
-          </button>
+          {!inSet && (
+            <>
+              <button type="button" disabled={busy} onClick={onReplace} aria-label="Replace key" data-tip="Replace key" className={rowIconBtn}>
+                <PencilIcon />
+              </button>
+              <button type="button" disabled={busy} onClick={() => setSure(true)} aria-label="Remove key" data-tip="Remove key" className={rowTrashBtn}>
+                <TrashIcon />
+              </button>
+            </>
+          )}
         </div>
       </div>
       {v.shown !== null && (
@@ -650,7 +711,8 @@ function KeyLine({
           <span className="text-[11.5px] leading-4 text-[#9A9A98]">Hides in 30 seconds, or when you leave the window.</span>
         </div>
       )}
-      {!!team.length && (
+      {k.forApps && !inSet && <span className="text-[12px] leading-4 text-[#9A9A98]">{FOR_APPS_LINE}</span>}
+      {!!team.length && !k.forApps && (
         <div className="flex items-center gap-2">
           {/* The owner's own key: only the bots using it are offered, to stop them (OWNERS_KEY_LINE); none is added. */}
           <div data-tip={owners ? OWNERS_KEY_LINE : undefined} className="min-w-0 flex-1">
@@ -725,6 +787,7 @@ function AddKey({
   onSaved,
   onCancel,
   service,
+  start,
   cancelLabel = "Cancel",
 }: {
   info: KeysInfo;
@@ -738,19 +801,27 @@ function AddKey({
   onSaved: (name: string, note?: string) => void;
   onCancel: () => void;
   service?: string;
+  /** The service it opens on (Canva's apps' Add a client: CANVA_PICK). */
+  start?: string;
   cancelLabel?: string;
 }) {
-  // Every name Orgo can call. A service with two (Stripe) shows each one's name.
-  const services = info.providers;
+  // Every name Orgo can call, and the keys for apps where this workspace has its own Orgo workspace: those are This
+  // workspace's whichever tab is open, since an app takes no other. A service with two (Stripe) shows each one's name.
+  const services = info.providers.filter((x) => !x.forApps || !!info.workspaceKeys);
+  // A client's Canva app, a pair of keys on its own form.
+  const canva = !!info.workspaceKeys && !replace && !service;
+  const scopeOf = (x: { forApps?: boolean }): Scope => (x.forApps ? "workspace" : scope);
   const twice = (label: string) => services.filter((x) => x.label === label).length > 1;
   const inScope = info.keys.filter((k) => k.scope === scope);
-  const [pick, setPick] = useState(replace?.name ?? service ?? services.find((p) => !inScope.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
+  const [pick, setPick] = useState(replace?.name ?? service ?? start ?? services.find((p) => !inScope.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
   const [value, setValue] = useState("");
   const [bots, setBots] = useState(startBots);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const name = replace?.name ?? pick;
   const p = info.providers.find((x) => x.name === name);
+  // Where it's saved: the tab looked at, or This workspace for a key for apps.
+  const saveScope = p ? scopeOf(p) : scope;
   // The service the key pasted says it's for (serviceOfKey), and the one that last picked it: a hand pick after stands.
   const names = services.map((x) => x.name);
   const found = value ? serviceOfKey(value, names, pick) : null;
@@ -765,14 +836,14 @@ function AddKey({
     }
     lastFound.current = f;
   };
-  const isSaved = !replace && inScope.some((k) => k.name === name);
+  const isSaved = !replace && info.keys.some((k) => k.name === name && k.scope === saveScope);
   const canSave = !!p && !!value.trim() && !busy;
   const save = async () => {
     if (!canSave || !p) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await post("/api/keys", { name, value, botIds: replace ? [] : bots, scope });
+      const res = await post("/api/keys", { name, value, botIds: replace || p.forApps ? [] : bots, scope: saveScope });
       const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; note?: string };
       if (!res.ok || !j.ok) return setError(undash(j.error ?? "That didn't save. Try again."));
       setValue("");
@@ -784,6 +855,40 @@ function AddKey({
       setBusy(false);
     }
   };
+  // The service to pick, with its name in the vault: Add a key's, and Canva's form's when it's picked there.
+  const pickRow = (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="relative flex">
+        <select
+          aria-label="Service"
+          value={pick}
+          onChange={(e) => {
+            setPick(e.target.value);
+            setError(null);
+          }}
+          className="h-8 appearance-none rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+        >
+          {services.map((s) => (
+            <option key={s.name} value={s.name}>
+              {s.label}
+              {twice(s.label) ? ` (${s.name})` : ""}
+              {info.keys.some((k) => k.name === s.name && k.scope === scopeOf(s)) ? " (saved)" : ""}
+            </option>
+          ))}
+          {canva && <option value={CANVA_PICK}>Canva, a client&apos;s app</option>}
+        </select>
+        <svg width="10" height="10" viewBox="0 0 12 12" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" aria-hidden>
+          <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </span>
+      {pick !== CANVA_PICK && (
+        <span data-tip="Its name in your Orgo vault" className="font-mono text-[11.5px] text-[#6B6B6B]">
+          {name}
+        </span>
+      )}
+    </div>
+  );
+  if (canva && pick === CANVA_PICK) return <CanvaForm info={info} first={first} head={pickRow} onSaved={onSaved} onCancel={onCancel} />;
   const field = "h-8 rounded-full bg-[#F7F7F6] px-3 text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]";
   return (
     <form
@@ -806,40 +911,18 @@ function AddKey({
           New value for <span className="font-mono text-[12.5px] font-medium">{replace.name}</span>
         </span>
       ) : service ? null : (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="relative flex">
-            <select
-              aria-label="Service"
-              value={pick}
-              onChange={(e) => {
-                setPick(e.target.value);
-                setError(null);
-              }}
-              className="h-8 appearance-none rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
-            >
-              {services.map((s) => (
-                <option key={s.name} value={s.name}>
-                  {s.label}
-                  {twice(s.label) ? ` (${s.name})` : ""}
-                  {inScope.some((k) => k.name === s.name) ? " (saved)" : ""}
-                </option>
-              ))}
-            </select>
-            <svg width="10" height="10" viewBox="0 0 12 12" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" aria-hidden>
-              <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </span>
-          <span data-tip="Its name in your Orgo vault" className="font-mono text-[11.5px] text-[#6B6B6B]">
-            {name}
-          </span>
-        </div>
+        pickRow
       )}
       {p ? (
         <span className="text-[12px] leading-[17px] text-[#3A3A38]">
           {p.tip}
           {p.readOnly ? ` Orgo lets bots only read from ${p.label}.` : ""} <span className="text-[#9A9A98]">Get one in {p.where}.</span>
           {isSaved && <span className="text-[#9A9A98]"> {shared ? "Saving replaces the one this workspace has." : "Saving replaces the one in your vault."}</span>}
-          {info.workspaceKeys && <span className="text-[#9A9A98]"> {scope === "workspace" ? "For this workspace only." : "For all your workspaces."}</span>}
+          {p.forApps ? (
+            <span className="text-[#9A9A98]"> For this workspace&apos;s apps. Bots can&apos;t use it.</span>
+          ) : (
+            info.workspaceKeys && <span className="text-[#9A9A98]"> {scope === "workspace" ? "For this workspace only." : "For all your workspaces."}</span>
+          )}
           {ORGO_USES[p.name] && !shared && <span className="text-[#9A9A98]"> Orgo computers that use your {ORGO_USES[p.name]} key use this one too.</span>}
         </span>
       ) : null}
@@ -860,7 +943,7 @@ function AddKey({
           This key looks like {looksLike.label}&apos;s.
         </span>
       )}
-      {!replace && !!team.length && (
+      {!replace && !p?.forApps && !!team.length && (
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="pr-0.5 text-[12px] leading-4 text-[#9A9A98]">Bots that may use it</span>
           {team.map((b) => {
@@ -875,6 +958,194 @@ function AddKey({
         </button>
         <button type="button" disabled={busy} onClick={onCancel} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
           {cancelLabel}
+        </button>
+        {error && (
+          <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
+            {error}
+          </span>
+        )}
+      </div>
+    </form>
+  );
+}
+
+/* ---------------- A client's Canva app ---------------- */
+
+/**
+ * One client's Canva app on the Keys page: the client's name, its client ID and secret (KeyLine: Show and Copy, through
+ * reveal as any key's), a new ID or secret (`onReplace`, its form under it), and Remove for the pair. Never a bot's.
+ */
+function CanvaSet({ set, state, team, form, onReplace }: { set: { client: string; keys: KeyRow[] }; state: AppState; team: Bot[]; form: React.ReactNode; onReplace: () => void }) {
+  const [sure, setSure] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const label = canvaLabel(set.client);
+  // Half a pair (a save that stopped part way, or one removed in Orgo): what it still needs.
+  const needs = set.keys.length === 1 ? (canvaOf(set.keys[0].name)?.part === "id" ? "secret" : "client ID") : null;
+  const remove = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      for (const k of set.keys) {
+        const res = await post(`/api/keys/${encodeURIComponent(k.name)}?scope=workspace`, {}, "DELETE");
+        if (!res.ok) return setError(undash(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "That didn't remove it. Try again."));
+      }
+      setSure(false);
+    } catch {
+      setError("Couldn't reach Bops. Try again.");
+    } finally {
+      setBusy(false);
+      keysChanged();
+    }
+  };
+  return (
+    <div data-canva-client={set.client} className="flex flex-col border-b border-[#F0F0EE] py-3 last:border-0 last:pb-0">
+      <div className="flex items-center gap-2">
+        <span data-canva-label className="min-w-0 truncate text-[13.5px] font-semibold leading-[18px]">
+          {label}
+        </span>
+        {needs && <span className="shrink-0 text-[12px] leading-4 text-[#B54708]">Needs its {needs}</span>}
+        <span className="flex-1" />
+        <button type="button" disabled={busy} onClick={onReplace} aria-label={`Replace ${label}'s Canva app`} data-tip="New client ID or secret" className={rowIconBtn}>
+          <PencilIcon />
+        </button>
+        <button type="button" disabled={busy} onClick={() => setSure(true)} aria-label={`Remove ${label}'s Canva app`} data-tip="Remove" className={rowTrashBtn}>
+          <TrashIcon />
+        </button>
+      </div>
+      <div className="flex flex-col pl-3">
+        {set.keys.map((k) => (
+          <KeyLine key={k.name} k={k} state={state} team={team} used={null} onReplace={onReplace} anchorRef={() => {}} inSet />
+        ))}
+      </div>
+      {form}
+      {sure && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
+          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">Remove {label}&apos;s Canva app from this workspace? Its client ID and secret are gone from Orgo too, and apps that use them stop getting them.</span>
+          <button disabled={busy} onClick={() => void remove()} className={`${btn} bg-[#B42318] text-white`}>
+            {busy ? "Removing…" : "Remove"}
+          </button>
+          <button disabled={busy} onClick={() => setSure(false)} className={`${btn} bg-white hover:bg-[#F7F7F6]`}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {error && (
+        <span role="alert" className="pt-1 text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A client's Canva app (lib/canva-keys.ts): the client's name, its client ID and its client secret, saved as This workspace's
+ * pair of keys named by the client, each the way any key is saved (POST /api/keys), to no bot. `client`: a new ID or secret
+ * for one saved, where an empty field keeps what's there. `head`: Add a key's service pick, to go to another service.
+ * The values live in the fields until Orgo has them.
+ */
+function CanvaForm({ info, client, first, head, onSaved, onCancel }: { info: KeysInfo; client?: string; first: boolean; head?: React.ReactNode; onSaved: (name: string, note?: string) => void; onCancel: () => void }) {
+  const [label, setLabel] = useState("");
+  const [id, setId] = useState("");
+  const [secret, setSecret] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const who = client ?? canvaClient(label);
+  const names = canvaNames(who);
+  const fits = canvaClientOk(who);
+  const canSave = !busy && (client ? !!(id.trim() || secret.trim()) : !!(label.trim() && id.trim() && secret.trim()));
+  const save = async () => {
+    if (!canSave) return;
+    if (!who) return setError("Give the client a name with a letter or a digit.");
+    if (!fits) return setError(`Give the client a shorter name, at most ${CANVA_CLIENT_MAX} letters and digits.`);
+    if (!client && info.keys.some((k) => k.scope === "workspace" && canvaOf(k.name)?.client === who)) return setError(`${canvaLabel(who)} has a Canva app here already. Change it from its row instead.`);
+    setBusy(true);
+    setError(null);
+    let saved = 0;
+    try {
+      for (const [name, value, clear] of [
+        [names.id, id, setId],
+        [names.secret, secret, setSecret],
+      ] as const) {
+        if (!value.trim()) continue;
+        const res = await post("/api/keys", { name, value, botIds: [], scope: "workspace" });
+        const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+        if (!res.ok || !j.ok) {
+          const why = undash(j.error ?? "That didn't save. Try again.");
+          return setError(saved ? `The client ID saved, but the secret didn't. ${why}` : why);
+        }
+        saved++;
+        clear("");
+      }
+      onSaved(names.id, `${canvaLabel(who)}'s Canva app saved for this workspace.`);
+    } catch {
+      setError("Couldn't reach Bops. Try again.");
+    } finally {
+      setBusy(false);
+      if (saved) keysChanged();
+    }
+  };
+  const field = "h-8 w-full rounded-full bg-[#F7F7F6] px-3 text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]";
+  return (
+    <form
+      data-canva-form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+      onKeyDown={(e) => {
+        // Closes the form, and keeps the Vault open (the app's Esc would close it).
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          onCancel();
+        }
+      }}
+      className={`flex flex-col gap-2.5 ${first ? "" : client ? "mt-2 rounded-[12px] bg-[#FCFCFB] p-3 shadow-[0_0_0_1px_#ECECEA]" : "mt-3 rounded-[12px] bg-[#FCFCFB] p-3 shadow-[0_0_0_1px_#ECECEA]"}`}
+    >
+      {client ? (
+        <span className="text-[13px] leading-[18px]">
+          New client ID or secret for <span className="font-medium">{canvaLabel(client)}</span>. Leave one empty to keep it.
+        </span>
+      ) : (
+        head
+      )}
+      <span className="text-[12px] leading-[17px] text-[#3A3A38]">
+        Someone in the client&apos;s own Canva makes the app and gives you its client ID and secret, so what your apps post there is theirs.{" "}
+        <span className="text-[#9A9A98]">Get them in canva.com/developers, Your integrations, the app, Configuration. For this workspace&apos;s apps. Bots can&apos;t use them.</span>
+      </span>
+      {!client && (
+        <div className="flex flex-col gap-1">
+          <input
+            type="text"
+            value={label}
+            onChange={(e) => {
+              setLabel(e.target.value);
+              setError(null);
+            }}
+            placeholder="The client's name, as in Acme"
+            aria-label="Client"
+            autoComplete="off"
+            spellCheck={false}
+            autoFocus
+            className={field}
+          />
+          {who && fits && (
+            <span data-canva-names className="px-1 text-[11.5px] leading-4 text-[#6B6B6B]">
+              Saved as <span className="font-mono">{names.id}</span> and <span className="font-mono">{names.secret}</span>, the names its apps link to.
+            </span>
+          )}
+        </div>
+      )}
+      <input type="text" value={id} onChange={(e) => setId(e.target.value)} placeholder={client ? "New client ID" : "Paste the client ID"} aria-label="Client ID" autoComplete="off" spellCheck={false} className={`${field} font-mono text-[12.5px]`} />
+      <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder={client ? "New client secret" : "Paste the client secret"} aria-label="Client secret" autoComplete="off" spellCheck={false} className={`${field} font-mono text-[12.5px]`} />
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="submit" disabled={!canSave} className={`${btn} bg-ink text-white disabled:opacity-40`}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button type="button" disabled={busy} onClick={onCancel} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          Cancel
         </button>
         {error && (
           <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
@@ -1065,7 +1336,8 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
   const { info, failed, retry } = useKeys(workspaceOf(b));
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const keys = botKeyRows(info?.keys ?? []);
+  // Keys for apps are never a bot's.
+  const keys = botKeyRows((info?.keys ?? []).filter((k) => !k.forApps));
   // A key this bot uses with starter routines (Stripe, Plain) offers them on its row, and by itself right after it's saved for this bot.
   const routinesOn = (name: string) => !state.shared && hasTemplates(name) && !!b.keys?.includes(name);
   const anchors = useRef(new Map<string, HTMLElement>());

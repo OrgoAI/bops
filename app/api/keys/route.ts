@@ -1,4 +1,4 @@
-import { KEY_PROVIDERS, KeysError, grantKey, keyGrants, keyHomes, keysOf, keysProject, listKeys, saveKey } from "@/lib/server/keys";
+import { KeysError, grantKey, keyGrants, keyHomes, keyShown, keysOf, keysProject, listKeys, providersShown, saveKey } from "@/lib/server/keys";
 import { notReady } from "@/lib/server/ready";
 import { sharedOpen } from "@/lib/server/shared";
 import { sharedGrant, sharedKeysList, sharedSave } from "@/lib/server/shared-keys";
@@ -17,8 +17,8 @@ const failed = (e: unknown) => Response.json({ error: (e as Error).message }, { 
 const scopeOf = (v: unknown) => (v === "workspace" ? "workspace" : "all");
 
 /**
- * The services Bops can call, the keys set in the user's Orgo vault that the current workspace sees (names
- * only: the account's, scope "all", and its own, scope "workspace") and which bots may use each.
+ * The services Bops can call and those only apps use (`forApps`), the keys set in the user's Orgo vault that the current
+ * workspace sees (names only: the account's, scope "all", and its own, scope "workspace") and which bots may use each.
  * `workspaceKeys`: whether this workspace can have keys of its own (it has its own Orgo workspace).
  *
  * In a workspace shared with the user (lib/server/shared-keys.ts): its own keys as orgo-web lists them, then the owner's,
@@ -28,7 +28,7 @@ const scopeOf = (v: unknown) => (v === "workspace" ? "workspace" : "all");
 export async function GET(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
-  const providers = KEY_PROVIDERS.map(({ name, label, where, tip, readOnly }) => ({ name, label, where, tip, readOnly: !!readOnly }));
+  const providers = providersShown();
   if (sharedOpen()) {
     try {
       const r = await sharedKeysList();
@@ -47,7 +47,7 @@ export async function GET(request: Request) {
     const keys = keysOf(all).map((k) => {
       const h = homes.find((x) => x.name === k.name && x.project === k.workspaceId);
       return {
-        ...providers.find((p) => p.name === k.name)!,
+        ...keyShown(k.name)!,
         updatedAt: k.updatedAt,
         scope: k.workspaceId ? "workspace" : "all",
         bots: grants[k.name] ?? [],

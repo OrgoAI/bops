@@ -1,5 +1,6 @@
 import "server-only";
 import type { SharedKey } from "@/cloud/protocol";
+import { canvaOf } from "@/lib/canva-keys";
 import { sameApp } from "@/lib/routine-catalog";
 import { keyLoginKey, MAIN_WORKSPACE, switchedOn, workspaceOf, type AccessUse, type Bot } from "@/lib/types";
 import { accessChanged, forMember, logUse, viaOf, type UseWhere } from "./access-sync";
@@ -78,6 +79,50 @@ export const KEY_PROVIDERS: KeyProvider[] = [
 ];
 
 export const keyProvider = (name: string) => KEY_PROVIDERS.find((p) => p.name === name);
+
+/**
+ * A key only apps use (Your Apps' links to Keys, lib/server/app-keys.ts): Orgo's broker has no address for it (orgo-web
+ * lib/vault/providers.ts), so it's never a bot's: not given, listed in call_api or ask_for_key, nor called. It's This
+ * workspace's only, since an app takes no other.
+ */
+export type AppKeyProvider = { name: string; label: string; where: string; tip: string };
+
+export const APP_KEY_PROVIDERS: AppKeyProvider[] = [
+  { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers, Your apps, your app, Keys", tip: "Paste the app's Access Key. Its Secret key stays with you." },
+  { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com, Account, Developer", tip: "Your apps read map styles with it. Make one for them alone." },
+];
+
+/** A client's Canva app (lib/canva-keys.ts), its client ID or its secret: a pair for each client, added on its own form. */
+function canvaKey(name: string): AppKeyProvider | undefined {
+  const c = canvaOf(name);
+  if (!c) return undefined;
+  const where = "canva.com/developers, Your integrations, the client's integration, Configuration";
+  return c.part === "id"
+    ? { name, label: "Canva", where, tip: "Made by someone in the client's own Canva workspace, so what your apps post there is theirs." }
+    : { name, label: "Canva", where, tip: "Canva shows a secret once, when it's made. Make a new one there to replace it." };
+}
+
+/** A key only apps use, by its vault name; undefined for one bots call, or any other. */
+export const appKeyProvider = (name: string) => APP_KEY_PROVIDERS.find((p) => p.name === name) ?? canvaKey(name);
+
+/** What the Keys page shows of a key it lists: one bots call (KEY_PROVIDERS), or one only apps use (`forApps`). Never a value. */
+export type KeyShown = { name: string; label: string; where: string; tip: string; readOnly: boolean; forApps?: true };
+
+/** A key Keys lists, by its vault name; undefined for any other secret in the vault. */
+export function keyShown(name: string): KeyShown | undefined {
+  const p = keyProvider(name);
+  if (p) return { name: p.name, label: p.label, where: p.where, tip: p.tip, readOnly: !!p.readOnly };
+  const a = appKeyProvider(name);
+  return a && { name: a.name, label: a.label, where: a.where, tip: a.tip, readOnly: false, forApps: true };
+}
+
+/** The services the Keys page's form offers, by name: a client's Canva pair has a form of its own. */
+export const providersShown = () => [...KEY_PROVIDERS, ...APP_KEY_PROVIDERS].map((p) => keyShown(p.name)!);
+
+/** Why a key for apps isn't a bot's, in the window's words. */
+export const forAppsOnly = (label: string) => `${label} is for apps only: bots can't use its key.`;
+/** A key for apps saved for all workspaces: refused, since an app takes This workspace's keys alone. */
+export const APP_KEY_SCOPE = "A key for apps goes under This workspace: apps use only This workspace's keys.";
 
 /** A vault name the way orgo-web saves it: "stripe-secret-key" is STRIPE_SECRET_KEY. */
 export const keyName = (name: string) => name.trim().toUpperCase().replace(/-/g, "_");
@@ -182,7 +227,7 @@ export async function listKeys({ fresh = false } = {}): Promise<VaultKey[]> {
   const { json } = await vault<{ secrets?: { name?: unknown; workspace_id?: unknown; updated_at?: unknown }[] }>("GET", "/api/secrets");
   const ours = new Set((getState().workspaces ?? []).map((w) => w.orgoProjectId).filter(Boolean));
   const keys = (json.secrets ?? [])
-    .filter((s) => typeof s.name === "string" && keyProvider(s.name) && (!s.workspace_id || (typeof s.workspace_id === "string" && ours.has(s.workspace_id))))
+    .filter((s) => typeof s.name === "string" && keyShown(s.name) && (!s.workspace_id || (typeof s.workspace_id === "string" && ours.has(s.workspace_id))))
     .map((s) => ({ name: s.name as string, updatedAt: typeof s.updated_at === "string" ? s.updated_at : null, workspaceId: typeof s.workspace_id === "string" ? s.workspace_id : null }));
   g.bopsKeys = { at: Date.now(), keys, who };
   // What people with Keys see of them: said from each read of the vault.
@@ -284,24 +329,29 @@ function scopeProject(scope: KeyScope, wsId?: string): string | null {
 
 /**
  * Save a key to the vault (the same name in the same scope replaces it), and let `botIds` use it: for all
- * workspaces, or for this one only (`scope`). The value goes to Orgo and nowhere else.
+ * workspaces, or for this one only (`scope`). The value goes to Orgo and nowhere else. A key only apps use is This
+ * workspace's, and no bot's.
  */
 export async function saveKey(name: string, value: string, botIds: string[] = [], scope: KeyScope = "all", wsId?: string) {
   const n = keyName(name);
-  if (!keyProvider(n)) throw new KeysError("Bops can't call that service yet. Pick one from the list.", 400);
+  const shown = keyShown(n);
+  if (!shown) throw new KeysError("Bops can't call that service yet. Pick one from the list.", 400);
   const v = value.trim();
   if (!v) throw new KeysError("Paste the key first.", 400);
   if (v.length > 8192) throw new KeysError("That key is too long.", 400);
+  if (shown.forApps && scope !== "workspace") throw new KeysError(APP_KEY_SCOPE, 400);
   const project = scopeProject(scope, wsId);
   // This workspace's bots had the service already (a key by any of its names, account wide or this
-  // workspace's), or the vault can't say: a key replaced, so nothing is offered for it.
-  const existed = await listKeys()
-    .then((all) => keysOf(all, wsId).some((k) => sameApp(k.name, n)))
-    .catch(() => true);
+  // workspace's), or the vault can't say: a key replaced, so nothing is offered for it. A key for apps offers bots nothing.
+  const existed =
+    shown.forApps ||
+    (await listKeys()
+      .then((all) => keysOf(all, wsId).some((k) => sameApp(k.name, n)))
+      .catch(() => true));
   await vault("POST", "/api/secrets", { name: n, value: v, ...(project ? { workspace_id: project } : {}) });
   forget();
   accessChanged();
-  for (const botId of botIds) grantKey(n, botId, true);
+  if (!shown.forApps) for (const botId of botIds) grantKey(n, botId, true);
   // A new key a bot was given: that bot is offered the service's starter routines (Stripe, Plain).
   if (!existed && botIds.length) await import("./routine-suggestions").then((m) => m.offerStarters(n, botIds)).catch(() => {});
   return n;
@@ -313,7 +363,7 @@ export async function saveKey(name: string, value: string, botIds: string[] = []
  */
 export async function removeKey(name: string, scope: KeyScope = "all", wsId?: string) {
   const n = keyName(name);
-  if (!keyProvider(n)) throw new KeysError("No such key.", 404);
+  if (!keyShown(n)) throw new KeysError("No such key.", 404);
   const project = scopeProject(scope, wsId);
   await vault("DELETE", `/api/secrets/${encodeURIComponent(n)}${project ? `?workspace_id=${encodeURIComponent(project)}` : ""}`);
   forget();
@@ -340,7 +390,7 @@ export async function removeKey(name: string, scope: KeyScope = "all", wsId?: st
  */
 export async function revealKey(name: string, scope: KeyScope = "all", wsId?: string): Promise<{ name: string; value: string }> {
   const n = keyName(name);
-  if (!keyProvider(n)) throw new KeysError("No such key.", 404);
+  if (!keyShown(n)) throw new KeysError("No such key.", 404);
   const project = scopeProject(scope, wsId);
   try {
     const { json } = await vault<{ value?: unknown }>("POST", "/api/secrets/reveal", { name: n, ...(project ? { workspace_id: project } : {}) });
@@ -360,6 +410,8 @@ export async function revealKey(name: string, scope: KeyScope = "all", wsId?: st
 /** Let a bot use a key, or stop it (Bot.keys). */
 export function grantKey(name: string, botId: string, allowed: boolean) {
   const n = keyName(name);
+  const forApps = appKeyProvider(n);
+  if (forApps) throw new KeysError(forAppsOnly(forApps.label), 400);
   if (!keyProvider(n)) throw new KeysError("No such key.", 404);
   if (!bot(botId)) throw new KeysError("No such bot.", 404);
   update(() => {
@@ -506,6 +558,9 @@ export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, op
   const used = (action: string, outcome: AccessUse["outcome"], approvedBy?: AccessUse["approvedBy"]) =>
     logUse({ bot: b.id, kind: "key", target: name, targetName: name, action, ...viaOf(where), outcome, ...(approvedBy ? { approvedBy } : {}) });
   const tried = () => `${String(a.method ?? "").toUpperCase()} ${String(a.path ?? "").trim().split("?")[0]}`.trim();
+  // A key only apps use: Orgo's broker has no address for it, whoever has it.
+  const forApps = !p && appKeyProvider(name);
+  if (forApps) return { text: `Bops can't call ${forApps.label} for you: its key is for ${owner}'s apps only. Say so plainly.` };
   if (!p || !b.keys?.includes(name)) {
     if (p) used(tried(), "refused");
     return { text: `You may not use ${name || "that key"}. ${owner} can let you in Keys.` };
@@ -619,6 +674,8 @@ export async function askForKey(botId: string, a: { service?: unknown; reason?: 
   const owner = ownerName();
   const name = keyName(String(a.service ?? ""));
   const p = keyProvider(name);
+  const forApps = !p && appKeyProvider(name);
+  if (forApps) return { text: `${forApps.label}'s key is for ${owner}'s apps only: Bops can't call it for you. Say so plainly, and never ask for it in a message.` };
   if (!p) return { text: `Bops can't call ${String(a.service ?? "").trim() || "that service"} yet: only ${[...new Set(KEY_PROVIDERS.map((k) => k.label))].join(", ")}. Say so plainly, and never ask for its key in a message.` };
   const change = a.change === true;
   const here = async () => {
