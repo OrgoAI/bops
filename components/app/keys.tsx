@@ -124,6 +124,7 @@ function useKeys(ws: string) {
   if (readFor !== ws) {
     setReadFor(ws);
     setInfo(null);
+    setFailed(null);
   }
   const now = useRef(ws);
   useEffect(() => {
@@ -140,7 +141,9 @@ function useKeys(ws: string) {
           setFailed(null);
         } else setFailed(undash(j.error ?? "Couldn't read your keys."));
       })
-      .catch(() => setFailed("Couldn't reach Bops."));
+      .catch(() => {
+        if (asked === now.current) setFailed("Couldn't reach Bops.");
+      });
   }, []);
   useEffect(() => {
     read();
@@ -839,8 +842,7 @@ function AddKey({
   const canva = !!info.workspaceKeys && !replace && !service;
   const scopeOf = (x: { forApps?: boolean }): Scope => (x.forApps ? "workspace" : scope);
   const twice = (label: string) => services.filter((x) => x.label === label).length > 1;
-  const inScope = info.keys.filter((k) => k.scope === scope);
-  const [pick, setPick] = useState(replace?.name ?? service ?? start ?? services.find((p) => !inScope.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
+  const [pick, setPick] = useState(replace?.name ?? service ?? start ?? services.find((p) => !info.keys.some((k) => k.name === p.name && k.scope === scopeOf(p)))?.name ?? services[0]?.name ?? "");
   const [value, setValue] = useState("");
   const [bots, setBots] = useState(startBots);
   const [busy, setBusy] = useState(false);
@@ -1089,7 +1091,7 @@ function CanvaForm({ info, ws, client, first, head, onSaved, onCancel }: { info:
   const save = async () => {
     if (!canSave) return;
     if (!who) return setError("Give the client a name with a letter or a digit.");
-    if (!fits) return setError(`Give the client a shorter name, at most ${CANVA_CLIENT_MAX} letters and digits.`);
+    if (!fits) return setError(`Give the client a shorter name: at most ${CANVA_CLIENT_MAX} characters, a space between words counting as one.`);
     // A client with any of its pair here already is changed from its row, unless it's this form's own save that stopped part way.
     const mine = kept[names.id] !== undefined || kept[names.secret] !== undefined;
     if (!client && !mine && info.keys.some((k) => k.scope === "workspace" && canvaOf(k.name)?.client === who)) return setError(`${canvaLabel(who)} has a Canva app here already. Change it from its row instead.`);

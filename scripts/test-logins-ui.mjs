@@ -77,9 +77,10 @@ globalThis.fetch = async (url, init = {}) => {
   if (method === "GET") {
     if (u.startsWith("/api/keys") && bops.late) {
       // A list asked for before a switch, answered after: what it says then is the old workspace's.
-      const { until, keys } = bops.late;
+      const { until, keys, fail } = bops.late;
       bops.late = null;
       await until;
+      if (fail) throw new TypeError("Failed to fetch");
       return json({ signedIn: true, keys, providers: bops.providers, workspaceKeys: true, ...bops.keysInfo });
     }
     if (u.startsWith("/api/keys")) return json({ signedIn: true, keys: bops.keys, providers: bops.providers, workspaceKeys: true, ...bops.keysInfo });
@@ -704,6 +705,17 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     assert.equal(form.querySelector('[role="alert"]').textContent, "Gamma Test has a Canva app here already. Change it from its row instead.");
     await click(buttonOf(form, "Cancel"));
     assert.match(page.querySelector('[data-canva-client="GAMMA_TEST"]').textContent, /Needs its secret/);
+    // A client's name too long for its keys' names (64 characters): said, with how it's counted, and nothing sent.
+    await click(buttonOf(page.querySelector("[data-canva-apps]"), "Add a client"));
+    form = page.querySelector("form[data-canva-form]");
+    await input(form.querySelector('input[aria-label="Client"]'), "Northern Lights ".repeat(3));
+    await input(form.querySelector('input[aria-label="Client ID"]'), "test-client-id-4");
+    await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-long-0007");
+    n = bops.sent.length;
+    await submit(form);
+    assert.deepEqual(posted(n), []);
+    assert.equal(form.querySelector('[role="alert"]').textContent, "Give the client a shorter name: at most 43 characters, a space between words counting as one.");
+    await click(buttonOf(form, "Cancel"));
     // Unsplash: a key for apps, no bot switches, no side panel; a new Snazzy Maps key goes to no bot.
     const un = page.querySelector('[data-key="workspace:UNSPLASH_ACCESS_KEY"]');
     assert.match(un.textContent, /For your apps\. Bots can't use it\./);
@@ -783,9 +795,44 @@ await test("Keys after a workspace switch: a form open for the last one closes, 
     assert.equal(page.querySelector('[data-key="workspace:GITHUB_TOKEN"]'), null, "never fernway's, answered late");
   } finally {
     bops.keys = [];
-    bops.providers = [];
     bops.late = null;
     await m2.done();
+  }
+  // Fernway's list failing after the switch to Northwind: Northwind's keys, with no word of it.
+  bops.late = { until: new Promise((r) => (answer = r)), keys: [], fail: true };
+  const m3 = await mount(settings(stateOf()));
+  try {
+    bops.keys = [row("STRIPE_SECRET_KEY", "workspace")];
+    await m3.rerender(settings(stateOf({ workspace: "ws_north" })));
+    await act(async () => {
+      answer();
+      await settle();
+    });
+    const page = m3.box.querySelector("[data-logins]");
+    assert.ok(page.querySelector('[data-key="workspace:STRIPE_SECRET_KEY"]'), "northwind's");
+    assert.ok(!page.textContent.includes("Couldn't reach Bops."), "fernway's failure isn't northwind's");
+  } finally {
+    bops.keys = [];
+    bops.late = null;
+    await m3.done();
+  }
+  // Fernway's list failed; on the switch to Northwind, while its own is on its way, that failure is gone.
+  bops.late = { until: Promise.resolve(), keys: [], fail: true };
+  const m4 = await mount(settings(stateOf()));
+  try {
+    assert.ok(m4.box.querySelector("[data-logins]").textContent.includes("Couldn't reach Bops."), "fernway's, said there");
+    bops.late = { until: new Promise((r) => (answer = r)), keys: [row("STRIPE_SECRET_KEY", "workspace")] };
+    await m4.rerender(settings(stateOf({ workspace: "ws_north" })));
+    assert.ok(!m4.box.querySelector("[data-logins]").textContent.includes("Couldn't reach Bops."), "not on northwind while it reads");
+    await act(async () => {
+      answer();
+      await settle();
+    });
+  } finally {
+    bops.keys = [];
+    bops.providers = [];
+    bops.late = null;
+    await m4.done();
   }
 });
 

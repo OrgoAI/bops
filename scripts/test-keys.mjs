@@ -1658,11 +1658,15 @@ await check("keys for apps are no bot's anywhere: not what people with Keys swit
     const [status, got] = await answered(await LoginsRoute.PATCH(req("PATCH", "/api/logins", { kind: "key", id: `${APP_PROJ}:UNSPLASH_ACCESS_KEY`, workspaceId: "ws_fern", on: true })));
     assert.deepEqual([status, got.error], [400, "A key for apps goes under This workspace: apps use only This workspace's keys."]);
     assert.equal(S.getState().workspaces.find((w) => w.id === "ws_fern").loginsOn, undefined);
-    // Switched on there all the same (a state from elsewhere): Fernway doesn't see it.
+    // Switched on there all the same (a state from elsewhere, switched on as Used in writes it): Fernway doesn't see a key
+    // for apps, and does see a bot's key of Main's switched on the same way (the control).
+    workspaceVault.set(inWorkspace(APP_PROJ, "LINEAR_API_KEY"), "lin_api_fake_main");
+    const withLinear = await Keys.listKeys({ fresh: true });
     const { keyLoginKey } = await import(`${root}/lib/types.ts`);
-    S.update((st) => void (st.workspaces.find((w) => w.id === "ws_fern").loginsOn = { [keyLoginKey(APP_PROJ, "UNSPLASH_ACCESS_KEY")]: true, [keyLoginKey(APP_PROJ, "CANVA_CLIENT_ID__ACME_TEST")]: true }));
-    assert.deepEqual(Keys.keysOf(all, "ws_fern").filter((k) => k.workspaceId === APP_PROJ).map((k) => k.name), []);
+    S.update((st) => void (st.workspaces.find((w) => w.id === "ws_fern").loginsOn = { [keyLoginKey(APP_PROJ, "UNSPLASH_ACCESS_KEY")]: { at: 1 }, [keyLoginKey(APP_PROJ, "CANVA_CLIENT_ID__ACME_TEST")]: { at: 1 }, [keyLoginKey(APP_PROJ, "LINEAR_API_KEY")]: { at: 1 } }));
+    assert.deepEqual(Keys.keysOf(withLinear, "ws_fern").filter((k) => k.workspaceId === APP_PROJ).map((k) => k.name), ["LINEAR_API_KEY"], "only the bot's key");
   } finally {
+    workspaceVault.delete(inWorkspace(APP_PROJ, "LINEAR_API_KEY"));
     S.update((st) => void (st.workspaces = had));
   }
   const A = await import(`${root}/lib/server/access-sync.ts`);
@@ -1715,7 +1719,7 @@ await check("no dashes in anything Bops said or told the model", () => {
 });
 
 await check("no key value in any log, or anything the model was sent", () => {
-  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2", CARD_VALUE, ...CANVA.flatMap((c) => [c.id, c.secret]), ...Object.values(APP_VALUES), "test-secret-acme-0005", "test-secret-shared-0006", "test-secret-elsewhere-0008", "test-unsplash-shared-0009", "test-unsplash-account-0007"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
+  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2", CARD_VALUE, ...CANVA.flatMap((c) => [c.id, c.secret]), ...Object.values(APP_VALUES), "test-secret-acme-0005", "test-secret-shared-0006", "test-secret-elsewhere-0008", "test-unsplash-shared-0009", "test-unsplash-account-0007", "lin_api_fake_main"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
   for (const body of asked) for (const v of [...vault.values(), ...CANVA.flatMap((c) => [c.id, c.secret]), ...Object.values(APP_VALUES)]) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
 });
 

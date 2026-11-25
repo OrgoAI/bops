@@ -40,6 +40,7 @@ const TARGETS = {
   ],
   keys: () => [
     ['npx', ['tsc', '--noEmit', '-p', 'tsconfig.json']],
+    ['npx', ['tsc', '--noEmit', '-p', 'cloud']],
     ['npx', ['eslint', ...keysFiles]],
     [node, ['--conditions=react-server', 'scripts/test-keys.mjs']],
     [node, ['--conditions=react-server', 'scripts/test-logins.mjs']],

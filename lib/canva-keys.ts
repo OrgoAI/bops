@@ -17,7 +17,7 @@ const CLIENT = /^[A-Z0-9]+(?:_[A-Z0-9]+)*$/;
 export const canvaClient = (label: string) =>
   label
     .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
