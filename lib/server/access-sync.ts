@@ -1,5 +1,6 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
+import { appOnlyKey } from "@/cloud/protocol";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { accessIsDefault, levelIn, memberOf, memberThread, workspaceOf, type AccessUse, type AppAccount, type LastUses } from "@/lib/types";
@@ -115,7 +116,8 @@ export function accessPayload(wsId: string, keyNames: string[] = []): AccessGran
     if (workspaceOf(a) !== wsId && !team.some((b) => levelIn(s, b, a))) continue;
     for (const b of team) row(b, "app", a.id, targetNameOf(a), levelIn(s, b, a) ?? "none", accessIsDefault(b, a));
   }
-  const keys = [...new Set([...keyNames, ...team.flatMap((b) => b.keys ?? [])])].sort();
+  // A key only apps use is no bot's (cloud/protocol.ts appOnlyKey): not a grant at all, so it never crowds out real ones (MAX_GRANTS).
+  const keys = [...new Set([...keyNames, ...team.flatMap((b) => b.keys ?? [])])].filter((k) => !appOnlyKey(k)).sort();
   for (const k of keys)
     for (const b of team) {
       const on = !!b.keys?.includes(k);

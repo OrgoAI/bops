@@ -39,7 +39,8 @@ export const keysOf = (all, ws) => {
   const w = globalThis.__fake.store.getState().workspaces.find((x) => x.id === ws);
   return all.filter((k) => !k.workspaceId || k.workspaceId === w?.orgoProjectId || switchedOn(w, keyLoginKey(k.workspaceId, k.name)));
 };
-export class KeysError extends Error {}`,
+export class KeysError extends Error {}
+export const APP_KEY_SCOPE = "A key for apps goes under This workspace: apps use only This workspace's keys.";`,
 };
 registerHooks({
   resolve(specifier, context, next) {

@@ -136,8 +136,8 @@ export async function sharedKeysList(): Promise<{ keys: SharedKeyRow[]; scope: {
   }
   for (const k of open.keyNames) {
     const shown = keyShown(k.name);
-    // A key for apps the owner keeps for all their workspaces is no app's (keys.ts listKeys).
-    if (!shown || (shown.forApps && k.scope === "all")) continue;
+    // The owner's keys for apps are no bot's to switch (keys.ts sharedKeysOf), nor This workspace's.
+    if (!shown || shown.forApps) continue;
     // This workspace's own as the owner's Mac last saw them: orgo-web's list now says what's there.
     if (k.scope === "workspace" && !k.from) continue;
     if (rows.some((r) => r.name === k.name && r.scope === k.scope)) continue;

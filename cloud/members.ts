@@ -101,6 +101,8 @@ import {
   type SharedWsUnchanged,
   type WsAccess,
   type WsRole,
+  appOnlyKey,
+  APP_ONLY_KEY_LINE,
 } from "./protocol.ts";
 import { announce, chatPage, chatsSeq, loadState, lockedState, lockUser, recentMessages, removedAfter, sendZipped, writeMessages, type MessageRow } from "./state.ts";
 import { awayFor as tunnelAwayFor, isConnected, queueForMac } from "./tunnel.ts";
@@ -664,7 +666,8 @@ export function cleanAct(v: unknown): { key: string; act: MemberAct } | null {
     }
     // Keys: a bot, a key's vault name, on or off.
     case "key":
-      return anId(x.botId) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" ? { key, act: { act: "key", botId: x.botId, name: x.name, on: x.on } } : null;
+      // On, never a key only apps use (appOnlyKey, keyActWhy says so); off goes for any.
+      return anId(x.botId) && typeof x.name === "string" && KEY_NAME.test(x.name) && typeof x.on === "boolean" && !(x.on && appOnlyKey(x.name)) ? { key, act: { act: "key", botId: x.botId, name: x.name, on: x.on } } : null;
     // A chat's or a thread's: one of them, never both.
     case "compact":
       if (anId(x.chatId) === anId(x.sessionId)) return null;
@@ -755,6 +758,14 @@ export function githubWhy(raw: unknown): string | null {
   if (!a || typeof a !== "object" || (a as { act?: unknown }).act !== "github" || (a as { github?: unknown }).github === null) return null;
   const c = cleanGithubMirror((a as { github?: unknown }).github);
   return "why" in c ? c.why : null;
+}
+
+/** Why a "key" act cleanAct refused turns a key only apps use on, in plain words; null for any other act. */
+export function keyActWhy(raw: unknown): string | null {
+  const a = raw && typeof raw === "object" ? (raw as { act?: unknown }).act : undefined;
+  if (!a || typeof a !== "object") return null;
+  const { act, name, on } = a as { act?: unknown; name?: unknown; on?: unknown };
+  return act === "key" && on === true && typeof name === "string" && appOnlyKey(name) ? APP_ONLY_KEY_LINE : null;
 }
 
 /** What a GitHub act on an app that isn't one folder says (lib/server/hosted-apps.ts setGithubMirror's words). */
@@ -1155,7 +1166,7 @@ const actIn: Route = {
     }
     const body = cleanAct(raw);
     // A GitHub setting that won't do: said in the owner's own words for it.
-    const why = body ? null : githubWhy(raw);
+    const why = body ? null : (githubWhy(raw) ?? keyActWhy(raw));
     if (why) throw new HttpError(400, why);
     if (!body) throw new HttpError(400, "Send {key, act}");
     // Counted before orgo-web is asked, so a flood never reaches it.

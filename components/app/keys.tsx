@@ -72,8 +72,9 @@ const STRIPE_NAMES = ["STRIPE_SECRET_KEY", "STRIPE_API_KEY"];
 const CANVA_PICK = "CANVA_CLIENT";
 /** The workspace the Keys page is for, as the server names it (lib/server/shared-keys.ts keysWorkspace). */
 const keysWs = (state: AppState) => state.shared?.projectId ?? state.workspace ?? MAIN_WORKSPACE;
-/** What a key for apps says in place of its bots. */
+/** What a key for apps says in place of its bots, and its tip. */
 const FOR_APPS_LINE = "For your apps. Bots can't use it.";
+const FOR_APPS_TIP = "This workspace's apps get it when they're built. No bot can use it.";
 
 /** Each client's Canva pair among `keys` (one scope's), by client name, the client ID first; a half saved shows alone. */
 function canvaSets(keys: KeyRow[]): { client: string; keys: KeyRow[] }[] {
@@ -113,7 +114,8 @@ const keysChanged = () => readers.forEach((f) => f());
 /**
  * GET /api/keys: the services Bops can call and the keys in the vault (names only). `failed` when it didn't
  * answer. `ws`: the workspace they're read for (the server answers for the current one): another one and
- * what was shown goes at once and is read again, so Reveal or Remove never acts on a row of the last one.
+ * what was shown goes at once and is read again, so Reveal or Remove never acts on a row of the last one. A list asked
+ * for before a switch and answered after it is the last one's: it isn't shown.
  */
 function useKeys(ws: string) {
   const [info, setInfo] = useState<KeysInfo | null>(null);
@@ -123,10 +125,16 @@ function useKeys(ws: string) {
     setReadFor(ws);
     setInfo(null);
   }
+  const now = useRef(ws);
+  useEffect(() => {
+    now.current = ws;
+  }, [ws]);
   const read = useCallback((fresh = false) => {
+    const asked = now.current;
     void fetch(`/api/keys${fresh ? "?fresh=1" : ""}`, { cache: "no-store" })
       .then(async (r) => {
         const j = (await r.json().catch(() => ({}))) as Partial<KeysInfo>;
+        if (asked !== now.current) return;
         if (r.ok && Array.isArray(j.keys) && Array.isArray(j.providers)) {
           setInfo(j as KeysInfo);
           setFailed(null);
@@ -182,10 +190,10 @@ const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabl
 const SHOW_MS = 30_000;
 const CLIPBOARD_MS = 60_000;
 
-/** POST /api/keys/reveal: a key's value from the Orgo vault, or words for why not. Not cached, and not kept. */
-async function reveal(name: string, scope: Scope): Promise<{ value: string } | { error: string }> {
+/** POST /api/keys/reveal: a key's value from the Orgo vault, or words for why not. Not cached, and not kept. `ws`: the workspace it's for (keysWs). */
+async function reveal(name: string, scope: Scope, ws?: string): Promise<{ value: string } | { error: string }> {
   try {
-    const res = await fetch("/api/keys/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, scope }), cache: "no-store" });
+    const res = await fetch("/api/keys/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, scope, ...(ws ? { ws } : {}) }), cache: "no-store" });
     const j = (await res.json().catch(() => ({}))) as { value?: unknown; error?: string };
     return res.ok && typeof j.value === "string" ? { value: j.value } : { error: undash(j.error ?? "Couldn't get the key. Try again.") };
   } catch {
@@ -226,7 +234,7 @@ function EyeIcon({ off }: { off?: boolean }) {
  * when the window loses focus, and when the row goes. Copied, the clipboard is emptied after CLIPBOARD_MS if
  * it still holds it. The value is fetched from the vault each time and kept only in this row while it shows.
  */
-function useKeyValue(name: string, scope: Scope, onError: (e: string | null) => void) {
+function useKeyValue(name: string, scope: Scope, onError: (e: string | null) => void, ws?: string) {
   const [shown, setShown] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -244,7 +252,7 @@ function useKeyValue(name: string, scope: Scope, onError: (e: string | null) => 
   const fetchValue = async () => {
     setBusy(true);
     onError(null);
-    const r = await reveal(name, scope);
+    const r = await reveal(name, scope, ws);
     setBusy(false);
     if ("error" in r) {
       onError(r.error);
@@ -354,6 +362,13 @@ export function KeysSettings({
   // a new key is for all workspaces unless This workspace was picked.
   // In a shared workspace it opens on This workspace, where keys are added there.
   const [tab, setTab] = useState<Scope | null>(null);
+  // Another workspace: a form or a tab picked for the last one isn't this one's.
+  const [formFor, setFormFor] = useState(keysWs(state));
+  if (formFor !== keysWs(state)) {
+    setFormFor(keysWs(state));
+    setForm(null);
+    setTab(null);
+  }
   const scope: Scope = info?.workspaceKeys ? (tab ?? (shared || info.keys.some((k) => k.scope === "workspace") ? "workspace" : "all")) : "all";
   // A new key goes where the user is looking: the tab shown, whether it was picked or opened on. A shared workspace's, This workspace's alone.
   const addScope: Scope = shared ? "workspace" : scope;
@@ -435,10 +450,11 @@ export function KeysSettings({
               onRoutines={!shared && hasTemplates(k.name) ? () => setAsked(k.name) : undefined}
               routines={!shared && hasTemplates(k.name) && firstOfApp(k.name) && <AppRoutines state={state} app={k.name} onOpenWatch={onOpenWatch} />}
               switchesOff={shared && !info.shared?.acts}
+              ws={keysWs(state)}
               anchorRef={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))}
             />
             {/* A new value for this key, right under it. */}
-            {form?.replace?.name === k.name && form.replace.scope === k.scope && <AddKey info={info} team={team} replace={k} scope={k.scope} shared={shared} bots={[]} first={false} onSaved={done} onCancel={() => setForm(null)} />}
+            {form?.replace?.name === k.name && form.replace.scope === k.scope && <AddKey info={info} team={team} replace={k} scope={k.scope} shared={shared} bots={[]} ws={keysWs(state)} first={false} onSaved={done} onCancel={() => setForm(null)} />}
           </Fragment>
         ))}
         {sets.length > 0 && (
@@ -568,6 +584,7 @@ function KeyLine({
   onRemoved,
   onBusy,
   inSet,
+  ws,
 }: {
   k: KeyRow;
   state: AppState;
@@ -591,11 +608,13 @@ function KeyLine({
   onBusy?: (busy: boolean) => void;
   /** One of a client's Canva pair (CanvaSet): replaced and removed with the pair, there. */
   inSet?: boolean;
+  /** The workspace the Keys page is for (keysWs): its remove and reveal name it, so a switch meanwhile changes nothing. */
+  ws?: string;
 }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const v = useKeyValue(k.name, k.scope, setError);
+  const v = useKeyValue(k.name, k.scope, setError, ws);
   useEffect(() => onBusy?.(busy), [busy, onBusy]);
   const toggle = async (b: Bot, allowed: boolean) => {
     setBusy(true);
@@ -606,7 +625,8 @@ function KeyLine({
     setBusy(true);
     setError(null);
     try {
-      const res = await post(`/api/keys/${encodeURIComponent(k.name)}${k.scope === "workspace" ? "?scope=workspace" : ""}`, {}, "DELETE");
+      const query = [k.scope === "workspace" && "scope=workspace", ws && `ws=${encodeURIComponent(ws)}`].filter(Boolean).join("&");
+      const res = await post(`/api/keys/${encodeURIComponent(k.name)}${query ? `?${query}` : ""}`, {}, "DELETE");
       const j = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
         setError(undash(j.error ?? "That didn't remove it. Try again."));
@@ -648,7 +668,7 @@ function KeyLine({
           </span>
         )}
         {meta && (
-          <span data-tip={`${owners ? OWNERS_TIP : scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
+          <span data-tip={k.forApps ? FOR_APPS_TIP : `${owners ? OWNERS_TIP : scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
             {meta}
           </span>
         )}
@@ -730,7 +750,7 @@ function KeyLine({
           {used && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{used}</span>}
         </div>
       )}
-      {switchesOff && !!team.length && <span className="text-[12px] leading-4 text-[#9A9A98]">{SWITCH_UPDATE_LINE}</span>}
+      {switchesOff && !!team.length && !k.forApps && <span className="text-[12px] leading-4 text-[#9A9A98]">{SWITCH_UPDATE_LINE}</span>}
       {sendWaits && <span className="text-[12px] leading-4 text-[#9A9A98]">{REPLY_WAITS_LINE}</span>}
       {sendFailed?.error && sendFailed.error !== error && (
         <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
@@ -742,7 +762,9 @@ function KeyLine({
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
           <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
-            {state.shared ? (
+            {k.forApps ? (
+              <>Remove {k.name} from this workspace? Apps that use it stop getting it, and it&apos;s gone from Orgo too.</>
+            ) : state.shared ? (
               <>Remove {k.name} from this workspace? Its bots stop using it, and it&apos;s gone from Orgo too.</>
             ) : (
               <>Remove {k.name} ({scopeLabel(k.scope).label.toLowerCase()}) from your Orgo vault? Your bots stop using it, and it&apos;s gone from Orgo too.</>
@@ -806,7 +828,7 @@ function AddKey({
   service?: string;
   /** The service it opens on (Canva's apps' Add a client: CANVA_PICK). */
   start?: string;
-  /** The workspace the page is for (keysWs): a client's Canva pair names it, so a switch while it's saving gets none of it. */
+  /** The workspace the page is for (keysWs): each save names it, so a switch while it's saving changes nothing there. */
   ws?: string;
   cancelLabel?: string;
 }) {
@@ -848,7 +870,7 @@ function AddKey({
     setBusy(true);
     setError(null);
     try {
-      const res = await post("/api/keys", { name, value, botIds: replace || p.forApps ? [] : bots, scope: saveScope });
+      const res = await post("/api/keys", { name, value, botIds: replace || p.forApps ? [] : bots, scope: saveScope, ...(ws ? { ws } : {}) });
       const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; note?: string };
       if (!res.ok || !j.ok) return setError(undash(j.error ?? "That didn't save. Try again."));
       setValue("");
@@ -1022,7 +1044,7 @@ function CanvaSet({ set, state, team, form, onReplace }: { set: { client: string
       </div>
       <div className="flex flex-col pl-3">
         {set.keys.map((k) => (
-          <KeyLine key={k.name} k={k} state={state} team={team} used={null} onReplace={onReplace} anchorRef={() => {}} inSet />
+          <KeyLine key={k.name} k={k} state={state} team={team} used={null} onReplace={onReplace} anchorRef={() => {}} inSet ws={ws} />
         ))}
       </div>
       {form}
@@ -1058,6 +1080,8 @@ function CanvaForm({ info, ws, client, first, head, onSaved, onCancel }: { info:
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // What this form has saved already (a save that stopped part way): name to value, so it isn't sent again unchanged.
+  const [kept, setKept] = useState<Record<string, string>>({});
   const who = client ?? canvaClient(label);
   const names = canvaNames(who);
   const fits = canvaClientOk(who);
@@ -1066,32 +1090,33 @@ function CanvaForm({ info, ws, client, first, head, onSaved, onCancel }: { info:
     if (!canSave) return;
     if (!who) return setError("Give the client a name with a letter or a digit.");
     if (!fits) return setError(`Give the client a shorter name, at most ${CANVA_CLIENT_MAX} letters and digits.`);
-    // A whole pair saved already is changed from its row; half of one (a save that stopped part way) is finished here.
-    if (!client && info.keys.filter((k) => k.scope === "workspace" && canvaOf(k.name)?.client === who).length > 1) return setError(`${canvaLabel(who)} has a Canva app here already. Change it from its row instead.`);
+    // A client with any of its pair here already is changed from its row, unless it's this form's own save that stopped part way.
+    const mine = kept[names.id] !== undefined || kept[names.secret] !== undefined;
+    if (!client && !mine && info.keys.some((k) => k.scope === "workspace" && canvaOf(k.name)?.client === who)) return setError(`${canvaLabel(who)} has a Canva app here already. Change it from its row instead.`);
     setBusy(true);
     setError(null);
-    let saved = 0;
+    const now = { ...kept };
+    // The client ID saved (now or by an earlier Save here) and the secret not: said so, whatever stopped it.
+    const half = (why: string) => setError(now[names.id] !== undefined && now[names.secret] === undefined && secret.trim() ? `The client ID saved, but the secret didn't. ${why}` : why);
     try {
       // Each names the workspace, so a switch while the pair goes gets none of it. The fields keep both until Orgo has them.
       for (const [name, value] of [
         [names.id, id],
         [names.secret, secret],
       ] as const) {
-        if (!value.trim()) continue;
+        if (!value.trim() || now[name] === value) continue;
         const res = await post("/api/keys", { name, value, botIds: [], scope: "workspace", ws });
         const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-        if (!res.ok || !j.ok) {
-          const why = undash(j.error ?? "That didn't save. Try again.");
-          return setError(saved ? `The client ID saved, but the secret didn't. ${why}` : why);
-        }
-        saved++;
+        if (!res.ok || !j.ok) return half(undash(j.error ?? "That didn't save. Try again."));
+        now[name] = value;
+        setKept({ ...now });
       }
       onSaved(names.id, `${canvaLabel(who)}'s Canva app saved for this workspace.`);
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      half("Couldn't reach Bops. Try again.");
     } finally {
       setBusy(false);
-      if (saved) keysChanged();
+      if (Object.keys(now).length > Object.keys(kept).length) keysChanged();
     }
   };
   const field = "h-8 w-full rounded-full bg-[#F7F7F6] px-3 text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]";

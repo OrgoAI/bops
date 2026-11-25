@@ -186,7 +186,8 @@ export const keysProject = (wsId: string = getState().workspace ?? MAIN_WORKSPAC
 export const keysOf = (all: VaultKey[], wsId?: string) => {
   const project = keysProject(wsId);
   const here = getState().workspaces?.find((w) => w.id === (wsId ?? getState().workspace ?? MAIN_WORKSPACE));
-  return all.filter((k) => !k.workspaceId || (!!project && k.workspaceId === project) || switchedOn(here, keyLoginKey(k.workspaceId, k.name)));
+  // A key for apps is its own workspace's alone (an app takes no other), switched on elsewhere or not.
+  return all.filter((k) => !k.workspaceId || (!!project && k.workspaceId === project) || (!appKeyProvider(k.name) && switchedOn(here, keyLoginKey(k.workspaceId, k.name))));
 };
 
 /**
@@ -253,6 +254,8 @@ export function sharedKeysOf(all: VaultKey[], wsId: string): SharedKey[] {
   const project = keysProject(wsId);
   const out: SharedKey[] = [];
   for (const k of keysOf(all, wsId)) {
+    // A key for apps is no bot's: nothing to switch (and it would crowd out the ones there are, cloud/ws-slice.ts MAX_KEY_NAMES).
+    if (!keyProvider(k.name)) continue;
     const key: SharedKey = { name: k.name, scope: k.workspaceId ? "workspace" : "all", ...(k.workspaceId && k.workspaceId !== project ? { from: true as const } : {}) };
     if (!out.some((x) => x.name === key.name && x.scope === key.scope && !!x.from === !!key.from)) out.push(key);
   }
@@ -370,7 +373,9 @@ export async function saveKey(name: string, value: string, botIds: string[] = []
  */
 export async function removeKey(name: string, scope: KeyScope = "all", wsId?: string) {
   const n = keyName(name);
-  if (!keyShown(n)) throw new KeysError("No such key.", 404);
+  const shown = keyShown(n);
+  if (!shown) throw new KeysError("No such key.", 404);
+  if (shown.forApps && scope !== "workspace") throw new KeysError(APP_KEY_SCOPE, 400);
   const project = scopeProject(scope, wsId);
   await vault("DELETE", `/api/secrets/${encodeURIComponent(n)}${project ? `?workspace_id=${encodeURIComponent(project)}` : ""}`);
   forget();
@@ -397,7 +402,9 @@ export async function removeKey(name: string, scope: KeyScope = "all", wsId?: st
  */
 export async function revealKey(name: string, scope: KeyScope = "all", wsId?: string): Promise<{ name: string; value: string }> {
   const n = keyName(name);
-  if (!keyShown(n)) throw new KeysError("No such key.", 404);
+  const shown = keyShown(n);
+  if (!shown) throw new KeysError("No such key.", 404);
+  if (shown.forApps && scope !== "workspace") throw new KeysError(APP_KEY_SCOPE, 400);
   const project = scopeProject(scope, wsId);
   try {
     const { json } = await vault<{ value?: unknown }>("POST", "/api/secrets/reveal", { name: n, ...(project ? { workspace_id: project } : {}) });

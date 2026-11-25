@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritten, type LiveSub } from "../live.ts";
 import { accessSummary, adminMay, appsLevelOf, appsSummary, cleanAccess, cleanName, currentFor, inviteDefault, levelOf, MAX_ACCESS_BOTS, ownerOnlyAsk, powersOf, sameAccess, withEntry, writesChat, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
-import { accessFor, adminGate, appsTouchedFor, cleanAct, githubWhy, GITHUB_NOT_LINKED, GITHUB_NOT_SET, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
+import { accessFor, adminGate, appsTouchedFor, cleanAct, githubWhy, GITHUB_NOT_LINKED, GITHUB_NOT_SET, keyActWhy, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, viewerOf, watchable } from "../members.ts";
 import { CHANGES_MIN_VERSION, checkChange, cleanChange, THIS_WS } from "../change-routes.ts";
 import type { WakeRefusal } from "../turns.ts";
 import { closeDb, query } from "../db.ts";
@@ -690,6 +690,15 @@ test("cleanAct keeps only an act's own fields, each checked", () => {
     assert.equal(cleanAct(bad), null, JSON.stringify(bad)?.slice(0, 80));
   // A bot's key: the bot, the key's vault name, on or off, and nothing else.
   assert.deepEqual(cleanAct({ key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: false, value: "ghp_never" } }), { key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: false } });
+  // A key only apps use (a client's Canva app, Unsplash, Snazzy Maps) is never a bot's: on is refused, in plain words, before
+  // orgo-web or the owner's state is touched; off still goes (it only takes away).
+  for (const name of ["CANVA_CLIENT_ID__ACME", "CANVA_CLIENT_SECRET__ACME_TEST", "UNSPLASH_ACCESS_KEY", "SNAZZY_MAPS_API_KEY"]) {
+    const raw = { key, act: { act: "key", botId: "max", name, on: true } };
+    assert.equal(cleanAct(raw), null, name);
+    assert.equal(keyActWhy(raw), "That key is for apps only: bots can't use it.", name);
+    assert.deepEqual(cleanAct({ key, act: { act: "key", botId: "max", name, on: false } }), { key, act: { act: "key", botId: "max", name, on: false } });
+  }
+  assert.equal(keyActWhy({ key, act: { act: "key", botId: "max", name: "GITHUB_TOKEN", on: true } }), null);
 });
 
 /* ---------------- Keys ---------------- */

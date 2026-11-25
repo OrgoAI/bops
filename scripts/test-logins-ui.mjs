@@ -75,6 +75,13 @@ globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
   const method = init.method ?? "GET";
   if (method === "GET") {
+    if (u.startsWith("/api/keys") && bops.late) {
+      // A list asked for before a switch, answered after: what it says then is the old workspace's.
+      const { until, keys } = bops.late;
+      bops.late = null;
+      await until;
+      return json({ signedIn: true, keys, providers: bops.providers, workspaceKeys: true, ...bops.keysInfo });
+    }
     if (u.startsWith("/api/keys")) return json({ signedIn: true, keys: bops.keys, providers: bops.providers, workspaceKeys: true, ...bops.keysInfo });
     if (u.startsWith("/api/members"))
       return json({
@@ -97,6 +104,7 @@ globalThis.fetch = async (url, init = {}) => {
   }
   bops.sent.push({ url: u, method, body: init.body ? JSON.parse(init.body) : undefined });
   if (bops.refuse?.(bops.sent.at(-1))) return json({ error: "Orgo couldn't keep it just now." }, 503);
+  if (bops.offline?.(bops.sent.at(-1))) throw new TypeError("Failed to fetch");
   if (bops.patch && u === "/api/keys" && method === "PATCH") return json(...bops.patch);
   return json({ ok: true });
 };
@@ -504,7 +512,7 @@ await test("Keys in a shared workspace, with Keys: This workspace's keys with Sh
     assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true");
     await input(page.querySelector('input[aria-label="Key"]'), "sk_live_example");
     await submit(page.querySelector("form"));
-    assert.deepEqual(sent("/api/keys").at(-1).body, { name: "STRIPE_API_KEY", value: "sk_live_example", botIds: ["max"], scope: "workspace" }, "a Stripe pick kept, This workspace");
+    assert.deepEqual(sent("/api/keys").at(-1).body, { name: "STRIPE_API_KEY", value: "sk_live_example", botIds: ["max"], scope: "workspace", ws: "p1" }, "a Stripe pick kept, This workspace; named by its Orgo project");
   } finally {
     bops.keys = [];
     bops.keysInfo = {};
@@ -559,7 +567,7 @@ await test("Keys form: a pasted key picks its service by how it starts, a hand p
     assert.equal(page.querySelector("[data-looks-like]").textContent, "This key looks like GitHub's.");
     await choose(page.querySelector('select[aria-label="Service"]'), "GITHUB_TOKEN");
     await submit(page.querySelector("form"));
-    assert.deepEqual(sent("/api/keys").at(-1).body, { name: "GITHUB_TOKEN", value: "github_pat_11EXAMPLE", botIds: ["boppy"], scope: "all" }, "for the tab looked at: All workspaces");
+    assert.deepEqual(sent("/api/keys").at(-1).body, { name: "GITHUB_TOKEN", value: "github_pat_11EXAMPLE", botIds: ["boppy"], scope: "all", ws: "ws_fern" }, "for the tab looked at: All workspaces");
   } finally {
     bops.keys = [];
     await m.done();
@@ -641,17 +649,25 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     assert.match(form.querySelector('[role="alert"]').textContent, /^The client ID saved, but the secret didn't\. Orgo couldn't keep it just now\.$/);
     assert.deepEqual(["Client ID", "Client secret"].map((f) => form.querySelector(`input[aria-label="${f}"]`).value), ["test-client-id-2", "test-secret-beta-0002"]);
     assert.equal(form.querySelector('button[type="submit"]').disabled, false, "Save again");
+    // Again, and Bops can't be reached: the client ID it already saved isn't sent again, and the line still says it's saved.
     bops.refuse = null;
+    bops.offline = (x) => x.body?.name === "CANVA_CLIENT_SECRET__BETA_TEST";
+    n = bops.sent.length;
+    await submit(form);
+    assert.deepEqual(posted(n).map((x) => x[1].name), ["CANVA_CLIENT_SECRET__BETA_TEST"]);
+    assert.equal(page.querySelector("form[data-canva-form] [role='alert']").textContent, "The client ID saved, but the secret didn't. Couldn't reach Bops. Try again.");
+    bops.offline = null;
     n = bops.sent.length;
     bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, ...beta, unsplash];
-    await submit(form);
-    assert.deepEqual(posted(n).map((x) => x[1].name), ["CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"]);
+    await submit(page.querySelector("form[data-canva-form]"));
+    assert.deepEqual(posted(n).map((x) => x[1].name), ["CANVA_CLIENT_SECRET__BETA_TEST"], "only what isn't saved yet");
     // Listed by client, each with its two names and Show (the reveal path, as any key), never a value; no bot can have them.
     const sets = () => [...page.querySelectorAll("[data-canva-client]")];
     assert.deepEqual(sets().map((s) => s.querySelector("[data-canva-label]").textContent), ["Acme Test", "Beta Test"]);
     assert.ok(sets()[0].querySelector('[data-key="workspace:CANVA_CLIENT_SECRET__ACME_TEST"] button[aria-label="Show key"]'));
     assert.ok(sets()[0].querySelector('[data-key="workspace:CANVA_CLIENT_ID__ACME_TEST"]'));
-    assert.ok(!page.textContent.includes("test-secret") && !page.textContent.includes("test-client-id"), "no value on the page");
+    const values = /test-(secret|client-id)/;
+    assert.ok(!values.test(page.textContent) && ![...page.querySelectorAll("input")].some((i) => values.test(i.value)), "no value on the page, in its words or a field left open");
     assert.ok(!page.querySelector("[data-canva-apps] button[aria-haspopup='menu']"), "no bot switch for them");
     assert.ok(!sets()[0].querySelector("button[aria-pressed]"), "no side panel of bots for them");
     assert.equal(tab(page, "This workspace").textContent, "This workspace4", "OpenAI, Unsplash and two clients");
@@ -668,17 +684,40 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     await click(sets()[0].querySelector(`button[aria-label="Remove Acme Test's Canva app"]`));
     assert.match(sets()[0].textContent, /Remove Acme Test's Canva app from this workspace\?/);
     n = bops.sent.length;
-    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...beta, unsplash];
+    // (Meanwhile half of a third client's pair was saved elsewhere: the list read after the remove has it.)
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...beta, forApps("CANVA_CLIENT_ID__GAMMA_TEST"), unsplash];
     await click(buttonOf(sets()[0], "Remove"));
     assert.deepEqual(bops.sent.slice(n).map((x) => [x.method, x.url]), [
       ["DELETE", "/api/keys/CANVA_CLIENT_ID__ACME_TEST?scope=workspace&ws=ws_fern"],
       ["DELETE", "/api/keys/CANVA_CLIENT_SECRET__ACME_TEST?scope=workspace&ws=ws_fern"],
     ]);
-    assert.deepEqual(sets().map((s) => s.querySelector("[data-canva-label]").textContent), ["Beta Test"]);
+    assert.deepEqual(sets().map((s) => s.querySelector("[data-canva-label]").textContent), ["Beta Test", "Gamma Test"]);
+    // Half a client's pair saved elsewhere (another window, a save that stopped): a new client by that name is refused; its row finishes it.
+    await click(buttonOf(page.querySelector("[data-canva-apps]"), "Add a client"));
+    form = page.querySelector("form[data-canva-form]");
+    await input(form.querySelector('input[aria-label="Client"]'), "gamma-test");
+    await input(form.querySelector('input[aria-label="Client ID"]'), "test-client-id-3");
+    await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-gamma-0006");
+    n = bops.sent.length;
+    await submit(form);
+    assert.deepEqual(posted(n), [], "nothing sent");
+    assert.equal(form.querySelector('[role="alert"]').textContent, "Gamma Test has a Canva app here already. Change it from its row instead.");
+    await click(buttonOf(form, "Cancel"));
+    assert.match(page.querySelector('[data-canva-client="GAMMA_TEST"]').textContent, /Needs its secret/);
     // Unsplash: a key for apps, no bot switches, no side panel; a new Snazzy Maps key goes to no bot.
     const un = page.querySelector('[data-key="workspace:UNSPLASH_ACCESS_KEY"]');
     assert.match(un.textContent, /For your apps\. Bots can't use it\./);
     assert.ok(!un.querySelector("button[aria-haspopup='menu']") && !un.querySelector("button[aria-pressed]"));
+    assert.ok(!/bots use it|bots stop/i.test(words(un)), "nothing on it says bots use it");
+    // Show names the workspace it's for (reveal), as Remove does.
+    await click(sets()[0].querySelector('[data-key="workspace:CANVA_CLIENT_SECRET__BETA_TEST"] button[aria-label="Show key"]'));
+    assert.deepEqual(bops.sent.at(-1), { url: "/api/keys/reveal", method: "POST", body: { name: "CANVA_CLIENT_SECRET__BETA_TEST", scope: "workspace", ws: "ws_fern" } });
+    await click(un.querySelector('button[aria-label="Remove key"]'));
+    assert.match(un.textContent, /Remove UNSPLASH_ACCESS_KEY from this workspace\? Apps that use it stop getting it, and it's gone from Orgo too\./);
+    assert.ok(!/bots stop/i.test(un.textContent), "its remove says nothing of bots using it");
+    n = bops.sent.length;
+    await click(buttonOf(un, "Remove"));
+    assert.deepEqual(bops.sent.slice(n).map((x) => [x.method, x.url]), [["DELETE", "/api/keys/UNSPLASH_ACCESS_KEY?scope=workspace&ws=ws_fern"]]);
     await click(tab(page, "All workspaces"));
     await click(buttonOf(page, "Add a key"));
     await choose(page.querySelector('select[aria-label="Service"]'), "SNAZZY_MAPS_API_KEY");
@@ -688,7 +727,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     await input(form.querySelector('input[aria-label="Key"]'), "test-snazzy-0004");
     n = bops.sent.length;
     await submit(form);
-    assert.deepEqual(posted(n), [["POST", { name: "SNAZZY_MAPS_API_KEY", value: "test-snazzy-0004", botIds: [], scope: "workspace" }]], "This workspace's, from All workspaces too");
+    assert.deepEqual(posted(n), [["POST", { name: "SNAZZY_MAPS_API_KEY", value: "test-snazzy-0004", botIds: [], scope: "workspace", ws: "ws_fern" }]], "This workspace's, from All workspaces too");
     assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true");
   } finally {
     await m.done();
@@ -714,6 +753,58 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     bops.keys = [];
     bops.providers = [];
     await card.done();
+  }
+});
+
+await test("Keys after a workspace switch: a form open for the last one closes, and a list asked for before the switch never shows for the new one", async () => {
+  bops.providers = PROVIDERS;
+  bops.keys = [row("OPENAI_API_KEY", "workspace")];
+  const m = await mount(settings(stateOf()));
+  try {
+    await click(buttonOf(m.box.querySelector("[data-logins]"), "Add a key"));
+    assert.ok(m.box.querySelector('[data-logins] input[aria-label="Key"]'), "the form, open on fernway");
+    await m.rerender(settings(stateOf({ workspace: "ws_north" })));
+    assert.equal(m.box.querySelector('[data-logins] input[aria-label="Key"]'), null, "closed on northwind");
+  } finally {
+    await m.done();
+  }
+  let answer;
+  bops.late = { until: new Promise((r) => (answer = r)), keys: [row("GITHUB_TOKEN", "workspace")] };
+  const m2 = await mount(settings(stateOf()));
+  try {
+    bops.keys = [row("STRIPE_SECRET_KEY", "workspace")];
+    await m2.rerender(settings(stateOf({ workspace: "ws_north" })));
+    await act(async () => {
+      answer();
+      await settle();
+    });
+    const page = m2.box.querySelector("[data-logins]");
+    assert.ok(page.querySelector('[data-key="workspace:STRIPE_SECRET_KEY"]'), "northwind's");
+    assert.equal(page.querySelector('[data-key="workspace:GITHUB_TOKEN"]'), null, "never fernway's, answered late");
+  } finally {
+    bops.keys = [];
+    bops.providers = [];
+    bops.late = null;
+    await m2.done();
+  }
+});
+
+await test("Keys in a shared workspace whose owner's Bops can't take bots' switches yet: a key for apps says nothing of switching bots", async () => {
+  bops.providers = PROVIDERS;
+  bops.keys = [row("STRIPE_SECRET_KEY", "workspace"), { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com", tip: "Paste it.", readOnly: false, forApps: true, updatedAt: null, scope: "workspace", bots: [] }];
+  bops.keysInfo = { shared: { keys: true, acts: false } };
+  const m = await mount(settings(sharedState(true)));
+  try {
+    const page = m.box.querySelector("[data-logins]");
+    assert.match(page.querySelector('[data-key="workspace:STRIPE_SECRET_KEY"]').textContent, /needs an update before you can switch bots/);
+    const un = page.querySelector('[data-key="workspace:UNSPLASH_ACCESS_KEY"]');
+    assert.match(un.textContent, /For your apps\. Bots can't use it\./);
+    assert.ok(!/switch bots|bots use it/i.test(words(un)), words(un));
+  } finally {
+    bops.keys = [];
+    bops.providers = [];
+    bops.keysInfo = {};
+    await m.done();
   }
 });
 
@@ -757,10 +848,11 @@ await test("every word plain: no dashes, never Orbit", () => {
     assert.ok(!DASHES.test(w), `a dash: ${w.match(new RegExp(`.{0,40}(${DASHES.source}).{0,40}`))?.[0]}`);
     assert.ok(!/orbit/i.test(w), "Knowledge, never Orbit");
   }
-  for (const f of ["components/app/logins.tsx", "lib/server/logins.ts", "app/api/logins/route.ts"]) {
+  for (const f of ["components/app/logins.tsx", "lib/server/logins.ts", "app/api/logins/route.ts", "components/app/keys.tsx", "lib/server/keys.ts", "lib/server/shared-keys.ts", "lib/canva-keys.ts", "app/api/keys/route.ts", "app/api/keys/[name]/route.ts", "app/api/keys/reveal/route.ts"]) {
     const src = readFileSync(`${root}/${f}`, "utf8");
     // Its words in quotes and template strings of one line: what the page and the routes say.
-    const strings = [...src.matchAll(/"([^"\\\n]{3,})"|`([^`\\\n]{3,})`/g)].map((x) => x[1] ?? x[2]).filter((x) => /[a-z] [a-z]/i.test(x));
+    // (A template string's ${...} is code, not words: `length - 1` isn't a dash.)
+    const strings = [...src.matchAll(/"([^"\\\n]{3,})"|`([^`\\\n]{3,})`/g)].map((x) => x[1] ?? x[2].replace(/\$\{[^}]*\}/g, "")).filter((x) => /[a-z] [a-z]/i.test(x));
     for (const x of strings) assert.ok(!/[‒–—―]| - /.test(x), `${f}: ${x}`);
   }
 });
