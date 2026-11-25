@@ -96,6 +96,7 @@ globalThis.fetch = async (url, init = {}) => {
     return json({}, 404);
   }
   bops.sent.push({ url: u, method, body: init.body ? JSON.parse(init.body) : undefined });
+  if (bops.refuse?.(bops.sent.at(-1))) return json({ error: "Orgo couldn't keep it just now." }, 503);
   if (bops.patch && u === "/api/keys" && method === "PATCH") return json(...bops.patch);
   return json({ ok: true });
 };
@@ -614,9 +615,9 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, unsplash];
     await submit(form);
     assert.deepEqual(posted(n), [
-      ["POST", { name: "CANVA_CLIENT_ID__ACME_TEST", value: "test-client-id-1", botIds: [], scope: "workspace" }],
-      ["POST", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-acme-0001", botIds: [], scope: "workspace" }],
-    ]);
+      ["POST", { name: "CANVA_CLIENT_ID__ACME_TEST", value: "test-client-id-1", botIds: [], scope: "workspace", ws: "ws_fern" }],
+      ["POST", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-acme-0001", botIds: [], scope: "workspace", ws: "ws_fern" }],
+    ], "each names the workspace it's for: a switch meanwhile gets none of it");
     assert.ok(!page.querySelector("form[data-canva-form]"), "the form closes once Orgo has both");
     assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true", "shown under This workspace, where it went");
     // A second client, from the Canva apps' own Add a client.
@@ -632,6 +633,16 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     await input(form.querySelector('input[aria-label="Client"]'), "Beta Test");
     await input(form.querySelector('input[aria-label="Client ID"]'), "test-client-id-2");
     await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-beta-0002");
+    // Orgo keeps the client ID but not the secret: said so, both fields kept, and Save again finishes it.
+    bops.refuse = (x) => x.body?.name === "CANVA_CLIENT_SECRET__BETA_TEST";
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, beta[0], unsplash];
+    await submit(form);
+    form = page.querySelector("form[data-canva-form]");
+    assert.match(form.querySelector('[role="alert"]').textContent, /^The client ID saved, but the secret didn't\. Orgo couldn't keep it just now\.$/);
+    assert.deepEqual(["Client ID", "Client secret"].map((f) => form.querySelector(`input[aria-label="${f}"]`).value), ["test-client-id-2", "test-secret-beta-0002"]);
+    assert.equal(form.querySelector('button[type="submit"]').disabled, false, "Save again");
+    bops.refuse = null;
+    n = bops.sent.length;
     bops.keys = [row("OPENAI_API_KEY", "workspace"), ...acme, ...beta, unsplash];
     await submit(form);
     assert.deepEqual(posted(n).map((x) => x[1].name), ["CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"]);
@@ -652,7 +663,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     await input(form.querySelector('input[aria-label="Client secret"]'), "test-secret-beta-0003");
     n = bops.sent.length;
     await submit(form);
-    assert.deepEqual(posted(n), [["POST", { name: "CANVA_CLIENT_SECRET__BETA_TEST", value: "test-secret-beta-0003", botIds: [], scope: "workspace" }]]);
+    assert.deepEqual(posted(n), [["POST", { name: "CANVA_CLIENT_SECRET__BETA_TEST", value: "test-secret-beta-0003", botIds: [], scope: "workspace", ws: "ws_fern" }]]);
     // Remove Acme Test's: both of its keys, This workspace's.
     await click(sets()[0].querySelector(`button[aria-label="Remove Acme Test's Canva app"]`));
     assert.match(sets()[0].textContent, /Remove Acme Test's Canva app from this workspace\?/);
@@ -660,8 +671,8 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     bops.keys = [row("OPENAI_API_KEY", "workspace"), ...beta, unsplash];
     await click(buttonOf(sets()[0], "Remove"));
     assert.deepEqual(bops.sent.slice(n).map((x) => [x.method, x.url]), [
-      ["DELETE", "/api/keys/CANVA_CLIENT_ID__ACME_TEST?scope=workspace"],
-      ["DELETE", "/api/keys/CANVA_CLIENT_SECRET__ACME_TEST?scope=workspace"],
+      ["DELETE", "/api/keys/CANVA_CLIENT_ID__ACME_TEST?scope=workspace&ws=ws_fern"],
+      ["DELETE", "/api/keys/CANVA_CLIENT_SECRET__ACME_TEST?scope=workspace&ws=ws_fern"],
     ]);
     assert.deepEqual(sets().map((s) => s.querySelector("[data-canva-label]").textContent), ["Beta Test"]);
     // Unsplash: a key for apps, no bot switches, no side panel; a new Snazzy Maps key goes to no bot.

@@ -2,11 +2,13 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { MEMBER_NO_KEYS, OWNERS_KEY_LINE, type MemberAct, type SharedKey } from "@/cloud/protocol";
 import { KEYS_GIVEN_LINE } from "@/lib/shared";
+import { MAIN_WORKSPACE } from "@/lib/types";
 import { orgoHeaders } from "./app-version";
 import { appKeyProvider, forAppsOnly, KeysError, keyName, keyProvider, keyShown, type KeyShown } from "./keys";
 import { apiKey } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
-import { actShared, sharedKeysOpen } from "./shared";
+import { actShared, sharedKeysOpen, sharedOpen } from "./shared";
+import { getState } from "./store";
 
 /*
  * Keys in a workspace shared with the user, for someone with Keys there (cloud/ws-slice.ts keysOf: an Admin always, a
@@ -134,7 +136,8 @@ export async function sharedKeysList(): Promise<{ keys: SharedKeyRow[]; scope: {
   }
   for (const k of open.keyNames) {
     const shown = keyShown(k.name);
-    if (!shown) continue;
+    // A key for apps the owner keeps for all their workspaces is no app's (keys.ts listKeys).
+    if (!shown || (shown.forApps && k.scope === "all")) continue;
     // This workspace's own as the owner's Mac last saw them: orgo-web's list now says what's there.
     if (k.scope === "workspace" && !k.from) continue;
     if (rows.some((r) => r.name === k.name && r.scope === k.scope)) continue;
@@ -142,6 +145,14 @@ export async function sharedKeysList(): Promise<{ keys: SharedKeyRow[]; scope: {
   }
   return { keys: rows, scope: { keys: true, acts: open.keyActs }, ...(error ? { error } : {}) };
 }
+
+/**
+ * The workspace Keys acts on now, as the window names it (AppState.shared.projectId in a shared one, else
+ * AppState.workspace). A pair saved or removed one key at a time (a client's Canva app, components/app/keys.tsx) names it
+ * with each request, so a workspace switched to meanwhile gets none of it (WORKSPACE_SWITCHED).
+ */
+export const keysWorkspace = () => (sharedOpen() ? (sharedKeysOpen()?.projectId ?? null) : (getState().workspace ?? MAIN_WORKSPACE));
+export const WORKSPACE_SWITCHED = "You switched workspaces before that was done, so nothing more was changed. Look again, then try once more.";
 
 /** An act's key (cloud/protocol.ts MemberActBody.key): a new one each time. */
 const actKey = () => `key_${randomBytes(12).toString("base64url")}`;

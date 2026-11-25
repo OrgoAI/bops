@@ -70,6 +70,8 @@ const STRIPE_NAMES = ["STRIPE_SECRET_KEY", "STRIPE_API_KEY"];
 
 /** Add a key's pick for a client's Canva app: a pair of keys, on its own form (CanvaForm). */
 const CANVA_PICK = "CANVA_CLIENT";
+/** The workspace the Keys page is for, as the server names it (lib/server/shared-keys.ts keysWorkspace). */
+const keysWs = (state: AppState) => state.shared?.projectId ?? state.workspace ?? MAIN_WORKSPACE;
 /** What a key for apps says in place of its bots. */
 const FOR_APPS_LINE = "For your apps. Bots can't use it.";
 
@@ -459,13 +461,13 @@ export function KeysSettings({
                 state={state}
                 team={team}
                 onReplace={() => setForm({ canva: set.client, bots: [] })}
-                form={form?.canva === set.client && <CanvaForm info={info} client={set.client} first={false} onSaved={done} onCancel={() => setForm(null)} />}
+                form={form?.canva === set.client && <CanvaForm info={info} ws={keysWs(state)} client={set.client} first={false} onSaved={done} onCancel={() => setForm(null)} />}
               />
             ))}
           </div>
         )}
         {form?.replace || form?.canva ? null : form ? (
-          <AddKey info={info} team={team} scope={addScope} shared={shared} bots={form.bots} start={form.start} first={!shown.length && !sets.length} onSaved={done} onCancel={() => setForm(null)} />
+          <AddKey info={info} team={team} scope={addScope} shared={shared} bots={form.bots} start={form.start} ws={keysWs(state)} first={!shown.length && !sets.length} onSaved={done} onCancel={() => setForm(null)} />
         ) : (
           saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>
         )}
@@ -788,6 +790,7 @@ function AddKey({
   onCancel,
   service,
   start,
+  ws,
   cancelLabel = "Cancel",
 }: {
   info: KeysInfo;
@@ -803,6 +806,8 @@ function AddKey({
   service?: string;
   /** The service it opens on (Canva's apps' Add a client: CANVA_PICK). */
   start?: string;
+  /** The workspace the page is for (keysWs): a client's Canva pair names it, so a switch while it's saving gets none of it. */
+  ws?: string;
   cancelLabel?: string;
 }) {
   // Every name Orgo can call, and the keys for apps where this workspace has its own Orgo workspace: those are This
@@ -888,7 +893,7 @@ function AddKey({
       )}
     </div>
   );
-  if (canva && pick === CANVA_PICK) return <CanvaForm info={info} first={first} head={pickRow} onSaved={onSaved} onCancel={onCancel} />;
+  if (canva && ws && pick === CANVA_PICK) return <CanvaForm info={info} ws={ws} first={first} head={pickRow} onSaved={onSaved} onCancel={onCancel} />;
   const field = "h-8 rounded-full bg-[#F7F7F6] px-3 text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]";
   return (
     <form
@@ -976,6 +981,8 @@ function AddKey({
  * reveal as any key's), a new ID or secret (`onReplace`, its form under it), and Remove for the pair. Never a bot's.
  */
 function CanvaSet({ set, state, team, form, onReplace }: { set: { client: string; keys: KeyRow[] }; state: AppState; team: Bot[]; form: React.ReactNode; onReplace: () => void }) {
+  // Each remove names the workspace: one switched to while the pair goes gets none of it.
+  const ws = keysWs(state);
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -987,7 +994,7 @@ function CanvaSet({ set, state, team, form, onReplace }: { set: { client: string
     setError(null);
     try {
       for (const k of set.keys) {
-        const res = await post(`/api/keys/${encodeURIComponent(k.name)}?scope=workspace`, {}, "DELETE");
+        const res = await post(`/api/keys/${encodeURIComponent(k.name)}?scope=workspace&ws=${encodeURIComponent(ws)}`, {}, "DELETE");
         if (!res.ok) return setError(undash(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "That didn't remove it. Try again."));
       }
       setSure(false);
@@ -1045,7 +1052,7 @@ function CanvaSet({ set, state, team, form, onReplace }: { set: { client: string
  * for one saved, where an empty field keeps what's there. `head`: Add a key's service pick, to go to another service.
  * The values live in the fields until Orgo has them.
  */
-function CanvaForm({ info, client, first, head, onSaved, onCancel }: { info: KeysInfo; client?: string; first: boolean; head?: React.ReactNode; onSaved: (name: string, note?: string) => void; onCancel: () => void }) {
+function CanvaForm({ info, ws, client, first, head, onSaved, onCancel }: { info: KeysInfo; ws: string; client?: string; first: boolean; head?: React.ReactNode; onSaved: (name: string, note?: string) => void; onCancel: () => void }) {
   const [label, setLabel] = useState("");
   const [id, setId] = useState("");
   const [secret, setSecret] = useState("");
@@ -1059,24 +1066,25 @@ function CanvaForm({ info, client, first, head, onSaved, onCancel }: { info: Key
     if (!canSave) return;
     if (!who) return setError("Give the client a name with a letter or a digit.");
     if (!fits) return setError(`Give the client a shorter name, at most ${CANVA_CLIENT_MAX} letters and digits.`);
-    if (!client && info.keys.some((k) => k.scope === "workspace" && canvaOf(k.name)?.client === who)) return setError(`${canvaLabel(who)} has a Canva app here already. Change it from its row instead.`);
+    // A whole pair saved already is changed from its row; half of one (a save that stopped part way) is finished here.
+    if (!client && info.keys.filter((k) => k.scope === "workspace" && canvaOf(k.name)?.client === who).length > 1) return setError(`${canvaLabel(who)} has a Canva app here already. Change it from its row instead.`);
     setBusy(true);
     setError(null);
     let saved = 0;
     try {
-      for (const [name, value, clear] of [
-        [names.id, id, setId],
-        [names.secret, secret, setSecret],
+      // Each names the workspace, so a switch while the pair goes gets none of it. The fields keep both until Orgo has them.
+      for (const [name, value] of [
+        [names.id, id],
+        [names.secret, secret],
       ] as const) {
         if (!value.trim()) continue;
-        const res = await post("/api/keys", { name, value, botIds: [], scope: "workspace" });
+        const res = await post("/api/keys", { name, value, botIds: [], scope: "workspace", ws });
         const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
         if (!res.ok || !j.ok) {
           const why = undash(j.error ?? "That didn't save. Try again.");
           return setError(saved ? `The client ID saved, but the secret didn't. ${why}` : why);
         }
         saved++;
-        clear("");
       }
       onSaved(names.id, `${canvaLabel(who)}'s Canva app saved for this workspace.`);
     } catch {

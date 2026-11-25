@@ -227,7 +227,13 @@ export async function listKeys({ fresh = false } = {}): Promise<VaultKey[]> {
   const { json } = await vault<{ secrets?: { name?: unknown; workspace_id?: unknown; updated_at?: unknown }[] }>("GET", "/api/secrets");
   const ours = new Set((getState().workspaces ?? []).map((w) => w.orgoProjectId).filter(Boolean));
   const keys = (json.secrets ?? [])
-    .filter((s) => typeof s.name === "string" && keyShown(s.name) && (!s.workspace_id || (typeof s.workspace_id === "string" && ours.has(s.workspace_id))))
+    .filter((s) => {
+      const shown = typeof s.name === "string" ? keyShown(s.name) : undefined;
+      if (!shown) return false;
+      // A key for apps is This workspace's: one kept for all workspaces (made in Orgo's own Secrets) is no app's.
+      if (!s.workspace_id) return !shown.forApps;
+      return typeof s.workspace_id === "string" && ours.has(s.workspace_id);
+    })
     .map((s) => ({ name: s.name as string, updatedAt: typeof s.updated_at === "string" ? s.updated_at : null, workspaceId: typeof s.workspace_id === "string" ? s.workspace_id : null }));
   g.bopsKeys = { at: Date.now(), keys, who };
   // What people with Keys see of them: said from each read of the vault.

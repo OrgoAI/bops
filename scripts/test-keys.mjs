@@ -1581,6 +1581,51 @@ await check("keys only apps use are never a bot's: not given in Keys, not in cal
   noDashes(asked.text, "a refusal");
 });
 
+await check("a pair saved or removed one key at a time names the workspace it's for: one switched to meanwhile gets none of it, and Orgo isn't asked", async () => {
+  const n = orgoCalls.length;
+  let [status, got] = await answered(await KeysRoute.POST(req("POST", "/api/keys", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-elsewhere-0008", scope: "workspace", ws: "ws_fern" })));
+  assert.equal(status, 409);
+  assert.match(got.error, /switched workspaces/);
+  noDashes(got.error, "a refusal");
+  [status] = await answered(await KeyRoute.DELETE(req("DELETE", "/api/keys/CANVA_CLIENT_SECRET__ACME_TEST?scope=workspace&ws=ws_fern"), ctx("CANVA_CLIENT_SECRET__ACME_TEST")));
+  assert.equal(status, 409);
+  assert.equal(orgoCalls.length, n, "Orgo isn't asked");
+  assert.equal(workspaceVault.get(inWorkspace(APP_PROJ, "CANVA_CLIENT_SECRET__ACME_TEST")), CANVA[0].secret, "nothing changed");
+  // The workspace open: done. In a shared one, it's named by its Orgo project.
+  assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: CANVA[0].secret, scope: "workspace", ws: "ws_main" }))).status, 200);
+  openShared();
+  try {
+    assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "UNSPLASH_ACCESS_KEY", value: "test-unsplash-shared-0009", scope: "workspace", ws: "ws_main" }))).status, 409);
+    assert.equal(projectVault.has("UNSPLASH_ACCESS_KEY"), false);
+    assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "UNSPLASH_ACCESS_KEY", value: "test-unsplash-shared-0009", scope: "workspace", ws: SHARED_PROJECT }))).status, 200);
+    projectVault.delete("UNSPLASH_ACCESS_KEY");
+  } finally {
+    closeShared();
+  }
+});
+
+await check("a key for apps kept for all workspaces (made in Orgo's own Secrets) isn't listed: no app can use it, and Bops would act on This workspace's by its name", async () => {
+  vault.set("UNSPLASH_ACCESS_KEY", "test-unsplash-account-0007");
+  vault.set("CANVA_CLIENT_ID__ACME_TEST", "test-client-id-account");
+  try {
+    const list = await (await KeysRoute.GET(req("GET", "/api/keys?fresh=1"))).json();
+    assert.deepEqual(list.keys.filter((k) => k.forApps && k.scope === "all").map((k) => k.name), []);
+    assert.ok(list.keys.some((k) => k.name === "UNSPLASH_ACCESS_KEY" && k.scope === "workspace"), "This workspace's still is");
+  } finally {
+    vault.delete("UNSPLASH_ACCESS_KEY");
+    vault.delete("CANVA_CLIENT_ID__ACME_TEST");
+    await Keys.listKeys({ fresh: true });
+  }
+  // In a shared workspace: the owner's for all their workspaces, as their Mac said them.
+  openShared({ keyNames: [{ name: "UNSPLASH_ACCESS_KEY", scope: "all" }, { name: "GITHUB_TOKEN", scope: "all" }] });
+  try {
+    const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+    assert.deepEqual(list.keys.filter((k) => k.scope === "all").map((k) => k.name), ["GITHUB_TOKEN"]);
+  } finally {
+    closeShared();
+  }
+});
+
 await check("in a shared workspace with Keys: a client's Canva pair is This workspace's (orgo-web), and no bot is switched on for it", async () => {
   openShared();
   try {
@@ -1613,7 +1658,7 @@ await check("no dashes in anything Bops said or told the model", () => {
 });
 
 await check("no key value in any log, or anything the model was sent", () => {
-  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2", CARD_VALUE, ...CANVA.flatMap((c) => [c.id, c.secret]), ...Object.values(APP_VALUES), "test-secret-acme-0005", "test-secret-shared-0006"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
+  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2", CARD_VALUE, ...CANVA.flatMap((c) => [c.id, c.secret]), ...Object.values(APP_VALUES), "test-secret-acme-0005", "test-secret-shared-0006", "test-secret-elsewhere-0008", "test-unsplash-shared-0009", "test-unsplash-account-0007"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
   for (const body of asked) for (const v of vault.values()) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
 });
 

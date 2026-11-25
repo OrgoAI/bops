@@ -13,7 +13,7 @@ const yourAppsFiles = ['components/app/app-controls.tsx', 'components/app/app-re
 
 // Keys: the vault's keys and bots' calls with them, keys only apps use (each client's Canva app, Unsplash, Snazzy Maps) and
 // their links to apps, and Settings, Logins' Keys. Against a fake orgo-web and a fake Bops: nothing reaches Orgo or a vendor.
-const keysFiles = ['lib/canva-keys.ts', 'lib/server/keys.ts', 'lib/server/shared-keys.ts', 'lib/server/app-keys.ts', 'app/api/keys/route.ts', 'components/app/keys.tsx', 'components/app/logins.tsx', 'scripts/test-keys.mjs', 'scripts/test-logins-ui.mjs'];
+const keysFiles = ['lib/canva-keys.ts', 'lib/server/keys.ts', 'lib/server/shared-keys.ts', 'lib/server/app-keys.ts', 'app/api/keys/route.ts', 'app/api/keys/[name]/route.ts', 'components/app/keys.tsx', 'components/app/logins.tsx', 'scripts/test-keys.mjs', 'scripts/test-logins-ui.mjs'];
 
 const TARGETS = {
   'browser-speed': () => [

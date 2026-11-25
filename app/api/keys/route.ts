@@ -1,7 +1,7 @@
 import { KeysError, grantKey, keyGrants, keyHomes, keyShown, keysOf, keysProject, listKeys, providersShown, saveKey } from "@/lib/server/keys";
 import { notReady } from "@/lib/server/ready";
 import { sharedOpen } from "@/lib/server/shared";
-import { sharedGrant, sharedKeysList, sharedSave } from "@/lib/server/shared-keys";
+import { WORKSPACE_SWITCHED, keysWorkspace, sharedGrant, sharedKeysList, sharedSave } from "@/lib/server/shared-keys";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 
 export const dynamic = "force-dynamic";
@@ -64,11 +64,15 @@ export async function GET(request: Request) {
   }
 }
 
-/** Save a key to the user's Orgo vault (it isn't kept here, or sent back), for all workspaces or this one (`scope`), and let `botIds` use it. */
+/**
+ * Save a key to the user's Orgo vault (it isn't kept here, or sent back), for all workspaces or this one (`scope`), and let
+ * `botIds` use it. `ws`: the workspace it's for (shared-keys.ts keysWorkspace), refused when another is open now.
+ */
 export async function POST(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
-  const b = (await request.json().catch(() => ({}))) as { name?: unknown; value?: unknown; botIds?: unknown; scope?: unknown };
+  const b = (await request.json().catch(() => ({}))) as { name?: unknown; value?: unknown; botIds?: unknown; scope?: unknown; ws?: unknown };
+  if (b.ws !== undefined && b.ws !== keysWorkspace()) return Response.json({ error: WORKSPACE_SWITCHED }, { status: 409 });
   const botIds = Array.isArray(b.botIds) ? b.botIds.filter((x): x is string => typeof x === "string") : [];
   try {
     // A shared workspace's own keys (This workspace only: the owner's for all their workspaces stay theirs).
