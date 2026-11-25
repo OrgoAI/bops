@@ -1121,7 +1121,7 @@ function CanvaForm({ info, ws, client, first, head, onSaved, onCancel }: { info:
       )}
       <span className="text-[12px] leading-[17px] text-[#3A3A38]">
         Someone in the client&apos;s own Canva makes the app and gives you its client ID and secret, so what your apps post there is theirs.{" "}
-        <span className="text-[#9A9A98]">Get them in canva.com/developers, Your integrations, the app, Configuration. For this workspace&apos;s apps. Bots can&apos;t use them.</span>
+        <span className="text-[#9A9A98]">Get them in canva.com/developers, Your apps, the app, Outside Canva, Configuration, Credentials. For this workspace&apos;s apps. Bots can&apos;t use them.</span>
       </span>
       {!client && (
         <div className="flex flex-col gap-1">

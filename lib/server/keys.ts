@@ -89,14 +89,15 @@ export type AppKeyProvider = { name: string; label: string; where: string; tip: 
 
 export const APP_KEY_PROVIDERS: AppKeyProvider[] = [
   { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers, Your apps, your app, Keys", tip: "Paste the app's Access Key. Its Secret key stays with you." },
-  { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com, Account, Developer", tip: "Your apps read map styles with it. Make one for them alone." },
+  { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com, your email at the top right, Developer", tip: "Your apps read map styles with it. Make one for them alone." },
 ];
 
 /** A client's Canva app (lib/canva-keys.ts), its client ID or its secret: a pair for each client, added on its own form. */
 function canvaKey(name: string): AppKeyProvider | undefined {
   const c = canvaOf(name);
   if (!c) return undefined;
-  const where = "canva.com/developers, Your integrations, the client's integration, Configuration";
+  // Canva's Developer Portal as its docs say it (canva.dev/docs/connect/quickstart): the app's Outside Canva, Configuration, Credentials.
+  const where = "canva.com/developers, Your apps, the client's app, Outside Canva, Configuration, Credentials";
   return c.part === "id"
     ? { name, label: "Canva", where, tip: "Made by someone in the client's own Canva workspace, so what your apps post there is theirs." }
     : { name, label: "Canva", where, tip: "Canva shows a secret once, when it's made. Make a new one there to replace it." };
