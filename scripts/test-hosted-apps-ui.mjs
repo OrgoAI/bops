@@ -3412,7 +3412,7 @@ await test("the picker beside an app's Variables offers every key This workspace
   try {
     await click(m.box.querySelector("[data-key-var-use]"));
     const select = m.box.querySelector(`select[aria-label="${K.APP_KEYS_WORDS.pick}"]`);
-    assert.deepEqual([...select.querySelectorAll("option")].map((o) => o.getAttribute("value")).filter(Boolean), keys, "This workspace's, Canva's pairs and both keys for apps among them; never one for all workspaces");
+    assert.deepEqual([...select.querySelectorAll("option")].map((o) => o.getAttribute("value")).filter(Boolean), keys, "every key of This workspace's: each client's Canva pair and Snazzy Maps (keys for apps) and Unsplash among them; never one for all workspaces");
     await act(async () => {
       for (const o of select.querySelectorAll("option")) o.selected = o.getAttribute("value") === "CANVA_CLIENT_SECRET__BETA_TEST";
       Object.defineProperty(select, "value", { configurable: true, get: () => "CANVA_CLIENT_SECRET__BETA_TEST" });

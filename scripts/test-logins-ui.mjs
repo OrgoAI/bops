@@ -590,7 +590,7 @@ await test("Keys form: a pasted key picks its service by how it starts, a hand p
   }
 });
 
-await test("Keys: each client's Canva app is a pair of This workspace's keys named by the client, added on its own form, listed by client, replaced and removed as a pair; Unsplash and Snazzy Maps are keys for apps; neither is ever a bot's", async () => {
+await test("Keys: each client's Canva app is a pair of This workspace's keys named by the client, added on its own form, listed by client, replaced and removed as a pair; Snazzy Maps is a key for apps; neither is ever a bot's; Unsplash is a bot's key, read only", async () => {
   const APP_PROVIDERS = [
     { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers", tip: "Paste the app's Access Key.", readOnly: true },
     { name: "SNAZZY_MAPS_API_KEY", label: "Snazzy Maps", where: "snazzymaps.com", tip: "Your apps read map styles with it.", readOnly: false, forApps: true },
@@ -599,6 +599,8 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
   const acme = [forApps("CANVA_CLIENT_ID__ACME_TEST"), forApps("CANVA_CLIENT_SECRET__ACME_TEST")];
   const beta = [forApps("CANVA_CLIENT_ID__BETA_TEST"), forApps("CANVA_CLIENT_SECRET__BETA_TEST")];
   const snazzy = forApps("SNAZZY_MAPS_API_KEY", "Snazzy Maps");
+  // Unsplash, saved as a bot's key (read only), that Boppy uses.
+  const unsplashBot = { name: "UNSPLASH_ACCESS_KEY", label: "Unsplash", where: "unsplash.com/developers", tip: "Paste the app's Access Key.", readOnly: true, updatedAt: "2026-11-25T00:00:00Z", scope: "workspace", bots: ["boppy"] };
   const options = (page) => [...page.querySelectorAll('select[aria-label="Service"] option')].map((o) => o.getAttribute("value"));
   const posted = (n) => bops.sent.slice(n).filter((x) => x.url === "/api/keys").map((x) => [x.method, x.body]);
   bops.providers = [...PROVIDERS, ...APP_PROVIDERS];
@@ -738,9 +740,25 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
     assert.ok(!form.textContent.includes("Bots that may use it"));
     await input(form.querySelector('input[aria-label="Key"]'), "test-snazzy-0004");
     n = bops.sent.length;
+    // (Meanwhile Unsplash was saved, as a bot's key: the list read after this save has it.)
+    bops.keys = [row("OPENAI_API_KEY", "workspace"), ...beta, snazzy, unsplashBot];
     await submit(form);
     assert.deepEqual(posted(n), [["POST", { name: "SNAZZY_MAPS_API_KEY", value: "test-snazzy-0004", botIds: [], scope: "workspace", ws: "ws_fern" }]], "This workspace's, from All workspaces too");
     assert.equal(tab(page, "This workspace").getAttribute("aria-selected"), "true");
+    // Unsplash: a bot's key, read only, with its bots' switches like any other; never the line a key for apps has.
+    const us = page.querySelector('[data-key="workspace:UNSPLASH_ACCESS_KEY"]');
+    assert.match(us.textContent, /Read only/);
+    assert.ok(!us.textContent.includes("For your apps"), "not a key for apps");
+    assert.ok([...us.querySelectorAll("button[aria-haspopup='menu']")].some((b) => b.textContent.includes("Boppy")), "Boppy's switch, as it uses it");
+    assert.ok(us.querySelector("button[aria-pressed]"), "its name opens its panel of bots");
+    // Picked in Add a key: what it reads, and the bots that may use it.
+    await click(buttonOf(page, "Add a key"));
+    await choose(page.querySelector('select[aria-label="Service"]'), "UNSPLASH_ACCESS_KEY");
+    form = page.querySelector("form");
+    assert.match(form.textContent, /Paste the app's Access Key\. Orgo lets bots only read from Unsplash\./);
+    assert.ok(form.textContent.includes("Bots that may use it"), "a bot to pick");
+    assert.ok(!form.textContent.includes("Bots can't use it"));
+    await click(buttonOf(form, "Cancel"));
   } finally {
     await m.done();
   }
@@ -760,6 +778,7 @@ await test("Keys: each client's Canva app is a pair of This workspace's keys nam
   const card = await mount(h(BotKeys, { state: st, bot: st.bots[0], onAdd: noop, className: "" }));
   try {
     assert.ok(card.box.textContent.includes("OPENAI_API_KEY"), "the card lists the workspace's keys");
+    assert.ok(card.box.querySelector('[role="switch"][aria-label="Stop Boppy using UNSPLASH_ACCESS_KEY"]'), "Unsplash, a bot's key, with Boppy's switch on");
     assert.ok(!/SNAZZY|CANVA/.test(card.box.textContent), "never one for apps");
   } finally {
     bops.keys = [];

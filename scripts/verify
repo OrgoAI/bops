@@ -47,6 +47,7 @@ const TARGETS = {
     [node, ['--conditions=react-server', 'scripts/test-runs-on-keys.mjs']],
     [node, ['--conditions=react-server', 'scripts/test-access.mjs']],
     [node, ['scripts/test-logins-ui.mjs']],
+    [node, ['scripts/test-hosted-apps-ui.mjs']],
     [node, ['--test', '--test-name-pattern=cleanAct', 'cloud/test/core-members.test.ts']],
   ],
 };
