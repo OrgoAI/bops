@@ -234,7 +234,8 @@ export const UNINSTALL_SCRIPT = [
  * signed with it.
  */
 export const RELEASE_KEYS = Object.freeze({
-  r1: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAOnXNLbg1J+CrDAspBAmssN/uaC+mJDB3RvCQM8qrMH0=\n-----END PUBLIC KEY-----\n",
+  // r2 replaces r1, which is retired. No release ever shipped r1, so there is no time when both are trusted.
+  r2: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA7wTlC4TstXeDzpvruOw3kO3cilAogIIaAQLCl7qfiqA=\n-----END PUBLIC KEY-----\n",
 });
 /** The largest runner bundle a release may name. */
 export const RELEASE_MAX_SIZE = 400 * 1024 * 1024;

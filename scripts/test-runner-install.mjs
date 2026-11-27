@@ -1984,12 +1984,15 @@ await check("a release is taken only signed by a key built in, and only a bops-r
   assert.deepEqual(STEPS.verifyRelease(signed(good), keys), good);
   assert.deepEqual(STEPS.verifyRelease(signed({ ...good, released: 1_763_467_200_000, size: STEPS.RELEASE_MAX_SIZE }), keys), { ...good, released: 1_763_467_200_000, size: STEPS.RELEASE_MAX_SIZE });
   assert.deepEqual(STEPS.verifyRelease(signed({ ...good, extra: "x" }), keys), good, "only the release's own fields");
-  // The keys built in: r1, an ed25519 key, and nothing else; frozen. A release signed by any other key is nothing.
-  assert.deepEqual(Object.keys(STEPS.RELEASE_KEYS), ["r1"]);
-  assert.equal(createPublicKey(STEPS.RELEASE_KEYS.r1).asymmetricKeyType, "ed25519");
+  // The keys built in: r2, an ed25519 key, and nothing else; frozen. A release signed by any other key is nothing.
+  assert.deepEqual(Object.keys(STEPS.RELEASE_KEYS), ["r2"]);
+  assert.equal(createPublicKey(STEPS.RELEASE_KEYS.r2).asymmetricKeyType, "ed25519");
   assert.ok(Object.isFrozen(STEPS.RELEASE_KEYS));
-  assert.equal(STEPS.verifyRelease(signed(good)), null, "not signed with r1");
-  assert.equal(STEPS.verifyRelease(signed(good, { keyId: "r1" })), null, "r1's name on another key's signature");
+  // r1 is retired: no merge may bring it back, under any keyId.
+  assert.ok(!Object.values(STEPS.RELEASE_KEYS).some((pem) => pem.includes("MCowBQYDK2VwAyEAOnXNLbg1J")), "r1 is trusted nowhere");
+  assert.equal(STEPS.verifyRelease(signed(good)), null, "not signed with r2");
+  assert.equal(STEPS.verifyRelease(signed(good, { keyId: "r2" })), null, "r2's name on another key's signature");
+  assert.equal(STEPS.verifyRelease(signed(good, { keyId: "r1" })), null, "r1 is no key at all now");
   // The signature.
   assert.equal(STEPS.verifyRelease(signed(good, { key: generateKeyPairSync("ed25519").privateKey }), keys), null, "another key");
   for (const keyId of ["t2", "__proto__", "constructor", "", "t1 "]) assert.equal(STEPS.verifyRelease(signed(good, { keyId }), keys), null, `keyId ${JSON.stringify(keyId)}`);
