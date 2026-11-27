@@ -24,7 +24,8 @@ import { RELEASE_MAX_BYTES, type RunnerRelease } from "./protocol.ts";
  * no release. To rotate, ship the next key here (and in the keeper's copy) a release before signing with it.
  */
 export const RELEASE_KEYS: Readonly<Record<string, string>> = Object.freeze({
-  r1: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAOnXNLbg1J+CrDAspBAmssN/uaC+mJDB3RvCQM8qrMH0=\n-----END PUBLIC KEY-----\n",
+  // r2 replaces r1, which is retired. No release ever shipped r1, so there is no time when both are trusted.
+  r2: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA7wTlC4TstXeDzpvruOw3kO3cilAogIIaAQLCl7qfiqA=\n-----END PUBLIC KEY-----\n",
 });
 
 /** The most of latest.json Bops Cloud reads. */

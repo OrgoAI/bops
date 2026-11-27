@@ -80,12 +80,14 @@ after(async () => {
 
 const serve = (path: string, body: string) => answers.set(path, { status: 200, headers: { "content-type": "application/json" }, body });
 
-test("the release key built in is Orgo's r1, an ed25519 public key, and the only one", () => {
-  assert.deepEqual(Object.keys(RELEASE_KEYS), ["r1"]);
-  const k = createPublicKey(RELEASE_KEYS.r1);
+test("the release key built in is Orgo's r2, an ed25519 public key, and the only one", () => {
+  assert.deepEqual(Object.keys(RELEASE_KEYS), ["r2"]);
+  const k = createPublicKey(RELEASE_KEYS.r2);
   assert.equal(k.asymmetricKeyType, "ed25519");
   assert.equal(k.type, "public");
-  assert.match(RELEASE_KEYS.r1, /MCowBQYDK2VwAyEAOnXNLbg1J\+CrDAspBAmssN\/uaC\+mJDB3RvCQM8qrMH0=/);
+  assert.match(RELEASE_KEYS.r2, /MCowBQYDK2VwAyEA7wTlC4TstXeDzpvruOw3kO3cilAogIIaAQLCl7qfiqA=/);
+  // r1 is retired: no merge may bring it back, under any keyId.
+  assert.ok(!Object.values(RELEASE_KEYS).some((pem) => pem.includes("MCowBQYDK2VwAyEAOnXNLbg1J")), "r1 is trusted nowhere");
   assert.ok(Object.isFrozen(RELEASE_KEYS), "nothing adds a key at run time");
 });
 
@@ -105,7 +107,8 @@ test("a bad signature, a key it doesn't know or one that isn't ed25519 is no rel
   assert.equal(verifyRelease(signed(r, other.privateKey, "t1"), KEYS), null);
   // A keyId it doesn't have, and the built-in key for a release a test key signed.
   assert.equal(verifyRelease(signed(r, mine.privateKey, "t2"), KEYS), null);
-  assert.equal(verifyRelease(signed(r, mine.privateKey, "r1")), null, "RELEASE_KEYS is the default, and r1 didn't sign it");
+  assert.equal(verifyRelease(signed(r, mine.privateKey, "r2")), null, "RELEASE_KEYS is the default, and r2 didn't sign it");
+  assert.equal(verifyRelease(signed(r, mine.privateKey, "r1")), null, "r1 is no key at all now");
   assert.equal(verifyRelease(signed(r, mine.privateKey, "toString"), KEYS), null, "only the keys' own ids");
   // A signature that isn't one (wrong length, not base64), or none.
   assert.equal(verifyRelease(JSON.stringify({ ...good, sig: good.sig.slice(4) }), KEYS), null);
