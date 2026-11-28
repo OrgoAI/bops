@@ -864,6 +864,13 @@ export type SharedWsSlice = {
 export type SharedKey = { name: string; scope: "workspace" | "all"; from?: true };
 /** A key's vault name as a "key" act and SharedKey carry it: UPPER_SNAKE, as orgo-web keeps it. */
 export const KEY_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
+/**
+ * A key only apps use (lib/server/keys.ts APP_KEY_PROVIDERS, a client's Canva pair in lib/canva-keys.ts): orgo-web's broker
+ * has no address for it, so no bot is ever given one. A "key" act turning one on is refused here, before orgo-web's grant
+ * (which a bot's computer goes by) or the owner's state is touched, as the owner's Mac refuses it (member-acts.ts).
+ */
+export const appOnlyKey = (name: string) => name === "SNAZZY_MAPS_API_KEY" || /^CANVA_CLIENT_(?:ID|SECRET)__[A-Z0-9]+(?:_[A-Z0-9]+)*$/.test(name);
+export const APP_ONLY_KEY_LINE = "That key is for apps only: bots can't use it.";
 /** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
 export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
 

@@ -2,11 +2,13 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { MEMBER_NO_KEYS, OWNERS_KEY_LINE, type MemberAct, type SharedKey } from "@/cloud/protocol";
 import { KEYS_GIVEN_LINE } from "@/lib/shared";
+import { MAIN_WORKSPACE } from "@/lib/types";
 import { orgoHeaders } from "./app-version";
-import { KEY_PROVIDERS, KeysError, keyName, keyProvider } from "./keys";
+import { appKeyProvider, forAppsOnly, KeysError, keyName, keyProvider, keyShown, type KeyShown } from "./keys";
 import { apiKey } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
-import { actShared, sharedKeysOpen } from "./shared";
+import { actShared, sharedKeysOpen, sharedOpen } from "./shared";
+import { getState } from "./store";
 
 /*
  * Keys in a workspace shared with the user, for someone with Keys there (cloud/ws-slice.ts keysOf: an Admin always, a
@@ -99,22 +101,12 @@ function withKeys() {
 }
 
 /** A key as the Keys page lists it (components/app/keys.tsx KeyRow): `owner`, the owner's own, which only switches bots. */
-export type SharedKeyRow = {
-  name: string;
-  label: string;
-  where: string;
-  tip: string;
-  readOnly: boolean;
+export type SharedKeyRow = KeyShown & {
   updatedAt: string | null;
   scope: "workspace" | "all";
   bots: string[];
   owner?: true;
   from?: string;
-};
-
-const providerOf = (name: string) => {
-  const p = keyProvider(name)!;
-  return { name: p.name, label: p.label, where: p.where, tip: p.tip, readOnly: !!p.readOnly };
 };
 
 /**
@@ -138,18 +130,29 @@ export async function sharedKeysList(): Promise<{ keys: SharedKeyRow[]; scope: {
   for (const k of Array.isArray(live.keys) ? live.keys : []) {
     if (!k || typeof k !== "object") continue;
     const { name, updated_at } = k as { name?: unknown; updated_at?: unknown };
-    if (typeof name !== "string" || !keyProvider(name) || rows.some((r) => r.name === name)) continue;
-    rows.push({ ...providerOf(name), updatedAt: typeof updated_at === "string" ? updated_at : null, scope: "workspace", bots: botsOf(name) });
+    const shown = typeof name === "string" ? keyShown(name) : undefined;
+    if (!shown || rows.some((r) => r.name === shown.name)) continue;
+    rows.push({ ...shown, updatedAt: typeof updated_at === "string" ? updated_at : null, scope: "workspace", bots: botsOf(shown.name) });
   }
   for (const k of open.keyNames) {
-    if (!keyProvider(k.name)) continue;
+    const shown = keyShown(k.name);
+    // The owner's keys for apps are no bot's to switch (keys.ts sharedKeysOf), nor This workspace's.
+    if (!shown || shown.forApps) continue;
     // This workspace's own as the owner's Mac last saw them: orgo-web's list now says what's there.
     if (k.scope === "workspace" && !k.from) continue;
     if (rows.some((r) => r.name === k.name && r.scope === k.scope)) continue;
-    rows.push({ ...providerOf(k.name), updatedAt: null, scope: k.scope, bots: botsOf(k.name), owner: true, ...(k.from ? { from: "owner" } : {}) });
+    rows.push({ ...shown, updatedAt: null, scope: k.scope, bots: botsOf(k.name), owner: true, ...(k.from ? { from: "owner" } : {}) });
   }
   return { keys: rows, scope: { keys: true, acts: open.keyActs }, ...(error ? { error } : {}) };
 }
+
+/**
+ * The workspace Keys acts on now, as the window names it (AppState.shared.projectId in a shared one, else
+ * AppState.workspace). A pair saved or removed one key at a time (a client's Canva app, components/app/keys.tsx) names it
+ * with each request, so a workspace switched to meanwhile gets none of it (WORKSPACE_SWITCHED).
+ */
+export const keysWorkspace = () => (sharedOpen() ? (sharedKeysOpen()?.projectId ?? null) : (getState().workspace ?? MAIN_WORKSPACE));
+export const WORKSPACE_SWITCHED = "You switched workspaces before that was done, so nothing more was changed. Look again, then try once more.";
 
 /** An act's key (cloud/protocol.ts MemberActBody.key): a new one each time. */
 const actKey = () => `key_${randomBytes(12).toString("base64url")}`;
@@ -168,6 +171,8 @@ const ownersOnly = (names: SharedKey[], name: string) => {
  */
 export async function sharedGrant(name: string, botId: string, on: boolean, o: { saved?: boolean } = {}): Promise<{ status: number; error: string } | null> {
   const n = keyName(name);
+  const forApps = appKeyProvider(n);
+  if (forApps) return { status: 400, error: forAppsOnly(forApps.label) };
   if (!keyProvider(n)) return { status: 404, error: "No such key." };
   const open = withKeys();
   if (!open.bots.some((b) => b.id === botId)) return { status: 404, error: "That bot isn't here." };
@@ -183,18 +188,21 @@ export async function sharedGrant(name: string, botId: string, on: boolean, o: {
 
 /**
  * Save a key to This workspace (orgo-web, with the user's own key: the same name replaces it), then let `botIds` use it
- * ("key" acts). `note`: the key saved, but a bot's switch didn't go (the owner's Bops needs an update, say).
+ * ("key" acts). `note`: the key saved, but a bot's switch didn't go (the owner's Bops needs an update, say). A key only
+ * apps use goes to no bot.
  */
 export async function sharedSave(name: string, value: string, botIds: string[]): Promise<{ name: string; note?: string }> {
   const n = keyName(name);
-  if (!keyProvider(n)) throw new KeysError("Bops can't call that service yet. Pick one from the list.", 400);
+  const shown = keyShown(n);
+  if (!shown) throw new KeysError("Bops can't call that service yet. Pick one from the list.", 400);
+
   const v = value.trim();
   if (!v) throw new KeysError("Paste the key first.", 400);
   if (v.length > 8192) throw new KeysError("That key is too long.", 400);
   const open = withKeys();
   await projectKeys(open.projectId, "POST", "", { name: n, value: v });
   let note: string | undefined;
-  for (const botId of botIds.filter((id, i, all) => all.indexOf(id) === i && open.bots.some((b) => b.id === id && !b.keys.includes(n)))) {
+  for (const botId of (shown.forApps ? [] : botIds).filter((id, i, all) => all.indexOf(id) === i && open.bots.some((b) => b.id === id && !b.keys.includes(n)))) {
     const no = await sharedGrant(n, botId, true, { saved: true }).catch((e: unknown) => ({ status: 502, error: e instanceof Error ? e.message : "That didn't go." }));
     if (no) note ??= `Saved. The bots you picked didn't get it: ${no.error}`;
   }
@@ -207,7 +215,7 @@ export async function sharedSave(name: string, value: string, botIds: string[]):
  */
 export async function sharedRemove(name: string): Promise<void> {
   const n = keyName(name);
-  if (!keyProvider(n)) throw new KeysError("No such key.", 404);
+  if (!keyShown(n)) throw new KeysError("No such key.", 404);
   const open = withKeys();
   await projectKeys(open.projectId, "DELETE", `/${encodeURIComponent(n)}`);
   for (const b of open.bots) if (b.keys.includes(n)) await sharedGrant(n, b.id, false).catch(() => null);
@@ -216,13 +224,10 @@ export async function sharedRemove(name: string): Promise<void> {
 /** A key of This workspace's value, to see or copy (orgo-web limits and logs it). Never the owner's for all their workspaces. */
 export async function sharedReveal(name: string, scope: "workspace" | "all"): Promise<{ name: string; value: string }> {
   const n = keyName(name);
-  if (!keyProvider(n)) throw new KeysError("No such key.", 404);
+  if (!keyShown(n)) throw new KeysError("No such key.", 404);
   if (scope !== "workspace") throw new KeysError(OWNERS_KEY, 403);
   const open = withKeys();
   const got = await projectKeys<{ value?: unknown }>(open.projectId, "POST", "/reveal", { name: n });
   if (typeof got.value !== "string") throw new KeysError("Orgo didn't send the key. Try again.", 502);
   return { name: n, value: got.value };
 }
-
-/** The services Bops can call, as the Keys page lists them. */
-export const providersShown = () => KEY_PROVIDERS.map(({ name, label, where, tip, readOnly }) => ({ name, label, where, tip, readOnly: !!readOnly }));

@@ -1,4 +1,5 @@
-import { KeysError, keysOf, listKeys } from "@/lib/server/keys";
+import { appOnlyKey } from "@/cloud/protocol";
+import { APP_KEY_SCOPE, KeysError, keysOf, listKeys } from "@/lib/server/keys";
 import { setAppIn, setKeyIn, setSiteIn } from "@/lib/server/logins";
 import { notReady } from "@/lib/server/ready";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -31,6 +32,8 @@ async function keyIn(id: string, wsId: string, on: boolean) {
   const at = id.indexOf(":");
   const [project, name] = at > 0 ? [id.slice(0, at), id.slice(at + 1)] : ["", ""];
   if (!project || !/^[A-Z0-9_]{1,80}$/.test(name)) return { error: "No such key.", status: 404 };
+  // A key for apps is its own workspace's alone: an app takes no other workspace's.
+  if (appOnlyKey(name)) return { error: APP_KEY_SCOPE, status: 400 };
   try {
     const all = await listKeys({ fresh: true });
     if (!all.some((k) => k.workspaceId === project && k.name === name)) return { error: "No such key.", status: 404 };

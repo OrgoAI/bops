@@ -95,6 +95,9 @@ const vault = new Map([
 ]);
 /** Values in `vault` for the workspace-scoped key by that name only (the GITHUB_TOKEN listed below), never an account one. */
 const scopedOnly = new Set();
+/** Keys saved for one Orgo workspace (This workspace: a save with its workspace_id), by "<workspace_id> <name>". */
+const workspaceVault = new Map();
+const inWorkspace = (ws, name) => `${ws} ${name}`;
 const orgoCalls = [];
 /** A shared workspace's own keys as orgo-web's bops-keys routes keep them, and what they answer next instead ("page": a route it doesn't have). */
 const projectVault = new Map([["LINEAR_API_KEY", "lin_api_fake_shared"]]);
@@ -132,22 +135,27 @@ const server = createServer(async (req, res) => {
         // A Cloudflare key for one Orgo workspace and its zone's id for all: no provider Bops' bots can call.
         { name: "CLOUDFLARE_API_TOKEN", workspace_id: "6f1c1b7e-1111-4222-8333-944455556666", created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-03T00:00:00Z" },
         { name: "CLOUDFLARE_ZONE_ID", workspace_id: null, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-03T00:00:00Z" },
+        ...[...workspaceVault.keys()].map((k) => ({ name: k.split(" ")[1], workspace_id: k.split(" ")[0], created_at: "2026-11-24T00:00:00Z", updated_at: "2026-11-24T00:00:00Z" })),
       ],
     });
   if (url.pathname === "/api/secrets" && req.method === "POST") {
+    if (body.workspace_id) return workspaceVault.set(inWorkspace(body.workspace_id, body.name), body.value), send(200, { ok: true });
     vault.set(String(body.name).toUpperCase().replace(/-/g, "_"), body.value);
     return send(200, { ok: true });
   }
   const del = url.pathname.match(/^\/api\/secrets\/([A-Za-z0-9_-]+)$/);
   if (del && req.method === "DELETE") {
+    const ws = url.searchParams.get("workspace_id");
+    if (ws) return workspaceVault.delete(inWorkspace(ws, del[1])) ? send(200, { ok: true }) : send(404, { error: "Secret not set" });
     vault.delete(del[1]);
     return send(200, { ok: true });
   }
   if (url.pathname === "/api/secrets/reveal" && req.method === "POST") {
     if (revealLimited) return send(429, { error: "Too many requests", code: "rate_limited" });
-    if (!vault.has(body.name)) return send(404, { error: "Secret not set", code: "not_set" });
+    const from = body.workspace_id ? new Map([[body.name, workspaceVault.get(inWorkspace(body.workspace_id, body.name))]].filter((e) => e[1] !== undefined)) : vault;
+    if (!from.has(body.name)) return send(404, { error: "Secret not set", code: "not_set" });
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-    return res.end(JSON.stringify({ name: body.name, value: vault.get(body.name) }));
+    return res.end(JSON.stringify({ name: body.name, value: from.get(body.name) }));
   }
   // Which apps use which of a workspace's keys (orgo-web's bops-keys/apps), names only. "old": an orgo-web from before it,
   // where the path falls into bops-keys/{name} (DELETE only) and answers 405.
@@ -1378,13 +1386,454 @@ await check("apps that use a key, with an orgo-web from before links: the list s
   assert.ok(!orgoCalls.some((c) => JSON.stringify(c.body ?? "").includes(LINK_VALUE)), "no value ever went to Orgo");
 });
 
+/* ---------------- Keys only apps use (each client's Canva app, Snazzy Maps), and Unsplash, for bots and apps ---------------- */
+
+// The open workspace has its own Orgo project, and apps are open (an @orgo.ai account), for the checks down to the next block.
+const APP_PROJ = "5c5c5c5c-1111-4222-8333-944455556666";
+const appsHad = { workspaces: S.getState().workspaces, workspace: S.getState().workspace, account: S.getState().account, boppy: S.bot("boppy").keys };
+S.update((st) => {
+  st.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, orgoProjectId: APP_PROJ }];
+  st.workspace = "ws_main";
+  st.account = { user: { id: "u_alex", email: "alex@orgo.ai", name: "Alex" }, signedInAt: 1 };
+});
+/** Made up, as every value here: two clients' Canva apps, and a Snazzy Maps key. */
+const CANVA = [
+  { client: "ACME_TEST", id: "test-client-id-1", secret: "test-secret-acme-0001" },
+  { client: "BETA_TEST", id: "test-client-id-2", secret: "test-secret-beta-0002" },
+];
+const APP_VALUES = { SNAZZY_MAPS_API_KEY: "test-snazzy-0004" };
+/** Unsplash's, as a key bots may use: for all workspaces, and This workspace's own (which apps link). */
+const UNSPLASH_VALUE = "test-unsplash-bots-0010";
+const UNSPLASH_WS_VALUE = "test-unsplash-workspace-0011";
+const secretPosts = () => orgoCalls.filter((c) => c.path === "/api/secrets" && c.method === "POST");
+/** `values` are in no state, file or log of Bops'. */
+async function nowhereElse(values) {
+  await S.flushState(5000);
+  for (const v of values) assert.ok(!JSON.stringify(S.getState()).includes(v), "not in the state");
+  const files = [];
+  const walk = (d) => {
+    for (const f of readdirSync(d)) {
+      const p = join(d, f);
+      if (statSync(p).isDirectory()) walk(p);
+      else files.push(p);
+    }
+  };
+  walk(scratch);
+  assert.ok(files.some((f) => f.endsWith("state.json")), "the state was saved");
+  for (const f of files) for (const v of values) assert.ok(!readFileSync(f).includes(v), `not in ${f}`);
+  for (const v of values) assert.ok(!logged.join("\n").includes(v), "not in a log");
+}
+
+await check("a client's Canva app: its client ID and secret go to Orgo's vault for This workspace only, named by the client, a set for each client, and nowhere else: not the state, a file or a log", async () => {
+  const n = secretPosts().length;
+  for (const c of CANVA)
+    for (const [name, value] of [[`CANVA_CLIENT_ID__${c.client}`, c.id], [`CANVA_CLIENT_SECRET__${c.client}`, c.secret]]) {
+      const [status, got] = await answered(await KeysRoute.POST(req("POST", "/api/keys", { name, value, botIds: ["boppy"], scope: "workspace" })));
+      assert.deepEqual([status, got], [200, { ok: true, name }], name);
+    }
+  assert.deepEqual(
+    secretPosts().slice(n).map((c) => c.body),
+    CANVA.flatMap((c) => [
+      { name: `CANVA_CLIENT_ID__${c.client}`, value: c.id, workspace_id: APP_PROJ },
+      { name: `CANVA_CLIENT_SECRET__${c.client}`, value: c.secret, workspace_id: APP_PROJ },
+    ]),
+    "This workspace's Orgo project, each under its client's name",
+  );
+  assert.ok(!S.bot("boppy").keys?.some((k) => k.startsWith("CANVA_")), "no bot is given one, whatever the save asked");
+  // Listed by name with This workspace's keys, for apps; no value.
+  const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+  assert.deepEqual(
+    list.keys.filter((k) => k.name.startsWith("CANVA_")).map((k) => [k.name, k.scope, k.forApps, k.bots]),
+    CANVA.flatMap((c) => [
+      [`CANVA_CLIENT_ID__${c.client}`, "workspace", true, []],
+      [`CANVA_CLIENT_SECRET__${c.client}`, "workspace", true, []],
+    ]),
+  );
+  assert.ok(!list.providers.some((p) => p.name.startsWith("CANVA_")), "a client's pair is added on its own form, not picked from the list");
+  for (const k of list.keys.filter((x) => x.forApps)) for (const v of [k.label, k.where, k.tip]) noDashes(v, k.name);
+  // Refused before Orgo is asked: for all workspaces (an app takes This workspace's keys only), and a name that isn't a client's pair.
+  const m = orgoCalls.length;
+  for (const [body, words] of [
+    [{ name: "CANVA_CLIENT_ID__ACME_TEST", value: "x", scope: "all" }, /This workspace/],
+    [{ name: "CANVA_CLIENT_ID__ACME__TEST", value: "x", scope: "workspace" }, /can't call that service/],
+    [{ name: `CANVA_CLIENT_SECRET__${"A".repeat(44)}`, value: "x", scope: "workspace" }, /can't call that service/],
+    [{ name: "CANVA_CLIENT_TOKEN__ACME_TEST", value: "x", scope: "workspace" }, /can't call that service/],
+    [{ name: "CANVA_CLIENT_ID__", value: "x", scope: "workspace" }, /can't call that service/],
+  ]) {
+    const [status, got] = await answered(await KeysRoute.POST(req("POST", "/api/keys", body)));
+    assert.equal(status, 400, body.name);
+    assert.match(got.error, words, body.name);
+    noDashes(got.error, "a refusal");
+  }
+  assert.equal(orgoCalls.length, m, "Orgo isn't asked");
+  // The longest client name that fits: the secret's name is 64 characters, all a vault name may have.
+  const longest = `CANVA_CLIENT_SECRET__${"A".repeat(43)}`;
+  assert.equal(longest.length, 64);
+  assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: longest, value: "test-secret-long", scope: "workspace" }))).status, 200);
+  workspaceVault.delete(inWorkspace(APP_PROJ, longest));
+  await nowhereElse(CANVA.flatMap((c) => [c.id, c.secret]));
+});
+
+await check("a client's Canva secret comes back to the window only through reveal, This workspace's; Remove takes it out of This workspace in Orgo", async () => {
+  const [status, got] = await answered(await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "CANVA_CLIENT_SECRET__ACME_TEST", scope: "workspace" })));
+  assert.deepEqual([status, got], [200, { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: CANVA[0].secret }]);
+  assert.deepEqual(orgoCalls.findLast((c) => c.path === "/api/secrets/reveal").body, { name: "CANVA_CLIENT_SECRET__ACME_TEST", workspace_id: APP_PROJ });
+  // A new secret for Acme replaces the one there; the client ID stays.
+  assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-acme-0005", scope: "workspace" }))).status, 200);
+  assert.equal(workspaceVault.get(inWorkspace(APP_PROJ, "CANVA_CLIENT_SECRET__ACME_TEST")), "test-secret-acme-0005");
+  assert.equal(workspaceVault.get(inWorkspace(APP_PROJ, "CANVA_CLIENT_ID__ACME_TEST")), CANVA[0].id);
+  workspaceVault.set(inWorkspace(APP_PROJ, "CANVA_CLIENT_SECRET__ACME_TEST"), CANVA[0].secret);
+  // Beta Test's pair removed: both of its names, This workspace's.
+  for (const name of ["CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"]) {
+    assert.equal((await KeyRoute.DELETE(req("DELETE", `/api/keys/${name}?scope=workspace`), ctx(name))).status, 200, name);
+    assert.deepEqual([orgoCalls.findLast((c) => c.method === "DELETE").path, orgoCalls.findLast((c) => c.method === "DELETE").search], [`/api/secrets/${name}`, `?workspace_id=${APP_PROJ}`]);
+  }
+  const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+  assert.deepEqual(list.keys.filter((k) => k.name.startsWith("CANVA_")).map((k) => k.name), ["CANVA_CLIENT_ID__ACME_TEST", "CANVA_CLIENT_SECRET__ACME_TEST"], "Acme's pair stays");
+  for (const c of CANVA.slice(1)) for (const [name, v] of [[`CANVA_CLIENT_ID__${c.client}`, c.id], [`CANVA_CLIENT_SECRET__${c.client}`, c.secret]]) workspaceVault.set(inWorkspace(APP_PROJ, name), v);
+});
+
+await check("Snazzy Maps is offered in Keys like the others, with a label, where to get one and a tip; a key for apps, saved for This workspace, listed for apps", async () => {
+  const before = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+  for (const [name, label] of [["SNAZZY_MAPS_API_KEY", "Snazzy Maps"]]) {
+    const p = before.providers.find((x) => x.name === name);
+    assert.ok(p, `${name} is offered`);
+    assert.deepEqual([p.label, p.readOnly, p.forApps], [label, false, true]);
+    assert.ok(p.where.length > 8 && p.tip.length > 8, `${name}: where to get one, and a tip`);
+    for (const v of [p.label, p.where, p.tip]) noDashes(v, name);
+    const n = secretPosts().length;
+    const [status, got] = await answered(await KeysRoute.POST(req("POST", "/api/keys", { name, value: APP_VALUES[name], botIds: ["boppy"], scope: "workspace" })));
+    assert.deepEqual([status, got], [200, { ok: true, name }]);
+    assert.deepEqual(secretPosts().slice(n).map((c) => c.body), [{ name, value: APP_VALUES[name], workspace_id: APP_PROJ }]);
+    const all = await answered(await KeysRoute.POST(req("POST", "/api/keys", { name, value: APP_VALUES[name], scope: "all" })));
+    assert.equal(all[0], 400, "for apps, so This workspace's only");
+    noDashes(all[1].error, "a refusal");
+  }
+  const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+  assert.deepEqual(
+    list.keys.filter((k) => k.name in APP_VALUES).map((k) => [k.name, k.label, k.scope, k.forApps, k.bots]),
+    [["SNAZZY_MAPS_API_KEY", "Snazzy Maps", "workspace", true, []]],
+  );
+  assert.ok(!S.bot("boppy").keys?.some((k) => k in APP_VALUES), "no bot is given one");
+  assert.ok(!JSON.stringify(list).includes(APP_VALUES.SNAZZY_MAPS_API_KEY), "no value");
+  await nowhereElse(Object.values(APP_VALUES));
+});
+
+await check("keys only apps use link to an app's variables through Your Apps' links, as orgo-web takes them today: one app's under the name it reads, or every app's under their own", async () => {
+  projectLinks.length = 0;
+  const n = linkCalls(APP_PROJ).length;
+  const links = [
+    { app: "brand-agent", name: "CANVA_CLIENT_ID", key: "CANVA_CLIENT_ID__ACME_TEST" },
+    { app: "brand-agent", name: "CANVA_CLIENT_SECRET", key: "CANVA_CLIENT_SECRET__ACME_TEST" },
+    { app: "*", key: "CANVA_CLIENT_ID__BETA_TEST" },
+    { app: "*", key: "UNSPLASH_ACCESS_KEY" },
+    { app: "brand-agent", name: "SNAZZY_KEY", key: "SNAZZY_MAPS_API_KEY" },
+  ];
+  for (const body of links) {
+    const [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", body)));
+    assert.equal(status, 200, JSON.stringify([body, got]));
+  }
+  assert.deepEqual(
+    linkCalls(APP_PROJ).slice(n).map((c) => [c.method, c.body]),
+    [
+      ["PUT", { app: "brand-agent", var: "CANVA_CLIENT_ID", key: "CANVA_CLIENT_ID__ACME_TEST" }],
+      ["PUT", { app: "brand-agent", var: "CANVA_CLIENT_SECRET", key: "CANVA_CLIENT_SECRET__ACME_TEST" }],
+      ["PUT", { app: "*", var: "CANVA_CLIENT_ID__BETA_TEST", key: "CANVA_CLIENT_ID__BETA_TEST" }],
+      ["PUT", { app: "*", var: "UNSPLASH_ACCESS_KEY", key: "UNSPLASH_ACCESS_KEY" }],
+      ["PUT", { app: "brand-agent", var: "SNAZZY_KEY", key: "SNAZZY_MAPS_API_KEY" }],
+    ],
+    "This workspace's project, names only",
+  );
+  const [, got] = await answered(await AppKeysRoute.GET(req("GET", "/api/keys/apps?app=brand-agent")));
+  assert.deepEqual(got.links.map((l) => [l.app, l.name, l.key]), [
+    ["brand-agent", "CANVA_CLIENT_ID", "CANVA_CLIENT_ID__ACME_TEST"],
+    ["brand-agent", "CANVA_CLIENT_SECRET", "CANVA_CLIENT_SECRET__ACME_TEST"],
+    ["*", "CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_ID__BETA_TEST"],
+    ["*", "UNSPLASH_ACCESS_KEY", "UNSPLASH_ACCESS_KEY"],
+    ["brand-agent", "SNAZZY_KEY", "SNAZZY_MAPS_API_KEY"],
+  ]);
+  assert.ok(!linkCalls(APP_PROJ).some((c) => Object.values(APP_VALUES).concat(CANVA.flatMap((c) => [c.id, c.secret])).some((v) => JSON.stringify(c.body ?? "").includes(v))), "no value goes with a link");
+  projectLinks.length = 0;
+});
+
+await check("any app links any client's Canva keys, as apps use Anthropic's from Keys: each client's own app under the names it reads, one shared app under the keys' own names, or every app under its own", async () => {
+  projectLinks.length = 0;
+  const n = linkCalls(APP_PROJ).length;
+  const links = [
+    // App A, Acme's own: the names its code reads.
+    { app: "acme-studio", name: "CANVA_CLIENT_ID", key: "CANVA_CLIENT_ID__ACME_TEST" },
+    { app: "acme-studio", name: "CANVA_CLIENT_SECRET", key: "CANVA_CLIENT_SECRET__ACME_TEST" },
+    // App B, Beta's own.
+    { app: "beta-studio", name: "CANVA_CLIENT_ID", key: "CANVA_CLIENT_ID__BETA_TEST" },
+    { app: "beta-studio", name: "CANVA_CLIENT_SECRET", key: "CANVA_CLIENT_SECRET__BETA_TEST" },
+    // One shared app with both clients' pairs, each under its own name, picking the client as it runs.
+    ...["CANVA_CLIENT_ID__ACME_TEST", "CANVA_CLIENT_SECRET__ACME_TEST", "CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"].map((key) => ({ app: "brand-studio", key })),
+    // Every app: under its own name.
+    { app: "*", key: "CANVA_CLIENT_SECRET__BETA_TEST" },
+  ];
+  for (const body of links) {
+    const [status, got] = await answered(await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", body)));
+    assert.equal(status, 200, JSON.stringify([body, got]));
+  }
+  assert.deepEqual(
+    linkCalls(APP_PROJ).slice(n).map((c) => [c.method, c.body.app, c.body.var, c.body.key]),
+    [
+      ["PUT", "acme-studio", "CANVA_CLIENT_ID", "CANVA_CLIENT_ID__ACME_TEST"],
+      ["PUT", "acme-studio", "CANVA_CLIENT_SECRET", "CANVA_CLIENT_SECRET__ACME_TEST"],
+      ["PUT", "beta-studio", "CANVA_CLIENT_ID", "CANVA_CLIENT_ID__BETA_TEST"],
+      ["PUT", "beta-studio", "CANVA_CLIENT_SECRET", "CANVA_CLIENT_SECRET__BETA_TEST"],
+      ["PUT", "brand-studio", "CANVA_CLIENT_ID__ACME_TEST", "CANVA_CLIENT_ID__ACME_TEST"],
+      ["PUT", "brand-studio", "CANVA_CLIENT_SECRET__ACME_TEST", "CANVA_CLIENT_SECRET__ACME_TEST"],
+      ["PUT", "brand-studio", "CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_ID__BETA_TEST"],
+      ["PUT", "brand-studio", "CANVA_CLIENT_SECRET__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"],
+      ["PUT", "*", "CANVA_CLIENT_SECRET__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"],
+    ],
+    "This workspace's project, names only",
+  );
+  // Each app sees its own and every app's, never another app's.
+  for (const [app, want] of [
+    ["acme-studio", [["acme-studio", "CANVA_CLIENT_ID", "CANVA_CLIENT_ID__ACME_TEST"], ["acme-studio", "CANVA_CLIENT_SECRET", "CANVA_CLIENT_SECRET__ACME_TEST"], ["*", "CANVA_CLIENT_SECRET__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"]]],
+    ["beta-studio", [["beta-studio", "CANVA_CLIENT_ID", "CANVA_CLIENT_ID__BETA_TEST"], ["beta-studio", "CANVA_CLIENT_SECRET", "CANVA_CLIENT_SECRET__BETA_TEST"], ["*", "CANVA_CLIENT_SECRET__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"]]],
+    [
+      "brand-studio",
+      [
+        ["brand-studio", "CANVA_CLIENT_ID__ACME_TEST", "CANVA_CLIENT_ID__ACME_TEST"],
+        ["brand-studio", "CANVA_CLIENT_SECRET__ACME_TEST", "CANVA_CLIENT_SECRET__ACME_TEST"],
+        ["brand-studio", "CANVA_CLIENT_ID__BETA_TEST", "CANVA_CLIENT_ID__BETA_TEST"],
+        ["brand-studio", "CANVA_CLIENT_SECRET__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"],
+        ["*", "CANVA_CLIENT_SECRET__BETA_TEST", "CANVA_CLIENT_SECRET__BETA_TEST"],
+      ],
+    ],
+  ]) {
+    const [, got] = await answered(await AppKeysRoute.GET(req("GET", `/api/keys/apps?app=${app}`)));
+    assert.deepEqual(got.links.map((l) => [l.app, l.name, l.key]), want, app);
+  }
+  projectLinks.length = 0;
+});
+
+await check("keys only apps use are never a bot's: not given in Keys, not in call_api or ask_for_key, and a call with one is refused in plain words with nothing sent", async () => {
+  for (const name of ["SNAZZY_MAPS_API_KEY", "CANVA_CLIENT_SECRET__ACME_TEST"]) {
+    const [status, got] = await answered(await KeysRoute.PATCH(req("PATCH", "/api/keys", { name, botId: "boppy", allowed: true })));
+    assert.equal(status, 400, name);
+    assert.match(got.error, /for apps only/, name);
+    noDashes(got.error, "a refusal");
+  }
+  // A bot that somehow has them (an old state, a hand edit): never usable, never told of them.
+  S.update(() => (S.bot("boppy").keys = ["STRIPE_SECRET_KEY", "SNAZZY_MAPS_API_KEY", "CANVA_CLIENT_ID__ACME_TEST"]));
+  assert.deepEqual((await Keys.usableKeys(S.bot("boppy"), { fresh: true })).map((k) => k.name), ["STRIPE_SECRET_KEY"]);
+  const { first } = await turnWith("find a photo of a harbour", []);
+  const callTool = first.tools.find((t) => t.name === "call_api");
+  assert.deepEqual(callTool.parameters.properties.key.enum, ["STRIPE_SECRET_KEY"]);
+  const askTool = first.tools.find((t) => t.name === "ask_for_key");
+  for (const tool of [callTool, askTool]) assert.ok(!/SNAZZY|CANVA|Snazzy|Canva/.test(JSON.stringify(tool)), `${tool.name} names none of them`);
+  const n = brokerCalls().length;
+  const t = await turnWith("get me a map style", [toolCall("call_api", { key: "SNAZZY_MAPS_API_KEY", method: "GET", path: "/explore.json", query: "{\"text\": \"dark\"}", body: null })]);
+  assert.match(t.out(), /^Bops can't call Snazzy Maps for you: its key is for Alex's apps only\./);
+  noDashes(t.out(), "a refusal");
+  for (const key of ["CANVA_CLIENT_SECRET__ACME_TEST"]) {
+    const r = await Keys.callApi("boppy", { key, method: "GET", path: "/v1/users/me", query: null, body: null }, { chatId }, { chat: true });
+    assert.match(r.text, /^Bops can't call Canva for you: its key is for Alex's apps only\./, key);
+  }
+  assert.equal(brokerCalls().length, n, "nothing went to Orgo's broker");
+  const asked = await Keys.askForKey("boppy", { service: "SNAZZY_MAPS_API_KEY", reason: null, change: false }, { chatId });
+  assert.match(asked.text, /is for Alex's apps only/);
+  noDashes(asked.text, "a refusal");
+});
+
+await check("Unsplash is a key bots may use too, read only (an access key reads public photos): saved for all workspaces like any bot key and given to a bot, offered to call_api and ask_for_key, a GET through Orgo's broker and a write refused; This workspace's own links to apps; Snazzy Maps and Canva stay apps only", async () => {
+  const had = S.bot("boppy").keys;
+  try {
+    const n = secretPosts().length;
+    const [status, got] = await answered(await KeysRoute.POST(req("POST", "/api/keys", { name: "UNSPLASH_ACCESS_KEY", value: UNSPLASH_VALUE, botIds: ["boppy"], scope: "all" })));
+    assert.deepEqual([status, got], [200, { ok: true, name: "UNSPLASH_ACCESS_KEY" }]);
+    assert.deepEqual(secretPosts().slice(n).map((c) => c.body), [{ name: "UNSPLASH_ACCESS_KEY", value: UNSPLASH_VALUE }], "for all workspaces, like any bot key");
+    assert.ok(S.bot("boppy").keys.includes("UNSPLASH_ACCESS_KEY"), "the bot it came with may use it");
+    const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+    const p = list.providers.find((x) => x.name === "UNSPLASH_ACCESS_KEY");
+    assert.deepEqual([p.label, p.readOnly, p.forApps], ["Unsplash", true, undefined]);
+    assert.ok(list.keys.some((k) => k.name === "UNSPLASH_ACCESS_KEY" && k.scope === "all" && k.bots.includes("boppy") && !k.forApps));
+    // call_api and ask_for_key offer it, with how it works; a GET goes through the broker, a write is refused as read only.
+    const { first } = await turnWith("find a photo of a harbour", []);
+    const tool = first.tools.find((t) => t.name === "call_api");
+    assert.ok(tool.parameters.properties.key.enum.includes("UNSPLASH_ACCESS_KEY"));
+    assert.match(tool.description, /UNSPLASH_ACCESS_KEY \(Unsplash, read only\): Read only REST at \/\.\.\. \(e\.g\. GET \/search\/photos/);
+    assert.ok(first.tools.find((t) => t.name === "ask_for_key").parameters.properties.service.enum.includes("UNSPLASH_ACCESS_KEY"));
+    const b = brokerCalls().length;
+    const r = await Keys.callApi("boppy", { key: "UNSPLASH_ACCESS_KEY", method: "GET", path: "/search/photos", query: "{\"query\": \"harbour\"}", body: null }, { chatId }, { chat: true });
+    assert.equal(r.did, "Called Unsplash GET /search/photos");
+    assert.deepEqual(brokerCalls().slice(b).map((c) => [c.body.name, c.body.method, c.body.path, c.body.query]), [["UNSPLASH_ACCESS_KEY", "GET", "/search/photos", { query: "harbour" }]]);
+    const w = await Keys.callApi("boppy", { key: "UNSPLASH_ACCESS_KEY", method: "POST", path: "/photos/abc/like", query: null, body: null }, { chatId }, { chat: true });
+    assert.equal(w.text, "Unsplash is read only in Bops: only GET.");
+    assert.equal(brokerCalls().length, b + 1, "the write went nowhere");
+    // This workspace's own, which apps take: saved there, the one for all workspaces removed, then linked to an app.
+    const m = secretPosts().length;
+    assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "UNSPLASH_ACCESS_KEY", value: UNSPLASH_WS_VALUE, botIds: [], scope: "workspace" }))).status, 200);
+    assert.deepEqual(secretPosts().slice(m).map((c) => c.body), [{ name: "UNSPLASH_ACCESS_KEY", value: UNSPLASH_WS_VALUE, workspace_id: APP_PROJ }]);
+    assert.equal((await KeyRoute.DELETE(req("DELETE", "/api/keys/UNSPLASH_ACCESS_KEY"), ctx("UNSPLASH_ACCESS_KEY"))).status, 200);
+    const left = (await (await KeysRoute.GET(req("GET", "/api/keys?fresh=1"))).json()).keys.filter((k) => k.name === "UNSPLASH_ACCESS_KEY");
+    assert.deepEqual(left.map((k) => [k.scope, !!k.forApps]), [["workspace", false]], "This workspace's is the one there");
+    assert.equal((await AppKeysRoute.PUT(req("PUT", "/api/keys/apps", { app: "brand-studio", key: "UNSPLASH_ACCESS_KEY" }))).status, 200);
+    assert.deepEqual(linkCalls(APP_PROJ).at(-1).body, { app: "brand-studio", var: "UNSPLASH_ACCESS_KEY", key: "UNSPLASH_ACCESS_KEY" });
+    await nowhereElse([UNSPLASH_VALUE, UNSPLASH_WS_VALUE]);
+    // A bot that doesn't have it yet is asked for it on a card (NeedsOk), never refused as a key for apps.
+    S.update(() => (S.bot("boppy").keys = had));
+    await assert.rejects(Keys.askForKey("boppy", { service: "UNSPLASH_ACCESS_KEY", reason: "Find a photo of the harbour", change: false }, { chatId }), (e) => e instanceof P.NeedsOk && e.ask.kind === "key" && e.ask.resources[0] === "UNSPLASH_ACCESS_KEY");
+    // Snazzy Maps and a client's Canva app are still no bot's.
+    for (const name of ["SNAZZY_MAPS_API_KEY", "CANVA_CLIENT_ID__ACME_TEST"]) {
+      const [s2, g2] = await answered(await KeysRoute.PATCH(req("PATCH", "/api/keys", { name, botId: "boppy", allowed: true })));
+      assert.deepEqual([s2, /for apps only/.test(g2.error)], [400, true], name);
+    }
+  } finally {
+    vault.delete("UNSPLASH_ACCESS_KEY");
+    S.update(() => (S.bot("boppy").keys = had));
+    projectLinks.length = 0;
+    // This workspace's Unsplash key stays through the checks below (a bot's key on every path), removed after them.
+    await Keys.listKeys({ fresh: true });
+  }
+});
+
+await check("a pair saved or removed one key at a time names the workspace it's for: one switched to meanwhile gets none of it, and Orgo isn't asked", async () => {
+  const n = orgoCalls.length;
+  let [status, got] = await answered(await KeysRoute.POST(req("POST", "/api/keys", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-elsewhere-0008", scope: "workspace", ws: "ws_fern" })));
+  assert.equal(status, 409);
+  assert.match(got.error, /switched workspaces/);
+  noDashes(got.error, "a refusal");
+  [status] = await answered(await KeyRoute.DELETE(req("DELETE", "/api/keys/CANVA_CLIENT_SECRET__ACME_TEST?scope=workspace&ws=ws_fern"), ctx("CANVA_CLIENT_SECRET__ACME_TEST")));
+  assert.equal(status, 409);
+  assert.equal(orgoCalls.length, n, "Orgo isn't asked");
+  assert.equal(workspaceVault.get(inWorkspace(APP_PROJ, "CANVA_CLIENT_SECRET__ACME_TEST")), CANVA[0].secret, "nothing changed");
+  // The workspace open: done. In a shared one, it's named by its Orgo project.
+  assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: CANVA[0].secret, scope: "workspace", ws: "ws_main" }))).status, 200);
+  openShared();
+  try {
+    assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "UNSPLASH_ACCESS_KEY", value: "test-unsplash-shared-0009", scope: "workspace", ws: "ws_main" }))).status, 409);
+    assert.equal(projectVault.has("UNSPLASH_ACCESS_KEY"), false);
+    assert.equal((await KeysRoute.POST(req("POST", "/api/keys", { name: "UNSPLASH_ACCESS_KEY", value: "test-unsplash-shared-0009", scope: "workspace", ws: SHARED_PROJECT }))).status, 200);
+    projectVault.delete("UNSPLASH_ACCESS_KEY");
+  } finally {
+    closeShared();
+  }
+});
+
+await check("a key for apps kept for all workspaces (made in Orgo's own Secrets) isn't listed: no app can use it, and Bops would act on This workspace's by its name", async () => {
+  vault.set("SNAZZY_MAPS_API_KEY", "test-snazzy-account-0007");
+  vault.set("CANVA_CLIENT_ID__ACME_TEST", "test-client-id-account");
+  try {
+    const list = await (await KeysRoute.GET(req("GET", "/api/keys?fresh=1"))).json();
+    assert.deepEqual(list.keys.filter((k) => k.forApps && k.scope === "all").map((k) => k.name), []);
+    assert.ok(list.keys.some((k) => k.name === "SNAZZY_MAPS_API_KEY" && k.scope === "workspace"), "This workspace's still is");
+  } finally {
+    vault.delete("SNAZZY_MAPS_API_KEY");
+    vault.delete("CANVA_CLIENT_ID__ACME_TEST");
+    await Keys.listKeys({ fresh: true });
+  }
+  // In a shared workspace: the owner's for all their workspaces, as their Mac said them.
+  openShared({ keyNames: [{ name: "SNAZZY_MAPS_API_KEY", scope: "all" }, { name: "GITHUB_TOKEN", scope: "all" }] });
+  try {
+    const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+    assert.deepEqual(list.keys.filter((k) => k.scope === "all").map((k) => k.name), ["GITHUB_TOKEN"]);
+  } finally {
+    closeShared();
+  }
+});
+
+await check("a key for apps is This workspace's at reveal and remove too: for all workspaces it's refused before Orgo is asked; reveal names the workspace it's for", async () => {
+  const n = orgoCalls.length;
+  for (const res of [
+    await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "SNAZZY_MAPS_API_KEY", scope: "all" })),
+    await KeyRoute.DELETE(req("DELETE", "/api/keys/CANVA_CLIENT_ID__ACME_TEST"), ctx("CANVA_CLIENT_ID__ACME_TEST")),
+  ]) {
+    const [status, got] = await answered(res);
+    assert.deepEqual([status, got.error], [400, "A key for apps goes under This workspace: apps use only This workspace's keys."]);
+  }
+  const [status, got] = await answered(await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "CANVA_CLIENT_SECRET__ACME_TEST", scope: "workspace", ws: "ws_fern" })));
+  assert.deepEqual([status, got.value], [409, undefined], "a workspace switched to meanwhile gets nothing");
+  assert.equal(orgoCalls.length, n, "Orgo isn't asked");
+  assert.equal((await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "CANVA_CLIENT_SECRET__ACME_TEST", scope: "workspace", ws: "ws_main" }))).status, 200);
+});
+
+await check("keys for apps are no bot's anywhere: not what people with Keys switch bots for, not switched on in another workspace (Used in), not in the access set sent to Orgo", async () => {
+  const all = await Keys.listKeys({ fresh: true });
+  assert.ok(all.some((k) => k.name === "SNAZZY_MAPS_API_KEY"), "listed in Keys");
+  const seen = Keys.sharedKeysOf(all, "ws_main").map((k) => k.name);
+  assert.ok(seen.length > 0 && !seen.some((k) => /^(CANVA_|SNAZZY_)/.test(k)), JSON.stringify(seen));
+  assert.ok(seen.includes("UNSPLASH_ACCESS_KEY"), "Unsplash, a bot's key, is what people with Keys switch bots for");
+  const FERN = "7a2d3c4e-1111-4222-8333-944455556666";
+  const had = S.getState().workspaces;
+  S.update((st) => void (st.workspaces = [...st.workspaces, { id: "ws_fern", name: "Fernway", createdAt: 1, orgoProjectId: FERN }]));
+  try {
+    const LoginsRoute = await import(`${root}/app/api/logins/route.ts`);
+    const [status, got] = await answered(await LoginsRoute.PATCH(req("PATCH", "/api/logins", { kind: "key", id: `${APP_PROJ}:SNAZZY_MAPS_API_KEY`, workspaceId: "ws_fern", on: true })));
+    assert.deepEqual([status, got.error], [400, "A key for apps goes under This workspace: apps use only This workspace's keys."]);
+    assert.equal(S.getState().workspaces.find((w) => w.id === "ws_fern").loginsOn, undefined);
+    // Unsplash, a bot's key of This workspace's, switches on in Fernway (Used in) and Fernway sees it.
+    const [ust, ugot] = await answered(await LoginsRoute.PATCH(req("PATCH", "/api/logins", { kind: "key", id: `${APP_PROJ}:UNSPLASH_ACCESS_KEY`, workspaceId: "ws_fern", on: true })));
+    assert.equal(ust, 200, JSON.stringify(ugot));
+    assert.ok(Keys.keysOf(await Keys.listKeys({ fresh: true }), "ws_fern").some((k) => k.name === "UNSPLASH_ACCESS_KEY" && k.workspaceId === APP_PROJ));
+    // Switched on there all the same (a state from elsewhere, switched on as Used in writes it): Fernway doesn't see a key
+    // for apps, and does see a bot's key of Main's switched on the same way (the control).
+    workspaceVault.set(inWorkspace(APP_PROJ, "LINEAR_API_KEY"), "lin_api_fake_main");
+    const withLinear = await Keys.listKeys({ fresh: true });
+    const { keyLoginKey } = await import(`${root}/lib/types.ts`);
+    S.update((st) => void Object.assign((st.workspaces.find((w) => w.id === "ws_fern").loginsOn ??= {}), { [keyLoginKey(APP_PROJ, "SNAZZY_MAPS_API_KEY")]: { at: 1 }, [keyLoginKey(APP_PROJ, "CANVA_CLIENT_ID__ACME_TEST")]: { at: 1 }, [keyLoginKey(APP_PROJ, "LINEAR_API_KEY")]: { at: 1 } }));
+    assert.deepEqual(Keys.keysOf(withLinear, "ws_fern").filter((k) => k.workspaceId === APP_PROJ).map((k) => k.name).sort(), ["LINEAR_API_KEY", "UNSPLASH_ACCESS_KEY"], "only the bots' keys");
+  } finally {
+    workspaceVault.delete(inWorkspace(APP_PROJ, "LINEAR_API_KEY"));
+    workspaceVault.delete(inWorkspace(APP_PROJ, "UNSPLASH_ACCESS_KEY"));
+    S.update((st) => void (st.workspaces = had));
+  }
+  const A = await import(`${root}/lib/server/access-sync.ts`);
+  const keys = A.accessPayload("ws_main", ["STRIPE_SECRET_KEY", "UNSPLASH_ACCESS_KEY", "SNAZZY_MAPS_API_KEY", "CANVA_CLIENT_ID__ACME_TEST"]).filter((g) => g.kind === "key").map((g) => g.target);
+  assert.ok(keys.includes("STRIPE_SECRET_KEY") && keys.includes("UNSPLASH_ACCESS_KEY") && !keys.some((k) => /^(CANVA_|SNAZZY_)/.test(k)), JSON.stringify([...new Set(keys)]));
+});
+
+await check("a client's name as its keys carry it: letters and digits in UPPER_SNAKE, accents dropped, one name however it's typed, refused when nothing's left or it's too long; Bops Cloud and Bops agree which keys are for apps", async () => {
+  const C = await import(`${root}/lib/canva-keys.ts`);
+  const { appOnlyKey } = await import(`${root}/cloud/protocol.ts`);
+  for (const [label, client] of [["Acme Test", "ACME_TEST"], ["acme-test", "ACME_TEST"], ["  Acme   Test  ", "ACME_TEST"], ["Café Nord", "CAFE_NORD"], ["3M", "3M"], ["", ""], ["  !!! ", ""], ["日本", ""]]) assert.equal(C.canvaClient(label), client, label);
+  assert.deepEqual([C.canvaClientOk(""), C.canvaClientOk("A".repeat(43)), C.canvaClientOk("A".repeat(44)), C.canvaClientOk("ACME__TEST"), C.canvaClientOk("acme")], [false, true, false, false, false]);
+  assert.deepEqual(C.canvaOf("CANVA_CLIENT_SECRET__ACME_TEST"), { client: "ACME_TEST", part: "secret" });
+  for (const bad of ["CANVA_CLIENT_ID__", "CANVA_CLIENT_ID__ACME__TEST", "CANVA_CLIENT_ID___ACME", `CANVA_CLIENT_ID__${"A".repeat(44)}`, "CANVA_CLIENT_TOKEN__ACME"]) assert.equal(C.canvaOf(bad), null, bad);
+  assert.equal(C.canvaLabel("CAFE_NORD"), "Cafe Nord");
+  const apps = [...Keys.APP_KEY_PROVIDERS.map((p) => p.name), "CANVA_CLIENT_ID__ACME_TEST", `CANVA_CLIENT_SECRET__${"A".repeat(43)}`];
+  for (const name of apps) assert.ok(appOnlyKey(name) && Keys.appKeyProvider(name), name);
+  for (const name of [...Keys.KEY_PROVIDERS.map((p) => p.name), "CANVA_CLIENT_ID__ACME__TEST", "CLOUDFLARE_API_TOKEN"]) assert.ok(!appOnlyKey(name) && !Keys.appKeyProvider(name), name);
+});
+
+await check("in a shared workspace with Keys: a client's Canva pair is This workspace's (orgo-web), and no bot is switched on for it", async () => {
+  openShared();
+  try {
+    const n = projectCalls().length;
+    const [status, got] = await answered(await KeysRoute.POST(req("POST", "/api/keys", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-shared-0006", botIds: ["max"], scope: "workspace" })));
+    assert.deepEqual([status, got], [200, { ok: true, name: "CANVA_CLIENT_SECRET__ACME_TEST" }]);
+    assert.deepEqual(projectCalls().slice(n).map((c) => [c.method, c.body]), [["POST", { name: "CANVA_CLIENT_SECRET__ACME_TEST", value: "test-secret-shared-0006" }]]);
+    assert.deepEqual(acts, [], "no bot's switch");
+    const list = await (await KeysRoute.GET(req("GET", "/api/keys"))).json();
+    assert.deepEqual(list.keys.filter((k) => k.forApps).map((k) => [k.name, k.scope]), [["CANVA_CLIENT_SECRET__ACME_TEST", "workspace"]]);
+    const no = await KeysRoute.PATCH(req("PATCH", "/api/keys", { name: "CANVA_CLIENT_SECRET__ACME_TEST", botId: "max", allowed: true }));
+    assert.equal(no.status, 400);
+    assert.deepEqual(acts, [], "still none");
+    assert.equal((await KeyRoute.DELETE(req("DELETE", "/api/keys/CANVA_CLIENT_SECRET__ACME_TEST?scope=workspace"), ctx("CANVA_CLIENT_SECRET__ACME_TEST"))).status, 200);
+    assert.equal(projectVault.has("CANVA_CLIENT_SECRET__ACME_TEST"), false);
+  } finally {
+    closeShared();
+  }
+});
+
+S.update((st) => {
+  Object.assign(st, { workspaces: appsHad.workspaces, workspace: appsHad.workspace, account: appsHad.account });
+  S.bot("boppy").keys = appsHad.boppy;
+});
+workspaceVault.clear();
+await Keys.listKeys({ fresh: true });
+
 await check("no dashes in anything Bops said or told the model", () => {
   for (const line of [...spoken, ...messages().map((m) => m.text)]) noDashes(line, "a line");
 });
 
 await check("no key value in any log, or anything the model was sent", () => {
-  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2", CARD_VALUE]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
-  for (const body of asked) for (const v of vault.values()) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
+  for (const v of [...vault.values(), ...projectVault.values(), "sk_test_fake123", "sk_live_shared_fake", "lin_api_fake_shared", "ghp_fake_shared", "ghp_fake_shared_2", CARD_VALUE, ...CANVA.flatMap((c) => [c.id, c.secret]), ...Object.values(APP_VALUES), "test-secret-acme-0005", "test-secret-shared-0006", "test-secret-elsewhere-0008", "test-unsplash-shared-0009", "test-snazzy-account-0007", "lin_api_fake_main", UNSPLASH_VALUE, UNSPLASH_WS_VALUE]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
+  for (const body of asked) for (const v of [...vault.values(), ...CANVA.flatMap((c) => [c.id, c.secret]), ...Object.values(APP_VALUES), UNSPLASH_VALUE, UNSPLASH_WS_VALUE]) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
 });
 
 server.close();

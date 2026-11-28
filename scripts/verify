@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// One entry point for each feature's checks (docs/FEATURES.md). Usage: scripts/verify [browser-speed|browser-input|your-apps [--ui]],
+// One entry point for each feature's checks (docs/FEATURES.md). Usage: scripts/verify [browser-speed|browser-input|your-apps [--ui]|keys],
 // or --list for every target. No target: browser-speed.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,11 @@ const node = process.execPath;
 // Your Apps: what the review flow touches, linted; its UI, status, password and sharing checks. --ui adds the browser pass.
 // (Bops Cloud's slice of it, SharedApp.github, is checked by cloud/test/core-members.test.ts, which needs the test database.)
 const yourAppsFiles = ['components/app/app-controls.tsx', 'components/app/app-review.tsx', 'components/app/app-envs.tsx', 'components/app/app-settings.tsx', 'components/app/hosted-apps.tsx', 'components/app/made-apps.tsx', 'components/app/shared-apps.tsx', 'components/app/preview-password.tsx', 'components/app/bops-app.tsx', 'components/app/crm.tsx', 'components/app/ui.tsx', 'lib/hosted-apps.ts', 'lib/app-review.ts', 'cloud/ws-slice.ts', 'cloud/protocol.ts'];
+
+// Keys: the vault's keys and bots' calls with them (Unsplash among them), keys only apps use (each client's Canva app, Snazzy Maps) and
+// their links to apps, and Settings, Logins' Keys. Against a fake orgo-web and a fake Bops: nothing reaches Orgo or a vendor.
+// Bops Cloud's part runs only its act checks (cleanAct), which need no test database.
+const keysFiles = ['lib/canva-keys.ts', 'lib/server/keys.ts', 'lib/server/shared-keys.ts', 'lib/server/app-keys.ts', 'lib/server/access-sync.ts', 'app/api/keys/route.ts', 'app/api/keys/[name]/route.ts', 'app/api/keys/reveal/route.ts', 'app/api/logins/route.ts', 'components/app/keys.tsx', 'components/app/logins.tsx', 'cloud/protocol.ts', 'cloud/members.ts', 'scripts/test-keys.mjs', 'scripts/test-logins-ui.mjs', 'scripts/test-access.mjs', 'scripts/test-hosted-apps-ui.mjs'];
 
 const TARGETS = {
   'browser-speed': () => [
@@ -32,6 +37,18 @@ const TARGETS = {
     ['npx', ['eslint', ...yourAppsFiles]],
     ...['hosted-apps-ui', 'app-status', 'preview-password-ui', 'shared'].map((name) => [node, [`scripts/test-${name}.mjs`]]),
     ...(ui ? [[node, ['scripts/test-your-apps-e2e.mjs']]] : []),
+  ],
+  keys: () => [
+    ['npx', ['tsc', '--noEmit', '-p', 'tsconfig.json']],
+    ['npx', ['tsc', '--noEmit', '-p', 'cloud']],
+    ['npx', ['eslint', ...keysFiles]],
+    [node, ['--conditions=react-server', 'scripts/test-keys.mjs']],
+    [node, ['--conditions=react-server', 'scripts/test-logins.mjs']],
+    [node, ['--conditions=react-server', 'scripts/test-runs-on-keys.mjs']],
+    [node, ['--conditions=react-server', 'scripts/test-access.mjs']],
+    [node, ['scripts/test-logins-ui.mjs']],
+    [node, ['scripts/test-hosted-apps-ui.mjs']],
+    [node, ['--test', '--test-name-pattern=cleanAct', 'cloud/test/core-members.test.ts']],
   ],
 };
 
