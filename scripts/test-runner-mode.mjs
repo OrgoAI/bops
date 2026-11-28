@@ -41,7 +41,7 @@ const FAKES = {
   local: ["CHROME"],
   "orgo-sign-in": ["authStatus"],
   routines: [],
-  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn", "watchIdentity", "WHO_AM_I_EVERY_MS"], "orgo-auth": ["loadOrgoKey", "lookForRunnerKey"], "free-hours": ["startActivityBeat"], "runner-chat": ["startRunnerChat", "startWorkingBeat"], "browser-runner": ["startBrowserRelay"] } : {}),
+  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn", "watchIdentity", "WHO_AM_I_EVERY_MS"], "orgo-auth": ["loadOrgoKey", "lookForRunnerKey"], "free-hours": ["startActivityBeat"], "runner-chat": ["startRunnerChat", "startWorkingBeat"], "browser-runner": ["startBrowserRelay"], "runner-keeper": ["startKeeperCheck"] } : {}),
 };
 const VALUES = { local: { CHROME: "/nonexistent/Chrome" }, runner: { IDENTITY_EVERY_MS: 300000, WHO_AM_I_EVERY_MS: 60000 } };
 const loaded = [];
@@ -153,6 +153,7 @@ if (START) {
     globalThis.__fake["free-hours"] = { startActivityBeat: () => calls.push("in-use") };
     globalThis.__fake["runner-chat"] = { startRunnerChat: () => calls.push("chat"), startWorkingBeat: () => calls.push("working") };
     globalThis.__fake["browser-runner"] = { startBrowserRelay: () => calls.push("browser") };
+    globalThis.__fake["runner-keeper"] = { startKeeperCheck: () => calls.push("keeper") };
     globalThis.__fake["orgo-sign-in"] = { authStatus: async () => (calls.push("state"), (ready = ++tries >= 2), {}) };
     Object.assign(process.env, good());
     const S = await import(`${root}/lib/server/runner-start.ts`);
@@ -161,7 +162,7 @@ if (START) {
     console.log = () => {};
     await S.startRunner();
     console.log = log;
-    assert.deepEqual(calls, ["key", "identity", "identity", "state", "state", "runs-on", "in-use", "chat", "working", "browser"], "key, which computer (again until Orgo says), the state (again until it loads), then its loops (the working beat for its keeper too)");
+    assert.deepEqual(calls, ["key", "identity", "identity", "state", "state", "runs-on", "in-use", "chat", "working", "browser", "keeper"], "key, which computer (again until Orgo says), the state (again until it loads), then its loops (the working beat for its keeper too), then its keeper put in place");
     assert.deepEqual(globalThis.__fake.started, ["routines"], "the routines timer");
     for (const m of ["mail", "phone", "channels", "cloud-tunnel", "bops-sync", "access-sync", "watches", "relay", "runner-install", "mac", "attention", "orbit-sync", "memory-categories", "sessions"])
       assert.ok(!loaded.includes(m), `${m} isn't started`);
@@ -361,6 +362,7 @@ const ALLOWED = {
   "browser-runner.ts": "the runner's browser loop (loopHere(\"browser\")): what each screen's browser is doing, said to Bops Cloud as it changes",
   "permission.ts": "reading the state while one of its own requests for the user's OK is unanswered and it's up (listenForAnswers), so their reply reaches the paused run; and a brain's held call looking for its reply (heldAsk)",
   "app-lease.ts": "one app's lease renewed while its own work on that app runs (holdApp, under withApp), stopped as it's freed",
+  "runner-keeper.ts": "putting its computer's keeper in place as this build's own (ensureKeeper), a minute after it starts and every 10 minutes until it's there",
 };
 await check("every loop and timer in lib/server is the Mac's behind its gate, or one a runner runs", () => {
   const dir = `${root}/lib/server`;

@@ -230,7 +230,7 @@ export type RoutingRow = { mode: "mac" | "cloud"; setBy: string | null; setAt: n
 /**
  * Why a workspace switched to the cloud can't answer now (chat_routing.trouble*): a key of the chat's notes (NOTES:
  * stopped, deleted, noHours, hourly, noCredit, paused, cant, noRunner, old, and for an owner at CLOUD_SELF_MIN_VERSION
- * settingUp, updating and sharedOff: selfNote), the bot whose computer it is, that computer
+ * settingUp, updating and sharedOff: selfNote, and accountMac: keeperSaysMac), the bot whose computer it is, that computer
  * (lowercased), and since when. Said on the workspace (Workspace.chatTrouble) in place of moving it back to the Mac.
  */
 export type Trouble = { note: string; botId: string | null; desktop: string | null; at: number };
@@ -532,7 +532,8 @@ const troubleOf = (note: string) => (note === "late" ? "cant" : note);
 export async function noteTrouble(userId: string, desktop: string, note: string, botId?: string): Promise<void> {
   if (!(await macNewEnough(userId, CLOUD_ALL_MIN_VERSION))) return;
   const d = desktop.toLowerCase();
-  const said = troubleOf(note);
+  // No runner there while its keeper says the account's bots work on the Mac (Orgo's Settings): that's what to fix.
+  const said = (note === "noRunner" || note === "settingUp") && (await keeperSaysMac(userId, d)) ? "accountMac" : troubleOf(note);
   const next = await tx(async (c) => {
     await lockUser(c, userId);
     const blob = await lockedState(c, userId);
@@ -1650,6 +1651,17 @@ export async function keeperLive(userId: string, desktop: string, c?: pg.PoolCli
   return ((c ? await c.query(sql, args) : await query(sql, args)).rowCount ?? 0) > 0;
 }
 
+/**
+ * Whether computer `desktop`'s keeper, live (keeperLive), last said Orgo has the account's bots work on the Mac
+ * (bops.runner_keeper.runs_on, POST /v1/runner/keeper): it sets no runner up there, so the workspace's trouble is that
+ * ("accountMac", noteTrouble). Only for an owner whose last Mac is at CLOUD_SELF_MIN_VERSION.
+ */
+export async function keeperSaysMac(userId: string, desktop: string): Promise<boolean> {
+  if (!(await macNewEnough(userId, CLOUD_SELF_MIN_VERSION))) return false;
+  const sql = "SELECT 1 FROM bops.runner_keeper WHERE user_id = $1 AND desktop_id = $2 AND runs_on = 'mac' AND asked_at > now() - make_interval(secs => $3)";
+  return ((await query(sql, [userId, desktop.toLowerCase(), KEEPER_LIVE_MS / 1000])).rowCount ?? 0) > 0;
+}
+
 /** The notes selfNote may give in place of today's. */
 export type SelfNote = "settingUp" | "updating" | "sharedOff";
 
@@ -2019,7 +2031,8 @@ async function ended(turns: Ended[]) {
 
 /* ---------------- The runner's routes ---------------- */
 
-const computerOnly = (user: CloudUser | null) => {
+/** The computer a call signed in as (its runner, or its keeper: runner-keeper.ts), or 403 for anyone else. */
+export const computerOnly = (user: CloudUser | null) => {
   if (!user?.computer) throw new HttpError(403, "Only a computer's runner does this.");
   return user.computer;
 };

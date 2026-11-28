@@ -1982,7 +1982,7 @@ await check("a release is taken only signed by a key built in, and only a bops-r
     return JSON.stringify({ payload, sig: sign(null, Buffer.from(payload), o.key ?? privateKey).toString("base64"), keyId: o.keyId ?? "t1" });
   };
   assert.deepEqual(STEPS.verifyRelease(signed(good), keys), good);
-  assert.deepEqual(STEPS.verifyRelease(signed({ ...good, released: 1_763_467_200_000, size: STEPS.RELEASE_MAX_SIZE }), keys), { ...good, released: 1_763_467_200_000, size: STEPS.RELEASE_MAX_SIZE });
+  assert.deepEqual(STEPS.verifyRelease(signed({ ...good, released: "2026-11-18T12:00:00.123Z", size: STEPS.RELEASE_MAX_SIZE }), keys), { ...good, released: "2026-11-18T12:00:00.123Z", size: STEPS.RELEASE_MAX_SIZE });
   assert.deepEqual(STEPS.verifyRelease(signed({ ...good, extra: "x" }), keys), good, "only the release's own fields");
   // The keys built in: r2, an ed25519 key, and nothing else; frozen. A release signed by any other key is nothing.
   assert.deepEqual(Object.keys(STEPS.RELEASE_KEYS), ["r2"]);
@@ -2020,6 +2020,9 @@ await check("a release is taken only signed by a key built in, and only a bops-r
     "state level 10000": { ...good, stateLevel: 10_000 },
     "state level as text": { ...good, stateLevel: "42" },
     "released not a time": { ...good, released: "soon" },
+    "released as a number": { ...good, released: 1_763_467_200_000 },
+    "released not in UTC": { ...good, released: "2026-11-18T12:00:00+01:00" },
+    "version with a long part": { ...good, version: "0.0.1234567", name: "bops-server-0.0.1234567-abcDEF_12-x.tgz" },
     "no released": noReleased,
   };
   for (const [what, p] of Object.entries(bad)) assert.equal(STEPS.verifyRelease(signed(p), keys), null, what);

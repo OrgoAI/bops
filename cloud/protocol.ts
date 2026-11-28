@@ -1670,7 +1670,11 @@ export type RunnerRelease = {
 /** The largest runner bundle a signed release may name (RunnerRelease.size). */
 export const RELEASE_MAX_BYTES = 400 * 1024 * 1024;
 
-/** Why Bops Cloud answers a keeper as it does (KeeperAnswer.why), in the order it looks (cloud/runner-keeper.ts). */
+/**
+ * Why Bops Cloud answers a keeper as it does (KeeperAnswer.why), in the order it looks (cloud/runner-keeper.ts). `keptDown`:
+ * the owner's Mac marked the runner there failed for a reason only it clears (it listened beyond its computer, it
+ * couldn't sign in, or any failure not in RUNNER_FAILED_PASSING), so only the owner's Mac sets one up there again.
+ */
 export type KeeperWhy =
   | "ownerMac"
   | "accountMac"
@@ -1678,6 +1682,7 @@ export type KeeperWhy =
   | "stale"
   | "stopping"
   | "someoneElse"
+  | "keptDown"
   | "macBusy"
   | "botsOnMac"
   | "noBot"

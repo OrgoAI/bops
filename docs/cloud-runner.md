@@ -432,6 +432,75 @@ the runs to come. The runner stays on its computer with its key, running nothing
 over (the user's answer wakes the computer and carries it on to its end there, or Stop ends it); the look
 within a minute of that takes it off. Switched back meanwhile, it's up again as it was.
 
+## Set up and updated on its own computer
+
+From 0.0.55 (`CLOUD_SELF_MIN_VERSION`), for an owner whose last Mac is at that version, a bot's computer sets up
+its own runner and keeps it on the newest signed release, with no Mac open. An owner whose last Mac is older sees
+nothing of this: their computers' keepers are answered "ownerMac", Bops Cloud keeps nothing of them, and their
+runners are set up and updated by the Mac exactly as above.
+
+**The keeper.** A small program on each Bops computer, `vm/bin/bops-runner-keeper.mjs`, run by supervisord as
+`bops-keeper` (root, beside `bops-runner`), with the same install steps the Mac sends (`vm/runner-steps.mjs`) in
+`/opt/bops/keeper` beside it. It gets there three ways: the template (bops-base 0.1.12, `orgo/bops-base.mjs`), each
+runner from 0.0.55 writing its own bundle's copy whenever the one there differs (`lib/server/runner-keeper.ts`
+ensureKeeper, never while the keeper is judging a build), and orgo-web's runner boot for a computer that never got
+one. A copy of a computer keeps its keeper (the copy's scrub takes off only the runner's program and script).
+
+**A look.** A minute after it starts, then whenever one is due: every 2 minutes with no runner there (then 4, 8 and
+so on up to 30), else every hour and a while (up to another hour, from the computer's id), at once when the runner
+hears Bops Cloud has a new release (`/var/run/bops/keeper-look`), and at once after the clock jumps (a computer
+restored or woken). Each look, in order:
+
+1. A pinned runner (`/opt/bops/keeper/pin`, a dev Mac's own build) is left alone.
+2. The computer's own identity from its VMM, as the runner asks for it. Refused: asked again in 10 minutes; none: 5.
+3. A computer other than the one `state.json` is for (a copy, a new VM) starts afresh.
+4. The runner there (its program, its script and the build `current` points at), whether a key line is on the
+   computer (grep alone), and whether the runner is answering a reply or running a thread of its own.
+5. Orgo's `GET /api/bops/settings` on the identity: where the account's bots work, and whether someone else can
+   use the computer and it's a Bops computer.
+6. The newest release (`latest.json`), checked against the keys built into `vm/runner-steps.mjs`. Nothing in the
+   environment, `keeper.json` or any file adds or changes a key.
+7. Bops Cloud's answer (`POST /v1/runner/keeper`, `cloud/runner-keeper.ts`): nothing, install or update, why, and when
+   to ask again. Never a place or a version.
+
+It never sets one up where the account's bots work on This Mac, where a key line is on a computer someone else can
+use (or Orgo didn't say whether one can), or on a computer Orgo doesn't count as a Bops computer (asked again in 6
+hours), whatever Bops Cloud says: it still asks, so Bops Cloud keeps why.
+
+**Installing or updating.** None for an hour after the owner's Mac took the runner off (`/opt/bops/keeper/off`), none
+for a day after it set one up 3 times in a day (reported as flapping), and a build that failed its health check
+here is skipped for 12 hours, and for good after 3 times until a newer one. Never the same or an older version over
+the runner there. The bundle is downloaded with a cap, hashed as it comes (one that doesn't match its release is
+deleted), unless that build is on the computer already (a copy). Its start script gets the computer's id from the
+identity, Orgo and Bops Cloud from `keeper.json`, and the time zone the old script had. Then, holding the Mac's look
+off (`/var/run/bops/keeper-hold`), the install script runs under the runners' lock with the build before kept: a reply
+being answered, or a thread of the runner's own going, means busy, nothing swapped, tried again in 5 minutes. The
+health check runs with `/opt/bops/keeper/judging` there. Healthy: reported installed or updated. Not healthy: a
+first one is stopped and reported failed; an update goes back to the build before, which is restarted, the new one
+is marked failed here, and it's reported rolled back. A runner that never got the user's state while Bops Cloud's
+`/health` doesn't answer isn't judged: that's Bops Cloud's outage, and it's judged at the next look.
+
+**Bops Cloud's answer**, in order: the owner's Mac too old; the account on This Mac; no release, or the keeper read
+another; the runner being taken off, couldn't be set up because someone else can use the workspace (or only its
+owner may), or failed for a reason only the Mac clears; a Mac setting it up right now; the bots' screens on the Mac,
+no bot there, bots of more than one workspace, or that workspace not everything in the cloud; not a Bops computer;
+a key on a computer someone else can use; a release that writes a state newer than the owner's Mac reads. Then with
+no runner: `BOPS_RUNNER_UPDATES` (off, staff or on; staff is owners with an @orgo.ai email) and the slots, else
+install. With one: up to date, `BOPS_RUNNER_UPDATES`, the build halted, a turn of it being answered, the slots, the
+soak, else update.
+
+- **Halts:** a build rolled back on 2 computers of Orgo's staff, or on computers of 3 owners, in a day is halted
+  for everyone; rolled back on 2 computers of one owner, for that owner alone.
+- **Slots:** `BOPS_RUNNER_OWNER_SLOTS` (3) set ups and updates per owner and `BOPS_RUNNER_UPDATE_SLOTS` (10) in all,
+  per 15 minutes.
+- **Soak:** an owner who isn't staff waits `BOPS_RUNNER_SOAK_MIN` (60) minutes after a release, and for one computer
+  of staff to have updated to it and stayed healthy.
+
+Each ask is kept (`bops.runner_keeper`), which says the computer is setting up or updating its Bops (`keeperLive`),
+and where the keeper said the account's bots work, so a cloud workspace whose computer has no runner because the
+account is on This Mac says so (`accountMac`). A computer's runner never raises the state's level (`cloud/state.ts`),
+so a runner newer than the owner's Mac never locks that Mac out of their state.
+
 ## Not in this version
 
 - Chat on the runner: the Mac still runs chat turns while it's open, and the iPhone's chats don't go
