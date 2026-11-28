@@ -64,11 +64,14 @@
 // member's job on the app's own computer's runner (appJob): each kind, a kind it doesn't know and another computer's app
 // doing nothing, the domain from its computer's own list, a left over by name, Orgo not taking its sign in yet said
 // plainly; Remove site and Remove app clearing its run fields and never dropping the record, a domain that won't come
-// off keeping its site up, what may be left in Cloudflare said; and what members see of its apps (appsViewHere).
+// off keeping its site up, what may be left in Cloudflare said; and what members see of its apps (appsViewHere). A
+// runner signs in with its computer's own key, which the fake holds to orgo-web's rules for one (web.rules: no app
+// where a link or domain points, a tail on its labels, passwords of 8, what's the owner's alone), as prod has them and
+// as fixed for a Bops computer: its Preview made and found again under both, its Published seeded for its domain.
 // Usage: node --conditions=react-server scripts/test-hosted-apps.mjs
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { constants, createHash, generateKeyPairSync, privateDecrypt, randomBytes, randomUUID } from "node:crypto";
+import { constants, createHash, generateKeyPairSync, privateDecrypt, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
@@ -99,6 +102,13 @@ mkdirSync(process.env.HOME);
 const ORGO_KEY = "sk_orgo_test_hosted_apps";
 /** The user's key after they signed in again. */
 const NEW_KEY = "sk_orgo_test_signed_in_again";
+/**
+ * A computer's own Orgo key, the one its runner signs in with (asRunner): orgo-web made it for that computer alone
+ * (app/api/computers/[id]/orgo-key), never by a device code for Bops, so it's no Bops sign-in key. The fake takes it as
+ * the owner, on its computer alone, under orgo-web's rules for a computer's own credential (web.rules).
+ */
+const COMPUTER_KEYS = new Map([["sk_live_test_computer_key_boppy", "c_boppy"]]);
+const [COMPUTER_KEY] = COMPUTER_KEYS.keys();
 globalThis.bopsOrgoKey = ORGO_KEY;
 const work = join(scratch, "work");
 mkdirSync(work);
@@ -226,6 +236,7 @@ const central = {
   keys: new Map([
     [ORGO_KEY, { id: "u_alex", name: "Alex", roles: { "3f6c2a1e-8b4d-4c7a-9e21-5d0b7a9c4f13": "owner" } }],
     [NEW_KEY, { id: "u_alex", name: "Alex", roles: { "3f6c2a1e-8b4d-4c7a-9e21-5d0b7a9c4f13": "owner" } }],
+    [COMPUTER_KEY, { id: "u_alex", name: "Alex", roles: { "3f6c2a1e-8b4d-4c7a-9e21-5d0b7a9c4f13": "owner" } }],
   ]),
   /** Agent tokens Ingot made, by id (revoked ones too): its secret, workspace, name and scope, and who made it. */
   tokens: new Map(),
@@ -605,7 +616,33 @@ function bash(id, command) {
 
 /* ---------------- A fake orgo-web: a computer's record and bash, the deploy runner ---------------- */
 
-const web = { projects: [], calls: [], closed: false, liveAtOnce: false, failAtOnce: null, members: null, membersDown: false, urls: [], urlLimit: 10, accountLimit: 10, urlRefuse: null };
+const web = { projects: [], calls: [], closed: false, liveAtOnce: false, failAtOnce: null, members: null, membersDown: false, urls: [], urlLimit: 10, accountLimit: 10, urlRefuse: null, urlPortRefuse: null, passwords: false };
+
+/*
+ * orgo-web's rules for a computer's own credential (COMPUTER_KEY: a runner's), each a switch, so a test runs on orgo-web
+ * as prod has it (ORGO_TODAY) and with its fix for a Bops computer's runner (ORGO_FIXED, fix/bops-runner-preview):
+ * - e8: no app on a port a domain or another public URL of its computer points at, at a create or a port change
+ *   (lib/deploys/manage.ts portPointedAt: 409 PORT_TAKEN), its own new link's included;
+ * - previewPort: but a project may go on the port of the Bops Preview link named as it (the fix's createProject skip);
+ * - tail: a label it sends is a name, given a tail (lib/public-urls/create.ts tailedLabel), where a Bops sign-in key's
+ *   Preview label is kept exactly (the fix keeps a Bops computer's too);
+ * - password8: a password under 8 characters refused (400 INVALID_PASSWORD), where a Bops sign-in key's may have 4 (the
+ *   fix lets a Bops computer's have 4 too);
+ * - ownerOnly: what's one_computer no refused 403 computer_key (lib/api-keys/permissions.csv): a project's variables, a
+ *   domain's DNS check, its verify.
+ * The owner's key (ORGO_KEY, NEW_KEY: a Bops sign-in key) is held to none of them.
+ */
+const ORGO_TODAY = Object.freeze({ e8: true, previewPort: false, tail: true, password8: true, ownerOnly: true });
+const ORGO_FIXED = Object.freeze({ ...ORGO_TODAY, previewPort: true, tail: false, password8: false });
+web.rules = { ...ORGO_TODAY };
+/** E8 (lib/deploys/manage.ts portPointedAt): a domain, or a public URL other than `except`, of the computer on `port`. */
+const portPointedAt = (computerId, port, except) =>
+  web.domains.some((d) => d.computerId === computerId && d.target_port === port) || web.urls.some((u) => u.computerId === computerId && u.port === port && u !== except);
+const E8_PORT = (port) => ({ error: `A domain or public URL on this computer already points at port ${port}. A computer’s own key puts an app only on a port nothing points at: pick another port.`, code: "PORT_TAKEN" });
+const OWNER_ONLY = { error: "A computer’s own key can’t do that.", code: "computer_key" };
+/** orgo-web's tail on a name (lib/public-urls/config.ts makeTail): 4 of its alphabet, no 0, 1, i, l or o. */
+const TAIL_ABC = "abcdefghjkmnpqrstuvwxyz23456789";
+const tailOf = () => Array.from({ length: 4 }, () => TAIL_ABC[randomInt(TAIL_ABC.length)]).join("");
 
 /*
  * orgo-web's public URLs (lib/public-urls), as Bops' Previews use them: a label taken once across every computer
@@ -614,8 +651,19 @@ const web = { projects: [], calls: [], closed: false, liveAtOnce: false, failAtO
  */
 const PUBLIC_RESERVED = new Set(["www", "api", "app", "admin", "edge", "staging", "test", "dev", "localhost"]);
 const urlLabelOk = (l) => typeof l === "string" && /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(l) && !/^[0-9]+$/.test(l) && !/^[0-9a-f]{8}$/.test(l) && !l.startsWith("orgo-") && l.slice(2, 4) !== "--" && !PUBLIC_RESERVED.has(l);
-const urlView = (u) => ({ id: u.id, url: `https://${u.label}.orgo.dev`, hostname: `${u.label}.orgo.dev`, label: u.label, port: u.port, created_at: u.created_at, ...(u.disabled ? { disabled: true } : {}) });
-function publicUrlsRoute(req, url, body) {
+const urlView = (u) => ({
+  id: u.id,
+  url: `https://${u.label}.orgo.dev`,
+  hostname: `${u.label}.orgo.dev`,
+  label: u.label,
+  port: u.port,
+  created_at: u.created_at,
+  ...(u.disabled ? { disabled: true } : {}),
+  // (An orgo-web with passwords says whether it has one: only when a test turns them on, as one before them didn't.)
+  ...(web.passwords ? { protected: !!u.password } : {}),
+});
+/** `who.computer`: the computer whose own key signed the call (null: the owner's key). */
+function publicUrlsRoute(req, url, body, who) {
   const m = url.pathname.match(/^\/api\/computers\/([^/]+)\/public-urls(?:\/([^/]+))?$/);
   if (!m) return null;
   const [, computerId, urlId] = m;
@@ -627,20 +675,35 @@ function publicUrlsRoute(req, url, body) {
     const label = typeof body?.label === "string" ? body.label.trim().toLowerCase() : "";
     const refused = web.urlRefuse?.(label, body?.port);
     if (refused) return json(refused.body, refused.status);
-    if (!urlLabelOk(label)) return json({ error: "That name can't be used.", code: "INVALID_LABEL" }, 400);
+    // (A computer's own key's label is a name: 2 to 16 characters, then a tail drawn until it's free.)
+    const tailed = !!who.computer && web.rules.tail;
+    if (!urlLabelOk(label) || (tailed && label.length > 16)) return json({ error: "That name can't be used.", code: "INVALID_LABEL" }, 400);
     if (here.some((u) => u.port === body.port)) return json({ error: `Port ${body.port} has a public URL already.`, code: "PORT_TAKEN" }, 409);
     if (here.length >= web.urlLimit) return json({ error: "This computer has as many public URLs as it can.", code: "PUBLIC_URL_LIMIT", limit: web.urlLimit }, 409);
     if (web.urls.length >= web.accountLimit) return json({ error: "The account has as many as it can.", code: "PUBLIC_URL_ACCOUNT_LIMIT", limit: web.accountLimit }, 409);
-    if (web.urls.some((u) => u.label === label)) return json({ error: `The name ${label} is taken. Pick another name.`, code: "LABEL_TAKEN" }, 409);
-    const u = { id: randomUUID(), computerId, label, port: body.port, created_at: iso(), owned: false };
+    if (!tailed && web.urls.some((u) => u.label === label)) return json({ error: `The name ${label} is taken. Pick another name.`, code: "LABEL_TAKEN" }, 409);
+    let full = label;
+    while (tailed && (full === label || web.urls.some((u) => u.label === full))) full = `${label}-${tailOf()}`;
+    const u = { id: randomUUID(), computerId, label: full, port: body.port, created_at: iso(), owned: false };
     web.urls.push(u);
     return json(urlView(u), 201);
   }
   const u = here.find((x) => x.id === urlId);
   if (!u) return json({ error: "Public URL not found" }, 404);
   if (req.method === "PATCH") {
-    if (here.some((x) => x !== u && x.port === body.port)) return json({ error: "Port taken", code: "PORT_TAKEN" }, 409);
-    u.port = body.port;
+    // (A move a test turns down, as one Orgo refuses.)
+    if (web.urlPortRefuse && body?.port !== undefined) return json(web.urlPortRefuse.body, web.urlPortRefuse.status);
+    // A password: 4 to 64 characters for a Bops sign-in key; 8 at least for anyone else, a computer's own key too,
+    // unless orgo-web takes a Bops computer's as a Bops app's (web.rules.password8).
+    if (body && "password" in body) {
+      if (!web.passwords) return json({ error: "Send a port.", code: "NOTHING_TO_CHANGE" }, 400);
+      const min = who.computer && web.rules.password8 ? 8 : 4;
+      if (body.password !== null && (typeof body.password !== "string" || body.password.length < min || body.password.length > 64))
+        return json({ error: `A password is ${min} to 64 characters: letters, digits, spaces and the symbols on a standard keyboard, with no space at the start or end.`, code: "INVALID_PASSWORD" }, 400);
+    }
+    if (body?.port !== undefined && here.some((x) => x !== u && x.port === body.port)) return json({ error: "Port taken", code: "PORT_TAKEN" }, 409);
+    if (body?.port !== undefined) u.port = body.port;
+    if (body && "password" in body) u.password = body.password;
     return json(urlView(u));
   }
   if (req.method === "DELETE") {
@@ -656,7 +719,10 @@ function publicUrlsRoute(req, url, body) {
  */
 function liveUrl(p) {
   const on = web.urls.find((u) => u.computerId === p.computerId && u.port === p.port);
-  if (on) return `https://${on.label}.orgo.dev`;
+  if (on) {
+    on.adopted = p.id;
+    return `https://${on.label}.orgo.dev`;
+  }
   if (p.created?.public_url === false) return null;
   const label = web.urls.some((u) => u.label === p.name) ? `${p.name}-x1y2` : p.name;
   web.urls.push({ id: randomUUID(), computerId: p.computerId, label, port: p.port, created_at: iso(), owned: p.id });
@@ -701,12 +767,17 @@ async function orgoWeb(req) {
   web.calls.push({ method: req.method, path: url.pathname, query: url.search, body });
   // A call a test holds (one that waits until it's let go, or throws as a dropped connection would).
   if (web.hold) await web.hold(req.method, url.pathname);
-  if (![ORGO_KEY, NEW_KEY].some((k) => req.headers.get("authorization") === `Bearer ${k}`)) return json({ error: "Not authenticated" }, 401);
+  const bearer = (req.headers.get("authorization") ?? "").replace(/^Bearer /, "");
+  const who = { computer: COMPUTER_KEYS.get(bearer) ?? null };
+  if (![ORGO_KEY, NEW_KEY].includes(bearer) && !who.computer) return json({ error: "Not authenticated" }, 401);
+  // A computer's own key works on its own computer alone.
+  const onComputer = url.pathname.match(/^\/api\/computers\/([^/]+)/)?.[1];
+  if (who.computer && onComputer && onComputer !== who.computer) return json({ error: "This key works on its own computer only.", code: "computer_scope_mismatch" }, 403);
   const vaulted = vaultAndBroker(req, url, body);
   if (vaulted) return vaulted;
-  const more = settingsAndAdding(req, url, body);
+  const more = settingsAndAdding(req, url, body, who);
   if (more) return more;
-  const pub = publicUrlsRoute(req, url, body);
+  const pub = publicUrlsRoute(req, url, body, who);
   if (pub) return pub;
   let m = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/members$/);
   if (m && req.method === "GET") {
@@ -751,15 +822,23 @@ async function orgoWeb(req) {
     if (web.closed) return json({ error: "Deploys are not enabled", code: "DEPLOYS_DISABLED" }, 404);
     // (`limit`: DEPLOY_PROJECTS_PER_COMPUTER, only when a test sets one, as an orgo-web before it said none; `projectsDown`: the list refused.)
     if (kind === "deploy-projects" && !id && req.method === "GET" && web.projectsDown) return json({ error: "Not now" }, 403);
+    // (`hidden`: projects a test has made "meanwhile", left out of the list until a create runs into one's name.)
     if (kind === "deploy-projects" && !id && req.method === "GET")
-      return json({ enabled: true, supported: true, ...(web.projectLimit !== undefined ? { limit: web.projectLimit } : {}), projects: web.projects.filter((p) => p.computerId === computerId).map(projectView) });
+      return json({ enabled: true, supported: true, ...(web.projectLimit !== undefined ? { limit: web.projectLimit } : {}), projects: web.projects.filter((p) => p.computerId === computerId && !web.hidden?.has(p.id)).map(projectView) });
     if (kind === "deploy-projects" && !id && req.method === "POST") {
       if (body.source !== "ingot") return json({ error: "Name an Ingot repo", code: "INVALID_SOURCE" }, 400);
       const ingotRepo = checkIngotRepo(body.repo);
       if (!ingotRepo) return json({ error: "That isn't an Ingot repo. Use <workspace>/<name>.", code: "INVALID_REPO" }, 400);
       const here = web.projects.filter((x) => x.computerId === computerId);
-      if (here.some((x) => x.name === body.name)) return json({ error: `This computer already has an app named ${body.name}. Pick another name.`, code: "NAME_TAKEN" }, 409);
+      if (here.some((x) => x.name === body.name)) {
+        web.hidden?.clear();
+        return json({ error: `This computer already has an app named ${body.name}. Pick another name.`, code: "NAME_TAKEN" }, 409);
+      }
       if (here.some((x) => x.port === body.port)) return json({ error: `Another app on this computer already uses port ${body.port}.`, code: "PORT_TAKEN" }, 409);
+      // E8: a computer's own key never puts an app where a domain or any public URL of its computer points, its own new
+      // link's included (but its Bops Preview link's, named as it, once orgo-web knows it: web.rules.previewPort).
+      const itsLink = web.rules.previewPort && web.urls.some((u) => u.computerId === computerId && u.port === body.port && u.label === body.name);
+      if (who.computer && web.rules.e8 && portPointedAt(computerId, body.port) && !itsLink) return json(E8_PORT(body.port), 409);
       for (const k of Object.keys(body.env ?? {})) if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(k)) return json({ error: `${k} isn’t a valid name.`, code: "INVALID_ENV" }, 400);
       const p = { id: randomUUID(), computerId, name: body.name, port: body.port, source: "ingot", ingot_repo: ingotRepo, ingot_at: body.at ?? null, url: null, deployments: [], created: body };
       // How it builds and is checked, as given in the create (orgo-web's checkProjectInput: "" is Orgo's own).
@@ -807,6 +886,8 @@ async function orgoWeb(req) {
     if (web.domainsDown && !domainId) return json({ error: "Service unavailable" }, 503);
     const here = web.domains.filter((d) => d.computerId === computerId);
     if (domainId) {
+      // (A domain's DNS check is the owner's: one_computer no.)
+      if (who.computer && web.rules.ownerOnly) return json(OWNER_ONLY, 403);
       const d = here.find((x) => x.id === domainId);
       if (!d) return json({ error: "Not found" }, 404);
       // What a look at the internet finds: the challenge is there, the CNAME isn't yet (hosts relative to the zone it found).
@@ -906,7 +987,7 @@ const boughtView = (b) => ({
   pointed: web.domains.filter((d) => d.zone === b.id).map((d) => ({ domain: d.domain, computer_id: d.computerId, computer_name: computerName(d), status: d.status })),
 });
 
-function settingsAndAdding(req, url, body) {
+function settingsAndAdding(req, url, body, who) {
   let m = url.pathname.match(/^\/api\/computers\/([^/]+)\/deploy-projects\/([^/]+)(\/env)?$/);
   if (m && req.method === "PATCH") {
     if (web.closed) return json({ error: "Deploys are not enabled", code: "DEPLOYS_DISABLED" }, 404);
@@ -914,6 +995,8 @@ function settingsAndAdding(req, url, body) {
     const p = web.projects.find((x) => x.id === id && x.computerId === computerId);
     if (!p) return json({ error: "Project not found", code: "NOT_FOUND" }, 404);
     if (env) {
+      // (A project's variables are the owner's: one_computer no.)
+      if (who.computer && web.rules.ownerOnly) return json(OWNER_ONLY, 403);
       if (web.envRefuse) return json(web.envRefuse, 400);
       const vars = web.envs.get(p.id) ?? new Map();
       for (const [k, v] of Object.entries(body?.env ?? {})) {
@@ -927,6 +1010,9 @@ function settingsAndAdding(req, url, body) {
     if (body.name !== undefined) return json({ error: "A deploy’s name can’t be changed.", code: "INVALID_NAME" }, 400);
     if (body.port !== undefined) {
       if (web.projects.some((x) => x !== p && x.computerId === computerId && x.port === body.port)) return json({ error: `Another app on this computer already uses port ${body.port}. Pick another port.`, code: "PORT_TAKEN" }, 409);
+      // E8: and moves one only to a port no domain or other public URL points at (its own URL there is no bar).
+      if (who.computer && web.rules.e8 && body.port !== p.port && portPointedAt(computerId, body.port, web.urls.find((u) => u.owned === p.id || u.adopted === p.id)))
+        return json(E8_PORT(body.port), 409);
       p.port = body.port;
     }
     for (const k of ["install_cmd", "build_cmd", "start_cmd"]) if (body[k] !== undefined) p[k] = body[k] || null;
@@ -1024,6 +1110,8 @@ function settingsAndAdding(req, url, body) {
       if (b) b.records = b.records.filter((r) => r.value !== d.token && !(r.type === "A" && (r.name ? `${r.name}.${b.domain}` : b.domain) === d.domain));
       return json({ deleted: true });
     }
+    // (Verifying one is the owner's: one_computer no.)
+    if (req.method === "POST" && who.computer && web.rules.ownerOnly) return json(OWNER_ONLY, 403);
     if (d.status === "disabled") return json({ status: "disabled", error: "This domain is turned off. Contact support to turn it back on." }, 409);
     if (d.status === "active") return json({ status: "active" });
     const left = web.verifyLeft.get(d.id) ?? 0;
@@ -1323,7 +1411,7 @@ const L = await import(`${root}/lib/server/app-labels.ts`);
 /** The site's Published project (named with a Published label sealed for it) and Preview project (a Preview label), as the fake has them. */
 const prodProject = (app, site = app, c = "c_boppy") => web.projects.find((p) => p.computerId === c && L.isLabelOf("prod", p.name, `${PROJECT}/${app}`, site));
 const previewProject = (app, site = app, c = "c_boppy") => web.projects.find((p) => p.computerId === c && L.isLabelOf("preview", p.name, `${PROJECT}/${app}`, site));
-const previewUrl = (app, site = app, c = "c_boppy") => web.urls.find((u) => u.computerId === c && L.isLabelOf("preview", u.label, `${PROJECT}/${app}`, site));
+const previewUrl = (app, site = app, c = "c_boppy") => web.urls.find((u) => u.computerId === c && L.isLabelOf("preview", L.untailed(u.label), `${PROJECT}/${app}`, site));
 /**
  * A site's Published project as an older Bops made one with its first Preview (this Bops makes it only on Publish, a
  * domain or its variables): a marked name on a free port, no public URL, nothing deployed. This one finds it by its
@@ -5568,7 +5656,7 @@ await check("Its link stays: deployed again, the same; its link deleted on Orgo,
   assert.deepEqual([previewProject("field-notes").name, previewProject("field-notes").port], [again.label, again.port]);
 });
 
-await check("Moved to another computer: its link moves with its next Preview deploy (removed on the computer it left, made here with the same label); its computer gone, its copy gives the label back; taken meanwhile, a new one and the words to add it to Google sign in", async () => {
+await check("Moved to another computer: its link moves with its next Preview deploy (removed on the computer it left, made here with the same label); its computer gone, its copy gives the label back; taken meanwhile, a new one and the words to add it to Google sign in; one with Orgo's tail (a runner's) made here with its label alone, its new address said", async () => {
   const label = notesLink().label;
   const had = S.getState().bots.find((b) => b.id === "boppy").computerId;
   computer("c_moved");
@@ -5599,6 +5687,18 @@ await check("Moved to another computer: its link moves with its next Preview dep
     assert.notEqual(now, label);
     assert.match(said, new RegExp(`Its preview link changed to https://${now}\\.orgo\\.dev, as the old one was taken\\. Add it to Google sign in\\.$`));
     web.urls = web.urls.filter((u) => u.computerId !== "c_someone");
+    // One a computer's runner made on the computer it left, with Orgo's tail: made here with its label alone, a new
+    // address, said as that.
+    web.urls = web.urls.filter((u) => u.computerId !== "c_moved");
+    web.projects = web.projects.filter((p) => p.computerId !== "c_moved");
+    let port = 3900;
+    while (web.urls.some((u) => u.computerId === "c_boppy" && u.port === port)) port++;
+    const tailed = { id: randomUUID(), computerId: "c_boppy", label: `${now}-x7k2`, port, created_at: iso(), owned: false };
+    web.urls.push(tailed);
+    const moved = hear(await H.deployForBot("boppy", "field-notes", null));
+    assert.ok(!web.urls.includes(tailed), "removed on the computer it left");
+    assert.equal(notesLink("c_moved").label, now, "its label alone, here");
+    assert.match(moved, new RegExp(`Its preview link is https://${now}\\.orgo\\.dev now\\. Add it to Google sign in\\.$`));
   } finally {
     onto(had);
     H.appWork("boppy", { app: "field-notes", name: null, change: "Back home" });
@@ -7151,13 +7251,16 @@ await check("What members see of each computer's room (appsForMembers.room): key
 /* ---------------- A member's job on the app's own computer (cloud/turns.ts takeAppJob, runner-chat.ts runnerJob) ---------------- */
 
 // This Bops as the app's computer's runner: its computer's own Orgo key in a file only it can read (runner-key.ts), which
-// Orgo's profile says is that computer's, and no identity here (as test-computer-task.mjs runs one).
+// Orgo's profile says is that computer's, and no identity here (as test-computer-task.mjs runs one). The fake holds that
+// key to orgo-web's rules for a computer's own credential (web.rules), as orgo-web has them today unless a test says.
 const RK = await import(`${root}/lib/server/runner-key.ts`);
 const OA = await import(`${root}/lib/server/orgo-auth.ts`);
 const runnerDir = join(scratch, "runner-key");
 mkdirSync(runnerDir, { mode: 0o700 });
-writeFileSync(join(runnerDir, ".orgo-secrets.env"), `export ORGO_API_KEY=${ORGO_KEY}\n`, { mode: 0o600 });
+writeFileSync(join(runnerDir, ".orgo-secrets.env"), `export ORGO_API_KEY=${COMPUTER_KEY}\n`, { mode: 0o600 });
 const asRunner = (computerId = "c_boppy") => {
+  // (Nothing signed in before it: its own key is its first, never one the owner's took the place of.)
+  OA.orgoAuthForTests.reset();
   RK.runnerKeyForTests.files([join(runnerDir, ".orgo-secrets.env")]);
   OA.orgoAuthForTests.authFile(join(runnerDir, "auth"));
   OA.orgoAuthForTests.profile(async () => ({ status: 200, body: { api_key: { scope: "computer", computer_id: process.env.BOPS_RUNNER_COMPUTER } } }));
@@ -7215,22 +7318,56 @@ await check("A member's job on the app's own computer (appJob), each kind on its
     assert.ok(!prodProject(DEMO), "no Published made for it");
     assert.deepEqual(writesSince(n), [], "nothing written");
     web.ownedHidden = false;
+    // A domain Orgo won't point: Published, made for it alone and seeded for it, goes again (the next domain makes it
+    // anew), and the settings saved for it before it had a project, which went into its create, are on its record again.
+    S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].settings = { start_cmd: "npm run serve" }));
+    web.connectRefuse = { status: 409, body: { error: "That name is in use.", code: "NAME_IN_USE" } };
+    n = web.calls.length;
+    assert.deepEqual(await job({ act: "domain", zone: ZONE, subdomain: "demo" }), { ok: false, said: "demo.acme.example is in use already. Pick another name." });
+    web.connectRefuse = null;
+    assert.equal(callsSince(n, "POST", /\/deploy-projects$/)[0]?.body.start_cmd, "npm run serve", "its saved settings in its create");
+    assert.ok(!prodProject(DEMO), "no Published left behind");
+    assert.equal(callsSince(n, "DELETE", /\/deploy-projects\//).length, 1, "the one made for it removed");
+    assert.deepEqual(demo().settings, { start_cmd: "npm run serve" }, "its saved settings kept");
+    S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].settings);
     // A domain of the workspace's own: from this computer's own list (owned_domains), never the workspace's (a computer
-    // may not read that one); Published is made for it, its first need. The domain it pointed, by name, for its act row.
+    // may not read that one); Published is made for it, its first need, with its sign in at that domain in its create, as
+    // the owner's Mac sets them at its first Publish: a computer's own sign in can't set a project's variables after. The
+    // domain it pointed, by name, for its act row.
     n = web.calls.length;
     const pointed = await job({ act: "domain", zone: ZONE, subdomain: "demo" });
     assert.deepEqual(pointed, { ok: true, said: "Pointed demo.acme.example at demo-app.", domain: "demo.acme.example" });
     assert.ok(prodProject(DEMO), "Published made for its domain");
     assert.ok(!web.calls.slice(n).some((c) => /^\/api\/projects\/[^/]+\/domains/.test(c.path)), "the workspace's bought domains never asked for");
     assert.ok(web.domains.some((d) => d.domain === "demo.acme.example" && d.target_port === prodProject(DEMO).port), "on Published's port");
+    const seeded = "https://demo.acme.example";
+    assert.deepEqual(Object.fromEntries(web.envs.get(prodProject(DEMO).id)), { AUTH_URL: seeded, NEXTAUTH_URL: seeded, BETTER_AUTH_URL: seeded, AUTH_TRUST_HOST: "true" }, "its sign in at its domain");
+    assert.deepEqual(callsSince(n, "PATCH", /\/env$/), [], "in its create, never a change of its variables");
     // A zone this computer's list doesn't have: Orgo's list is what it goes by.
     n = web.calls.length;
     assert.deepEqual(await job({ act: "domain", zone: "00000000-0000-4000-8000-000000000000" }), { ok: false, said: "That isn't one of this workspace's domains." });
     assert.deepEqual(writesSince(n), [], "nothing written");
-    // Publish: what its Preview serves goes on Published (its domain is there, pending).
+    // Publish: what its Preview serves goes on Published (its domain is there, pending), its sign in as it was made.
     n = web.calls.length;
     assert.deepEqual(await job({ act: "deploy", env: "prod" }), { ok: true, said: "Publishing demo-app, what its preview serves." });
     assert.deepEqual(callsSince(n, "POST", /\/deployments$/).map((c) => c.path.split("/")[5]), [prodProject(DEMO).id]);
+    assert.deepEqual(callsSince(n, "PATCH", /\/env$/), []);
+    // Its domains read here: one bought elsewhere has its records as Orgo said them, never Orgo's DNS check, which is
+    // the owner's (a computer's own sign in is refused it).
+    const typed = { id: "cd_demo_dns", computerId: "c_boppy", domain: "www.demo-typed.test", status: "pending", target_port: prodProject(DEMO).port, zone: null, token: "tok-dns" };
+    web.domains.push(typed);
+    n = web.calls.length;
+    const read = await H.appDomains(WS, DEMO);
+    web.domains = web.domains.filter((d) => d !== typed);
+    assert.deepEqual(callsSince(n, "GET", /\/dns-check$/), [], "no DNS check");
+    assert.deepEqual(
+      read.domains.find((d) => d.id === typed.id)?.publish,
+      [
+        { type: "TXT", name: "_orgo-verify.www.demo-typed.test", value: "tok-dns" },
+        { type: "CNAME", name: "www.demo-typed.test", value: "edge.orgo.dev" },
+      ],
+      "its records as Orgo said them",
+    );
     // On GitHub with no bot here given the GitHub key: said, nothing sent.
     const keys = structuredClone(S.getState().bots.find((b) => b.id === "boppy").keys);
     S.update((s) => {
@@ -7262,6 +7399,211 @@ await check("A member's job on the app's own computer (appJob), each kind on its
   }
 });
 
+await check("On its computer's runner, under orgo-web's rules for a computer's own sign in as prod has them and as fixed for a Bops computer: a site's Preview is its link first, its project on a free port nothing points at, seeded with that link as Orgo named it, then the link moved onto the project's port before anything deploys; found again by the label Bops gave it (Orgo's tail on it today), the same link the next time; a link whose project went gets one the same way; a link that can't be moved leaves no project it made, and keeps one it found; a link left off its project's port moved there; once orgo-web takes a Bops computer's password, the new Preview is protected and its password shared, a new one as it goes live; Orgo's own words in the log; a settings port a domain or a link points at said as that; the owner's key moves a link onto its project too", async () => {
+  const APP = "runner-page";
+  const REPO = `${PROJECT}/${APP}`;
+  const Share = await import(`${root}/lib/server/preview-password-share.ts`);
+  central.repos.set(REPO, { created_by: { id: "u_alex", name: "Alex" }, created_at: iso(), changesets: [] });
+  commit(APP, "A page", { id: "boppy", name: "Boppy" });
+  const shares = [];
+  Share.previewShareForTests.send(async (b) => (shares.push(structuredClone(b)), 204));
+  H.previewWatchForTests.times({ every: 5, for: 5_000 });
+  web.liveAtOnce = true;
+  web.passwords = true;
+  const deploy = () => H.appJob("boppy", { act: "deploy", app: APP }, "Sam").then(hear);
+  const settings = (port) => H.appJob("boppy", { act: "settings", app: APP, port }, "Sam").then(hear);
+  /** Its link's and its project's creates and moves, and its deploys, in order (never a password's set). */
+  const made = (n) =>
+    writesSince(n)
+      .filter((c) => /[/](public-urls|deploy-projects)/.test(c.path) && (c.method === "POST" || c.body?.port !== undefined))
+      .map((c) => `${c.method} ${c.path.replace(/[0-9a-f-]{36}/g, "id")}`);
+  const passwordSets = (n) => callsSince(n, "PATCH", /[/]public-urls[/]/).filter((c) => c.body && "password" in c.body);
+  /** Every Preview watch done (its password set as its deploy went live), and every share settled. */
+  const settled = async () => {
+    for (let i = 0; i < 1000 && H.previewWatchForTests.now().size; i++) await new Promise((r) => setTimeout(r, 5));
+    await Share.previewShareForTests.settled();
+  };
+  /** A port on its computer nothing has. */
+  const spare = (from) => {
+    let p = from;
+    while (web.projects.some((x) => x.computerId === "c_boppy" && x.port === p) || web.urls.some((u) => u.computerId === "c_boppy" && u.port === p) || web.domains.some((d) => d.computerId === "c_boppy" && d.target_port === p)) p++;
+    return p;
+  };
+  const fresh = () => {
+    web.projects = web.projects.filter((p) => p.ingot_repo !== REPO);
+    web.urls = web.urls.filter((u) => !L.isLabelOf("preview", L.untailed(u.label), REPO, APP));
+    S.update((s) => void (s.workspaces.find((w) => w.id === WS).hostedApps[APP] = { botId: "boppy", computerId: "c_boppy" }));
+  };
+  try {
+    for (const [when, rules] of [
+      ["today", ORGO_TODAY],
+      ["fixed", ORGO_FIXED],
+    ]) {
+      web.rules = { ...rules };
+      fresh();
+      shares.length = 0;
+      const w0 = warned.length;
+      const logged = (...bits) => warned.slice(w0).some((l) => bits.every((b) => l.includes(b)));
+      asRunner();
+
+      // A new Preview: its link, its project on another free port seeded with the link, the link moved, then its deploy.
+      let n = web.calls.length;
+      assert.deepEqual(await deploy(), { ok: true, said: `Deploying ${APP} to its preview.` }, when);
+      const pv = previewProject(APP);
+      const link = previewUrl(APP);
+      assert.ok(pv && link, `${when}: its project and its link`);
+      assert.deepEqual(
+        made(n),
+        ["POST /api/computers/c_boppy/public-urls", "POST /api/computers/c_boppy/deploy-projects", "PATCH /api/computers/c_boppy/public-urls/id", "POST /api/computers/c_boppy/deploy-projects/id/deployments"],
+        `${when}: made once each (never a project refused), its link moved before its deploy`,
+      );
+      const [asked] = callsSince(n, "POST", /[/]public-urls$/);
+      const [create] = callsSince(n, "POST", /[/]deploy-projects$/);
+      assert.equal(asked.body.label, pv.name, "its link asked for with its project's name");
+      assert.notEqual(create.body.port, asked.body.port, "its project never on its link's first port");
+      assert.equal(create.body.env.AUTH_URL, `https://${link.label}.orgo.dev`, "seeded with its own link, as Orgo named it");
+      assert.equal(link.port, pv.port, "its link on its project's port");
+      assert.equal(link.owned, false, "never owned");
+      assert.equal(link.adopted, pv.id, "adopted by its first deploy");
+      assert.equal(hostedApps()[APP].preview, pv.name, "its label kept as Bops gave it");
+      if (when === "today") {
+        assert.match(link.label, new RegExp(`^${pv.name}-[a-hjkmnp-z2-9]{4}$`), "Orgo's tail on it");
+        assert.ok(logged(`Orgo named its preview link ${link.label}, not ${pv.name}`), "the tail logged");
+      } else assert.equal(link.label, pv.name, "its label exactly");
+      await settled();
+      if (when === "fixed") {
+        assert.equal(urlView(link).protected, true, "its link asks for a password");
+        assert.equal(link.password.length, H.PASSWORD_LENGTH);
+        assert.deepEqual(
+          shares.map((x) => [x.app, x.site, x.url]),
+          [
+            [APP, APP, urlView(link).url],
+            [APP, APP, urlView(link).url],
+          ],
+          "shared for the people at Write: one as it was made, a new one as its deploy went live",
+        );
+        assert.notEqual(shares[0].password, shares[1].password, "a new one as it went live");
+        assert.equal(shares[1].password, link.password, "what its link has");
+        assert.equal(passwordSets(n).length, 2);
+      } else {
+        assert.equal(urlView(link).protected, false, "open: orgo-web takes no password that short from a computer's own sign in yet");
+        assert.deepEqual(shares, [], "nothing shared");
+        assert.equal(passwordSets(n).length, 1, "asked once, never again as its deploy went live");
+        assert.ok(logged("Orgo turned down a password for its preview link", "400 INVALID_PASSWORD", "A password is 8 to 64 characters"), "Orgo's words logged");
+        assert.ok(!warned.slice(w0).some((l) => /\b[A-Za-z2-9]{7}\b/.test(l) && passwordSets(n).some((c) => l.includes(c.body.password))), "never the password");
+      }
+
+      // The next time: the same link and project, found by the label Bops gave it.
+      n = web.calls.length;
+      assert.equal((await deploy()).ok, true);
+      assert.deepEqual(made(n), ["POST /api/computers/c_boppy/deploy-projects/id/deployments"], `${when}: the same link and project`);
+      await settled();
+
+      // Its project gone (removed on Orgo's own pages): made again the same way, under its link's name, on a free port.
+      web.projects = web.projects.filter((p) => p !== pv);
+      n = web.calls.length;
+      assert.equal((await deploy()).ok, true);
+      const again = previewProject(APP);
+      assert.ok(again && again.id !== pv.id && again.name === pv.name, "made again with its label");
+      assert.equal(callsSince(n, "POST", /[/]deploy-projects$/)[0].body.env.AUTH_URL, `https://${link.label}.orgo.dev`);
+      assert.equal(link.port, again.port, "the same link, on its new project's port");
+      assert.deepEqual(callsSince(n, "POST", /[/]public-urls$/), [], "no new link");
+      await settled();
+
+      // A link that can't be moved: the project made for it removed again, its link kept, nothing deployed; Orgo's words logged.
+      web.projects = web.projects.filter((p) => p !== again);
+      web.urlPortRefuse = { status: 409, body: { error: "Port taken", code: "PORT_TAKEN" } };
+      n = web.calls.length;
+      assert.deepEqual(await deploy(), { ok: false, said: "Orgo says: Port taken." });
+      assert.ok(!previewProject(APP), "its new project removed again");
+      assert.ok(web.urls.includes(link), "its link kept");
+      assert.deepEqual(callsSince(n, "POST", /[/]deployments$/), [], "nothing deployed");
+      assert.ok(logged("Orgo turned down its preview link's move to port", "409 PORT_TAKEN", "Port taken"));
+      // One its first read didn't see (made meanwhile by a try that stopped halfway), found once Orgo says its name is
+      // taken: its link moved onto it, and when that can't be, it's kept as it is.
+      const half = { id: randomUUID(), computerId: "c_boppy", name: pv.name, port: spare(3300), source: "ingot", ingot_repo: REPO, ingot_at: null, url: null, deployments: [] };
+      web.projects.push(half);
+      web.hidden = new Set([half.id]);
+      n = web.calls.length;
+      assert.equal((await deploy()).ok, false);
+      assert.ok(web.projects.includes(half) && web.urls.includes(link), "the one it found, and its link, kept");
+      assert.deepEqual(callsSince(n, "DELETE", /./), [], "nothing removed");
+      // Then both there, its link off its project's port: a move Orgo refuses deploys nothing (its first deploy would make
+      // Orgo give it a link of its own).
+      n = web.calls.length;
+      assert.deepEqual(await deploy(), { ok: false, said: "Orgo says: Port taken." });
+      assert.deepEqual(callsSince(n, "POST", /[/]deployments$/), [], "nothing deployed off its link");
+      assert.deepEqual(callsSince(n, "DELETE", /./), [], "nothing removed");
+      // And once it can be: moved, while its project serves no link yet and nothing else points at its port.
+      web.urlPortRefuse = null;
+      n = web.calls.length;
+      assert.equal((await deploy()).ok, true);
+      assert.equal(link.port, half.port, "its link moved onto its project's port");
+      assert.deepEqual(made(n), ["PATCH /api/computers/c_boppy/public-urls/id", "POST /api/computers/c_boppy/deploy-projects/id/deployments"]);
+      await settled();
+
+      // Its Preview's port changed to one a domain or a link points at: said as that, not as another app's.
+      const dPort = spare(3400);
+      const shop = { id: randomUUID(), computerId: "c_boppy", domain: "shop.example.test", status: "active", target_port: dPort, zone: null, token: "tok-shop" };
+      web.domains.push(shop);
+      assert.deepEqual(await settings(dPort), { ok: false, said: `shop.example.test points at port ${dPort} on its computer. Pick another port.` });
+      web.domains = web.domains.filter((d) => d !== shop);
+      const uPort = spare(3400);
+      const other = { id: randomUUID(), computerId: "c_boppy", label: "spare-link-here", port: uPort, created_at: iso(), owned: false };
+      web.urls.push(other);
+      assert.deepEqual(await settings(uPort), { ok: false, said: `A public link on its computer points at port ${uPort}. Pick another port.` });
+      web.urls = web.urls.filter((u) => u !== other);
+      const app = web.projects.find((p) => p.computerId === "c_boppy" && p.ingot_repo !== REPO && typeof p.port === "number");
+      assert.deepEqual(await settings(app.port), { ok: false, said: "Another app on this computer uses that port. Pick another." });
+      assert.ok(logged(`Orgo turned down port ${dPort}`, "PORT_TAKEN", "A domain or public URL on this computer already points at port"));
+
+      // A new link refused a port its list didn't show taken: its project never goes there either.
+      fresh();
+      let refusedAt;
+      web.urlRefuse = (l, port) => {
+        web.urlRefuse = null;
+        refusedAt = port;
+        return { status: 409, body: { error: `Port ${port} has a public URL already.`, code: "PORT_TAKEN" } };
+      };
+      n = web.calls.length;
+      assert.equal((await deploy()).ok, true);
+      assert.equal(typeof refusedAt, "number");
+      assert.notEqual(callsSince(n, "POST", /[/]deploy-projects$/)[0].body.port, refusedAt, "never on a port found taken");
+      await settled();
+      asMac();
+    }
+
+    // The owner's key moves a link left off its project's port onto it too (a runner stopped between the two).
+    web.rules = { ...ORGO_TODAY };
+    fresh();
+    const label = L.newLabel("preview", REPO, APP);
+    const lone = { id: randomUUID(), computerId: "c_boppy", label, port: spare(3500), created_at: iso(), owned: false };
+    web.urls.push(lone);
+    const theirs = { id: randomUUID(), computerId: "c_boppy", name: label, port: spare(3501), source: "ingot", ingot_repo: REPO, ingot_at: null, url: null, deployments: [] };
+    web.projects.push(theirs);
+    const n = web.calls.length;
+    assert.equal((await deploy()).ok, true);
+    assert.equal(lone.port, theirs.port, "moved onto its project's port");
+    assert.deepEqual(made(n), ["PATCH /api/computers/c_boppy/public-urls/id", "POST /api/computers/c_boppy/deploy-projects/id/deployments"]);
+    await settled();
+  } finally {
+    asMac();
+    H.previewWatchForTests.stopAll();
+    H.previewWatchForTests.times({ every: undefined, for: undefined });
+    Share.previewShareForTests.send(undefined);
+    web.rules = { ...ORGO_TODAY };
+    web.liveAtOnce = false;
+    web.passwords = false;
+    web.urlPortRefuse = null;
+    web.urlRefuse = null;
+    web.hidden = undefined;
+    web.projects = web.projects.filter((p) => p.ingot_repo !== REPO);
+    web.urls = web.urls.filter((u) => !L.isLabelOf("preview", L.untailed(u.label), REPO, APP));
+    S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps[APP]);
+    central.repos.delete(REPO);
+  }
+});
+
 await check("A member's remove on the app's own computer: Remove site and Remove app take its Previews, its Published and their domains off (a domain that won't come off keeps that site up, said, so a try again finds it all), clear what its runner kept, and never drop the record or its sites (Bops Cloud does, once it's done); what may be left in Cloudflare is said; its code stays in Ingot", async () => {
   S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps[DEMO].sites = [{ name: "demo-app-docs" }]));
   web.liveAtOnce = true;
@@ -7277,7 +7619,7 @@ await check("A member's remove on the app's own computer: Remove site and Remove
     // Remove site: its Preview and link, then its Published (none); its record's run fields cleared, the site kept.
     let r = await job({ act: "removeSite", site: "demo-app-docs" });
     assert.deepEqual(r, { ok: true, said: "demo-app-docs is off the web.", removed: "site" });
-    assert.ok(!previewProject(DEMO, "demo-app-docs") && !web.urls.some((u) => u.label === docsPv.name), "off the web");
+    assert.ok(!previewProject(DEMO, "demo-app-docs") && !web.urls.some((u) => L.untailed(u.label) === docsPv.name), "off the web");
     assert.deepEqual(demo().sites, [{ name: "demo-app-docs" }], "the site stays on its record: Bops Cloud takes it out");
     assert.deepEqual(await job({ act: "removeSite", site: DEMO }), { ok: false, said: "The app's own site goes only with the app. Remove the app instead." });
     // A typed domain on Published's port too (one in the user's Cloudflare, maybe), and one Orgo won't take off.

@@ -1,0 +1,5 @@
+- Previews made in the cloud work again.
+- A cloud Preview keeps its link from one deploy to the next.
+- Cloud Previews ask for a password, as on the Mac.
+- A site published from the cloud signs in at its own domain.
+- Changing a Preview's port from the cloud says what's in the way.
